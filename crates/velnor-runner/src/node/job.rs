@@ -2,14 +2,13 @@
 //! heartbeat on a child wait. Host Docker remains the named transitional
 //! executor, not the Build L3 availability boundary.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Args;
-use velnor_control::journal::{payload_checksum, Event, Journal};
-use velnor_model::{Generation, JobId, SlotId};
+use velnor_control::journal::{Event, Journal};
+use velnor_model::{Generation, JobId};
 
-use super::slot::slot_id;
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
 #[derive(Debug, Clone, Args)]
@@ -45,10 +44,7 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
             args.generation
         );
     }
-    let slot = match (args.scope.as_deref(), args.slot_index) {
-        (Some(scope), Some(index)) => Some(slot_id(scope, index)),
-        _ => None,
-    };
+    super::complete::bind_state_dir(args.state_dir.clone());
     if let Ok(mut daemon) = super::exec::load_exec_config(&args.state_dir) {
         if args.once {
             daemon.once = true;
@@ -70,14 +66,6 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
         tokio::select! {
             () = beat => anyhow::bail!("job heartbeat ended"),
             result = crate::runner::run_daemon_slot(daemon, config_base, slot_index, slots) => {
-                persist_terminal(
-                    &mut journal,
-                    &args.state_dir,
-                    &job_id,
-                    generation,
-                    slot.as_ref(),
-                    result.is_ok(),
-                )?;
                 result
             }
         }
@@ -90,43 +78,4 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
-}
-
-fn persist_terminal(
-    journal: &mut Journal,
-    state_dir: &Path,
-    job_id: &JobId,
-    generation: Generation,
-    slot_id: Option<&SlotId>,
-    success: bool,
-) -> anyhow::Result<()> {
-    let payload: &[u8] = if success {
-        b"conclusion=success"
-    } else {
-        b"conclusion=failure"
-    };
-    let checksum = payload_checksum(payload);
-    let intended = journal.apply(Event::CompletionIntended {
-        job_id: job_id.clone(),
-        generation,
-        payload_sha256: checksum,
-    })?;
-    if !intended.rejected {
-        super::cleanup::write_outbox(state_dir, &job_id.0, generation.0, payload)?;
-        journal.apply(Event::CompletionSendStarted {
-            job_id: job_id.clone(),
-            generation,
-        })?;
-    }
-    if let Some(slot_id) = slot_id {
-        let cleanup = journal.apply(Event::CleanupIntended {
-            slot_id: slot_id.clone(),
-            isolation_id: job_id.0.clone(),
-            generation,
-        })?;
-        if !cleanup.rejected {
-            super::cleanup::remove_owned(state_dir, &job_id.0, generation.0)?;
-        }
-    }
-    Ok(())
 }

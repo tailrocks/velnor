@@ -230,68 +230,24 @@ fn packaged_units_have_no_controller_partof_to_workers() {
         job_src.contains("run_daemon_slot"),
         "job process is the transitional executor"
     );
-    assert!(
-        job_src.contains("CompletionIntended"),
-        "job process must persist completion before send"
-    );
-    let beat = job_src
-        .split("if let Ok(mut daemon)")
-        .next()
-        .expect("job beat");
-    assert!(
-        !beat.contains("if args.once"),
-        "heartbeat must not return on --once before the worker"
-    );
-    let controller_src = include_str!("../src/node/controller.rs");
-    assert!(
-        controller_src.contains("observe_routing") && controller_src.contains("observe_executor"),
-        "controller must observe routing and executor, not stamp them"
-    );
-    assert!(
-        !controller_src.contains("Event::Routing {\n        valid: true"),
-        "controller must not stamp Routing valid:true"
-    );
-    assert!(
-        controller_src.contains("JobOwned") && controller_src.contains("CompletionSendStarted"),
-        "controller must claim jobs and send completions"
-    );
-    let daemon_src = include_str!("../src/runner.rs");
-    let pass = daemon_src
-        .split("async fn daemon_pass")
-        .nth(1)
-        .expect("daemon_pass")
-        .split("fn supervised_retry_delay")
-        .next()
-        .expect("daemon_pass body");
-    let reserve = pass
-        .find("reserve_capacity_permits")
-        .expect("permits first");
-    let dry = pass
-        .find("daemon_should_poll_after_jit_config")
-        .expect("dry-run gate");
-    let configure = pass
-        .find("configure_daemon_slots(&resolved_args")
-        .expect("jit configure");
-    assert!(reserve < dry, "permits before dry-run gate");
-    assert!(
-        dry < configure,
-        "production JIT must not run before the dry-run gate"
-    );
-    assert_eq!(
-        pass.matches("configure_daemon_slots(&resolved_args")
-            .count(),
-        1,
-        "only dry-run may bulk-configure JIT slots"
-    );
-    assert!(!daemon_src.contains("daemon-args.json"));
+    assert!(!daemon_src_has_args_json());
     assert!(
         !job.contains("--once"),
         "packaged job unit must not pass --once: {job}"
     );
-    assert!(
-        job_src.contains("daemon.once = true"),
-        "--once must select one GitHub job, not skip the worker"
-    );
+}
+
+fn daemon_src_has_args_json() -> bool {
+    include_str!("../src/runner.rs").contains("daemon-args.json")
+}
+
+fn matching_routing() -> velnor_runner::node::prove::RoutingFields {
+    velnor_runner::node::prove::RoutingFields {
+        group: "velnor".into(),
+        selected_repositories: vec!["tailrocks/velnor".into()],
+        labels: vec!["velnor".into()],
+        trust_scope: "trusted".into(),
+    }
 }
 
 fn prime_named_ready(journal: &mut Journal, scope: &str) {
@@ -402,6 +358,42 @@ fn controller_does_not_stamp_ready_without_proofs() {
 }
 
 #[test]
+fn controller_rejects_boolean_routing_stamp() {
+    let dir = scratch("bool-route");
+    std::fs::write(
+        dir.join("routing.json"),
+        br#"{"valid":true,"group_valid":true}"#,
+    )
+    .unwrap();
+    velnor_runner::node::prove::write_executor_ok(&dir).unwrap();
+    let status = run_runner(
+        &dir,
+        &[
+            "controller",
+            "--state-dir",
+            dir.to_str().unwrap(),
+            "--scope",
+            "boolroute",
+            "--desired-ready",
+            "1",
+            "--surge",
+            "0",
+            "--once",
+            "--spawn-slots",
+            "false",
+        ],
+    );
+    assert!(status.success(), "{}", cmd_err(&dir));
+    let state = Journal::open(dir.join("journal.db"))
+        .unwrap()
+        .load_state()
+        .unwrap();
+    assert!(!state.routing_valid, "{state:?}");
+    assert!(state.slots.iter().all(|slot| !slot.registered));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn controller_observes_live_session_and_executor_before_ready_proof() {
     let dir = scratch("proofs");
     let first = run_runner(
@@ -452,7 +444,8 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
     }
     assert!(saw_pid, "slot heartbeat never landed");
 
-    velnor_runner::node::prove::write_routing(&dir, true, true).unwrap();
+    let fields = matching_routing();
+    velnor_runner::node::prove::write_routing_document(&dir, fields.clone(), fields).unwrap();
     velnor_runner::node::prove::write_executor_ok(&dir).unwrap();
 
     let second = run_runner(

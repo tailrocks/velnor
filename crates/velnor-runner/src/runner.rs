@@ -1098,10 +1098,6 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     if draining() {
         return Ok(());
     }
-    if resolved_args.url.is_some() {
-        crate::node::prove::write_routing(&config_base, true, true)?;
-    }
-    crate::node::prove::write_executor_ok(&config_base)?;
     notify_daemon_ready(total_slots, total_slots);
     if let Some(sink) = crate::ops::global() {
         // Current instance state row: identity, version, and slot counts.
@@ -1320,6 +1316,7 @@ pub(crate) async fn run_daemon_slot(
     slot_index: usize,
     slots: usize,
 ) -> Result<()> {
+    crate::node::complete::bind_state_dir(config_base.clone());
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         return run(slot_args).await;
@@ -3294,6 +3291,7 @@ async fn handle_job_request(
     let capacity_run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    crate::node::complete::bind_state_dir(crate::node::complete::journal_dir_near(config_dir));
     let Some(job_claim) =
         JobClaim::try_acquire(&capacity_run_root, &job.plan.plan_id, &job.job_id)?
     else {
@@ -7433,10 +7431,35 @@ async fn complete_run_service_job(
         billing_owner_id,
         infrastructure_failure_category,
     };
-    client
-        .complete_job(run_service_url, completion)
-        .await
-        .context("complete run-service job")
+    send_guarded_run_service_complete(client, run_service_url, completion).await
+}
+
+async fn send_guarded_run_service_complete(
+    client: &RunServiceClient,
+    run_service_url: &str,
+    completion: crate::protocol::RunServiceCompleteJob,
+) -> Result<()> {
+    let state_dir = crate::node::complete::bound_state_dir()
+        .ok_or_else(|| anyhow::anyhow!("refusing GitHub complete_job without a bound journal"))?;
+    let mut journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let job_id = velnor_model::JobId(completion.job_id.clone());
+    let generation = crate::node::complete::ensure_owned(&mut journal, &job_id)?;
+    let payload = serde_json::to_vec(&completion)?;
+    crate::node::complete::guarded_complete_async(
+        &mut journal,
+        &state_dir,
+        &job_id,
+        generation,
+        &payload,
+        async {
+            client
+                .complete_job(run_service_url, completion)
+                .await
+                .context("complete run-service job")
+        },
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7733,20 +7756,20 @@ async fn complete_acquired_job_outcome(
             }
         }
     }
-    run_service_job
-        .client
-        .complete_job(
-            &run_service_job.run_service_url,
-            fail_closed_pre_execution_completion(terminal_acquired_job_completion(
-                identity,
-                run_service_job.billing_owner_id.clone(),
-                conclusion,
-                infrastructure_failure_category,
-                &masked_reason,
-            ))?,
-        )
-        .await
-        .context("complete acquired run-service job after infrastructure failure")
+    let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
+        identity,
+        run_service_job.billing_owner_id.clone(),
+        conclusion,
+        infrastructure_failure_category,
+        &masked_reason,
+    ))?;
+    send_guarded_run_service_complete(
+        &run_service_job.client,
+        &run_service_job.run_service_url,
+        completion,
+    )
+    .await
+    .context("complete acquired run-service job after infrastructure failure")
 }
 
 /// Guard the pre-execution complete_job payload.

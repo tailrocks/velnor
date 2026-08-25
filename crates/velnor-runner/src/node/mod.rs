@@ -7,6 +7,7 @@
 
 pub mod canary;
 pub mod cleanup;
+pub mod complete;
 pub mod controller;
 pub mod exec;
 pub mod guardian;
