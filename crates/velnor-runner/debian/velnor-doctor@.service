@@ -7,6 +7,10 @@ After=network-online.target
 Type=oneshot
 Environment=HOME=/root
 Environment=VELNOR_STORAGE_ROOT=/var
+# Doctor must read the matching daemon instance's slot logs. Without this
+# explicit binding it falls back to the shared /var/lib/velnor/runner path and
+# reports no timing samples even when the daemon emitted job-timing records.
+Environment=VELNOR_CONFIG_DIR=/var/lib/velnor-%i/runner
 EnvironmentFile=/etc/velnor/%i.env
 EnvironmentFile=-/etc/velnor/%i.secrets.env
 ExecStart=/usr/bin/velnorctl doctor \
