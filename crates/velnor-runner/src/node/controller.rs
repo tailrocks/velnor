@@ -14,7 +14,7 @@ use velnor_control::journal::{Event, Journal, SideEffect};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use super::cleanup;
-use super::exec::{load_exec_config, EXEC_FILE};
+use super::exec::load_exec_config;
 use super::health::HealthServer;
 use super::prove;
 use super::slot::slot_id;
@@ -153,12 +153,7 @@ async fn reconcile_once(
         execute_effect(args, journal, slots, jobs, command).await?;
     }
 
-    let _ = prove::reconcile_from_dir(&args.state_dir)?;
-    let routing = prove::observe_routing(&args.state_dir);
-    journal.apply(Event::Routing {
-        valid: routing.valid,
-        group_valid: routing.group_valid,
-    })?;
+    observe_github_and_routing(args, journal).await?;
 
     let mut proof_effects = Vec::new();
     let executor = prove::observe_executor(&args.state_dir);
@@ -216,57 +211,16 @@ async fn reconcile_once(
     }
     register_runners(args, journal, registrations).await?;
 
-    let mut job_effects = Vec::new();
-    if args.state_dir.join(EXEC_FILE).is_file() {
-        let state = journal.load_state()?;
-        for slot in &state.slots {
-            if slot.phase != ActorPhase::Ready {
-                continue;
-            }
-            if state.jobs.iter().any(|job| job.slot_id == slot.slot_id) {
-                continue;
-            }
-            let index = slot_index_from_id(&slot.slot_id);
-            let job_id = worker_job_id(index);
-            let assigned = journal.apply(Event::Assigned {
-                slot_id: slot.slot_id.clone(),
-                job_id: job_id.clone(),
-                generation: slot.generation,
-            })?;
-            if assigned.rejected {
-                continue;
-            }
-            let owned = journal.apply(Event::JobOwned {
-                job_id: job_id.clone(),
-                slot_id: slot.slot_id.clone(),
-                attempt: 1,
-                generation: slot.generation,
-                worker: format!("velnor-job@{}", job_id.0),
-            })?;
-            if owned.rejected {
-                continue;
-            }
-            cleanup::claim_owned(&args.state_dir, &job_id.0, slot.generation.0)?;
-            job_effects.extend(owned.commands);
-        }
-    }
-    for command in job_effects {
-        execute_effect(args, journal, slots, jobs, command).await?;
-    }
+    spawn_ready_waiters(args, journal, jobs)?;
 
     for row in journal.pending_outbox()? {
-        cleanup::write_outbox(
-            &args.state_dir,
-            &row.job_id.0,
-            row.generation.0,
-            row.payload_sha256.as_bytes(),
+        preserve_outbox(
+            args,
+            journal,
+            &row.job_id,
+            row.generation,
+            &row.payload_sha256,
         )?;
-        if !row.send_started {
-            journal.apply(Event::CompletionSendStarted {
-                job_id: row.job_id,
-                generation: row.generation,
-            })?;
-        }
     }
 
     reap(slots);
@@ -290,7 +244,7 @@ async fn execute_effect(
             generation,
         } => register_runner(args, journal, slot_id, generation).await,
         SideEffect::StartJob { job_id, generation } => {
-            maybe_spawn_job(args, jobs, &job_id.0, generation.0)
+            maybe_spawn_job(args, journal, jobs, &job_id.0, generation.0, None)
         }
         SideEffect::AdvertiseCapacity { permits } => {
             std::fs::write(
@@ -303,16 +257,7 @@ async fn execute_effect(
             job_id,
             generation,
             payload_sha256,
-        } => {
-            cleanup::write_outbox(
-                &args.state_dir,
-                &job_id.0,
-                generation.0,
-                payload_sha256.as_bytes(),
-            )?;
-            journal.apply(Event::CompletionSendStarted { job_id, generation })?;
-            Ok(())
-        }
+        } => preserve_outbox(args, journal, &job_id, generation, &payload_sha256),
         SideEffect::Cleanup {
             isolation_id,
             generation,
@@ -402,6 +347,122 @@ async fn register_runners(
     Ok(())
 }
 
+async fn observe_github_and_routing(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+) -> anyhow::Result<()> {
+    let mut reachable = false;
+    if let Ok(exec) = load_exec_config(&args.state_dir) {
+        let group = exec
+            .pool_name
+            .clone()
+            .or_else(|| exec.name.clone())
+            .unwrap_or_else(|| "default".to_owned());
+        let trust = prove::runtime_trust_scope(&exec.trust_scope);
+        if let Some(url) = exec.url.as_deref() {
+            if let Some(policy) =
+                prove::policy_from_github_url(url, group, exec.labels.clone(), trust.clone())
+            {
+                prove::write_policy_if_absent(&args.state_dir, &policy)?;
+            }
+        }
+        let policy = prove::read_policy(&args.state_dir);
+        if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
+            let probe = prove::probe_github(prove::GitHubProbeRequest {
+                url,
+                token,
+                policy: policy.as_ref(),
+                pool_id: exec.pool_id,
+                configured_labels: &exec.labels,
+                configured_trust: &exec.trust_scope,
+            })
+            .await;
+            reachable = probe.reachable;
+            if let Some(evidence) = probe.evidence {
+                prove::write_evidence(&args.state_dir, &evidence)?;
+            }
+        }
+    }
+    journal.apply(Event::Dependency {
+        github_reachable: reachable,
+    })?;
+    let _ = prove::reconcile_from_dir(&args.state_dir)?;
+    let routing = prove::observe_routing(&args.state_dir);
+    journal.apply(Event::Routing {
+        valid: routing.valid,
+        group_valid: routing.group_valid,
+    })?;
+    Ok(())
+}
+
+/// GitHub session waiters for Ready slots. Do not apply Assigned: REST
+/// queued ids are not broker job ids, and Ready must stay Ready until
+/// `accept_job` on the broker GUID.
+fn spawn_ready_waiters(
+    args: &ControllerArgs,
+    journal: &Journal,
+    jobs: &mut HashMap<String, Child>,
+) -> anyhow::Result<()> {
+    if load_exec_config(&args.state_dir).is_err() {
+        return Ok(());
+    }
+    let state = journal.load_state()?;
+    for slot in &state.slots {
+        if slot.phase != ActorPhase::Ready {
+            continue;
+        }
+        if state.jobs.iter().any(|job| {
+            job.slot_id == slot.slot_id
+                && matches!(
+                    job.phase,
+                    ActorPhase::Assigned
+                        | ActorPhase::Starting
+                        | ActorPhase::Running
+                        | ActorPhase::Completing
+                )
+        }) {
+            continue;
+        }
+        if jobs.contains_key(&slot.slot_id.0) {
+            continue;
+        }
+        maybe_spawn_job(
+            args,
+            journal,
+            jobs,
+            &format!("wait-{}", slot.slot_id.0),
+            slot.generation.0,
+            Some(&slot.slot_id.0),
+        )?;
+    }
+    Ok(())
+}
+
+/// Keep a durable completion payload. Never replace it with the checksum
+/// and never stamp `CompletionSendStarted` without an actual send.
+fn preserve_outbox(
+    args: &ControllerArgs,
+    _journal: &mut Journal,
+    job_id: &JobId,
+    generation: Generation,
+    payload_sha256: &str,
+) -> anyhow::Result<()> {
+    let path = cleanup::outbox_path(&args.state_dir, &job_id.0, generation.0);
+    if !path.is_file() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(&path)?;
+    let actual = velnor_control::journal::payload_checksum(&bytes);
+    if actual != payload_sha256 {
+        anyhow::bail!(
+            "outbox checksum mismatch for {} generation {}",
+            job_id.0,
+            generation.0
+        );
+    }
+    Ok(())
+}
+
 fn slot_index_from_id(slot_id: &SlotId) -> usize {
     slot_id
         .0
@@ -409,10 +470,6 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
         .next()
         .and_then(|part| part.parse::<usize>().ok())
         .unwrap_or(1)
-}
-
-fn worker_job_id(slot_index: usize) -> JobId {
-    JobId(format!("slot-{slot_index}-worker"))
 }
 
 fn maybe_spawn_slot(
@@ -451,11 +508,25 @@ fn maybe_spawn_slot(
 
 fn maybe_spawn_job(
     args: &ControllerArgs,
+    journal: &Journal,
     jobs: &mut HashMap<String, Child>,
     job_id: &str,
     generation: u64,
+    slot_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    if jobs.contains_key(job_id) {
+    let key = slot_key
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            journal.load_state().ok().and_then(|state| {
+                state
+                    .jobs
+                    .into_iter()
+                    .find(|job| job.job_id.0 == job_id)
+                    .map(|job| job.slot_id.0)
+            })
+        })
+        .unwrap_or_else(|| job_id.to_owned());
+    if jobs.contains_key(&key) {
         return Ok(());
     }
     if cleanup::read_owned_pid(&args.state_dir, job_id, generation).is_some_and(prove::pid_is_alive)
@@ -463,11 +534,7 @@ fn maybe_spawn_job(
         return Ok(());
     }
     let exe = std::env::current_exe()?;
-    let slot_index = job_id
-        .strip_prefix("slot-")
-        .and_then(|rest| rest.strip_suffix("-worker"))
-        .and_then(|index| index.parse::<usize>().ok())
-        .unwrap_or(1);
+    let slot_index = slot_index_from_id(&SlotId(key.clone()));
     let child = Command::new(exe)
         .arg("job")
         .arg("--state-dir")
@@ -482,7 +549,7 @@ fn maybe_spawn_job(
         .arg(&args.scope)
         .spawn()?;
     cleanup::write_owned_pid(&args.state_dir, job_id, generation, child.id())?;
-    jobs.insert(job_id.to_owned(), child);
+    jobs.insert(key, child);
     Ok(())
 }
 
@@ -516,4 +583,104 @@ pub async fn supervise_from_daemon(
         spawn_slots: true,
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::DaemonArgs;
+    use crate::node::exec::write_exec_config;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn dummy_exec(url: &str) -> DaemonArgs {
+        serde_json::from_value(json!({
+            "url": url,
+            "name": "velnor",
+            "labels": ["velnor"],
+            "target_mvp_labels": false,
+            "target_mvp_arm_label": false,
+            "replace": false,
+            "dry_run_registration": false,
+            "slots": 1,
+            "once": false,
+            "complete_noop": false,
+            "execute_scripts": false,
+            "dry_run_jobs": false,
+            "docker_image": "img",
+            "job_cpus": "",
+            "job_memory": "",
+            "trust_scope": "trusted",
+            "emergency_reserve_bytes": 0,
+            "job_peak_bytes": 0,
+            "node_action_image": "img",
+            "skip_preflight": false,
+            "require_docker_socket": false
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn org_url_probe_sets_github_reachable_without_inferred_policy() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "runners": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "runner_groups": [{"id": 7, "name": "velnor", "default": false}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v3/orgs/tailrocks/actions/runner-groups/7/repositories",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "repositories": [{"full_name": "tailrocks/velnor"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-ctrl-org-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("{}/tailrocks", server.uri());
+        write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".into(),
+            desired_ready: 1,
+            surge: 0,
+            once: true,
+            spawn_slots: false,
+        };
+        observe_github_and_routing(&args, &mut journal)
+            .await
+            .unwrap();
+        let state = journal.load_state().unwrap();
+        assert!(state.github_reachable, "{state:?}");
+        let evidence: crate::node::prove::RoutingFields =
+            serde_json::from_slice(&std::fs::read(dir.join(prove::ROUTING_EVIDENCE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(evidence.group, "velnor");
+        assert_eq!(evidence.selected_repositories, vec!["tailrocks/velnor"]);
+        std::env::remove_var("GITHUB_TOKEN");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

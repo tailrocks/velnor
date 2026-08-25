@@ -37,7 +37,8 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
         job_id: job_id.clone(),
         generation,
     })?;
-    if started.rejected {
+    let owned = !started.rejected;
+    if !owned && args.once && super::exec::load_exec_config(&args.state_dir).is_err() {
         anyhow::bail!(
             "job {} is not owned at generation {}",
             args.job_id,
