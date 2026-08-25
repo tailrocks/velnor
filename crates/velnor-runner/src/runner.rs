@@ -7175,8 +7175,13 @@ async fn complete_run_service_job(
     }
     // Best-effort: publish the whole job log to the same Results Service job-log
     // blob used by official runners, then keep a `job-log.txt` artifact fallback.
-    upload_results_job_log(job, &step_logs).await;
-    upload_job_log_artifact(job, &step_logs).await;
+    // The two independent uploads used to run serially, needlessly adding both
+    // network tails to terminal completion. Keep both before CompleteJob, but
+    // overlap them so completion waits only for the slower upload.
+    tokio::join!(
+        upload_results_job_log(job, &step_logs),
+        upload_job_log_artifact(job, &step_logs),
+    );
     let step_results = step_logs
         .iter()
         .map(|log| RunServiceStepResult {
