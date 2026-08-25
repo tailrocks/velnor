@@ -475,6 +475,35 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
         fs::remove_dir_all(prefix).ok();
     }
 
+    #[test]
+    fn live_var_lib_scope_is_not_root_dot_velnor_leftover() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-leftover-home-vs-var-{}",
+            std::process::id()
+        ));
+        let lib = root.join("lib");
+        let live_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let live = lib.join("velnor-fixture/work/slot-1").join(live_id);
+        let home_orphan = root
+            .join("root/.velnor/runner/_work/slot-1")
+            .join("11111111-2222-3333-4444-555555555555");
+        write_tree(&live);
+        write_tree(&home_orphan);
+        let live_ids = BTreeSet::from([live_id.to_string()]);
+        let roots = discover_daemon_work_roots_in(&lib);
+        let orphans = orphan_job_workspace_paths(&roots, &live_ids);
+        assert!(
+            orphans.is_empty(),
+            "live /var/lib job must stay, got {orphans:?}"
+        );
+        assert!(live.exists());
+        assert!(
+            home_orphan.exists(),
+            "/root/.velnor leftover is not a /var/lib work root and must not be swept as job GC"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
     fn assert_leftover_docker_commands_are_safe(commands: &[Vec<String>]) {
         for command in commands {
             assert!(

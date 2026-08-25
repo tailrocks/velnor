@@ -71,10 +71,9 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-# State, work, and forensic logs all live below this root. Docker remains
-# reachable through /var/run/docker.sock; ProtectSystem=full leaves /var writable.
-# JIT slot credentials remain under the root user's configured runner state.
-ReadWritePaths=/var/lib/velnor /var/cache/velnor /run/velnor /var/log/velnor /root/.velnor/runner
+# State, work, JIT credentials, and forensic logs live below
+# StateDirectory=/var/lib/velnor. Never $HOME/.velnor.
+ReadWritePaths=/var/lib/velnor /var/cache/velnor /run/velnor /var/log/velnor
 
 [Install]
 WantedBy=multi-user.target
