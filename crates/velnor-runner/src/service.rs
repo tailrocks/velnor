@@ -34,7 +34,7 @@ pub struct ServiceCli {
 #[derive(Debug, Subcommand)]
 pub enum ServiceCommand {
     /// Run one daemon process that manages one or more internal runner slots.
-    Daemon(DaemonArgs),
+    Daemon(Box<DaemonArgs>),
     /// Release-coherence hooks for ExecStartPre, postinst, and release CI.
     Release(ReleaseArgs),
     /// Compiled-manifest export for postinst identity validation.
@@ -62,7 +62,7 @@ pub enum Command {
 impl From<ServiceCommand> for Command {
     fn from(command: ServiceCommand) -> Self {
         match command {
-            ServiceCommand::Daemon(args) => Self::Daemon(args),
+            ServiceCommand::Daemon(args) => Self::Daemon(*args),
             ServiceCommand::Release(args) => Self::Release(args),
             ServiceCommand::Capabilities(args) => Self::Capabilities(args.into()),
         }
@@ -510,7 +510,7 @@ pub async fn execute() -> anyhow::Result<()> {
     let cli = ServiceCli::parse();
     let command = Command::from(cli.command);
     let telemetry_dir = match &command {
-        Command::Daemon(args) => crate::runner::daemon_config_dir(&args.clone().into())
+        Command::Daemon(args) => crate::runner::daemon_config_dir(&(*args).clone().into())
             .ok()
             .map(|dir| dir.join("logs")),
         _ => None,
@@ -532,7 +532,7 @@ async fn dispatch_service(command: Command) -> anyhow::Result<()> {
 fn other_command(command: Command) -> crate::args::Command {
     match command {
         Command::Cache(args) => crate::args::Command::Cache(args),
-        Command::Capabilities(args) => crate::args::Command::Capabilities(args.into()),
+        Command::Capabilities(args) => crate::args::Command::Capabilities(args),
         Command::Configure(args) => crate::args::Command::Configure(args),
         Command::Preflight(args) => crate::args::Command::Preflight(args),
         Command::Remove(args) => crate::args::Command::Remove(args),
