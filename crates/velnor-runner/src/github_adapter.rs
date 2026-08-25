@@ -58,7 +58,7 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
-        env: job_container_env(job),
+        env: backend_advertising_env(job_container_env(job), paths.execution_backend),
         resource_options,
         options: job_container_options(job),
         services: service_containers(job),
@@ -369,6 +369,21 @@ fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         .into_iter()
         .flat_map(container_env)
         .collect()
+}
+
+/// Advertise the operator-selected pool backend to jobs as
+/// `VELNOR_EXECUTION_BACKEND`. Repository-controlled env of the same name is
+/// dropped first: a workflow must not spoof the pool's isolation level.
+fn backend_advertising_env(
+    mut env: Vec<(String, String)>,
+    backend: velnor_model::ExecutionBackendKind,
+) -> Vec<(String, String)> {
+    env.retain(|(name, _)| name != "VELNOR_EXECUTION_BACKEND");
+    env.push((
+        "VELNOR_EXECUTION_BACKEND".to_string(),
+        backend.as_str().to_string(),
+    ));
+    env
 }
 
 fn job_container_options(job: &AgentJobRequestMessage) -> Vec<String> {
@@ -1126,6 +1141,24 @@ mod tests {
         assert_eq!(
             job_container_image(&job),
             Some("ghcr.io/acme/resource:latest")
+        );
+    }
+
+    #[test]
+    fn backend_advertising_env_overrides_repo_controlled_value() {
+        let env = backend_advertising_env(
+            vec![
+                ("NODE_OPTIONS".to_string(), "x".to_string()),
+                ("VELNOR_EXECUTION_BACKEND".to_string(), "microvm".to_string()),
+            ],
+            velnor_model::ExecutionBackendKind::Docker,
+        );
+        assert_eq!(
+            env,
+            vec![
+                ("NODE_OPTIONS".to_string(), "x".to_string()),
+                ("VELNOR_EXECUTION_BACKEND".to_string(), "docker".to_string()),
+            ]
         );
     }
 
