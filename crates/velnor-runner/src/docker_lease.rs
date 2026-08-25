@@ -32,7 +32,10 @@ pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 /// a lease socket there is invisible to host dockerd and the guest bind-mount
 /// of `/tmp/vdl-*.sock` is not the proxy.
 pub const LEASE_SOCKET_DIR: &str = "/run/velnor";
-pub const JOB_IMAGE_ANCESTOR: &str = "velnor/job-ubuntu";
+/// Job containers are owned by their Velnor name and labels. Do not use an
+/// untagged `ancestor=` filter here: Docker resolves it as an image reference
+/// on every scan and emits a lookup warning when only `:26.04` is tagged.
+pub const JOB_CONTAINER_NAME_PREFIX: &str = "velnor-job-";
 /// docker-container BuildKit daemon created by `docker buildx create --name velnor-builder-*`.
 /// Job-end used a `name=-{scope}0$` filter; Docker's name filter is a match on the
 /// container name, and `$` is not an end-anchor on every engine, so Created/removing
@@ -139,7 +142,7 @@ pub fn list_job_image_format_args() -> Vec<String> {
         "ps".into(),
         "--all".into(),
         "--filter".into(),
-        format!("ancestor={JOB_IMAGE_ANCESTOR}"),
+        format!("name={JOB_CONTAINER_NAME_PREFIX}"),
         "--format".into(),
         "{{.ID}}\t{{.Label \"velnor.job-id\"}}".into(),
     ]
@@ -1619,6 +1622,21 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
         assert_eq!(
             calls[2],
             force_remove_container_args(&["gagarin".into(), "preflight1".into(), "ride".into()])
+        );
+    }
+
+    #[test]
+    fn job_image_reclaim_scans_names_without_resolving_an_image_reference() {
+        assert_eq!(
+            list_job_image_format_args(),
+            vec![
+                "ps",
+                "--all",
+                "--filter",
+                "name=velnor-job-",
+                "--format",
+                "{{.ID}}\t{{.Label \"velnor.job-id\"}}",
+            ]
         );
     }
 
