@@ -417,9 +417,12 @@ jobs:
           [ "$(dpkg-deb -f "$src" Architecture)" = "$expected_arch" ] || { echo "::error::deb arch != $expected_arch" >&2; exit 1; }
           manifest="$(mktemp)"
           dpkg-deb -c "$src" > "$manifest"
-          grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
+          # The interim two-binary package still ships the daemon entrypoint
+          # and the operator CLI. Plan 079 removes the former; until then the
+          # admission check must assert the package that the build actually
+          # declares instead of rejecting its required daemon binary.
+          grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner daemon" >&2; exit 1; }
           grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
-          grep -q "usr/bin/velnor-runner" "$manifest" && { echo "::error::deb still ships the deleted velnor-runner binary" >&2; exit 1; } || true
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
