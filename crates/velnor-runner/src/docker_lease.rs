@@ -25,6 +25,12 @@ pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 /// of `/tmp/vdl-*.sock` is not the proxy.
 pub const LEASE_SOCKET_DIR: &str = "/run/velnor";
 pub const JOB_IMAGE_ANCESTOR: &str = "velnor/job-ubuntu";
+/// docker-container BuildKit daemon created by `docker buildx create --name velnor-builder-*`.
+/// Job-end used a `name=-{scope}0$` filter; Docker's name filter is a match on the
+/// container name, and `$` is not an end-anchor on every engine, so Created/removing
+/// builders survived cancel/restart. Prefix match plus orphan-job reclaim is the
+/// ownership path.
+pub const BUILDKIT_CONTAINER_NAME_PREFIX: &str = "buildx_buildkit_velnor-builder-";
 
 const MAX_PROXY_BODY: usize = 32 * 1024 * 1024;
 
@@ -127,6 +133,28 @@ pub fn list_job_image_format_args() -> Vec<String> {
         format!("ancestor={JOB_IMAGE_ANCESTOR}"),
         "--format".into(),
         "{{.ID}}\t{{.Label \"velnor.job-id\"}}".into(),
+    ]
+}
+
+pub fn list_job_buildkit_format_args() -> Vec<String> {
+    vec![
+        "ps".into(),
+        "--all".into(),
+        "--filter".into(),
+        format!("name={BUILDKIT_CONTAINER_NAME_PREFIX}"),
+        "--format".into(),
+        "{{.ID}}\t{{.Names}}\t{{.Label \"velnor.job-id\"}}\t{{.Label \"velnor.daemon-id\"}}\t{{.State}}"
+            .into(),
+    ]
+}
+
+pub fn list_job_buildkit_volume_args() -> Vec<String> {
+    vec![
+        "volume".into(),
+        "ls".into(),
+        "--quiet".into(),
+        "--filter".into(),
+        format!("name={BUILDKIT_CONTAINER_NAME_PREFIX}"),
     ]
 }
 
@@ -246,6 +274,143 @@ pub fn daemon_orphan_job_ids(formatted: &str, daemon_id: &str) -> Vec<String> {
 /// IDs of `velnor/job-ubuntu` siblings with no job label (docker-generated names).
 pub fn unlabeled_job_image_ids(formatted: &str) -> Vec<String> {
     unlabeled_testcontainer_ids(formatted)
+}
+
+pub fn live_job_ids(formatted: &str) -> std::collections::BTreeSet<String> {
+    let mut live = std::collections::BTreeSet::new();
+    for line in formatted.lines() {
+        let mut parts = line.split('\t');
+        let name = parts.next().unwrap_or("").trim();
+        let job_id = parts.next().unwrap_or("").trim();
+        let state = parts.next().unwrap_or("").trim();
+        if !job_id.is_empty() && name == job_id && state.eq_ignore_ascii_case("running") {
+            live.insert(job_id.to_string());
+        }
+    }
+    live
+}
+
+pub fn live_daemon_job_ids(formatted: &str, daemon_id: &str) -> std::collections::BTreeSet<String> {
+    let mut live = std::collections::BTreeSet::new();
+    for line in formatted.lines() {
+        let mut parts = line.split('\t');
+        let name = parts.next().unwrap_or("").trim();
+        let job_id = parts.next().unwrap_or("").trim();
+        let owner = parts.next().unwrap_or("").trim();
+        let state = parts.next().unwrap_or("").trim();
+        if job_id.is_empty() || !daemon_owns_label(owner, daemon_id) {
+            continue;
+        }
+        if name == job_id && state.eq_ignore_ascii_case("running") {
+            live.insert(job_id.to_string());
+        }
+    }
+    live
+}
+
+/// Rows from [`list_job_buildkit_format_args`]: id, names, job-id, daemon-id, state.
+/// A builder is leftover when its job is not running (Created/removing/exited of a
+/// finished/cancelled job) or never carried a job label. Live jobs keep their
+/// bootstrapping Created builders.
+pub fn orphan_job_buildkit_ids(
+    formatted: &str,
+    live_jobs: &std::collections::BTreeSet<String>,
+    daemon_id: Option<&str>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in formatted.lines() {
+        let mut parts = line.split('\t');
+        let id = parts.next().unwrap_or("").trim();
+        let names = parts.next().unwrap_or("").trim();
+        let job_id = parts.next().unwrap_or("").trim();
+        let owner = parts.next().unwrap_or("").trim();
+        if id.is_empty() || !names.contains(BUILDKIT_CONTAINER_NAME_PREFIX) {
+            continue;
+        }
+        if let Some(daemon_id) = daemon_id {
+            if !owner.is_empty() && !daemon_owns_label(owner, daemon_id) {
+                continue;
+            }
+        }
+        let job_live = if job_id.is_empty() {
+            live_jobs
+                .iter()
+                .any(|live| names.contains(live.trim_start_matches("velnor-job-")))
+        } else {
+            live_jobs.contains(job_id)
+        };
+        if !job_live {
+            ids.push(id.to_string());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Current-job builders including Created/removing. Job-end must delete them
+/// even while the job container is still running (cleanup happens before rm).
+pub fn job_buildkit_ids_for_job(formatted: &str, job_id: &str, scope: &str) -> Vec<String> {
+    let needle = format!("{BUILDKIT_CONTAINER_NAME_PREFIX}{scope}");
+    let mut ids = Vec::new();
+    for line in formatted.lines() {
+        let mut parts = line.split('\t');
+        let id = parts.next().unwrap_or("").trim();
+        let names = parts.next().unwrap_or("").trim();
+        let labeled_job = parts.next().unwrap_or("").trim();
+        if id.is_empty() {
+            continue;
+        }
+        if labeled_job == job_id || names.contains(&needle) {
+            ids.push(id.to_string());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn reclaim_orphan_job_buildkit(
+    job_formatted: &str,
+    daemon_id: Option<&str>,
+    docker: &mut impl FnMut(&[String]) -> Result<String>,
+) -> Result<()> {
+    reclaim_orphan_job_buildkit_with_live(&live_job_ids(job_formatted), daemon_id, docker)
+}
+
+fn reclaim_orphan_job_buildkit_with_live(
+    live_jobs: &std::collections::BTreeSet<String>,
+    daemon_id: Option<&str>,
+    docker: &mut impl FnMut(&[String]) -> Result<String>,
+) -> Result<()> {
+    let formatted = docker(&list_job_buildkit_format_args())?;
+    let ids = orphan_job_buildkit_ids(&formatted, live_jobs, daemon_id);
+    if !ids.is_empty() {
+        docker(&force_remove_container_args(&ids)).map(|_| ())?;
+    }
+    let volumes = docker(&list_job_buildkit_volume_args())?;
+    let volume_ids: Vec<String> = volumes
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.contains(BUILDKIT_CONTAINER_NAME_PREFIX))
+        .filter(|name| {
+            let scope = name
+                .strip_prefix(BUILDKIT_CONTAINER_NAME_PREFIX)
+                .unwrap_or(name);
+            let scope = scope.strip_suffix("_state").unwrap_or(scope);
+            let scope = scope.strip_suffix('0').unwrap_or(scope);
+            let job = format!("velnor-job-{scope}");
+            !live_jobs.contains(&job)
+                && !live_jobs
+                    .iter()
+                    .any(|live| name.contains(live.trim_start_matches("velnor-job-")))
+        })
+        .map(ToOwned::to_owned)
+        .collect();
+    if !volume_ids.is_empty() {
+        docker(&force_remove_volume_args(&volume_ids)).map(|_| ())?;
+    }
+    Ok(())
 }
 
 /// IDs of testcontainers that were created before the lease proxy (no job label).
@@ -427,7 +592,7 @@ pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) 
     for job_id in orphan_job_ids(&formatted) {
         reclaim_job_owned(&job_id, &mut docker)?;
     }
-    Ok(())
+    reclaim_orphan_job_buildkit(&formatted, None, &mut docker)
 }
 
 /// Daemon-scoped variant of [`reclaim_orphan_jobs`] for daemon startup: only
@@ -444,7 +609,8 @@ pub fn reclaim_daemon_orphan_jobs(
     for job_id in daemon_orphan_job_ids(&formatted, daemon_id) {
         reclaim_job_owned(&job_id, &mut docker)?;
     }
-    Ok(())
+    let live = live_daemon_job_ids(&formatted, daemon_id);
+    reclaim_orphan_job_buildkit_with_live(&live, Some(daemon_id), &mut docker)
 }
 
 pub fn reclaim_unlabeled_testcontainers(
@@ -473,17 +639,56 @@ pub fn reclaim_unlabeled_job_image_siblings(
     docker(&force_remove_container_args(&ids)).map(|_| ())
 }
 
+const TEARDOWN_RM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub fn run_host_docker(args: &[String]) -> Result<String> {
+    if args.first().is_some_and(|arg| arg == "rm") {
+        return run_host_docker_bounded(args, TEARDOWN_RM_TIMEOUT);
+    }
     let output = std::process::Command::new("docker")
         .args(args)
         .output()
         .with_context(|| format!("run docker {}", args.join(" ")))?;
     if !output.status.success() {
-        bail!(
-            "docker {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("already in progress") {
+            return Ok(String::new());
+        }
+        bail!("docker {} failed: {}", args.join(" "), stderr);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_host_docker_bounded(args: &[String], timeout: std::time::Duration) -> Result<String> {
+    let mut child = std::process::Command::new("docker")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run docker {}", args.join(" ")))?;
+    let pid = child.id();
+    let (cancel, cancelled) = std::sync::mpsc::channel();
+    let killer = std::thread::spawn(move || {
+        if cancelled.recv_timeout(timeout).is_err() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+    });
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("wait docker {}", args.join(" ")))?;
+    let _ = cancel.send(());
+    let _ = killer.join();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.code() == Some(137)
+            || output.status.code() == Some(9)
+            || stderr.contains("already in progress")
+        {
+            return Ok(String::new());
+        }
+        bail!("docker {} failed: {}", args.join(" "), stderr);
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -893,6 +1098,80 @@ velnor-job-dead\tvelnor-job-dead\texited
         assert_eq!(calls[0], list_owned_job_format_args());
         assert_eq!(calls[1], list_owned_containers_args("velnor-job-dead"));
         assert_eq!(calls[2], force_remove_container_args(&["guest-old".into()]));
+        assert!(calls
+            .iter()
+            .any(|call| call == &list_job_buildkit_format_args()));
+        assert!(calls
+            .iter()
+            .any(|call| call == &list_job_buildkit_volume_args()));
+    }
+
+    #[test]
+    fn orphan_job_buildkit_ids_keep_live_created_and_reclaim_ended_created_removing() {
+        let live = live_job_ids(
+            "velnor-job-live\tvelnor-job-live\trunning\n\
+             velnor-job-dead\tvelnor-job-dead\texited\n",
+        );
+        let formatted = "\
+id-live-created\tbuildx_buildkit_velnor-builder-live0\tvelnor-job-live\t/var/lib/velnor/work/slot-1\tcreated
+id-dead-created\tbuildx_buildkit_velnor-builder-dead0\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\tcreated
+id-dead-removing\tbuildx_buildkit_velnor-builder-dead0\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\tremoving
+id-unlabeled\tbuildx_buildkit_velnor-builder-orphan0\t\t\tcreated
+id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
+";
+        assert_eq!(
+            orphan_job_buildkit_ids(formatted, &live, None),
+            vec![
+                "id-dead-created".to_string(),
+                "id-dead-removing".to_string(),
+                "id-unlabeled".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reclaim_orphan_job_buildkit_force_removes_created_removing_of_ended_jobs() {
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            "velnor-job-live\tvelnor-job-live\trunning\nvelnor-job-dead\tvelnor-job-dead\texited\n"
+                .to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "id-live\tbuildx_buildkit_velnor-builder-live0\tvelnor-job-live\t\tcreated\n\
+             id-created\tbuildx_buildkit_velnor-builder-dead0\tvelnor-job-dead\t\tcreated\n\
+             id-removing\tbuildx_buildkit_velnor-builder-dead0\tvelnor-job-dead\t\tremoving\n"
+                .to_string(),
+            String::new(),
+            "buildx_buildkit_velnor-builder-dead0_state\nbuildx_buildkit_velnor-builder-live0_state\n"
+                .to_string(),
+            String::new(),
+        ];
+        reclaim_orphan_jobs(|args| {
+            calls.push(args.to_vec());
+            if outputs.is_empty() {
+                return Err(anyhow!("unexpected docker call {args:?}"));
+            }
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+        assert_eq!(calls[0], list_owned_job_format_args());
+        assert!(calls
+            .iter()
+            .any(|call| call == &list_job_buildkit_format_args()));
+        assert!(calls.iter().any(|call| call
+            == &force_remove_container_args(&["id-created".into(), "id-removing".into()])));
+        assert!(calls
+            .iter()
+            .any(|call| call == &list_job_buildkit_volume_args()));
+        assert!(calls.iter().any(|call| {
+            call.starts_with(&["volume".into(), "rm".into(), "--force".into()])
+                && call.contains(&"buildx_buildkit_velnor-builder-dead0_state".to_string())
+                && !call.contains(&"buildx_buildkit_velnor-builder-live0_state".to_string())
+        }));
+        assert!(!calls.iter().any(|call| {
+            call.get(2) == Some(&"id-live".to_string()) && call.first().is_some_and(|a| a == "rm")
+        }));
     }
 
     #[test]
@@ -988,6 +1267,8 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
             "velnor-job-live\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning\nguest-old\tvelnor-job-dead\t/var/lib/velnor-fleet/work/slot-1\trunning\nother\tother\t/var/lib/velnor-other/work\texited\n"
                 .to_string(),
             "guest-old\n".to_string(),
+            String::new(),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),

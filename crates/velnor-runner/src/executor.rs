@@ -37,6 +37,10 @@ use tokio::sync::mpsc::UnboundedSender;
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const DEFAULT_STEP_TIMEOUT_MINUTES: u64 = 360;
 const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STEP_TIMEOUT_MINUTES * 60);
+/// `docker rm --force` of a Created/removing BuildKit daemon can block until
+/// dockerd finishes. Job teardown must not inherit the 6h step timeout or the
+/// job container (and every guest sibling) stays Up for hours.
+const TEARDOWN_RM_TIMEOUT: Duration = Duration::from_secs(20);
 const SETUP_QEMU_BINFMT_IMAGE: &str =
     "docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0";
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -229,7 +233,7 @@ impl CommandRunner for ProcessCommandRunner {
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, timeout);
+            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
         let output = child
             .wait_with_output()
             .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
@@ -299,7 +303,7 @@ impl CommandRunner for ProcessCommandRunner {
         thread::spawn(move || stream_reader(stdout, CommandStream::Stdout, stdout_sender));
         thread::spawn(move || stream_reader(stderr, CommandStream::Stderr, sender));
         let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, timeout);
+            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
 
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -394,7 +398,7 @@ impl CommandRunner for ProcessCommandRunner {
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, timeout);
+            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
         if let Some(mut child_stdin) = child.stdin.take() {
             child_stdin
                 .write_all(stdin.as_bytes())
@@ -3128,31 +3132,22 @@ where
     /// daemon together with its anonymous/named state volume.
     fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
         let scope = job_scope_from_temp(Some(&container.temp_host));
-        let filter = format!("name=-{scope}0$");
-        let listed = self.run_docker(&[
-            "ps".into(),
-            "--all".into(),
-            "--quiet".into(),
-            "--filter".into(),
-            filter,
-        ])?;
-        let ids = listed
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+        let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
+        let ids =
+            crate::docker_lease::job_buildkit_ids_for_job(&listed.stdout, &container.name, &scope);
         if !ids.is_empty() {
-            let mut args = vec!["rm".into(), "--force".into()];
-            args.extend(ids);
-            self.run_docker_remove_container(&args)?;
+            self.run_docker_remove_container(&crate::docker_lease::force_remove_container_args(
+                &ids,
+            ))?;
         }
 
         // Buildx creates a named `<container>_state` volume. Docker's
         // `rm --volumes` deliberately removes only anonymous volumes, so the
-        // state volume requires a separate exact-suffix query and removal.
-        let volume_filter = format!("name=-{scope}0_state$");
+        // state volume requires a separate prefix query and removal.
+        let volume_filter = format!(
+            "name={}{scope}",
+            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
+        );
         let listed_volumes = self.run_docker(&[
             "volume".into(),
             "ls".into(),
@@ -3168,7 +3163,7 @@ where
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
         if !volumes.is_empty() {
-            let mut args = vec!["volume".into(), "rm".into()];
+            let mut args = vec!["volume".into(), "rm".into(), "--force".into()];
             args.extend(volumes);
             self.run_docker(&args)?;
         }
@@ -3431,15 +3426,20 @@ where
     }
 
     fn run_docker_remove_container(&mut self, args: &[String]) -> Result<CommandResult> {
-        let result = self.runner.run("docker", args)?;
+        let result = self
+            .runner
+            .run_timeout("docker", args, TEARDOWN_RM_TIMEOUT)?;
         if result.code != 0 {
             // Docker reports this when another rm request is already in flight for
             // the same container (e.g. the container exited on its own and Docker
             // started its own GC pass concurrently with our `docker rm --force`).
             // The container IS being removed — treat it as success so a clean
             // container removal does not cause the slot to cycle unnecessarily.
-            if result.stderr.contains("removal of container")
-                && result.stderr.contains("is already in progress")
+            // A bounded timeout (Created/removing BuildKit) is the same class:
+            // job teardown proceeds; doctor/boot retry until the object is gone.
+            if result.code == 124
+                || (result.stderr.contains("removal of container")
+                    && result.stderr.contains("is already in progress"))
             {
                 return Ok(result);
             }
@@ -9163,6 +9163,7 @@ fn timeout_command_result(stdout: String, mut stderr: String) -> CommandResult {
 fn spawn_docker_timeout_watchdog(
     program: &str,
     args: &[String],
+    child_pid: u32,
     timeout: Duration,
 ) -> (
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -9171,18 +9172,22 @@ fn spawn_docker_timeout_watchdog(
 ) {
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (watchdog_cancel, watchdog_cancelled) = mpsc::channel();
-    let watchdog = docker_timeout_container_name(program, args).map(|container_name| {
-        let timed_out = std::sync::Arc::clone(&timed_out);
-        thread::spawn(move || {
-            if watchdog_cancelled.recv_timeout(timeout).is_err() {
-                timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+    let container_name = docker_timeout_container_name(program, args);
+    let timed_out_thread = std::sync::Arc::clone(&timed_out);
+    let watchdog = Some(thread::spawn(move || {
+        if watchdog_cancelled.recv_timeout(timeout).is_err() {
+            timed_out_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(container_name) = container_name {
                 let _ = Command::new("docker")
                     .arg("kill")
                     .arg(container_name)
                     .status();
             }
-        })
-    });
+            let _ = Command::new("kill")
+                .args(["-KILL", &child_pid.to_string()])
+                .status();
+        }
+    }));
     (timed_out, watchdog_cancel, watchdog)
 }
 
@@ -9539,9 +9544,12 @@ mod tests {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push(args.to_vec());
             let stdout = match args.first().map(String::as_str) {
-                Some("ps") => "buildkit-one\nbuildkit-two\n",
+                Some("ps") => {
+                    "bk1\tbuildx_buildkit_velnor-builder-job-scope0\tjob\t\tcreated\n\
+                     bk2\tbuildx_buildkit_velnor-builder-job-scope0\t\t\tremoving\n"
+                }
                 Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                    "buildkit-one_state\nbuildkit-two_state\n"
+                    "buildx_buildkit_velnor-builder-job-scope0_state\n"
                 }
                 _ => "",
             };
@@ -10311,14 +10319,16 @@ esac
             calls[rm_index + 3].1,
             crate::docker_lease::list_owned_volumes_args("job")
         );
-        assert_eq!(calls[rm_index + 4].1[0], "ps");
-        assert!(calls[rm_index + 4]
-            .1
-            .iter()
-            .any(|arg| arg.contains("name=-")));
+        assert_eq!(
+            calls[rm_index + 4].1,
+            crate::docker_lease::list_job_buildkit_format_args()
+        );
         let scope = sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap());
-        assert!(calls[rm_index + 4].1.contains(&format!("name=-{scope}0$")));
         assert_eq!(calls[rm_index + 5].1[0], "volume");
+        assert!(calls[rm_index + 5].1.contains(&format!(
+            "name={}{scope}",
+            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
+        )));
         assert_eq!(calls[rm_index + 6].1[0], "network");
     }
 
@@ -10378,17 +10388,9 @@ esac
         assert!(calls
             .iter()
             .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
-        assert!(calls.iter().any(|(_, args)| args
-            == &[
-                "ps".into(),
-                "--all".into(),
-                "--quiet".into(),
-                "--filter".into(),
-                format!(
-                    "name=-{}0$",
-                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
-                ),
-            ]));
+        assert!(calls
+            .iter()
+            .any(|(_, args)| args == &crate::docker_lease::list_job_buildkit_format_args()));
         assert!(calls.iter().any(|(_, args)| args.starts_with(&[
             "network".into(),
             "rm".into(),
@@ -10456,32 +10458,32 @@ esac
         let mut executor = DockerScriptExecutor::new(BuildkitCleanupRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
+        // Created + removing of this job's builder must both be force-removed.
 
         assert_eq!(
             executor.runner().calls,
             vec![
-                vec!["ps", "--all", "--quiet", "--filter", "name=-job-scope0$"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect::<Vec<_>>(),
-                vec!["rm", "--force", "buildkit-one", "buildkit-two"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect::<Vec<_>>(),
+                crate::docker_lease::list_job_buildkit_format_args(),
+                crate::docker_lease::force_remove_container_args(&["bk1".into(), "bk2".into()]),
                 vec![
                     "volume",
                     "ls",
                     "--quiet",
                     "--filter",
-                    "name=-job-scope0_state$",
+                    "name=buildx_buildkit_velnor-builder-job-scope",
                 ]
                 .into_iter()
                 .map(String::from)
                 .collect::<Vec<_>>(),
-                vec!["volume", "rm", "buildkit-one_state", "buildkit-two_state"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect::<Vec<_>>(),
+                vec![
+                    "volume",
+                    "rm",
+                    "--force",
+                    "buildx_buildkit_velnor-builder-job-scope0_state",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
             ]
         );
         fs::remove_dir_all(root).unwrap();
