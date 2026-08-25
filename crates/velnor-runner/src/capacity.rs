@@ -270,6 +270,29 @@ impl FilesystemCoordinator {
     }
 }
 
+/// Serializes Docker control-plane lifecycle mutations across daemon
+/// processes on one host. Job containers remain concurrent; only create,
+/// start, and teardown bursts share this gate because dockerd's control plane
+/// turns an unbounded fan-out into 10–70s tail latency.
+pub struct DockerLifecycleGuard {
+    _file: fs::File,
+}
+
+impl DockerLifecycleGuard {
+    pub fn lock(run_root: &Path) -> Result<Self> {
+        fs::create_dir_all(run_root)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(run_root.join("docker-lifecycle.lock"))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .context("lock Docker lifecycle coordinator")?;
+        Ok(Self { _file: file })
+    }
+}
+
 impl ScopeLease {
     pub fn acquire(
         run_root: &Path,

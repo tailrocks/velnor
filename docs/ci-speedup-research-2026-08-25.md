@@ -166,4 +166,13 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
 
 1. chainargos/java-monorepo#1976 — registry-primary bake cache (expected
    −23 min/run on the estate's biggest pipeline once main seeds the cache).
-2. This document + adoption roadmap (P1 next implementation target).
+2. Velnor #365/#370 — queue timing records plus daemon-bound doctor probes;
+   Sentry now reports 73 samples instead of a false empty result.
+3. Velnor — Docker lifecycle gate: cross-daemon create/start/teardown control
+   mutations are serialized at `/run/velnor/docker-lifecycle.lock`, while job
+   containers remain concurrent. The pre-gate burst proved the root cause:
+   isolated boot was 0.4–3.7s and teardown 0.6–5.9s, but an eight-slot burst
+   produced 11.6–70.5s boot and 12.1–42.1s teardown tails. This targets the
+   dockerd control-plane contention directly; the next Sentry burst measures
+   whether the tails collapse without reducing job parallelism.
+4. This document + adoption roadmap (P1 next implementation target).
