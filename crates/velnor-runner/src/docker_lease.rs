@@ -1151,11 +1151,24 @@ fn handle_client_with(
     proxy_until_closed(host, client)
 }
 
-/// Copy both directions and shut the peer down when either side EOFs.
+/// Copy both directions, propagating half-closes instead of full teardown.
+///
+/// The Go docker client marks hijacked requests (`Connection: Upgrade`,
+/// attach/exec/session) close-after-write, so it FINs its write side as soon
+/// as the request is sent — long before the hijacked output stream arrives.
+/// Treating that FIN as a guest disconnect and shutting both sockets down
+/// killed dockerd's attach stream: `docker run` printed EMPTY stdout while
+/// its exit code arrived on the separate `wait` connection (exit 0, work
+/// done, logs dropped — tailrocks/velnor#348). A FIN is stdin-EOF semantics
+/// here: forward it to the Engine write side only and keep pumping
+/// Engine→guest until the Engine itself closes.
 ///
 /// Non-upgrade used to `io::copy` host→guest only. Job cancel closed the
 /// guest CLI, but the proxy kept the Engine `ContainerStart` HTTP request
 /// open, so Created `buildx_buildkit_velnor-builder-*` could not be deleted.
+/// The guest→host FIN still reaches the Engine (write shutdown = EOF on the
+/// Engine's read side), so a cancelled client unblocks dockerd's in-flight
+/// request; lease `Drop` aborts anything the Engine still holds open.
 #[cfg(unix)]
 fn proxy_until_closed(
     host: std::os::unix::net::UnixStream,
@@ -1169,22 +1182,24 @@ fn proxy_until_closed(
         .try_clone()
         .context("clone job Docker lease stream")?;
     let mut host_write = host.try_clone().context("clone host Docker lease stream")?;
-    let host_close = host.try_clone().context("clone host Docker lease stream")?;
-    let client_close = client
+    let client_half = client
         .try_clone()
         .context("clone job Docker lease stream")?;
     let up = std::thread::Builder::new()
         .name("velnor-docker-lease-io".into())
         .spawn(move || {
             let result = io::copy(&mut host_read, &mut client_write);
-            let _ = host_close.shutdown(std::net::Shutdown::Both);
-            let _ = client_close.shutdown(std::net::Shutdown::Both);
+            // Engine finished: EOF the guest's read side, nothing else. The
+            // guest closes at its leisure; the guest→host copy below then
+            // returns on its own.
+            let _ = client_half.shutdown(std::net::Shutdown::Write);
             result
         })
         .context("start job Docker lease copy thread")?;
     let _ = io::copy(&mut client_read, &mut host_write);
-    let _ = host.shutdown(std::net::Shutdown::Both);
-    let _ = client.shutdown(std::net::Shutdown::Both);
+    // Guest FIN: stdin-EOF for the Engine, NOT a teardown of the hijacked
+    // output stream still flowing in the copy thread above.
+    let _ = host.shutdown(std::net::Shutdown::Write);
     let _ = up.join();
     Ok(())
 }
@@ -1732,6 +1747,10 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
             "guest should receive the ping response, got {}",
             String::from_utf8_lossy(&buf[..n])
         );
+        // The proxy EOFs our read side (Engine closed after `Connection:
+        // close`); a real CLI then closes the socket. Do the same so the
+        // proxy's guest→host copy can finish.
+        drop(client);
         rx.recv_timeout(Duration::from_secs(2))
             .expect("handle_client must return after injecting Connection: close; keepalive io::copy deadlocks docker CLI")
             .unwrap();
@@ -1801,6 +1820,92 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
             engine_saw_close,
             "guest EOF must shut down the Engine request, not leave ContainerStart in flight"
         );
+        engine_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hijacked_stream_survives_client_half_close() {
+        use std::io::Read as _;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Regression for tailrocks/velnor#348: the Go docker client FINs its
+        // write side right after sending a hijacked attach request
+        // (`Connection: Upgrade` implies close-after-write in net/http). The
+        // proxy must treat that FIN as stdin-EOF for the Engine, not as a
+        // guest disconnect that tears down the hijacked output stream —
+        // `docker run` printed EMPTY stdout with exit code 0 otherwise.
+        let dir = unique_unix_dir("velnor-lease-hijack-halfclose");
+        let engine_path = dir.join("engine.sock");
+        let engine = UnixListener::bind(&engine_path).unwrap();
+        let (sent_tx, sent_rx) = mpsc::channel();
+        let engine_thread = std::thread::spawn(move || {
+            let (mut sock, _) = engine.accept().unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let _ = sock.read(&mut buf);
+            sock.write_all(
+                b"HTTP/1.1 101 UPGRADED\r\n\
+                   Content-Type: application/vnd.docker.raw-stream\r\n\
+                   Connection: Upgrade\r\n\
+                   Upgrade: tcp\r\n\r\n\
+                   package=app-a\n",
+            )
+            .unwrap();
+            let _ = sent_tx.send(());
+            // Keep the hijacked stream open past the guest FIN, like dockerd
+            // streaming a container that has not exited yet, then close.
+            std::thread::sleep(Duration::from_millis(300));
+            drop(sock);
+        });
+
+        let (mut client, proxy_client) = UnixStream::pair().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let engine_for_proxy = engine_path.clone();
+        std::thread::spawn(move || {
+            let result = handle_client(proxy_client, &engine_for_proxy, "job", "daemon");
+            let _ = done_tx.send(result);
+        });
+
+        client
+            .write_all(
+                b"POST /v1.54/containers/abc/attach?stderr=1&stdout=1&stream=1 HTTP/1.1\r\n\
+                   Host: docker\r\n\
+                   Connection: Upgrade\r\n\
+                   Upgrade: tcp\r\n\
+                   Content-Length: 0\r\n\r\n",
+            )
+            .unwrap();
+        // Go net/http closes the write side of an upgraded request as soon
+        // as it is sent, before any hijacked output exists.
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        sent_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("engine should send the hijacked stream");
+
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut received = Vec::new();
+        let mut buf = [0_u8; 4096];
+        loop {
+            match client.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+            }
+        }
+        let text = String::from_utf8_lossy(&received);
+        assert!(
+            text.contains("package=app-a"),
+            "hijacked output must survive the guest half-close, got: {text}"
+        );
+        drop(client);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("handle_client must return once the Engine closes the hijacked stream")
+            .unwrap();
         engine_thread.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
