@@ -42,6 +42,9 @@ const CHECKOUT_VERSION: &str = "v7.0.1";
 /// Pinned mise setup action (full 40-hex SHA) and its version comment.
 const MISE_ACTION_REF: &str = "7e36c90d9ab29c415a2384db3006f3ec8a8cc654";
 const MISE_ACTION_VERSION: &str = "v4.2.4";
+/// Pinned local compiler-cache action.
+const SCCACHE_ACTION_REF: &str = "fc920bf0ec8de6ee65d409111f7ec508035751ba";
+const SCCACHE_ACTION_VERSION: &str = "v0.0.11";
 /// Default platform-lane job timeout unless a class overrides it.
 const DEFAULT_PLATFORM_TIMEOUT_MINUTES: u32 = 30;
 /// Pinned GitHub cache action.
@@ -432,6 +435,13 @@ pub fn callable_workflow(
     b.line(4, &format!("timeout-minutes: {lane_timeout}"));
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
+    if matches!(class, RepositoryClass::Code | RepositoryClass::Native) {
+        b.line(4, "env:");
+        b.line(6, "CARGO_INCREMENTAL: \"0\"");
+        b.line(6, "RUSTC_WRAPPER: sccache");
+        b.line(6, "SCCACHE_CACHE_SIZE: 20G");
+        b.line(6, "SCCACHE_GHA_ENABLED: \"false\"");
+    }
     b.line(4, "steps:");
     lane_steps(
         &mut b,
@@ -455,6 +465,13 @@ pub fn callable_workflow(
     b.line(4, &format!("timeout-minutes: {lane_timeout}"));
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
+    if matches!(class, RepositoryClass::Code | RepositoryClass::Native) {
+        b.line(4, "env:");
+        b.line(6, "CARGO_INCREMENTAL: \"0\"");
+        b.line(6, "RUSTC_WRAPPER: sccache");
+        b.line(6, "SCCACHE_CACHE_SIZE: 20G");
+        b.line(6, "SCCACHE_GHA_ENABLED: \"false\"");
+    }
     b.line(4, "steps:");
     lane_steps(
         &mut b,
@@ -2072,6 +2089,21 @@ fn lane_steps(
                 ),
             );
         }
+    }
+    if matches!(
+        contract.class,
+        RepositoryClass::Code | RepositoryClass::Native
+    ) {
+        b.line(6, "- name: Set up local sccache");
+        b.line(
+            8,
+            &format!(
+                "uses: mozilla-actions/sccache-action@{SCCACHE_ACTION_REF} # {SCCACHE_ACTION_VERSION}"
+            ),
+        );
+        b.line(8, "with:");
+        b.line(10, "version: v0.16.0");
+        b.line(10, "disable_annotations: \"false\"");
     }
     b.line(6, "- name: Set up mise toolchain");
     b.line(

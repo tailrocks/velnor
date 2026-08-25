@@ -30,6 +30,15 @@ files = [
 ]
 
 [[action]]
+root = "mozilla-actions/sccache-action"
+sha = "fc920bf0ec8de6ee65d409111f7ec508035751ba"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "df12a8d986d8a04b8a63c165d2dc0fe0ee3567ffbd54b82cdd8bd6512cc0c7b5" },
+  { path = "dist/setup/index.js", kind = "behavior", sha256 = "2f4dacfe34d9fa83a109b9fc1c80364e4347561b57506eaebd25af6e5bf361f6" },
+  { path = "dist/show_stats/index.js", kind = "behavior", sha256 = "d77e050c31d1f803b195f4674cd753c9d4b37df80c97d4a41dda25ae469aae99" },
+]
+
+[[action]]
 root = "actions/upload-artifact"
 sha = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 files = [
