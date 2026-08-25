@@ -242,3 +242,20 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
    mutations; stale-resource cleanup remains gated. This preserves the
    cross-job mutation bound while removing readiness from the critical section.
 5. This document + adoption roadmap (P1 next implementation target).
+
+### 2026-08-26 teardown root cause
+
+Sentry's lifecycle corpus contained 271 completed `job-timing` records. The
+runner-side percentiles were: pickup p95 **1.1 s**, container boot p95 **9.5
+s**, checkout p95 **5.4 s**, and teardown p95 **8.6 s** (maximum **45.1 s**).
+The journal recorded **65** instances on 2026-08-25 where the Docker lease
+accept thread failed to stop within its 2 s bound. The old lease used a
+blocking UnixListener and synthetic wakeup connections; under host load the
+wakeup race left the accept thread behind while teardown held the lifecycle
+permit.
+
+The structural fix makes the listener nonblocking, parks on `WouldBlock`, and
+unparks the exact accept thread during guard drop. Connection abortion and
+Docker ownership cleanup remain unchanged. The new regression test requires
+idle lease shutdown below 500 ms. Post-deploy proof must show zero new accept
+thread warnings and reduced teardown tail on the same workload mix.

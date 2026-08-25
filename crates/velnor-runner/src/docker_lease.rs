@@ -972,17 +972,12 @@ impl Drop for DockerLeaseGuard {
             // `ContainerStart`; that lock is what made Created BuildKit
             // `docker rm --force` hang until dockerd was SIGKILL'd.
             self.conns.abort();
-            // Wake `accept()` twice: the first connect can be handed to
-            // `handle_client` if it races the shutdown load; the second
-            // unblocks the loop so Drop can finish. EOF the wakeup so a
-            // raced `read_http_request` does not wait for headers.
-            for _ in 0..2 {
-                if let Ok(stream) = std::os::unix::net::UnixStream::connect(&self.listen_path) {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
-                }
-            }
         }
         if let Some(thread) = self.accept_thread.take() {
+            // The listener is nonblocking. Wake its park timeout directly;
+            // synthetic socket connects raced shutdown and could still leave
+            // the accept thread inside a blocking accept on busy hosts.
+            thread.thread().unpark();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let _ = thread.join();
@@ -1019,7 +1014,7 @@ fn bind_unix_lease(
     let listener = UnixListener::bind(&listen_path)
         .with_context(|| format!("bind job Docker lease socket {}", listen_path.display()))?;
     listener
-        .set_nonblocking(false)
+        .set_nonblocking(true)
         .context("configure job Docker lease socket")?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let conns = LeaseConnSet::new(Arc::clone(&shutdown));
@@ -1058,7 +1053,19 @@ fn accept_loop(
     while !conns.is_shutdown() {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
-            Err(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                // Polling avoids a blocking accept that cannot be reliably
+                // interrupted by a raced wakeup connection. Drop unparks us
+                // immediately; the timeout bounds an external shutdown that
+                // happens before the thread reaches park.
+                std::thread::park_timeout(Duration::from_millis(10));
+                continue;
+            }
+            Err(_) if conns.is_shutdown() => break,
+            Err(_) => {
+                std::thread::yield_now();
+                continue;
+            }
         };
         if conns.is_shutdown() {
             break;
@@ -1975,6 +1982,30 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
             "lease Drop must shut down host Engine HTTP, not leave ContainerStart held after the job ends"
         );
         engine_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_stops_idle_accept_thread_promptly() {
+        let dir = unique_unix_dir("velnor-lease-drop-idle");
+        let listen_path = dir.join("lease.sock");
+        let guard = DockerLeaseGuard::bind_to(
+            listen_path.clone(),
+            dir.join("missing-engine.sock"),
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        drop(guard);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "idle lease accept thread shutdown took {:?}",
+            started.elapsed()
+        );
+        assert!(!listen_path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
