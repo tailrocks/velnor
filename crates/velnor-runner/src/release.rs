@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use crate::args::{
     ReleaseActivateArgs, ReleaseArgs, ReleaseAssembleArgs, ReleaseCommand, ReleaseEmitArgs,
     ReleaseExportArgs, ReleaseRollbackArgs, ReleaseVerifyInstalledArgs, ReleaseVerifyRecordArgs,
+    INSTALLED_BINARY_PATH,
 };
 
 /// Schema tags. A consumer refuses an unknown shape before trusting any field.
@@ -1087,7 +1088,7 @@ fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
     let architecture = record
         .architecture(host)
         .context("release record lacks host architecture")?;
-    let installed_binary = Path::new("/usr/bin/velnor-runner");
+    let installed_binary = Path::new(INSTALLED_BINARY_PATH);
     let binary_sha256 = sha256_file(installed_binary)?;
     if binary_sha256 != architecture.binary_sha256 {
         bail!("installed binary digest disagrees with release record");

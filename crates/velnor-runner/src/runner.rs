@@ -12717,6 +12717,13 @@ runs:
         // An unclaimed pre-created environment is cleaned up by Drop; the
         // pre-create thread's guard must be handed to that cleanup so the
         // proxy outlives the container removal (and is gone afterwards).
+        // Drop shells out to `docker`. Inside a Velnor job the ambient
+        // `/var/run/docker.sock` is THAT job's lease proxy, not a real
+        // engine — on 0.1.190 that proxy deadlocks HTTP keepalive and
+        // `docker rm --force` hangs for DEFAULT_STEP_TIMEOUT (6h). Point
+        // docker CLI at a missing socket so cleanup fails fast as the
+        // comment below assumed.
+        std::env::set_var("DOCKER_HOST", "unix:///tmp/velnor-test-no-docker.sock");
         let root = std::env::temp_dir().join(format!("velnor-lease-drop-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let (socket_dir, listen) = short_lease_socket("drop");
