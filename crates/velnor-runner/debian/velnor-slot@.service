@@ -1,0 +1,28 @@
+[Unit]
+Description=Velnor ready slot %i
+Documentation=https://github.com/tailrocks/velnor
+After=network-online.target
+Wants=network-online.target
+# No PartOf=velnor-controller@.service: slot isolation is the process boundary.
+
+[Service]
+Type=notify
+WatchdogSec=30
+TimeoutStartSec=0
+Slice=velnor-control.slice
+Environment=VELNOR_CAPABILITY_VALIDATION=strict
+EnvironmentFile=/etc/velnor/velnor.env
+EnvironmentFile=-/etc/velnor/secrets.env
+ExecStart=/usr/bin/velnor-runner slot --state-dir /var/lib/velnor --scope default --slot-index %i
+Restart=always
+RestartSec=5
+TimeoutStopSec=10800
+KillMode=mixed
+User=root
+StateDirectory=velnor
+RuntimeDirectory=velnor
+WorkingDirectory=/var/lib/velnor
+ReadWritePaths=/var/lib/velnor /run/velnor /var/log/velnor
+
+[Install]
+WantedBy=multi-user.target

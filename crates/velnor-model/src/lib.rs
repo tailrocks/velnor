@@ -14,9 +14,11 @@ pub mod condition;
 pub mod error_envelope;
 pub mod job_summary;
 pub mod lifecycle;
+pub mod node;
 pub mod phase;
 pub mod resources;
 pub mod sanitized;
+pub mod scheduler;
 pub mod since;
 pub mod source;
 pub mod time;
@@ -29,12 +31,21 @@ pub use job_summary::{
     NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
 };
 pub use lifecycle::{transition_target, EventReason, InvalidLifecycleToken, JobState};
+pub use node::{
+    ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthDocument, JobId,
+    NotReady, ReadyProof, SliDimension, SlotId,
+};
 pub use phase::{SlotKind, SlotPhase};
 pub use resources::{
     Adapter, AnyResource, Capability, Event, Host, Instance, Job, Lease, QueueEntry, Reservation,
     Run, RunnerRegistration, Slot,
 };
 pub use sanitized::{IdentityRef, RepositoryRef, SanitizedUrl, SecretRef};
+pub use scheduler::{
+    RunnerScaleSetMessageResponse, RunnerScaleSetStatistic, ScaleSetJobMessageType,
+    ScaleSetNotProven, SchedulerKind, SCALESET_API_VERSION, SCALESET_ENDPOINT,
+    SCALESET_MAX_CAPACITY_HEADER, SCALESET_UPSTREAM_COMMIT,
+};
 pub use since::{InvalidSince, Since};
 pub use source::Source;
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};

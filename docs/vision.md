@@ -67,6 +67,12 @@ conclusions in the GitHub UI — is **achieved and in production**:
   signed apt source, never a local package or copied binary; it operates under systemd
   (never-exit supervision, credential diagnosis, watchdog, doctor timers),
   and streams logs live per line to the GitHub UI.
+- **Node Architecture v2**: production availability is independently
+  supervised OS processes — guardian, per-scope controller, one process per
+  ready slot, one transient job worker — not one daemon `JoinSet`. Health is
+  a vector (`velnorctl status --json`); systemd `READY=1` is control-loop
+  liveness only. Host Docker remains a named transitional executor; Build L3
+  (Firecracker / guest-local Docker) is still the final isolation boundary.
 - **velnorctl migration**: the product surface converges on one `velnorctl`
   operator CLI with a service-only `daemon` entrypoint. Final crate layout:
   `velnorctl` (operator CLI), service-only `daemon` entrypoint, and libraries

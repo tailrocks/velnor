@@ -351,6 +351,14 @@ pub struct StatusArgs {
     /// Validate that local config is ready for current target repository x64 Linux jobs.
     #[arg(long)]
     pub check_target_mvp: bool,
+
+    /// Print the node health vector (not systemd is-active).
+    #[arg(long)]
+    pub json: bool,
+
+    /// Journal directory for `--json` (journal.db + health.sock).
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
 }
 
 impl From<StatusArgs> for rt::StatusArgs {

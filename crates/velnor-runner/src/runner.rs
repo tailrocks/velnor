@@ -20,7 +20,7 @@ use std::{
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     sync::{mpsc::UnboundedReceiver, oneshot},
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
 use tracing::Instrument as _;
 
@@ -108,6 +108,7 @@ struct RunServiceJobContext {
     client: RunServiceClient,
     run_service_url: String,
     billing_owner_id: Option<String>,
+    journal_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +272,7 @@ async fn complete_recorded_in_flight_job(
         client,
         run_service_url: record.run_service_url,
         billing_owner_id: record.billing_owner_id,
+        journal_dir: crate::node::complete::journal_dir_near(slot_dir),
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
@@ -884,19 +886,8 @@ fn notify_daemon_ready(usable_slots: usize, slots: usize) {
         return;
     }
     crate::sd_notify::status(&format!(
-        "ready: {usable_slots}/{slots} runner slot(s) configured"
+        "configured: {usable_slots}/{slots} runner slot(s); control READY follows a local cycle"
     ));
-    crate::sd_notify::ready();
-    if let Some(interval) = crate::sd_notify::watchdog_interval() {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                crate::sd_notify::watchdog_ping();
-            }
-        });
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1045,10 +1036,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 }
 
-/// One full daemon pass: preflight → prune → JIT-configure slots → supervise
-/// slot tasks. In supervised mode the slot tasks themselves loop forever, so
-/// reaching the end of this function only happens in one-shot modes or when
-/// every slot task has stopped (e.g. all panicked repeatedly).
+/// One full daemon pass: preflight → prune → reserve permits → supervise
+/// slot processes. JIT registration is the controller `RegisterRunner` side
+/// effect after permit+routing+session+executor proof, not a bulk configure
+/// before those checks. Dry-run still calls `configure_daemon_slots`.
 async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     if draining() {
         return Ok(());
@@ -1090,24 +1081,32 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
-    let usable_slots = configure_daemon_slots(&resolved_args, &config_base, slots).await?;
-    // Startup preflight covered every executable slot before JIT configuration.
+    let surge: u32 = if resolved_args.dry_run_registration || resolved_args.once {
+        0
+    } else {
+        1
+    };
+    let total_slots = slots.saturating_add(surge as usize);
+    reserve_capacity_permits(&config_base, &resolved_args, slots as u32, surge)?;
+    if !daemon_should_poll_after_jit_config(&resolved_args) {
+        let _usable_slots =
+            configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
+        println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
+        return Ok(());
+    }
+    // Startup preflight covered every executable slot before supervision.
     // Child cycles must not repeat the same expensive check.
     resolved_args.skip_preflight = true;
     if draining() {
         return Ok(());
     }
-    if !daemon_should_poll_after_jit_config(&resolved_args) {
-        println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
-        return Ok(());
-    }
-    notify_daemon_ready(usable_slots, slots);
+    notify_daemon_ready(total_slots, total_slots);
     if let Some(sink) = crate::ops::global() {
         // Current instance state row: identity, version, and slot counts.
         let _ = sink.upsert_instance(
             &instance_slug_for_store(),
             env!("CARGO_PKG_VERSION"),
-            usable_slots as u32,
+            total_slots as u32,
         );
         // Time-gated retention passes continue while slots are supervised.
         let retention_sink = std::sync::Arc::clone(sink);
@@ -1119,131 +1118,48 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             }
         });
     }
-    let mut slot_tasks = JoinSet::new();
-
     println!(
-        "Starting Velnor daemon with {slots} internal runner slot{}.",
-        if slots == 1 { "" } else { "s" }
+        "Starting Velnor controller with {total_slots} runner slot process{} (M={slots}, surge={surge}).",
+        if total_slots == 1 { "" } else { "es" }
     );
-    if slots > 1 {
+    if total_slots > 1 {
         println!(
-            "Each slot uses its own GitHub runner config under {}/slots/slot-N.",
+            "Each slot is one OS process with config under {}/slots/slot-N.",
             config_base.display()
         );
     }
-    crate::sd_notify::status(&format!("supervising {slots} runner slot(s)"));
+    crate::sd_notify::status(&format!(
+        "supervising {total_slots} runner slot process(es)"
+    ));
     daemon_forensic_log(
         &config_base,
         &format!(
-            "supervising {slots} slot(s), version={}",
+            "supervising {total_slots} slot process(es) M={slots} surge={surge} version={}",
             env!("CARGO_PKG_VERSION")
         ),
     );
-
-    let spawn_slot = |slot_tasks: &mut JoinSet<(usize, Result<()>)>, slot_index: usize| {
-        let daemon_args = resolved_args.clone();
-        let config_base = config_base.clone();
-        slot_tasks.spawn(async move {
-            // catch_unwind keeps the slot index attached to a panic, so the
-            // supervisor can respawn exactly the panicked slot instead of
-            // silently losing capacity until the whole set drains.
-            use futures_util::FutureExt as _;
-            let result = std::panic::AssertUnwindSafe(run_daemon_slot(
-                daemon_args,
-                config_base,
-                slot_index,
-                slots,
-            ))
-            .catch_unwind()
-            .await;
-            let result = match result {
-                Ok(result) => result.with_context(|| format!("daemon slot-{slot_index} failed")),
-                Err(panic) => {
-                    let panic_message = panic
-                        .downcast_ref::<&str>()
-                        .map(|s| (*s).to_string())
-                        .or_else(|| panic.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "non-string panic payload".to_string());
-                    Err(anyhow::anyhow!(
-                        "daemon slot-{slot_index} task panicked: {panic_message}"
-                    ))
-                }
-            };
-            (slot_index, result)
-        });
-    };
-
-    for slot_index in 1..=slots {
-        spawn_slot(&mut slot_tasks, slot_index);
-    }
-
-    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
-    let mut failures = Vec::new();
-    while let Some(result) = slot_tasks.join_next().await {
-        match result {
-            Ok((_, Ok(()))) => {}
-            Ok((slot_index, Err(error))) => {
-                let ops_state = match crate::ops::global() {
-                    Some(sink) if sink.degraded() => " ops-store=degraded",
-                    Some(_) => " ops-store=ok",
-                    None => " ops-store=absent",
-                };
-                eprintln!("{error:#}{ops_state}");
-                daemon_forensic_log(
-                    &config_base,
-                    &format!("slot-{slot_index} task exited with error: {error:#}{ops_state}"),
-                );
-                if supervised && !draining() {
-                    // A slot returning an error in supervised mode is a bug
-                    // (slot loops are supposed to retry internally) — but one
-                    // broken slot must never take down the others. Respawn it.
-                    eprintln!("Respawning daemon slot-{slot_index} in 10s.");
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                    spawn_slot(&mut slot_tasks, slot_index);
-                } else if !supervised {
-                    failures.push(error);
-                }
-            }
-            Err(join_error) => {
-                let slot_note = if join_error.is_panic() {
-                    "daemon slot task panicked"
-                } else {
-                    "daemon slot task aborted"
-                };
-                let error = anyhow::Error::new(join_error).context(slot_note);
-                eprintln!("{error:#}");
-                if supervised {
-                    // Panic isolation: the panicking slot's index is unknown
-                    // from the JoinError alone, so respawn any missing slots
-                    // by simply continuing — remaining slots keep running.
-                    // (Slot identity recovery: respawn is handled by the
-                    // error arm above for non-panic failures; a panic loses
-                    // the index, so restart the whole pass only if the set
-                    // drains completely.)
-                    if slot_tasks.is_empty() {
-                        bail!("all daemon slot tasks stopped (last: panic)");
-                    }
-                } else {
-                    failures.push(error);
-                }
-            }
+    crate::node::exec::write_exec_config(&config_base, &resolved_args, total_slots)?;
+    let scope = resolved_args
+        .name
+        .clone()
+        .unwrap_or_else(|| "velnor".to_owned());
+    let result = crate::node::controller::supervise_from_daemon(
+        config_base.clone(),
+        scope,
+        slots as u32,
+        surge,
+        resolved_args.once,
+    )
+    .await;
+    if let Some(sink) = crate::ops::global() {
+        if sink.degraded() {
+            daemon_forensic_log(&config_base, "ops-store=degraded after slot supervision");
         }
     }
-    if !failures.is_empty() {
-        bail!("{} daemon slot task(s) failed", failures.len());
+    if draining() {
+        emit_drain_completed_once();
     }
-    if supervised {
-        if draining() {
-            let note = "drain complete: all slots deregistered, exiting";
-            println!("{note}");
-            daemon_forensic_log(&config_base, note);
-            emit_drain_completed_once();
-            return Ok(());
-        }
-        bail!("all daemon slot tasks stopped");
-    }
-
-    Ok(())
+    result
 }
 
 /// Capped exponential backoff with deterministic jitter for the never-exit
@@ -1396,7 +1312,7 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
     None
 }
 
-async fn run_daemon_slot(
+pub(crate) async fn run_daemon_slot(
     args: DaemonArgs,
     config_base: PathBuf,
     slot_index: usize,
@@ -1959,6 +1875,59 @@ async fn configure_daemon_slots(
         );
     }
     Ok(usable_slots)
+}
+
+fn reserve_capacity_permits(
+    config_base: &Path,
+    args: &DaemonArgs,
+    desired: u32,
+    surge: u32,
+) -> Result<()> {
+    use velnor_control::journal::{Event, Journal};
+    use velnor_model::{Generation, SlotId};
+    std::fs::create_dir_all(config_base)?;
+    let mut journal = Journal::open(config_base.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    journal
+        .apply(Event::ControlLive)
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    journal
+        .apply(Event::JournalWritable)
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    journal
+        .apply(Event::DesiredCapacity {
+            ready: desired,
+            surge,
+        })
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let scope = args.name.clone().unwrap_or_else(|| "velnor".to_owned());
+    let total = desired.saturating_add(surge).max(1);
+    for index in 1..=total {
+        journal
+            .apply(Event::PermitReserved {
+                slot_id: SlotId(format!("{scope}-{index}")),
+                generation: Generation::INITIAL,
+                surge: index > desired,
+            })
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    }
+    Ok(())
+}
+
+/// JIT-register one already-permitted slot. Called from the controller
+/// `RegisterRunner` side effect, never before a journal permit exists.
+pub(crate) async fn jit_configure_one_slot(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Result<()> {
+    validate_daemon_slot_index(slot_index, slot_count)?;
+    if args.url.is_none() {
+        return Ok(());
+    }
+    let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slot_count)?;
+    configure(configure_args).await
 }
 
 async fn cleanup_configured_daemon_slots(
@@ -3243,10 +3212,12 @@ async fn handle_v2_message(
     };
     let acquired_identity = acquired_job_identity(&job_value)
         .ok_or_else(|| anyhow::anyhow!("acquired run-service job missing plan/job identity"))?;
+    let journal_dir = crate::node::complete::journal_dir_near(config_dir);
     let fallback_run_service_job = RunServiceJobContext {
         client: run_service.clone(),
         run_service_url: run_service_url.to_string(),
         billing_owner_id: reference.billing_owner_id.clone(),
+        journal_dir: journal_dir.clone(),
     };
     let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
         Ok(job) => job,
@@ -3285,6 +3256,7 @@ async fn handle_v2_message(
         client: job_run_service,
         run_service_url: run_service_url.to_string(),
         billing_owner_id: reference.billing_owner_id,
+        journal_dir,
     };
     if let Some(trigger) = prewarm_trigger.take() {
         let _ = trigger.send(());
@@ -3323,6 +3295,7 @@ async fn handle_job_request(
     let capacity_run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let journal_dir = crate::node::complete::journal_dir_near(config_dir);
     let Some(job_claim) =
         JobClaim::try_acquire(&capacity_run_root, &job.plan.plan_id, &job.job_id)?
     else {
@@ -3911,6 +3884,7 @@ async fn handle_job_request(
             run_service_job.billing_owner_id,
             None,
             false,
+            &journal_dir,
         )
         .instrument(finalize_span)
         .await;
@@ -3967,6 +3941,7 @@ async fn handle_job_request(
             run_service_job.billing_owner_id,
             None,
             true,
+            &journal_dir,
         )
         .await?;
         println!("No-op job completed and message acknowledged.");
@@ -7345,6 +7320,7 @@ async fn complete_run_service_job(
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
     publish_completion_timeline_logs: bool,
+    journal_dir: &Path,
 ) -> Result<()> {
     if publish_completion_timeline_logs {
         if let Err(error) = publish_timeline_logs(job, &step_logs).await {
@@ -7462,10 +7438,34 @@ async fn complete_run_service_job(
         billing_owner_id,
         infrastructure_failure_category,
     };
-    client
-        .complete_job(run_service_url, completion)
-        .await
-        .context("complete run-service job")
+    send_guarded_run_service_complete(client, run_service_url, completion, journal_dir).await
+}
+
+async fn send_guarded_run_service_complete(
+    client: &RunServiceClient,
+    run_service_url: &str,
+    completion: crate::protocol::RunServiceCompleteJob,
+    journal_dir: &Path,
+) -> Result<()> {
+    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let job_id = velnor_model::JobId(completion.job_id.clone());
+    let generation = crate::node::complete::ensure_owned(&mut journal, &job_id)?;
+    let payload = serde_json::to_vec(&completion)?;
+    crate::node::complete::guarded_complete_async(
+        &mut journal,
+        journal_dir,
+        &job_id,
+        generation,
+        &payload,
+        async {
+            client
+                .complete_job(run_service_url, completion)
+                .await
+                .context("complete run-service job")
+        },
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7481,6 +7481,7 @@ async fn complete_run_service_job_refreshing(
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
     publish_completion_timeline_logs: bool,
+    journal_dir: &Path,
 ) -> Result<()> {
     let first = complete_run_service_job(
         client,
@@ -7493,6 +7494,7 @@ async fn complete_run_service_job_refreshing(
         billing_owner_id.clone(),
         infrastructure_failure_category.clone(),
         publish_completion_timeline_logs,
+        journal_dir,
     )
     .await;
     if !first
@@ -7515,6 +7517,7 @@ async fn complete_run_service_job_refreshing(
         billing_owner_id,
         infrastructure_failure_category,
         publish_completion_timeline_logs,
+        journal_dir,
     )
     .await
 }
@@ -7762,20 +7765,21 @@ async fn complete_acquired_job_outcome(
             }
         }
     }
-    run_service_job
-        .client
-        .complete_job(
-            &run_service_job.run_service_url,
-            fail_closed_pre_execution_completion(terminal_acquired_job_completion(
-                identity,
-                run_service_job.billing_owner_id.clone(),
-                conclusion,
-                infrastructure_failure_category,
-                &masked_reason,
-            ))?,
-        )
-        .await
-        .context("complete acquired run-service job after infrastructure failure")
+    let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
+        identity,
+        run_service_job.billing_owner_id.clone(),
+        conclusion,
+        infrastructure_failure_category,
+        &masked_reason,
+    ))?;
+    send_guarded_run_service_complete(
+        &run_service_job.client,
+        &run_service_job.run_service_url,
+        completion,
+        &run_service_job.journal_dir,
+    )
+    .await
+    .context("complete acquired run-service job after infrastructure failure")
 }
 
 /// Guard the pre-execution complete_job payload.

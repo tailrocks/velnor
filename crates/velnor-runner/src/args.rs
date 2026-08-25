@@ -202,10 +202,11 @@ pub struct RunArgs {
     pub require_docker_socket: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonArgs {
     pub config_dir: Option<PathBuf>,
     pub url: Option<String>,
+    #[serde(default, skip_serializing)]
     pub pat: Option<String>,
     pub name: Option<String>,
     pub labels: Vec<String>,
