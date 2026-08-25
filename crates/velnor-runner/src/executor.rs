@@ -3141,7 +3141,7 @@ where
             .services
             .iter()
             .rev()
-            .map(|service| self.run_docker(&service.remove_args()))
+            .map(|service| self.run_docker_remove_container(&service.remove_args()))
             .collect::<Vec<_>>();
         for service_result in service_results {
             service_result?;
@@ -3174,7 +3174,7 @@ where
 
     fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
         crate::docker_lease::reclaim_job_owned(job_id, |args| {
-            self.run_docker(args).map(|result| result.stdout)
+            self.run_docker_cleanup(args).map(|result| result.stdout)
         })
     }
 
@@ -3441,12 +3441,14 @@ where
     }
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
-        self.run_docker(&container.remove_container_args()).ok();
+        self.run_docker_remove_container(&container.remove_container_args())
+            .ok();
         self.abort_docker_lease();
         self.reclaim_job_owned_docker(&container.name).ok();
         self.cleanup_job_buildkit(container).ok();
         for service in container.services.iter().rev() {
-            self.run_docker(&service.remove_args()).ok();
+            self.run_docker_remove_container(&service.remove_args())
+                .ok();
         }
     }
 
@@ -3465,6 +3467,14 @@ where
             );
         }
         Ok(result)
+    }
+
+    fn run_docker_cleanup(&mut self, args: &[String]) -> Result<CommandResult> {
+        if args.first().is_some_and(|arg| arg == "rm") {
+            self.run_docker_remove_container(args)
+        } else {
+            self.run_docker(args)
+        }
     }
 
     fn run_docker_with_env(
@@ -13434,6 +13444,39 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
         assert_eq!(executor.runner().calls.len(), 1);
         assert_eq!(executor.runner().calls[0].1, vec!["rm", "--force", "svc"]);
+    }
+
+    struct ContainerRemovalRaceRunner;
+
+    impl CommandRunner for ContainerRemovalRaceRunner {
+        fn run(&mut self, _program: &str, _args: &[String]) -> Result<CommandResult> {
+            Ok(CommandResult {
+                code: 1,
+                stdout: String::new(),
+                stderr:
+                    "Error response from daemon: removal of container svc is already in progress"
+                        .into(),
+            })
+        }
+    }
+
+    #[test]
+    fn service_cleanup_treats_in_progress_removal_as_success() {
+        let temp = temp_dir();
+        let mut spec = container(&temp);
+        spec.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+
+        DockerScriptExecutor::new(ContainerRemovalRaceRunner)
+            .cleanup_services(&spec)
+            .unwrap();
     }
 
     #[test]
