@@ -40,7 +40,7 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
 }
 
 #[test]
-fn activate_hashes_the_shipped_velnorctl_binary() {
+fn activate_hashes_the_shipped_daemon_binary() {
     let src = include_str!("../release.rs");
     assert!(
         !src.contains("/usr/bin/velnor-runner"),
@@ -50,7 +50,7 @@ fn activate_hashes_the_shipped_velnorctl_binary() {
         src.contains("INSTALLED_BINARY_PATH"),
         "activate must hash the same shipped binary verify-installed uses"
     );
-    assert_eq!(crate::args::INSTALLED_BINARY_PATH, "/usr/bin/velnorctl");
+    assert_eq!(crate::args::INSTALLED_BINARY_PATH, "/usr/bin/velnor-runner");
 }
 
 // --- deterministic fixtures ------------------------------------------------

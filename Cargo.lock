@@ -3417,6 +3417,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "base64",
+ "clap",
  "futures-util",
  "globset",
  "jsonwebtoken",

@@ -23,7 +23,7 @@ COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/sccache \
-    cargo build --release --bin velnorctl --bin velnor-tools \
+    cargo build --release --bin velnor-runner --bin velnorctl --bin velnor-tools \
     && sccache --show-stats
 
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
@@ -40,6 +40,7 @@ RUN apt-get update \
         jq \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/velnorctl /usr/local/bin/velnorctl
+COPY --from=build /src/target/release/velnor-runner /usr/local/bin/velnor-runner
 COPY --from=build /src/target/release/velnor-tools /usr/local/bin/velnor-tools
 
 WORKDIR /work

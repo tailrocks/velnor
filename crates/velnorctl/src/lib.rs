@@ -209,16 +209,11 @@ pub enum Command {
     Capabilities(Box<legacy::CapabilitiesArgs>),
     /// Create and store a GitHub JIT runner configuration.
     Configure(Box<legacy::ConfigureArgs>),
-    /// Run one daemon process that manages one or more internal runner slots.
-    Daemon(Box<legacy::DaemonArgs>),
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
     Doctor(Box<legacy::DoctorArgs>),
     /// Validate local Docker prerequisites before polling GitHub for jobs.
     Preflight(Box<legacy::PreflightArgs>),
-    /// Plan 010 release-coherence chain over the installed identity. Service
-    /// plumbing until Plan 079 replaces it with signed apt/dpkg operations.
-    Release(Box<legacy::ReleaseArgs>),
     /// Remove local runner configuration.
     Remove(Box<legacy::RemoveArgs>),
     /// Print local runner configuration status.
@@ -233,10 +228,8 @@ impl From<Command> for velnor_runner::args::Command {
             Command::Cache(args) => Self::Cache((*args).into()),
             Command::Capabilities(args) => Self::Capabilities((*args).into()),
             Command::Configure(args) => Self::Configure((*args).into()),
-            Command::Daemon(args) => Self::Daemon((*args).into()),
             Command::Doctor(args) => Self::Doctor((*args).into()),
             Command::Preflight(args) => Self::Preflight((*args).into()),
-            Command::Release(args) => Self::Release((*args).into()),
             Command::Remove(args) => Self::Remove((*args).into()),
             Command::Status(args) => Self::Status((*args).into()),
             Command::Storage(args) => Self::Storage((*args).into()),
