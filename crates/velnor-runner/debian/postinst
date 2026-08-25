@@ -15,7 +15,7 @@
 # deployment flow, never here.
 set -e
 
-BIN=/usr/bin/velnorctl
+BIN=/usr/bin/velnor-runner
 SHARE=/usr/share/velnor
 RELEASE_DIR=/var/lib/velnor/release
 ACTIVE_DIR=$RELEASE_DIR/active

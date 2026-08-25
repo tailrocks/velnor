@@ -78,10 +78,8 @@ fn cli_migrated_legacy_names_are_first_class_subcommands() {
         "cache",
         "capabilities",
         "configure",
-        "daemon",
         "doctor",
         "preflight",
-        "release",
         "remove",
         "status",
         "storage",
@@ -97,6 +95,14 @@ fn cli_migrated_legacy_names_are_first_class_subcommands() {
 fn cli_run_worker_is_not_a_public_command() {
     // C075: the single-worker mode folds into `daemon --once` service
     // plumbing; `run` stays reserved for the future workflow-run resource.
+    for name in ["daemon", "release"] {
+        let output = run(&[name, "--help"]);
+        assert_eq!(code(&output), 2, "{name}");
+        assert!(
+            text(&output.stderr).contains("unrecognized subcommand"),
+            "{name}"
+        );
+    }
     let output = run(&["run", "--help"]);
     assert_eq!(code(&output), 2);
     assert!(text(&output.stderr).contains("unrecognized subcommand"));

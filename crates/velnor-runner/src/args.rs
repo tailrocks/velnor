@@ -15,7 +15,7 @@ pub const ACTIVE_RELEASE_DIR: &str = "/var/lib/velnor/release";
 pub const ACTIVE_RECORD_PATH: &str = "/var/lib/velnor/release/active/record.json";
 pub const ACTIVE_DEPLOYED_PATH: &str = "/var/lib/velnor/release/active/deployed.json";
 /// The single installed product binary owned by the Debian package.
-pub const INSTALLED_BINARY_PATH: &str = "/usr/bin/velnorctl";
+pub const INSTALLED_BINARY_PATH: &str = "/usr/bin/velnor-runner";
 
 /// Runtime dispatch surface. `velnorctl` builds this enum from its CLI tree;
 /// the exhaustive match in [`crate::scaffold::dispatch`] is the registry.
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_binary_path_is_the_velnorctl_command_center() {
-        assert_eq!(INSTALLED_BINARY_PATH, "/usr/bin/velnorctl");
+    fn installed_binary_path_is_the_daemon_binary() {
+        assert_eq!(INSTALLED_BINARY_PATH, "/usr/bin/velnor-runner");
     }
 }

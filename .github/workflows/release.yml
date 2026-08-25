@@ -172,8 +172,8 @@ jobs:
         id: export
         run: |
           set -euo pipefail
-          cargo build -q -p velnorctl --release --locked --features release-build
-          runner=target/release/velnorctl
+          cargo build -q -p velnor-runner --release --locked --features release-build
+          runner=target/release/velnor-runner
           "$runner" release export > build-identity.json
           "$runner" capabilities export > manifest.json
           sha256="$(sha256sum manifest.json | awk '{print $1}')"
@@ -381,10 +381,10 @@ jobs:
           # package rename (downstream apt verify + evidence reference them);
           # the bound BINARY is the shipped product: /usr/bin/velnorctl.
           archive="velnor-runner-${VERSION}-${{ matrix.arch }}.tar.gz"
-          tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnorctl
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnor-runner
           sha256sum "$archive" | awk '{print $1}' > "$archive.sha256"
           # Independent digest of the raw binary (the record's per-arch binary id).
-          sha256sum "target/${{ matrix.target }}/release/velnorctl" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
+          sha256sum "target/${{ matrix.target }}/release/velnor-runner" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
 
       - name: Stage acyclic identity files packaged into the deb
         run: |
@@ -417,6 +417,7 @@ jobs:
           [ "$(dpkg-deb -f "$src" Architecture)" = "$expected_arch" ] || { echo "::error::deb arch != $expected_arch" >&2; exit 1; }
           manifest="$(mktemp)"
           dpkg-deb -c "$src" > "$manifest"
+          grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
           grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
           grep -q "usr/bin/velnor-runner" "$manifest" && { echo "::error::deb still ships the deleted velnor-runner binary" >&2; exit 1; } || true
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }

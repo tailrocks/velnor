@@ -25,7 +25,7 @@ fn load_runner_name(config_dir: &Path) -> String {
 #[test]
 fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
     let config_dir = unique_temp_dir("daemon-cli");
-    let output = Command::new(env!("CARGO_BIN_EXE_velnorctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_velnor-runner"))
         .args([
             "daemon",
             "--url",
