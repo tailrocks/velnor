@@ -9,6 +9,10 @@ use std::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_DOCKER_LIFECYCLE_CONCURRENCY: usize = 2;
+const MAX_DOCKER_LIFECYCLE_CONCURRENCY: usize = 8;
+const DOCKER_LIFECYCLE_RETRY: Duration = Duration::from_millis(25);
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaseRecord {
     scope: String,
@@ -270,26 +274,54 @@ impl FilesystemCoordinator {
     }
 }
 
-/// Serializes Docker control-plane lifecycle mutations across daemon
-/// processes on one host. Job containers remain concurrent; only create,
-/// start, and teardown bursts share this gate because dockerd's control plane
-/// turns an unbounded fan-out into 10–70s tail latency.
+/// Bounds Docker control-plane lifecycle mutations across daemon processes on
+/// one host. Job containers remain concurrent; create, start, and teardown
+/// bursts use two host-wide permits by default because dockerd's control
+/// plane turns an unbounded fan-out into 10–70s tail latency. Operators can
+/// tune the bound with `VELNOR_DOCKER_LIFECYCLE_CONCURRENCY` (1–8).
 pub struct DockerLifecycleGuard {
     _file: fs::File,
 }
 
 impl DockerLifecycleGuard {
     pub fn lock(run_root: &Path) -> Result<Self> {
+        let concurrency = std::env::var("VELNOR_DOCKER_LIFECYCLE_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (1..=MAX_DOCKER_LIFECYCLE_CONCURRENCY).contains(value))
+            .unwrap_or(DEFAULT_DOCKER_LIFECYCLE_CONCURRENCY);
+        Self::lock_with_concurrency(run_root, concurrency)
+    }
+
+    fn lock_with_concurrency(run_root: &Path, concurrency: usize) -> Result<Self> {
+        if concurrency == 0 {
+            bail!("Docker lifecycle concurrency must be at least 1");
+        }
         fs::create_dir_all(run_root)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(run_root.join("docker-lifecycle.lock"))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-            .context("lock Docker lifecycle coordinator")?;
-        Ok(Self { _file: file })
+        loop {
+            for slot in 0..concurrency {
+                // Keep slot zero at the original path so an in-place upgrade
+                // never makes a live old daemon invisible to the new guard.
+                let path = if slot == 0 {
+                    run_root.join("docker-lifecycle.lock")
+                } else {
+                    run_root.join(format!("docker-lifecycle-{slot}.lock"))
+                };
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(path)?;
+                match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+                {
+                    Ok(()) => return Ok(Self { _file: file }),
+                    Err(rustix::io::Errno::WOULDBLOCK) => {}
+                    Err(error) => return Err(error).context("lock Docker lifecycle coordinator"),
+                }
+            }
+            std::thread::sleep(DOCKER_LIFECYCLE_RETRY);
+        }
     }
 }
 
@@ -547,6 +579,27 @@ mod tests {
         let lease = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(lease);
         handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn docker_lifecycle_guard_bounds_cross_process_concurrency() {
+        let root = root("docker-lifecycle");
+        let first = DockerLifecycleGuard::lock_with_concurrency(&root, 2).unwrap();
+        let second = DockerLifecycleGuard::lock_with_concurrency(&root, 2).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            let third = DockerLifecycleGuard::lock_with_concurrency(&thread_root, 2).unwrap();
+            sender.send(()).unwrap();
+            third
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(first);
+        assert!(receiver.recv_timeout(Duration::from_secs(2)).is_ok());
+        drop(second);
+        drop(handle.join().unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
