@@ -4991,7 +4991,30 @@ fn materialize_persistent_target(
     if !store.join(".velnor-target-complete-v1").is_file() || !payload.is_dir() {
         return Ok(());
     }
+    let stored_revision = fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let source_revision = workspace_source_revision(&container.workspace_host, source_revision);
     let target = container.workspace_host.join("target");
+    if source_revision
+        .as_deref()
+        .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
+    {
+        // Checkout pins source mtimes to the commit timestamp. Restoring a
+        // different revision and then touching sources would poison the
+        // published fingerprints for every later unchanged run.
+        eprintln!(
+            "forensics.lifecycle: persistent target generation invalidated (stored={}, current={})",
+            stored_revision.as_deref().unwrap_or("unknown"),
+            source_revision.as_deref().unwrap_or("unknown")
+        );
+        if target.exists() {
+            fs::remove_dir_all(&target)
+                .with_context(|| format!("clear stale job-local target {}", target.display()))?;
+        }
+        return Ok(());
+    }
     if target.exists() {
         fs::remove_dir_all(&target)
             .with_context(|| format!("clear job-local target {}", target.display()))?;
@@ -5001,23 +5024,6 @@ fn materialize_persistent_target(
     copy_dir_contents(&payload, &target)?;
     verify_cache_copy(&payload, &target)
         .with_context(|| format!("verify persistent target restore from {}", store.display()))?;
-
-    let stored_revision = fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER))
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let source_revision = workspace_source_revision(&container.workspace_host, source_revision);
-    if source_revision
-        .as_deref()
-        .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
-    {
-        eprintln!(
-            "forensics.lifecycle: persistent target source revision changed (stored={}, current={}); refreshing workspace mtimes",
-            stored_revision.as_deref().unwrap_or("unknown"),
-            source_revision.as_deref().unwrap_or("unknown")
-        );
-        refresh_workspace_source_mtimes(&container.workspace_host)?;
-    }
     Ok(())
 }
 
@@ -5033,35 +5039,6 @@ fn workspace_source_revision(workspace: &Path, fallback: Option<&str>) -> Option
         .map(|revision| revision.trim().to_owned())
         .filter(|revision| !revision.is_empty())
         .or_else(|| fallback.map(str::to_owned))
-}
-
-fn refresh_workspace_source_mtimes(workspace: &Path) -> Result<()> {
-    let modified = std::time::SystemTime::now();
-    let mut pending = vec![workspace.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(&directory)
-            .with_context(|| format!("read workspace directory {}", directory.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if directory == workspace
-                && matches!(entry.file_name().to_str(), Some(".git" | "target"))
-            {
-                continue;
-            }
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                pending.push(path);
-            } else if file_type.is_file() {
-                fs::File::options()
-                    .append(true)
-                    .open(&path)?
-                    .set_modified(modified)?;
-            }
-        }
-        fs::File::open(&directory)?.set_modified(modified)?;
-    }
-    Ok(())
 }
 
 fn publish_persistent_target(
@@ -11889,20 +11866,19 @@ esac
 
         materialize_persistent_target(&spec, Some("new-revision")).unwrap();
         let target = spec.workspace_host.join("target");
+        assert!(!target.exists());
         assert_eq!(
-            fs::read_to_string(target.join("debug/seed")).unwrap(),
-            "warm\n"
-        );
-        assert!(
             fs::metadata(spec.workspace_host.join("Cargo.toml"))
                 .unwrap()
                 .modified()
-                .unwrap()
-                > stale_time
+                .unwrap(),
+            stale_time
         );
 
         // Both paths remain inside the workspace mount, so the workflow's
         // ordinary atomic promotion cannot fail with EXDEV.
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("debug/seed"), "compiled\n").unwrap();
         fs::create_dir_all(spec.workspace_host.join(".ci-target-cache")).unwrap();
         fs::rename(
             target.join("debug/seed"),
