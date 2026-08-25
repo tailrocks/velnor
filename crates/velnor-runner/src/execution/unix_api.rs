@@ -20,7 +20,11 @@ impl UnixFirecrackerClient {
     }
 
     fn put_json(&self, path: &str, body: &str) -> Result<(), String> {
-        put_unix_json(&self.socket, path, body)
+        unix_json(&self.socket, "PUT", path, body)
+    }
+
+    fn patch_json(&self, path: &str, body: &str) -> Result<(), String> {
+        unix_json(&self.socket, "PATCH", path, body)
     }
 }
 
@@ -62,6 +66,14 @@ impl FirecrackerApi for UnixFirecrackerClient {
         self.put_json("/actions", r#"{"action_type":"InstanceStart"}"#)
     }
 
+    fn pause_vm(&mut self) -> Result<(), String> {
+        self.patch_json("/vm", r#"{"state":"Paused"}"#)
+    }
+
+    fn resume_vm(&mut self) -> Result<(), String> {
+        self.patch_json("/vm", r#"{"state":"Resumed"}"#)
+    }
+
     fn create_snapshot(&mut self, mem: &Path, vmstate: &Path) -> Result<(), String> {
         let body = format!(
             r#"{{"mem_file_path":"{}","snapshot_path":"{}","snapshot_type":"Full"}}"#,
@@ -83,7 +95,7 @@ impl FirecrackerApi for UnixFirecrackerClient {
             ));
         }
         let body = format!(
-            r#"{{"snapshot_path":"{}","mem_backend":{{"backend_type":"File","backend_path":"{}"}}}}"#,
+            r#"{{"snapshot_path":"{}","mem_backend":{{"backend_type":"File","backend_path":"{}"}},"resume_vm":true}}"#,
             json_escape(&vmstate.display().to_string()),
             json_escape(&mem.display().to_string())
         );
@@ -95,7 +107,7 @@ fn json_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn put_unix_json(socket: &Path, path: &str, body: &str) -> Result<(), String> {
+fn unix_json(socket: &Path, method: &str, path: &str, body: &str) -> Result<(), String> {
     let mut stream = UnixStream::connect(socket)
         .map_err(|error| format!("connect {}: {error}", socket.display()))?;
     stream
@@ -105,7 +117,7 @@ fn put_unix_json(socket: &Path, path: &str, body: &str) -> Result<(), String> {
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| format!("write timeout: {error}"))?;
     let request = format!(
-        "PUT {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream
@@ -117,10 +129,10 @@ fn put_unix_json(socket: &Path, path: &str, body: &str) -> Result<(), String> {
         .map_err(|error| format!("read {path}: {error}"))?;
     let response = std::str::from_utf8(&buf[..n])
         .map_err(|_| "firecracker response is not UTF-8".to_string())?;
-    parse_http_success(path, response)
+    parse_http_success(method, path, response)
 }
 
-fn parse_http_success(path: &str, response: &str) -> Result<(), String> {
+fn parse_http_success(method: &str, path: &str, response: &str) -> Result<(), String> {
     let status_line = response.lines().next().unwrap_or("");
     if status_line.contains(" 204 ") || status_line.ends_with(" 204") {
         return Ok(());
@@ -129,7 +141,7 @@ fn parse_http_success(path: &str, response: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "firecracker PUT {path} failed: {status_line}; the docker backend was not used"
+        "firecracker {method} {path} failed: {status_line}; the docker backend was not used"
     ))
 }
 
@@ -181,5 +193,36 @@ mod tests {
             .load_snapshot(Path::new("/m"), Path::new("/s"), "0.0.0")
             .unwrap_err();
         assert!(err.contains("cold boot required"), "{err}");
+    }
+
+    #[test]
+    fn unix_client_patches_vm_pause() {
+        let dir = std::env::temp_dir().join(format!(
+            "fc-pause-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("fc.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            req
+        });
+        let mut client = UnixFirecrackerClient::new(sock);
+        client.pause_vm().unwrap();
+        let req = server.join().unwrap();
+        assert!(req.starts_with("PATCH /vm HTTP/1.1"), "{req}");
+        assert!(req.contains("Paused"), "{req}");
+        std::fs::remove_dir_all(dir).ok();
     }
 }

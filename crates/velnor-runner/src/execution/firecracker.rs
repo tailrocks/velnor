@@ -9,7 +9,7 @@ use super::artifacts::{
 };
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
 use super::isolation::IsolationResources;
-use super::snapshot::SnapshotIdentity;
+use super::snapshot::{read_identity, vmstate_path, write_identity, GuestReady, SnapshotIdentity};
 use super::ExecutionWorld;
 
 /// Injectable Firecracker HTTP API (Unix socket). Tests use [`RecordingFirecracker`].
@@ -29,6 +29,16 @@ pub trait FirecrackerApi {
     /// # Errors
     /// API transport or protocol failures.
     fn instance_start(&mut self) -> Result<(), String>;
+    /// Pause a running VM. Required before [`FirecrackerApi::create_snapshot`].
+    ///
+    /// # Errors
+    /// API transport or protocol failures.
+    fn pause_vm(&mut self) -> Result<(), String>;
+    /// Resume a paused VM.
+    ///
+    /// # Errors
+    /// API transport or protocol failures.
+    fn resume_vm(&mut self) -> Result<(), String>;
     /// # Errors
     /// API transport or protocol failures.
     fn create_snapshot(&mut self, mem: &Path, vmstate: &Path) -> Result<(), String>;
@@ -81,6 +91,16 @@ impl FirecrackerApi for RecordingFirecracker {
         Ok(())
     }
 
+    fn pause_vm(&mut self) -> Result<(), String> {
+        self.calls.push("pause_vm".into());
+        Ok(())
+    }
+
+    fn resume_vm(&mut self) -> Result<(), String> {
+        self.calls.push("resume_vm".into());
+        Ok(())
+    }
+
     fn create_snapshot(&mut self, mem: &Path, vmstate: &Path) -> Result<(), String> {
         self.calls.push(format!(
             "create_snapshot {} {}",
@@ -118,6 +138,7 @@ pub const FIRECRACKER_GUEST_CID: u32 = 3;
 pub struct FirecrackerBackend {
     pub guest_cid: u32,
     pub started: bool,
+    pub restored: bool,
 }
 
 impl FirecrackerBackend {
@@ -190,48 +211,19 @@ impl FirecrackerBackend {
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
-        if try_restore_snapshot(&set, world, events)? {
+        let _ = plan;
+        let identity_ok = snapshot_identity_matches(&set, world);
+        start_jailer(&set, resources, world, events)?;
+        if identity_ok && try_restore_snapshot(&set, world, events)? {
+            self.restored = true;
+            self.guest_cid = FIRECRACKER_GUEST_CID;
             return Ok(());
         }
-        let jailer_bin = set.jailer.path.to_str().unwrap_or("jailer");
-        let jailer_args = Self::jailer_args(resources, &set.firecracker.path);
-        let jailer = world
-            .runner
-            .run(jailer_bin, &jailer_args)
-            .map_err(|error| MicroVmPreflightFailure::new("jailer", error.to_string()))?;
-        if jailer.code != 0 {
-            return Err(MicroVmPreflightFailure::new(
-                "jailer",
-                format!("jailer start exited {}", jailer.code),
-            )
-            .into());
+        if identity_ok {
+            // Load taints a Firecracker process; a failed load needs a fresh VMM.
+            start_jailer(&set, resources, world, events)?;
         }
-        events.push(ExecutionEvent::FirecrackerApi("jailer".into()));
-        let _ = plan;
-        world
-            .firecracker
-            .put_boot_source(&set.kernel.path)
-            .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
-        events.push(ExecutionEvent::FirecrackerApi("put_boot_source".into()));
-        world
-            .firecracker
-            .put_drive("rootfs", &set.rootfs.path, true)
-            .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
-        world
-            .firecracker
-            .put_drive("scratch", &resources.writable_disk, false)
-            .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
-        world
-            .firecracker
-            .put_network_interface("eth0", &resources.tap)
-            .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
-        self.guest_cid = FIRECRACKER_GUEST_CID;
-        world
-            .firecracker
-            .put_vsock(self.guest_cid, &resources.vsock)
-            .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
-        events.push(ExecutionEvent::FirecrackerApi("devices".into()));
-        Ok(())
+        cold_configure(self, &set, resources, world, events)
     }
 
     pub(crate) fn start(
@@ -239,13 +231,26 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        world
-            .firecracker
-            .instance_start()
-            .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
+        if !self.restored {
+            world
+                .firecracker
+                .instance_start()
+                .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
+            events.push(ExecutionEvent::FirecrackerApi("instance_start".into()));
+        }
         self.started = true;
-        events.push(ExecutionEvent::FirecrackerApi("instance_start".into()));
         events.push(ExecutionEvent::GuestDocker("engine healthy".into()));
+        if !self.restored {
+            let _ = create_golden_snapshot(
+                world,
+                GuestReady {
+                    agent_listening: true,
+                    docker_healthy: true,
+                    job_credentials_absent: true,
+                },
+                events,
+            );
+        }
         Ok(())
     }
 
@@ -304,42 +309,125 @@ impl FirecrackerBackend {
     }
 }
 
+fn start_jailer(
+    set: &MicroVmArtifactSet,
+    resources: &IsolationResources,
+    world: &mut ExecutionWorld<'_>,
+    events: &mut Vec<ExecutionEvent>,
+) -> Result<(), ExecutionError> {
+    let jailer_bin = set.jailer.path.to_str().unwrap_or("jailer");
+    let jailer_args = FirecrackerBackend::jailer_args(resources, &set.firecracker.path);
+    let jailer = world
+        .runner
+        .run(jailer_bin, &jailer_args)
+        .map_err(|error| MicroVmPreflightFailure::new("jailer", error.to_string()))?;
+    if jailer.code != 0 {
+        return Err(MicroVmPreflightFailure::new(
+            "jailer",
+            format!("jailer start exited {}", jailer.code),
+        )
+        .into());
+    }
+    events.push(ExecutionEvent::FirecrackerApi("jailer".into()));
+    Ok(())
+}
+
+fn cold_configure(
+    backend: &mut FirecrackerBackend,
+    set: &MicroVmArtifactSet,
+    resources: &IsolationResources,
+    world: &mut ExecutionWorld<'_>,
+    events: &mut Vec<ExecutionEvent>,
+) -> Result<(), ExecutionError> {
+    world
+        .firecracker
+        .put_boot_source(&set.kernel.path)
+        .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
+    events.push(ExecutionEvent::FirecrackerApi("put_boot_source".into()));
+    world
+        .firecracker
+        .put_drive("rootfs", &set.rootfs.path, true)
+        .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
+    world
+        .firecracker
+        .put_drive("scratch", &resources.writable_disk, false)
+        .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
+    world
+        .firecracker
+        .put_network_interface("eth0", &resources.tap)
+        .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
+    backend.guest_cid = FIRECRACKER_GUEST_CID;
+    world
+        .firecracker
+        .put_vsock(backend.guest_cid, &resources.vsock)
+        .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
+    events.push(ExecutionEvent::FirecrackerApi("devices".into()));
+    Ok(())
+}
+
+fn snapshot_mem_path(set: &MicroVmArtifactSet, root: &Path) -> PathBuf {
+    set.snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.path.clone())
+        .unwrap_or_else(|| root.join("snapshot.mem"))
+}
+
+fn snapshot_identity_matches(set: &MicroVmArtifactSet, world: &ExecutionWorld<'_>) -> bool {
+    let mem = snapshot_mem_path(set, world.artifact_root);
+    if !world.host_fs.exists(&mem) || !world.host_fs.exists(&vmstate_path(&mem)) {
+        return false;
+    }
+    let generation = MicroVmGeneration::from_set(set);
+    let want = SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    let Ok(have) = read_identity(world.host_fs, &mem) else {
+        return false;
+    };
+    want.restore_or_cold_boot(&have).is_ok()
+}
+
+/// Pause a credential-free ready guest and persist mem+vmstate+identity.
+///
+/// # Errors
+/// Credentials present, guest not ready, or Firecracker API failure.
+pub fn create_golden_snapshot(
+    world: &mut ExecutionWorld<'_>,
+    ready: GuestReady,
+    events: &mut Vec<ExecutionEvent>,
+) -> Result<(), ExecutionError> {
+    ready.credential_free_or_err()?;
+    let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
+    let mem = world.artifact_root.join("snapshot.mem");
+    let vmstate = vmstate_path(&mem);
+    world
+        .firecracker
+        .pause_vm()
+        .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
+    events.push(ExecutionEvent::FirecrackerApi("pause_vm".into()));
+    world
+        .firecracker
+        .create_snapshot(&mem, &vmstate)
+        .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
+    events.push(ExecutionEvent::FirecrackerApi("create_snapshot".into()));
+    let generation = MicroVmGeneration::from_set(&set);
+    let identity =
+        SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    write_identity(world.host_fs, &mem, &identity)?;
+    world
+        .firecracker
+        .resume_vm()
+        .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
+    events.push(ExecutionEvent::FirecrackerApi("resume_vm".into()));
+    Ok(())
+}
+
 fn try_restore_snapshot(
     set: &MicroVmArtifactSet,
     world: &mut ExecutionWorld<'_>,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<bool, ExecutionError> {
-    let Some(snapshot) = &set.snapshot else {
-        return Ok(false);
-    };
-    let generation = MicroVmGeneration::from_set(set);
-    let want = SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
-    let sidecar = snapshot.path.with_extension("identity.json");
-    let Ok(bytes) = world.host_fs.read(&sidecar) else {
-        events.push(ExecutionEvent::FirecrackerApi(
-            "snapshot sidecar missing; cold boot".into(),
-        ));
-        return Ok(false);
-    };
-    let Ok(have) = serde_json::from_slice::<SnapshotIdentity>(&bytes) else {
-        events.push(ExecutionEvent::FirecrackerApi(
-            "snapshot identity unreadable; cold boot".into(),
-        ));
-        return Ok(false);
-    };
-    if want.restore_or_cold_boot(&have).is_err() {
-        events.push(ExecutionEvent::FirecrackerApi(
-            "snapshot identity mismatch; cold boot".into(),
-        ));
-        return Ok(false);
-    }
-    let vmstate = snapshot.path.with_extension("vmstate");
-    match restore_or_cold_boot(
-        world.firecracker,
-        &snapshot.path,
-        &vmstate,
-        FIRECRACKER_VERSION,
-    ) {
+    let mem = snapshot_mem_path(set, world.artifact_root);
+    let vmstate = vmstate_path(&mem);
+    match restore_or_cold_boot(world.firecracker, &mem, &vmstate, FIRECRACKER_VERSION) {
         Ok(_) => {
             events.push(ExecutionEvent::FirecrackerApi("snapshot_restore".into()));
             events.push(ExecutionEvent::FirecrackerApi("devices".into()));

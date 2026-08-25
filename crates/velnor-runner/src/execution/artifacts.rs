@@ -448,13 +448,35 @@ mod tests {
     fn unset_manifest_checksums_fail_closed() {
         let root = PathBuf::from("/microvm");
         let mut fs = MemoryFs::default();
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../microvm/manifest.json")).unwrap();
+        value["guest_agent"] = serde_json::Value::String("UNSET_FILL".into());
         fs.write(
             &root.join("manifest.json"),
-            include_str!("../../../../microvm/manifest.json").as_bytes(),
+            &serde_json::to_vec(&value).unwrap(),
         )
         .unwrap();
         let error = MicroVmArtifactSet::load(&root, &fs).unwrap_err();
         assert_eq!(error.requirement, "artifacts.checksum");
+    }
+
+    #[test]
+    fn shipped_manifest_guest_agent_is_pinned_sha256() {
+        let value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../microvm/manifest.json")).unwrap();
+        let pins = match &value["guest_agent"] {
+            serde_json::Value::String(one) => vec![one.as_str()],
+            serde_json::Value::Object(map) => {
+                map.values().filter_map(|v| v.as_str()).collect::<Vec<_>>()
+            }
+            other => panic!("guest_agent pin shape {other}"),
+        };
+        assert!(!pins.is_empty());
+        for pin in pins {
+            assert_eq!(pin.len(), 64, "{pin}");
+            assert!(pin.bytes().all(|b| b.is_ascii_hexdigit()), "{pin}");
+            assert!(!pin.starts_with("UNSET"), "{pin}");
+        }
     }
 
     #[test]

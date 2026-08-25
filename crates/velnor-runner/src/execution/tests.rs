@@ -391,6 +391,168 @@ fn snapshot_checksum_mismatch_cold_boots() {
         .calls
         .iter()
         .any(|call| call.starts_with("load_snapshot")));
+    assert!(
+        runner
+            .calls
+            .iter()
+            .any(|(program, args)| program.ends_with("jailer") && args.iter().any(|a| a == "--id")),
+        "jailer must start a VMM before restore/cold-boot: {:?}",
+        runner.calls
+    );
+}
+
+#[test]
+fn matching_snapshot_loads_only_after_jailer() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    fs.write(&artifacts.join("snapshot.mem"), b"snap").unwrap();
+    fs.write(&artifacts.join("snapshot.vmstate"), b"vmstate")
+        .unwrap();
+    let generation =
+        MicroVmGeneration::from_set(&MicroVmArtifactSet::load(&artifacts, &fs).unwrap());
+    let identity =
+        SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    fs.write(
+        &artifacts.join("snapshot.identity.json"),
+        &serde_json::to_vec(&identity).unwrap(),
+    )
+    .unwrap();
+    let checksums = ArtifactChecksums {
+        firecracker_version: FIRECRACKER_VERSION.to_string(),
+        jailer_version: JAILER_VERSION.to_string(),
+        firecracker: hex_sha256(b"fc"),
+        jailer: hex_sha256(b"jailer"),
+        kernel: hex_sha256(b"kernel"),
+        rootfs: hex_sha256(b"rootfs"),
+        guest_agent: hex_sha256(b"agent"),
+        snapshot: Some(hex_sha256(b"snap")),
+    };
+    fs.write(
+        &artifacts.join("manifest.json"),
+        &serde_json::to_vec(&checksums).unwrap(),
+    )
+    .unwrap();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        let mut session =
+            open_session(&file, IsolationIdentity::new("job-restore", 1), &mut world).unwrap();
+        session.reserve(&mut world).unwrap();
+        session
+            .prepare(&ValidatedPlan::example_success("job-restore"), &mut world)
+            .unwrap();
+    }
+    let jailer_at = runner
+        .calls
+        .iter()
+        .position(|(program, args)| program.ends_with("jailer") && args.iter().any(|a| a == "--id"))
+        .expect("jailer must start before load_snapshot");
+    assert!(
+        api.calls
+            .iter()
+            .any(|call| call.starts_with("load_snapshot")),
+        "{:?}",
+        api.calls
+    );
+    assert!(!api
+        .calls
+        .iter()
+        .any(|call| call.starts_with("put_boot_source")));
+    let _ = jailer_at;
+}
+
+#[test]
+fn golden_snapshot_create_pauses_then_writes_sidecar() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        let mut session =
+            open_session(&file, IsolationIdentity::new("job-gold", 1), &mut world).unwrap();
+        session.reserve(&mut world).unwrap();
+        session
+            .prepare(&ValidatedPlan::example_success("job-gold"), &mut world)
+            .unwrap();
+        session.start(&mut world).unwrap();
+    }
+    assert!(
+        api.calls.iter().any(|call| call == "pause_vm"),
+        "{:?}",
+        api.calls
+    );
+    assert!(
+        api.calls
+            .iter()
+            .any(|call| call.starts_with("create_snapshot")),
+        "{:?}",
+        api.calls
+    );
+    assert!(
+        api.calls.iter().any(|call| call == "resume_vm"),
+        "{:?}",
+        api.calls
+    );
+    let sidecar = fs
+        .read(&artifacts.join("snapshot.identity.json"))
+        .expect("golden sidecar");
+    let identity: SnapshotIdentity = serde_json::from_slice(&sidecar).unwrap();
+    assert!(identity.credential_free);
+}
+
+#[test]
+fn golden_snapshot_create_refuses_job_credentials() {
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands::default();
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    let mut events = Vec::new();
+    let err = create_golden_snapshot(
+        &mut world,
+        GuestReady {
+            agent_listening: true,
+            docker_healthy: true,
+            job_credentials_absent: false,
+        },
+        &mut events,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("credential-free"), "{err}");
+    assert!(!api
+        .calls
+        .iter()
+        .any(|call| call.starts_with("create_snapshot")));
 }
 
 #[test]

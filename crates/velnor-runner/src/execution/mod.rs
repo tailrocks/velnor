@@ -29,8 +29,8 @@ pub use backend::{
 pub use cache_transport::{publish_on_success, CacheBlob, CacheTransportError};
 pub use docker::DockerBackend;
 pub use firecracker::{
-    restore_or_cold_boot, FirecrackerApi, FirecrackerBackend, RecordingFirecracker,
-    FIRECRACKER_GUEST_CID,
+    create_golden_snapshot, restore_or_cold_boot, FirecrackerApi, FirecrackerBackend,
+    RecordingFirecracker, FIRECRACKER_GUEST_CID,
 };
 pub use guest::{
     required_kconfig_for_arch, validate_built_kernel_config, validate_guest_toml,
@@ -50,7 +50,7 @@ pub use guest_runtime::{
 };
 pub use isolation::{IsolationIdentity, IsolationResources};
 pub use net::{nftables_commands, teardown_is_exact, teardown_net_commands};
-pub use snapshot::SnapshotIdentity;
+pub use snapshot::{GuestReady, SnapshotIdentity};
 pub use unix_api::UnixFirecrackerClient;
 
 /// Guest-agent entry: decode a vsock plan and run it on the local Docker daemon.
