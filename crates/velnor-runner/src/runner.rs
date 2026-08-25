@@ -997,7 +997,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // variables, so an enabled fleet serves warm gha-cache traffic to job
     // containers through their bridge gateway while disabled fleets remain
     // byte-for-byte unchanged.
-    if let Some((url, token)) = crate::gha_cache::enabled_from_env() {
+    if let Some((url, _token)) = crate::gha_cache::enabled_from_env() {
         let root = crate::storage::StorageLayout::resolve()
             .map(|layout| layout.cache_root.join("gha-cache"))
             .unwrap_or_else(|| {
@@ -1012,15 +1012,13 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                     println!("gha cache service listening on {bound} (public base {url})");
                 }
                 Err(error) => eprintln!(
-                    "Warning: gha cache service failed to bind ({error:#});                      type=gha caches stay unavailable"
+                    "Warning: gha cache service failed to bind ({error:#}); caches stay unavailable"
                 ),
             },
             Err(error) => {
                 eprintln!("Warning: gha cache store init failed: {error:#}");
             }
         }
-        let _ = url;
-        let _ = token;
     }
 
     if !supervised {
