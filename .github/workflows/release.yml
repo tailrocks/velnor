@@ -292,7 +292,11 @@ jobs:
             deb: amd64
           - arch: aarch64
             deb: arm64
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && (matrix.deb == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04') || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    # Always GitHub-hosted: mmdebstrap needs unprivileged user namespaces
+    # (or CAP_SYS_ADMIN), which the Velnor job sandbox drops. Building the
+    # signed guest kernel/rootfs release artifacts is a trusted operation on
+    # the documented trust route anyway.
+    runs-on: ${{ matrix.deb == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
