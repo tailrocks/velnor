@@ -548,6 +548,7 @@ jobs:
           grep -q "usr/share/velnor/microvm/velnor-guest-agent" "$manifest" || { echo "::error::deb missing packaged guest-agent" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/vmlinux" "$manifest" || { echo "::error::deb missing guest kernel" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/rootfs.ext4" "$manifest" || { echo "::error::deb missing guest rootfs" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/manifest.json" "$manifest" || { echo "::error::deb missing microvm manifest" >&2; exit 1; }
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"

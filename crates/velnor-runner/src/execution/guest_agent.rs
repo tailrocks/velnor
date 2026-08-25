@@ -200,6 +200,14 @@ mod tests {
             cache_digest: None,
             command_files: Vec::new(),
             outputs: Vec::new(),
+            env: Vec::new(),
+            workspace: "/__w".into(),
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
         };
         let bytes = plan.encode().unwrap();
         let guest_env = env.clone();

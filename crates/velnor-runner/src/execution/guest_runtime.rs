@@ -149,43 +149,51 @@ pub fn execute_guest_plan(
         &["network", "create", "--label", &label, &network],
     )?;
     for service in &plan.services {
-        docker(
-            runner,
-            events,
-            host_docker,
-            &[
-                "run",
-                "-d",
-                "--name",
-                &service.name,
-                "--network",
-                &network,
-                "--label",
-                &label,
-                &service.image,
-            ],
-        )?;
+        let mut args = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            service.name.clone(),
+            "--network".into(),
+            network.clone(),
+            "--label".into(),
+            label.clone(),
+        ];
+        if !service.network_alias.is_empty() {
+            args.extend(["--network-alias".into(), service.network_alias.clone()]);
+        }
+        for port in &service.ports {
+            args.extend(["-p".into(), port.clone()]);
+        }
+        for env in &service.env {
+            args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
+        }
+        args.push(service.image.clone());
+        docker_owned(runner, events, host_docker, args)?;
     }
     let job_name = format!("velnor-job-{}", plan.job_id);
     if !plan.image.is_empty() {
-        docker(
-            runner,
-            events,
-            host_docker,
-            &[
-                "run",
-                "-d",
-                "--name",
-                &job_name,
-                "--network",
-                &network,
-                "--label",
-                &label,
-                &plan.image,
-                "sleep",
-                "infinity",
-            ],
-        )?;
+        let mut args = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            job_name.clone(),
+            "--network".into(),
+            network.clone(),
+            "--label".into(),
+            label.clone(),
+        ];
+        for env in &plan.env {
+            args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
+        }
+        if !plan.workspace.is_empty() {
+            args.extend(["-w".into(), plan.workspace.clone()]);
+        }
+        args.extend([plan.image.clone(), "sleep".into(), "infinity".into()]);
+        docker_owned(runner, events, host_docker, args)?;
+    }
+    if plan.buildx {
+        docker(runner, events, host_docker, &["buildx", "version"])?;
     }
     let mut code = 0_i32;
     for step in &plan.steps {
@@ -240,13 +248,12 @@ fn record_plan_files(plan: &GuestJobPlan, events: &mut Vec<ExecutionEvent>) {
     }
 }
 
-fn docker(
+fn docker_owned(
     runner: &mut dyn CommandRunner,
     events: &mut Vec<ExecutionEvent>,
     host_docker: bool,
-    args: &[&str],
+    owned: Vec<String>,
 ) -> Result<CommandResult, String> {
-    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
     if owned.iter().any(|arg| arg.contains("docker.sock")) {
         return Err("guest plan refused a docker.sock mount".into());
     }
@@ -264,6 +271,16 @@ fn docker(
     runner
         .run("docker", &owned)
         .map_err(|error| format!("docker {}: {error}", owned.join(" ")))
+}
+
+fn docker(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    args: &[&str],
+) -> Result<CommandResult, String> {
+    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    docker_owned(runner, events, host_docker, owned)
 }
 
 fn log_line(line: &str) -> ExecutionEvent {
@@ -305,6 +322,9 @@ mod tests {
             services: vec![GuestService {
                 name: "pg".into(),
                 image: "postgres:16".into(),
+                network_alias: "postgres".into(),
+                ports: vec!["5432".into()],
+                env: Vec::new(),
             }],
             steps: vec![GuestStep {
                 id: "run".into(),
@@ -320,6 +340,17 @@ mod tests {
                 name: "result".into(),
                 value: "ok".into(),
             }],
+            env: vec![velnor_model::GuestEnvVar {
+                name: "CI".into(),
+                value: "true".into(),
+            }],
+            workspace: "/__w".into(),
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
         }
     }
 
@@ -353,6 +384,14 @@ mod tests {
             .calls
             .iter()
             .all(|(_, args)| args.iter().all(|arg| !arg.contains("docker.sock"))));
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.windows(2)
+                .any(|w| w == ["--network-alias", "postgres"])
+        }));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.windows(2).any(|w| w == ["-e", "CI=true"])));
     }
 
     #[test]

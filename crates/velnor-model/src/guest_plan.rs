@@ -24,6 +24,29 @@ pub struct GuestJobPlan {
     pub command_files: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<GuestOutput>,
+    #[serde(default)]
+    pub env: Vec<GuestEnvVar>,
+    #[serde(default)]
+    pub workspace: String,
+    #[serde(default)]
+    pub cache: Vec<GuestCacheOp>,
+    #[serde(default)]
+    pub artifacts: Vec<GuestArtifactOp>,
+    #[serde(default)]
+    pub annotations: Vec<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub buildx: bool,
+    #[serde(default)]
+    pub testcontainers: bool,
+}
+
+/// Job or service environment pair. Never a host docker.sock path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestEnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 /// Service container inside the job (guest Docker or host Docker backend).
@@ -31,6 +54,25 @@ pub struct GuestJobPlan {
 pub struct GuestService {
     pub name: String,
     pub image: String,
+    #[serde(default)]
+    pub network_alias: String,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<GuestEnvVar>,
+}
+
+/// Digest-addressed cache import/export. No host bind mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestCacheOp {
+    pub digest: String,
+}
+
+/// Artifact name and guest path for bounded export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestArtifactOp {
+    pub name: String,
+    pub path: String,
 }
 
 /// One workflow step. `script` may be empty in contract fixtures.
@@ -102,6 +144,12 @@ mod tests {
             services: vec![GuestService {
                 name: "pg".into(),
                 image: "postgres:16".into(),
+                network_alias: "postgres".into(),
+                ports: vec!["5432".into()],
+                env: vec![GuestEnvVar {
+                    name: "POSTGRES_PASSWORD".into(),
+                    value: "ci".into(),
+                }],
             }],
             steps: vec![GuestStep {
                 id: "run".into(),
@@ -117,6 +165,22 @@ mod tests {
                 name: "result".into(),
                 value: "ok".into(),
             }],
+            env: vec![GuestEnvVar {
+                name: "CI".into(),
+                value: "true".into(),
+            }],
+            workspace: "/__w".into(),
+            cache: vec![GuestCacheOp {
+                digest: "abc".into(),
+            }],
+            artifacts: vec![GuestArtifactOp {
+                name: "logs".into(),
+                path: "/__w/logs".into(),
+            }],
+            annotations: vec!["notice".into()],
+            summary: "ok".into(),
+            buildx: true,
+            testcontainers: true,
         };
         let bytes = plan.encode().unwrap();
         assert_eq!(GuestJobPlan::decode(&bytes).unwrap(), plan);

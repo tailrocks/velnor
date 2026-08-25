@@ -25,6 +25,17 @@ fail() {
   exit 1
 }
 
+microvm_verify_sha256() {
+  file="$1"
+  field="$2"
+  path="$SHARE/microvm/$file"
+  manifest="$SHARE/microvm/manifest.json"
+  want=$(sed -n "s/.*\"$field\": *\"\\([0-9a-fA-F]\\{64\\}\\)\".*/\\1/p" "$manifest" | head -n1 | tr 'A-F' 'a-f')
+  [ -n "$want" ] || fail "microvm manifest missing $field sha256"
+  got=$(sha256sum "$path" | awk '{print $1}')
+  [ "$got" = "$want" ] || fail "microvm $file sha256 $got != manifest $want"
+}
+
 case "$1" in
   configure)
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
@@ -60,10 +71,17 @@ case "$1" in
     # the shipped manifest export. This proves binary <-> package <-> manifest
     # coherence for exactly this deb before anything is activated.
     MICROVM="$SHARE/microvm"
-    if [ -e "$MICROVM/firecracker" ] || [ -e "$MICROVM/jailer" ] || [ -e "$MICROVM/velnor-guest-agent" ]; then
+    if [ -f "$MICROVM/manifest.json" ]; then
       [ -x "$MICROVM/firecracker" ] || fail "microvm firecracker missing from package identity"
       [ -x "$MICROVM/jailer" ] || fail "microvm jailer missing from package identity"
       [ -x "$MICROVM/velnor-guest-agent" ] || fail "microvm guest-agent missing from package identity"
+      [ -f "$MICROVM/vmlinux" ] || fail "microvm vmlinux missing from package identity"
+      [ -f "$MICROVM/rootfs.ext4" ] || fail "microvm rootfs.ext4 missing from package identity"
+      microvm_verify_sha256 firecracker firecracker
+      microvm_verify_sha256 jailer jailer
+      microvm_verify_sha256 vmlinux kernel
+      microvm_verify_sha256 rootfs.ext4 rootfs
+      microvm_verify_sha256 velnor-guest-agent guest_agent
     fi
 
     if [ -x "$BIN" ] && [ -f "$SHARE/build-identity.json" ]; then

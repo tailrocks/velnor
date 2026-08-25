@@ -31,19 +31,37 @@ pub struct ValidatedStep {
     pub action: Option<String>,
 }
 
+/// Admitted service container. Alias/ports stay GitHub-visible; no host socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedService {
+    pub name: String,
+    pub image: String,
+    pub network_alias: String,
+    pub ports: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
 /// Backend-neutral plan delivered after admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedPlan {
     pub job_id: String,
     pub steps: Vec<ValidatedStep>,
     pub job_container_image: String,
-    pub service_images: Vec<String>,
+    pub services: Vec<ValidatedService>,
     pub timeout_ms: u64,
     pub cancel_requested: bool,
     pub fail: bool,
     pub cache_digest: Option<String>,
     pub command_files: Vec<String>,
     pub outputs: Vec<(String, String)>,
+    pub env: Vec<(String, String)>,
+    pub workspace: String,
+    pub cache: Vec<String>,
+    pub artifacts: Vec<(String, String)>,
+    pub annotations: Vec<String>,
+    pub summary: String,
+    pub buildx: bool,
+    pub testcontainers: bool,
 }
 
 impl ValidatedPlan {
@@ -56,12 +74,14 @@ impl ValidatedPlan {
             job_id: self.job_id.clone(),
             image: self.job_container_image.clone(),
             services: self
-                .service_images
+                .services
                 .iter()
-                .enumerate()
-                .map(|(index, image)| velnor_model::GuestService {
-                    name: format!("svc-{index}"),
-                    image: image.clone(),
+                .map(|service| velnor_model::GuestService {
+                    name: service.name.clone(),
+                    image: service.image.clone(),
+                    network_alias: service.network_alias.clone(),
+                    ports: service.ports.clone(),
+                    env: guest_env(&service.env),
                 })
                 .collect(),
             steps: self
@@ -86,6 +106,27 @@ impl ValidatedPlan {
                     value: value.clone(),
                 })
                 .collect(),
+            env: guest_env(&self.env),
+            workspace: self.workspace.clone(),
+            cache: self
+                .cache
+                .iter()
+                .map(|digest| velnor_model::GuestCacheOp {
+                    digest: digest.clone(),
+                })
+                .collect(),
+            artifacts: self
+                .artifacts
+                .iter()
+                .map(|(name, path)| velnor_model::GuestArtifactOp {
+                    name: name.clone(),
+                    path: path.clone(),
+                })
+                .collect(),
+            annotations: self.annotations.clone(),
+            summary: self.summary.clone(),
+            buildx: self.buildx,
+            testcontainers: self.testcontainers,
         }
     }
 }
@@ -101,13 +142,32 @@ impl ValidatedPlan {
                 action: None,
             }],
             job_container_image: "velnor/job-ubuntu:26.04".into(),
-            service_images: vec!["postgres:16".into()],
+            services: vec![ValidatedService {
+                name: "svc-0".into(),
+                image: "postgres:16".into(),
+                network_alias: "postgres".into(),
+                ports: vec!["5432".into()],
+                env: Vec::new(),
+            }],
             timeout_ms: 60_000,
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+            command_files: vec![
+                "GITHUB_OUTPUT".into(),
+                "GITHUB_ENV".into(),
+                "GITHUB_PATH".into(),
+                "GITHUB_STEP_SUMMARY".into(),
+            ],
             outputs: vec![("result".into(), "ok".into())],
+            env: vec![("CI".into(), "true".into())],
+            workspace: "/__w".into(),
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
         }
     }
 
@@ -118,11 +178,11 @@ impl ValidatedPlan {
             job_id: plan.identity.job_id.clone(),
             steps: plan.steps.iter().map(validated_step).collect(),
             job_container_image: plan.execution.job_container.image.clone(),
-            service_images: plan
+            services: plan
                 .execution
                 .services
                 .iter()
-                .map(|service| service.image.clone())
+                .map(validated_service)
                 .collect(),
             timeout_ms: plan_timeout_ms(
                 plan.steps
@@ -132,12 +192,28 @@ impl ValidatedPlan {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+            command_files: vec![
+                "GITHUB_OUTPUT".into(),
+                "GITHUB_ENV".into(),
+                "GITHUB_PATH".into(),
+                "GITHUB_STEP_SUMMARY".into(),
+            ],
             outputs: plan
                 .outputs
                 .iter()
                 .map(|(name, output)| (name.clone(), output.value.clone()))
                 .collect(),
+            env: sanitized_pairs(&plan.execution.env),
+            workspace: plan.execution.workspace_container.clone(),
+            cache: plan_cache(&plan.steps),
+            artifacts: plan_artifacts(&plan.steps),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: plan_needs_buildx(&plan.steps),
+            testcontainers: plan_needs_testcontainers(
+                &plan.execution.env,
+                &plan.execution.services,
+            ),
         }
     }
 
@@ -160,15 +236,38 @@ impl ValidatedPlan {
                 })
                 .collect(),
             job_container_image: docker_image.into(),
-            service_images,
+            services: service_images
+                .into_iter()
+                .enumerate()
+                .map(|(index, image)| ValidatedService {
+                    name: format!("svc-{index}"),
+                    image,
+                    network_alias: format!("svc-{index}"),
+                    ports: Vec::new(),
+                    env: Vec::new(),
+                })
+                .collect(),
             timeout_ms: plan_timeout_ms(
                 script_steps.iter().filter_map(|step| step.timeout_minutes),
             ),
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+            command_files: vec![
+                "GITHUB_OUTPUT".into(),
+                "GITHUB_ENV".into(),
+                "GITHUB_PATH".into(),
+                "GITHUB_STEP_SUMMARY".into(),
+            ],
             outputs: Vec::new(),
+            env: Vec::new(),
+            workspace: "/__w".into(),
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
         }
     }
 }
@@ -189,6 +288,101 @@ fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
         },
         action: executable_action(step),
     }
+}
+
+fn guest_env(pairs: &[(String, String)]) -> Vec<velnor_model::GuestEnvVar> {
+    sanitized_pairs(pairs)
+        .into_iter()
+        .map(|(name, value)| velnor_model::GuestEnvVar { name, value })
+        .collect()
+}
+
+fn sanitized_pairs(pairs: &[(String, String)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .filter(|(name, value)| !name.contains("docker.sock") && !value.contains("docker.sock"))
+        .cloned()
+        .collect()
+}
+
+fn validated_service(service: &crate::container::ServiceContainerSpec) -> ValidatedService {
+    ValidatedService {
+        name: service.name.clone(),
+        image: service.image.clone(),
+        network_alias: service.network_alias.clone(),
+        ports: service.ports.clone(),
+        env: sanitized_pairs(&service.env),
+    }
+}
+
+fn plan_needs_buildx(steps: &[crate::executor::ExecutableStep]) -> bool {
+    steps.iter().any(|step| {
+        matches!(
+            step,
+            crate::executor::ExecutableStep::Native { invocation, .. }
+                if matches!(
+                    invocation.adapter,
+                    crate::action::NativeActionAdapter::DockerSetupBuildx
+                        | crate::action::NativeActionAdapter::DockerBuildPush
+                        | crate::action::NativeActionAdapter::DockerBake
+                )
+        )
+    })
+}
+
+fn plan_needs_testcontainers(
+    env: &[(String, String)],
+    services: &[crate::container::ServiceContainerSpec],
+) -> bool {
+    env.iter()
+        .any(|(name, _)| name.to_ascii_uppercase().contains("TESTCONTAINERS"))
+        || services.iter().any(|service| {
+            service.image.contains("testcontainers")
+                || service.network_alias.contains("testcontainers")
+        })
+}
+
+fn plan_cache(steps: &[crate::executor::ExecutableStep]) -> Vec<String> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            crate::executor::ExecutableStep::Native { invocation, .. }
+                if matches!(
+                    invocation.adapter,
+                    crate::action::NativeActionAdapter::Cache
+                        | crate::action::NativeActionAdapter::RustCache
+                ) =>
+            {
+                invocation.inputs.get("key").cloned()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn plan_artifacts(steps: &[crate::executor::ExecutableStep]) -> Vec<(String, String)> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            crate::executor::ExecutableStep::Native { invocation, .. }
+                if matches!(
+                    invocation.adapter,
+                    crate::action::NativeActionAdapter::UploadArtifact
+                        | crate::action::NativeActionAdapter::UploadPagesArtifact
+                ) =>
+            {
+                Some((
+                    invocation
+                        .inputs
+                        .get("name")
+                        .cloned()
+                        .unwrap_or_else(|| step.id().to_string()),
+                    invocation.inputs.get("path").cloned().unwrap_or_default(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn executable_action(step: &crate::executor::ExecutableStep) -> Option<String> {
@@ -219,6 +413,12 @@ pub struct ExecutionOutcome {
     pub masked: bool,
     pub command_file: Option<String>,
     pub outputs: Vec<(String, String)>,
+    pub annotations: Vec<String>,
+    pub summary: String,
+    pub cache: Vec<String>,
+    pub artifacts: Vec<(String, String)>,
+    pub buildx: bool,
+    pub testcontainers: bool,
     pub cleaned: bool,
 }
 
@@ -297,6 +497,12 @@ pub struct BackendSession {
     teardown_ran: bool,
     plan_command_files: Vec<String>,
     plan_outputs: Vec<(String, String)>,
+    plan_annotations: Vec<String>,
+    plan_summary: String,
+    plan_cache: Vec<String>,
+    plan_artifacts: Vec<(String, String)>,
+    plan_buildx: bool,
+    plan_testcontainers: bool,
 }
 
 impl BackendSession {
@@ -318,6 +524,12 @@ impl BackendSession {
             teardown_ran: false,
             plan_command_files: Vec::new(),
             plan_outputs: Vec::new(),
+            plan_annotations: Vec::new(),
+            plan_summary: String::new(),
+            plan_cache: Vec::new(),
+            plan_artifacts: Vec::new(),
+            plan_buildx: false,
+            plan_testcontainers: false,
         })
     }
 
@@ -339,6 +551,12 @@ impl BackendSession {
             teardown_ran: false,
             plan_command_files: Vec::new(),
             plan_outputs: Vec::new(),
+            plan_annotations: Vec::new(),
+            plan_summary: String::new(),
+            plan_cache: Vec::new(),
+            plan_artifacts: Vec::new(),
+            plan_buildx: false,
+            plan_testcontainers: false,
         })
     }
 
@@ -392,6 +610,12 @@ impl BackendSession {
         self.require(BackendPhase::Reserved)?;
         self.plan_command_files = plan.command_files.clone();
         self.plan_outputs = plan.outputs.clone();
+        self.plan_annotations = plan.annotations.clone();
+        self.plan_summary = plan.summary.clone();
+        self.plan_cache = plan.cache.clone();
+        self.plan_artifacts = plan.artifacts.clone();
+        self.plan_buildx = plan.buildx;
+        self.plan_testcontainers = plan.testcontainers;
         match self.kind {
             ExecutionBackendKind::Docker => {
                 if let Some(docker) = &mut self.docker {
@@ -536,6 +760,12 @@ impl BackendSession {
             ),
             command_file,
             outputs,
+            annotations: self.plan_annotations.clone(),
+            summary: self.plan_summary.clone(),
+            cache: self.plan_cache.clone(),
+            artifacts: self.plan_artifacts.clone(),
+            buildx: self.plan_buildx,
+            testcontainers: self.plan_testcontainers,
             cleaned: false,
         })
     }
@@ -576,6 +806,12 @@ impl BackendSession {
             masked: false,
             command_file: self.plan_command_files.first().cloned(),
             outputs: self.plan_outputs.clone(),
+            annotations: self.plan_annotations.clone(),
+            summary: self.plan_summary.clone(),
+            cache: self.plan_cache.clone(),
+            artifacts: self.plan_artifacts.clone(),
+            buildx: self.plan_buildx,
+            testcontainers: self.plan_testcontainers,
             cleaned: true,
         }
     }

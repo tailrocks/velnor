@@ -781,16 +781,22 @@ fn both_backends_execute_the_same_admitted_plan() {
     assert_eq!(plan.job_container_image, "velnor/job-ubuntu:26.04");
     assert_eq!(plan.steps[0].script, "echo run");
     assert!(plan.steps[0].action.is_none());
-    assert_eq!(plan.service_images, vec!["postgres:16".to_string()]);
+    assert_eq!(plan.services[0].image, "postgres:16");
+    assert_eq!(plan.workspace, "/__w");
     let guest = plan.to_guest("job-shared", 1);
     assert_eq!(guest.image, plan.job_container_image);
     assert_eq!(guest.steps[0].script, "echo run");
+    assert_eq!(guest.services[0].network_alias, "svc-0");
     let docker = run_custom(ExecutionBackendKind::Docker, plan.clone());
     let micro = run_custom(ExecutionBackendKind::MicroVm, plan);
     assert_eq!(docker.conclusion, micro.conclusion);
     assert_eq!(docker.exit_code, micro.exit_code);
     assert_eq!(docker.command_file, micro.command_file);
     assert_eq!(docker.outputs, micro.outputs);
+    assert_eq!(docker.cache, micro.cache);
+    assert_eq!(docker.artifacts, micro.artifacts);
+    assert_eq!(docker.buildx, micro.buildx);
+    assert_eq!(docker.testcontainers, micro.testcontainers);
     assert!(docker.cleaned && micro.cleaned);
 }
 
@@ -904,6 +910,62 @@ fn log_substring_does_not_override_explicit_exit() {
     );
     assert_eq!(outcome.outputs, vec![("result".into(), "ok".into())]);
     assert_eq!(outcome.command_file.as_deref(), Some("GITHUB_OUTPUT"));
+}
+
+#[test]
+fn debian_package_binds_complete_microvm_identity() {
+    let assets = include_str!("../../Cargo.toml");
+    for path in [
+        "release/microvm/firecracker",
+        "release/microvm/jailer",
+        "release/microvm/velnor-guest-agent",
+        "release/microvm/vmlinux",
+        "release/microvm/rootfs.ext4",
+        "release/microvm/manifest.json",
+    ] {
+        assert!(assets.contains(path), "cargo-deb assets missing {path}");
+    }
+    let postinst = include_str!("../../debian/postinst");
+    for needle in [
+        "vmlinux",
+        "rootfs.ext4",
+        "microvm_verify_sha256",
+        "guest_agent",
+    ] {
+        assert!(postinst.contains(needle), "postinst missing {needle}");
+    }
+}
+
+#[test]
+fn full_github_visible_plan_matches_across_backends() {
+    let mut plan = ValidatedPlan::example_success("job-full");
+    plan.env = vec![("CI".into(), "true".into())];
+    plan.workspace = "/__w".into();
+    plan.cache = vec!["sha256:cache".into()];
+    plan.artifacts = vec![("logs".into(), "/__w/logs".into())];
+    plan.annotations = vec!["notice".into()];
+    plan.summary = "ok".into();
+    plan.buildx = true;
+    plan.testcontainers = true;
+    let docker = run_custom(ExecutionBackendKind::Docker, plan.clone());
+    let micro = run_custom(ExecutionBackendKind::MicroVm, plan.clone());
+    assert_eq!(docker.conclusion, micro.conclusion);
+    assert_eq!(docker.cache, plan.cache);
+    assert_eq!(micro.cache, plan.cache);
+    assert_eq!(docker.artifacts, plan.artifacts);
+    assert_eq!(docker.annotations, plan.annotations);
+    assert_eq!(docker.summary, plan.summary);
+    assert!(docker.buildx && micro.buildx);
+    assert!(docker.testcontainers && micro.testcontainers);
+    let guest = plan.to_guest("job-full", 1);
+    assert!(guest.buildx);
+    assert!(guest.testcontainers);
+    assert_eq!(guest.workspace, "/__w");
+    assert!(!guest
+        .encode()
+        .unwrap()
+        .windows(11)
+        .any(|w| w == b"docker.sock"));
 }
 
 #[test]

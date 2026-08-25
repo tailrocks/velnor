@@ -25,7 +25,7 @@ pub use artifacts::{
 };
 pub use backend::{
     BackendPhase, BackendSession, ExecutionError, ExecutionEvent, ExecutionOutcome, ValidatedPlan,
-    ValidatedStep,
+    ValidatedService, ValidatedStep,
 };
 pub use cache_transport::{publish_on_success, CacheBlob, CacheTransportError};
 pub use docker::DockerBackend;

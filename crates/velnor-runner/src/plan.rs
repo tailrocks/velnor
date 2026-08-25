@@ -187,8 +187,12 @@ mod tests {
         assert!(validated.steps[0].action.is_none());
         assert!(validated.outputs.is_empty());
         assert_eq!(validated.job_container_image, "ubuntu:24.04");
+        assert_eq!(validated.workspace, "/__w");
+        assert!(!validated.buildx);
+        assert!(!validated.testcontainers);
         let guest = validated.to_guest("job", 1);
         assert_eq!(guest.steps[0].script, "cargo check");
+        assert_eq!(guest.workspace, "/__w");
         assert!(!guest
             .encode()
             .unwrap()

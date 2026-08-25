@@ -5162,6 +5162,8 @@ fn execute_microvm_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
     docker_image: &str,
+    node_action_image: &str,
+    trust_scope: &str,
 ) -> Result<ScriptJobResult> {
     let file = velnor_model::ExecutionFile {
         execution: velnor_model::ExecutionSection {
@@ -5195,12 +5197,44 @@ fn execute_microvm_script_job(
         docker_engine: None,
         allow_inline_guest_plan: false,
     };
-    let plan = crate::execution::ValidatedPlan::from_script_steps(
-        job.job_id.clone(),
+    let run_root = std::path::PathBuf::from("/run/velnor");
+    let container = crate::github_adapter::github_job_container_spec(
+        job,
+        crate::github_adapter::GitHubJobContainerPaths {
+            workspace_host: run_root.join("workspace"),
+            temp_host: run_root.join("temp"),
+            home_host: run_root.join("home"),
+            actions_host: run_root.join("actions"),
+            tools_host: run_root.join("tools"),
+            docker_host_work_dir: None,
+            execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+        },
         docker_image,
-        script_steps,
-        admitted_service_images(job),
+        Vec::new(),
+        node_action_image,
+        "microvm".into(),
+        trust_scope,
     );
+    if container.mount_docker_socket {
+        return Err(anyhow::anyhow!(
+            "microvm plan mounted host docker.sock; docker backend was not used"
+        ));
+    }
+    let steps = script_steps
+        .iter()
+        .cloned()
+        .map(crate::executor::ExecutableStep::Script)
+        .collect();
+    let normalized = crate::github_adapter::github_normalized_job_plan(
+        job,
+        "",
+        None,
+        container,
+        steps,
+        crate::runtime_env::job_environment_variables(job),
+        Vec::new(),
+    );
+    let plan = crate::execution::ValidatedPlan::from_normalized(&normalized);
     let outcome = crate::execution::run_validated_job(&file, isolation, &plan, &mut world)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let result = match outcome.conclusion {
@@ -5216,25 +5250,6 @@ fn execute_microvm_script_job(
         teardown: None,
         timings: ExecutionTimings::default(),
     })
-}
-
-fn admitted_service_images(job: &AgentJobRequestMessage) -> Vec<String> {
-    match &job.job_service_containers {
-        Some(Value::Object(map)) => map.values().filter_map(admitted_container_image).collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn admitted_container_image(value: &Value) -> Option<String> {
-    if let Some(image) = value.as_str().filter(|image| !image.is_empty()) {
-        return Some(image.to_owned());
-    }
-    value
-        .as_object()
-        .and_then(|object| object.get("image").or_else(|| object.get("Image")))
-        .and_then(Value::as_str)
-        .filter(|image| !image.is_empty())
-        .map(str::to_owned)
 }
 
 fn microvm_step_logs(
@@ -5310,7 +5325,13 @@ fn execute_script_job_inner(
     execution_backend: velnor_model::ExecutionBackendKind,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
-        return execute_microvm_script_job(job, script_steps, docker_image);
+        return execute_microvm_script_job(
+            job,
+            script_steps,
+            docker_image,
+            node_action_image,
+            trust_scope,
+        );
     }
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here

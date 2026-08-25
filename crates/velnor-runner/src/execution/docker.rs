@@ -45,10 +45,22 @@ impl DockerBackend {
             "prepare image {}",
             plan.job_container_image
         )));
-        for service in &plan.service_images {
+        for (name, _) in &plan.env {
+            events.push(ExecutionEvent::HostDockerInvoked(format!("env {name}")));
+        }
+        for service in &plan.services {
             events.push(ExecutionEvent::HostDockerInvoked(format!(
-                "prepare service {service}"
+                "prepare service {} alias {}",
+                service.image, service.network_alias
             )));
+        }
+        if plan.buildx {
+            events.push(ExecutionEvent::HostDockerInvoked("buildx".into()));
+        }
+        if plan.testcontainers {
+            events.push(ExecutionEvent::HostDockerInvoked(
+                "testcontainers guest-local docker".into(),
+            ));
         }
         Ok(())
     }
