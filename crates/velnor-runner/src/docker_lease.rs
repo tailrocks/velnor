@@ -660,7 +660,7 @@ pub fn run_host_docker(args: &[String]) -> Result<String> {
 }
 
 fn run_host_docker_bounded(args: &[String], timeout: std::time::Duration) -> Result<String> {
-    let mut child = std::process::Command::new("docker")
+    let child = std::process::Command::new("docker")
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
