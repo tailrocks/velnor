@@ -476,16 +476,38 @@ fn download(ctx: &Ctx, id: &str) -> Result<Vec<u8>> {
     std::fs::read(blob_path).context("read cached blob")
 }
 
-/// Bind the service and return the local address it listens on.
-pub async fn bind(service: CacheService) -> Result<SocketAddr> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
+/// Operator enablement contract: both variables must be present and
+/// non-empty. Shared by the daemon bootstrap (service spawn) and the
+/// runtime-env injection so the two can never drift.
+#[must_use]
+pub fn enabled_from_env() -> Option<(String, String)> {
+    let url = std::env::var("VELNOR_ACTIONS_CACHE_URL").ok()?;
+    let token = std::env::var("VELNOR_ACTIONS_RUNTIME_TOKEN").ok()?;
+    if url.is_empty() || token.is_empty() {
+        return None;
+    }
+    Some((url, token))
+}
+
+/// Default listen address. Operators override with `VELNOR_ACTIONS_CACHE_BIND`
+/// (e.g. `0.0.0.0:17933`) so job containers reach the service through their
+/// docker bridge gateway (`host.docker.internal`, mapped by the job's
+/// `--add-host`).
+pub const DEFAULT_CACHE_BIND: &str = "127.0.0.1:17933";
+
+/// Bind the configured address, spawn the accept loop, return the bound addr.
+pub async fn bind_configured(service: CacheService) -> Result<SocketAddr> {
+    let raw = std::env::var("VELNOR_ACTIONS_CACHE_BIND")
+        .unwrap_or_else(|_| DEFAULT_CACHE_BIND.to_owned());
+    let addr: SocketAddr = raw.parse().context("parse VELNOR_ACTIONS_CACHE_BIND")?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
     tokio::spawn(async move {
         if let Err(error) = serve(listener, service).await {
             eprintln!("Warning: gha cache service stopped: {error:#}");
         }
     });
-    Ok(addr)
+    Ok(bound)
 }
 
 #[cfg(test)]

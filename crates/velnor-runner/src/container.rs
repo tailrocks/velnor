@@ -88,6 +88,11 @@ impl JobContainerSpec {
         let mut args = vec![
             "run".into(),
             "--detach".into(),
+            "--add-host".into(),
+            // Standard alias for host services (GitHub-hosted runners expose
+            // the same name). The gha cache service and future daemon-side
+            // endpoints are reached as http://host.docker.internal:<port>.
+            "host.docker.internal:host-gateway".into(),
             "--name".into(),
             self.name.clone(),
             "--workdir".into(),
@@ -1459,6 +1464,11 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--name", "velnor-job-1"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--add-host", "host.docker.internal:host-gateway"]),
+            "job containers must map the standard host alias for daemon services"
+        );
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
