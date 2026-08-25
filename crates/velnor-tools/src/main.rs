@@ -866,18 +866,6 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ],
         ),
         (
-            ".github/workflows/backend-parity.yml",
-            vec![
-                ("matrix config lanes", "matrix.config"),
-                ("github lane entry", r#""lane":"GitHub""#),
-                ("velnor lane entry", r#""lane":"Velnor""#),
-                ("matrix runner", "matrix.config.runner"),
-                ("lanes choice velnor", "velnor | github | both"),
-                ("no workflow backend input", "VELNOR_EXECUTION_BACKEND"),
-                ("docker run guest", "docker run --rm"),
-            ],
-        ),
-        (
             ".github/workflows/docker.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
