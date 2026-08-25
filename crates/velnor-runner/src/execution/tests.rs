@@ -329,6 +329,71 @@ fn faults_fail_closed_without_host_docker_or_sibling_teardown() {
 }
 
 #[test]
+fn snapshot_checksum_mismatch_cold_boots() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let generation =
+        MicroVmGeneration::from_set(&MicroVmArtifactSet::load(&artifacts, &fs).unwrap());
+    let mut identity = SnapshotIdentity::from_generation(&generation, "x86_64", "linux-6.1");
+    identity.rootfs = "0".repeat(64);
+    fs.write(
+        &artifacts.join("snapshot.identity.json"),
+        &serde_json::to_vec(&identity).unwrap(),
+    )
+    .unwrap();
+    fs.write(&artifacts.join("snapshot.mem"), b"snap").unwrap();
+    let checksums = ArtifactChecksums {
+        firecracker_version: FIRECRACKER_VERSION.to_string(),
+        jailer_version: JAILER_VERSION.to_string(),
+        firecracker: hex_sha256(b"fc"),
+        jailer: hex_sha256(b"jailer"),
+        kernel: hex_sha256(b"kernel"),
+        rootfs: hex_sha256(b"rootfs"),
+        guest_agent: hex_sha256(b"agent"),
+        snapshot: Some(hex_sha256(b"snap")),
+    };
+    fs.write(
+        &artifacts.join("manifest.json"),
+        &serde_json::to_vec(&checksums).unwrap(),
+    )
+    .unwrap();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        let mut session =
+            open_session(&file, IsolationIdentity::new("job-snap", 1), &mut world).unwrap();
+        session.reserve(&mut world).unwrap();
+        session
+            .prepare(&ValidatedPlan::example_success("job-snap"), &mut world)
+            .unwrap();
+    }
+    assert!(
+        api.calls
+            .iter()
+            .any(|call| call.starts_with("put_boot_source")),
+        "{:?}",
+        api.calls
+    );
+    assert!(!api
+        .calls
+        .iter()
+        .any(|call| call.starts_with("load_snapshot")));
+}
+
+#[test]
 fn shipped_guest_image_rejects_virtio_fs() {
     crate::execution::validate_kernel_config(include_str!("../../../../microvm/kernel.config"))
         .unwrap();

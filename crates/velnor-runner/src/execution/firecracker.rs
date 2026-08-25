@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 
 use velnor_model::{MicroVmKind, MicroVmPreflightFailure, VsockMessage};
 
-use super::artifacts::{verify_microvm_artifacts, MicroVmArtifactSet, FIRECRACKER_VERSION};
+use super::artifacts::{
+    verify_microvm_artifacts, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION,
+};
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
 use super::isolation::IsolationResources;
+use super::snapshot::SnapshotIdentity;
 use super::ExecutionWorld;
 
 /// Injectable Firecracker HTTP API (Unix socket). Tests use [`RecordingFirecracker`].
@@ -187,6 +190,9 @@ impl FirecrackerBackend {
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
+        if try_restore_snapshot(&set, world, events)? {
+            return Ok(());
+        }
         let jailer_bin = set.jailer.path.to_str().unwrap_or("jailer");
         let jailer_args = Self::jailer_args(resources, &set.firecracker.path);
         let jailer = world
@@ -295,6 +301,56 @@ impl FirecrackerBackend {
             line: "cancel".into(),
         });
         Ok(())
+    }
+}
+
+fn try_restore_snapshot(
+    set: &MicroVmArtifactSet,
+    world: &mut ExecutionWorld<'_>,
+    events: &mut Vec<ExecutionEvent>,
+) -> Result<bool, ExecutionError> {
+    let Some(snapshot) = &set.snapshot else {
+        return Ok(false);
+    };
+    let generation = MicroVmGeneration::from_set(set);
+    let want = SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    let sidecar = snapshot.path.with_extension("identity.json");
+    let Ok(bytes) = world.host_fs.read(&sidecar) else {
+        events.push(ExecutionEvent::FirecrackerApi(
+            "snapshot sidecar missing; cold boot".into(),
+        ));
+        return Ok(false);
+    };
+    let Ok(have) = serde_json::from_slice::<SnapshotIdentity>(&bytes) else {
+        events.push(ExecutionEvent::FirecrackerApi(
+            "snapshot identity unreadable; cold boot".into(),
+        ));
+        return Ok(false);
+    };
+    if want.restore_or_cold_boot(&have).is_err() {
+        events.push(ExecutionEvent::FirecrackerApi(
+            "snapshot identity mismatch; cold boot".into(),
+        ));
+        return Ok(false);
+    }
+    let vmstate = snapshot.path.with_extension("vmstate");
+    match restore_or_cold_boot(
+        world.firecracker,
+        &snapshot.path,
+        &vmstate,
+        FIRECRACKER_VERSION,
+    ) {
+        Ok(_) => {
+            events.push(ExecutionEvent::FirecrackerApi("snapshot_restore".into()));
+            events.push(ExecutionEvent::FirecrackerApi("devices".into()));
+            Ok(true)
+        }
+        Err(_) => {
+            events.push(ExecutionEvent::FirecrackerApi(
+                "snapshot load failed; cold boot".into(),
+            ));
+            Ok(false)
+        }
     }
 }
 
