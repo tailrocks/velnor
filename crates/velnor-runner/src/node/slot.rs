@@ -33,18 +33,35 @@ pub async fn run(args: SlotArgs) -> anyhow::Result<()> {
     let id = slot_id(&args.scope, args.slot_index);
     let mut ready_announced = false;
     loop {
-        let state = journal.load_state()?;
+        let state = journal.load_state().ok();
         let generation = state
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == id)
-            .map(|slot| slot.generation)
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.slot_id == id)
+                    .map(|slot| slot.generation)
+            })
             .unwrap_or(Generation::INITIAL);
-        journal.apply(Event::SlotHeartbeat {
+        match journal.apply(Event::SlotHeartbeat {
             slot_id: id.clone(),
             generation,
             pid: std::process::id(),
-        })?;
+        }) {
+            Ok(outcome) if !outcome.rejected => {}
+            Ok(_) => {
+                eprintln!(
+                    "slot {} heartbeat rejected at generation {}",
+                    id.0, generation.0
+                );
+            }
+            Err(error) => {
+                eprintln!("slot {} heartbeat journal error: {error}", id.0);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        }
         let _ = feed_after_cycle(LocalCycle::finished(), !ready_announced);
         ready_announced = true;
         if args.once {

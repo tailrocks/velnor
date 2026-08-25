@@ -108,7 +108,11 @@ pub fn remove_owned(state_dir: &Path, isolation_id: &str, generation: u64) -> an
     Ok(())
 }
 
-fn assert_safe_id(id: &str) -> anyhow::Result<()> {
+/// Isolation / job / assignment ids must be a single path component.
+///
+/// # Errors
+/// Empty, `..`, or separator characters.
+pub(crate) fn assert_safe_id(id: &str) -> anyhow::Result<()> {
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
         anyhow::bail!("isolation id must be a single path component");
     }

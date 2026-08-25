@@ -141,7 +141,7 @@ impl FleetState {
             registered_slots: registered,
             capacity_permits: permits,
             executor_ready_slots: executor_ready,
-            oldest_queued_job_seconds: 0,
+            oldest_queued_job_seconds: oldest_queued_job_seconds(&self.jobs),
             oldest_outbox_entry_seconds: oldest_outbox_age_seconds(&self.outbox),
             external_canary: self.canary,
             state: FleetHealthState::NotReady,
@@ -164,6 +164,61 @@ impl FleetState {
             .iter()
             .filter(|slot| slot.permit_held && slot.phase.counts_as_ready())
             .count() as u32
+    }
+}
+
+fn job_occupies_slot(phase: ActorPhase) -> bool {
+    matches!(
+        phase,
+        ActorPhase::Assigned | ActorPhase::Starting | ActorPhase::Running | ActorPhase::Completing
+    )
+}
+
+fn restore_slot_after_terminal_job(
+    state: &mut FleetState,
+    commands: &mut Vec<SideEffect>,
+    job_id: &JobId,
+) {
+    let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id).cloned() else {
+        return;
+    };
+    state.jobs.retain(|item| item.job_id != *job_id);
+    let Some(index) = state
+        .slots
+        .iter()
+        .position(|slot| slot.slot_id == job.slot_id)
+    else {
+        return;
+    };
+    if state.slots[index].generation != job.generation {
+        return;
+    }
+    if state.slots[index].ready_proof().is_ok() && state.slots[index].registered {
+        state.slots[index].phase = ActorPhase::Ready;
+        commands.push(SideEffect::AdvertiseCapacity {
+            permits: state.advertised_capacity(),
+        });
+    } else if state.slots[index].registered {
+        state.slots[index].phase = ActorPhase::Registered;
+    } else {
+        state.slots[index].phase = ActorPhase::Provisioning;
+    }
+}
+
+fn oldest_queued_job_seconds(jobs: &[JobRecord]) -> u64 {
+    let now = unix_now();
+    jobs.iter()
+        .filter(|job| job_occupies_slot(job.phase) && job.accepted_unix > 0)
+        .map(|job| now.saturating_sub(job.accepted_unix))
+        .max()
+        .unwrap_or(0)
+}
+
+fn stamp_event(event: &mut Event) {
+    if let Event::JobOwned { accepted_unix, .. } = event {
+        if *accepted_unix == 0 {
+            *accepted_unix = unix_now();
+        }
     }
 }
 
@@ -234,6 +289,7 @@ pub struct JobRecord {
     pub attempt: u32,
     pub worker: String,
     pub phase: ActorPhase,
+    pub accepted_unix: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +356,8 @@ pub enum Event {
         attempt: u32,
         generation: Generation,
         worker: String,
+        #[serde(default)]
+        accepted_unix: u64,
     },
     JobStarted {
         job_id: JobId,
@@ -527,17 +585,23 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             attempt,
             generation,
             worker,
+            accepted_unix,
         } => {
-            let slot_generation = state
-                .slots
-                .iter()
-                .find(|slot| slot.slot_id == slot_id)
-                .map(|slot| slot.generation);
+            let slot = state.slots.iter().find(|slot| slot.slot_id == slot_id);
+            let slot_generation = slot.map(|slot| slot.generation);
+            let slot_phase = slot.map(|slot| slot.phase);
             let newer_job = state
                 .jobs
                 .iter()
                 .any(|job| job.job_id == job_id && job.generation > generation);
-            if newer_job || slot_generation != Some(generation) {
+            let other_live = state.jobs.iter().any(|job| {
+                job.slot_id == slot_id && job.job_id != job_id && job_occupies_slot(job.phase)
+            });
+            if newer_job
+                || slot_generation != Some(generation)
+                || slot_phase != Some(ActorPhase::Assigned)
+                || other_live
+            {
                 rejected = true;
             } else {
                 state.jobs.retain(|job| job.job_id != job_id);
@@ -548,6 +612,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     attempt,
                     worker,
                     phase: ActorPhase::Assigned,
+                    accepted_unix,
                 });
                 commands.push(SideEffect::StartJob { job_id, generation });
             }
@@ -568,15 +633,25 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
             payload_sha256,
         } => {
-            if let Some(job) = state.jobs.iter().find(|job| job.job_id == job_id) {
-                let slot_generation = state
-                    .slots
+            let slot_generation =
+                state
+                    .jobs
                     .iter()
-                    .find(|slot| slot.slot_id == job.slot_id)
-                    .map(|slot| slot.generation);
-                if job.generation != generation || slot_generation != Some(generation) {
+                    .find(|job| job.job_id == job_id)
+                    .and_then(|job| {
+                        state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .map(|slot| (job.generation, slot.generation))
+                    });
+            if let Some((job_generation, slot_generation)) = slot_generation {
+                if job_generation != generation || slot_generation != generation {
                     rejected = true;
                 } else {
+                    if let Some(job) = state.jobs.iter_mut().find(|job| job.job_id == job_id) {
+                        job.phase = ActorPhase::Completing;
+                    }
                     state.outbox.retain(|row| row.job_id != job_id);
                     state.outbox.push(OutboxRecord {
                         job_id: job_id.clone(),
@@ -615,7 +690,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     rejected = true;
                 } else {
                     row.remote_acked = true;
-                    commands.push(SideEffect::DeleteOutbox { job_id, generation });
+                    commands.push(SideEffect::DeleteOutbox {
+                        job_id: job_id.clone(),
+                        generation,
+                    });
+                    restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
                 }
             } else {
                 rejected = true;
@@ -767,7 +846,7 @@ impl Journal {
     ///
     /// # Errors
     /// SQLite write failures.
-    pub fn apply(&mut self, event: Event) -> StoreResult<ReduceOutcome> {
+    pub fn apply(&mut self, mut event: Event) -> StoreResult<ReduceOutcome> {
         if self.write_blocked {
             return Err(StoreError::new(
                 velnor_model::ExitClass::Conflict,
@@ -777,6 +856,7 @@ impl Journal {
                 "N-1 must not write a journal whose PRAGMA user_version is newer than this binary",
             ));
         }
+        stamp_event(&mut event);
         let state = self.load_state()?;
         let outcome = reduce(state, event.clone());
         if outcome.rejected {
@@ -1252,6 +1332,7 @@ mod tests {
                 attempt: 1,
                 generation: gen(),
                 worker: "velnor-job@job-1".to_owned(),
+                accepted_unix: 0,
             })
             .unwrap();
         assert!(matches!(
@@ -1291,6 +1372,7 @@ mod tests {
                 attempt: 1,
                 generation: gen(),
                 worker: "w".to_owned(),
+                accepted_unix: 0,
             })
             .unwrap();
         let checksum = payload_checksum(b"conclusion=success");
@@ -1324,10 +1406,22 @@ mod tests {
                 generation: gen(),
             })
             .unwrap();
-        assert!(matches!(
-            outcome.commands.as_slice(),
-            [SideEffect::DeleteOutbox { .. }]
-        ));
+        assert!(
+            outcome
+                .commands
+                .iter()
+                .any(|command| matches!(command, SideEffect::DeleteOutbox { .. })),
+            "{:?}",
+            outcome.commands
+        );
+        assert!(
+            outcome
+                .commands
+                .iter()
+                .any(|command| matches!(command, SideEffect::AdvertiseCapacity { .. })),
+            "terminal job must restore advertised Ready capacity: {:?}",
+            outcome.commands
+        );
         drop(recovered);
         let again = Journal::open(dir.join("journal.db")).unwrap();
         assert!(again.pending_outbox().unwrap().is_empty());
@@ -1357,6 +1451,7 @@ mod tests {
                 attempt: 1,
                 generation: gen(),
                 worker: "w".to_owned(),
+                accepted_unix: 0,
             })
             .unwrap();
         let newer = Generation(2);
@@ -1436,6 +1531,144 @@ mod tests {
     }
 
     #[test]
+    fn second_live_job_on_assigned_slot_is_rejected() {
+        let (_dir, mut journal) = open_tmp("two-jobs");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot("scope-1"),
+                    job_id: job("guid-1"),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("guid-1"),
+                    slot_id: slot("scope-1"),
+                    attempt: 1,
+                    generation: gen(),
+                    worker: "w".into(),
+                    accepted_unix: 0,
+                })
+                .unwrap()
+                .rejected
+        );
+        let second = journal
+            .apply(Event::JobOwned {
+                job_id: job("424242"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w2".into(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        assert!(second.rejected);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("guid-1"));
+        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+    }
+
+    #[test]
+    fn completion_intended_marks_completing_and_counts_queued_age() {
+        let (_dir, mut journal) = open_tmp("complete-phase");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("guid-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("guid-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w".into(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        let owned = journal.load_state().unwrap();
+        assert!(owned.health().oldest_queued_job_seconds < 60, "{owned:?}");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("guid-1"),
+                generation: gen(),
+                payload_sha256: payload_checksum(b"ok"),
+            })
+            .unwrap();
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs[0].phase, ActorPhase::Completing);
+        assert!(state.jobs[0].accepted_unix > 0);
+    }
+
+    #[test]
+    fn remote_ack_restores_ready() {
+        let (_dir, mut journal) = open_tmp("ack-ready");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("guid-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("guid-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w".into(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("guid-1"),
+                generation: gen(),
+                payload_sha256: payload_checksum(b"ok"),
+            })
+            .unwrap();
+        let acked = journal
+            .apply(Event::RemoteAcked {
+                job_id: job("guid-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(!acked.rejected);
+        let state = journal.load_state().unwrap();
+        assert!(state.jobs.is_empty(), "{:?}", state.jobs);
+        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert!(state.slots[0].phase.counts_as_ready());
+    }
+
+    #[test]
     fn duplicate_assignment_is_rejected() {
         let (_dir, mut journal) = open_tmp("dup-assign");
         prime_ready(&mut journal, "scope-1");
@@ -1487,6 +1720,7 @@ mod tests {
                 attempt: 1,
                 generation: gen(),
                 worker: "w".into(),
+                accepted_unix: 0,
             })
             .unwrap();
         journal

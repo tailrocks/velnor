@@ -5,6 +5,7 @@
 //! local cycle. The transitional job executor remains host Docker and is not
 //! the Build L3 isolation boundary.
 
+pub mod assign;
 pub mod canary;
 pub mod cleanup;
 pub mod complete;
