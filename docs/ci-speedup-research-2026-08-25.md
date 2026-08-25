@@ -233,4 +233,12 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
    broker pickup stayed below 1.1s while container boot reached 42.7s. The
    bounded gate preserves the race fix without turning eight slots into one.
    `VELNOR_DOCKER_LIFECYCLE_CONCURRENCY` permits controlled tuning from 1–8.
-4. This document + adoption roadmap (P1 next implementation target).
+4. Velnor — phase-scoped the Docker lifecycle gate around state-changing
+   Engine calls. The old `start_job_environment` scope held one of two host
+   permits through service health polling (100 ms → 1.6 s backoff, 30 s
+   budget), DNS checks, and bind-mount probes. Those reads could block other
+   slots behind a non-mutating wait. The new path releases the permit before
+   each readiness/read-only phase and reacquires it only for network/container
+   mutations; stale-resource cleanup remains gated. This preserves the
+   cross-job mutation bound while removing readiness from the critical section.
+5. This document + adoption roadmap (P1 next implementation target).

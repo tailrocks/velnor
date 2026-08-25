@@ -3258,7 +3258,6 @@ where
     }
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
         let _span = tracing::info_span!("job-container-boot").entered();
         let mut attempt = 1_u32;
         loop {
@@ -3343,24 +3342,33 @@ where
                 container.daemon_id.clone(),
             )?);
         }
-        self.run_docker(&container.create_network_args())?;
+        // Hold the host-wide Docker permit only for state-changing Engine
+        // calls. Readiness polling below can take up to 30s and does not
+        // mutate Docker state; keeping the permit across it serializes other
+        // slots behind a non-mutating wait.
+        self.with_docker_lifecycle(|executor| {
+            executor.run_docker(&container.create_network_args())
+        })?;
         for service in &container.services {
-            self.run_docker(&service.start_args())?;
+            self.with_docker_lifecycle(|executor| executor.run_docker(&service.start_args()))?;
             self.wait_for_service(service)?;
         }
-        self.run_docker(&container.start_args())?;
+        self.with_docker_lifecycle(|executor| executor.run_docker(&container.start_args()))?;
         // Docker accepts repeated network-shaped create options with behavior
         // that depends on option placement. Reconcile the runner-owned
         // topology explicitly after every container exists, before any step
         // can observe it. This also makes each workflow service key the exact
         // embedded-DNS alias on the per-job network.
         if !container.services.is_empty() {
-            self.run_docker(&container.disconnect_network_args())?;
-            self.run_docker(&container.connect_network_args())?;
-            for service in &container.services {
-                self.run_docker(&service.disconnect_network_args())?;
-                self.run_docker(&service.connect_network_args())?;
-            }
+            self.with_docker_lifecycle(|executor| {
+                executor.run_docker(&container.disconnect_network_args())?;
+                executor.run_docker(&container.connect_network_args())?;
+                for service in &container.services {
+                    executor.run_docker(&service.disconnect_network_args())?;
+                    executor.run_docker(&service.connect_network_args())?;
+                }
+                Ok(())
+            })?;
             self.verify_service_dns(container)?;
         }
         if container.verify_bind_mounts {
@@ -3473,6 +3481,9 @@ where
     }
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
+        let Ok(_lifecycle) = docker_lifecycle_guard() else {
+            return;
+        };
         self.run_docker_remove_container(&container.remove_container_args())
             .ok();
         self.abort_docker_lease();
@@ -3499,6 +3510,14 @@ where
             );
         }
         Ok(result)
+    }
+
+    fn with_docker_lifecycle<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let _lifecycle = docker_lifecycle_guard()?;
+        operation(self)
     }
 
     fn run_docker_cleanup(&mut self, args: &[String]) -> Result<CommandResult> {
