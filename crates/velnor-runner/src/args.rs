@@ -206,6 +206,7 @@ pub struct RunArgs {
 pub struct DaemonArgs {
     pub config_dir: Option<PathBuf>,
     pub url: Option<String>,
+    #[serde(default, skip_serializing)]
     pub pat: Option<String>,
     pub name: Option<String>,
     pub labels: Vec<String>,

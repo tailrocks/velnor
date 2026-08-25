@@ -57,24 +57,33 @@ pub async fn run(args: SlotArgs) -> anyhow::Result<()> {
     if args.once {
         return heartbeat.await;
     }
-    let exec = args.state_dir.join("daemon-args.json");
-    if exec.is_file() {
-        let daemon: crate::args::DaemonArgs = serde_json::from_slice(&std::fs::read(&exec)?)?;
-        let config_base = daemon
-            .config_dir
-            .clone()
-            .unwrap_or_else(|| args.state_dir.clone());
-        let slots = daemon.slots.max(1);
-        tokio::select! {
-            result = heartbeat => result,
-            result = crate::runner::run_daemon_slot(
-                daemon,
-                config_base,
-                args.slot_index,
-                slots,
-            ) => result,
-        }
-    } else {
-        heartbeat.await
+    // Assigned work runs in a job process, never in this slot process.
+    let mut job = spawn_slot_job(&args)?;
+    let result = heartbeat.await;
+    if let Some(child) = job.as_mut() {
+        let _ = child.try_wait();
+        std::mem::forget(job.take());
     }
+    result
+}
+
+fn spawn_slot_job(args: &SlotArgs) -> anyhow::Result<Option<std::process::Child>> {
+    if !args.state_dir.join(super::exec::EXEC_FILE).is_file() {
+        return Ok(None);
+    }
+    let exe = std::env::current_exe()?;
+    let child = std::process::Command::new(exe)
+        .arg("job")
+        .arg("--state-dir")
+        .arg(&args.state_dir)
+        .arg("--job-id")
+        .arg(format!("slot-{}-worker", args.slot_index))
+        .arg("--generation")
+        .arg("1")
+        .arg("--slot-index")
+        .arg(args.slot_index.to_string())
+        .arg("--scope")
+        .arg(&args.scope)
+        .spawn()?;
+    Ok(Some(child))
 }

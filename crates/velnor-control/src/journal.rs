@@ -315,6 +315,7 @@ pub enum Event {
         generation: Generation,
     },
     CleanupIntended {
+        slot_id: SlotId,
         isolation_id: String,
         generation: Generation,
     },
@@ -450,7 +451,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || !slot.permit_held {
+            if generation != slot.generation || slot.ready_proof().is_err() {
                 rejected = true;
             } else {
                 commands.push(SideEffect::RegisterRunner {
@@ -604,13 +605,23 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             }
         }
         Event::CleanupIntended {
+            slot_id,
             isolation_id,
             generation,
         } => {
-            commands.push(SideEffect::Cleanup {
-                isolation_id,
-                generation,
-            });
+            let slot_generation = state
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == slot_id)
+                .map(|slot| slot.generation);
+            if slot_generation != Some(generation) {
+                rejected = true;
+            } else {
+                commands.push(SideEffect::Cleanup {
+                    isolation_id,
+                    generation,
+                });
+            }
         }
         Event::SlotHeartbeat {
             slot_id,
@@ -1065,8 +1076,8 @@ mod tests {
     }
 
     #[test]
-    fn registration_intent_is_durable_before_register_command() {
-        let (dir, mut journal) = open_tmp("reg-intent");
+    fn registration_without_ready_proof_is_rejected() {
+        let (_dir, mut journal) = open_tmp("reg-no-proof");
         let s = slot("scope-1");
         let g = gen();
         journal.apply(Event::ControlLive).unwrap();
@@ -1080,10 +1091,52 @@ mod tests {
             .unwrap();
         let outcome = journal
             .apply(Event::RegistrationIntended {
+                slot_id: s,
+                generation: g,
+            })
+            .unwrap();
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+    }
+
+    #[test]
+    fn registration_intent_is_durable_before_register_command() {
+        let (dir, mut journal) = open_tmp("reg-intent");
+        let s = slot("scope-1");
+        let g = gen();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::PermitReserved {
+                slot_id: s.clone(),
+                generation: g,
+                surge: false,
+            },
+            Event::ExecutorProven {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: s.clone(),
+                generation: g,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let outcome = journal
+            .apply(Event::RegistrationIntended {
                 slot_id: s.clone(),
                 generation: g,
             })
             .unwrap();
+        assert!(!outcome.rejected);
         assert_eq!(
             outcome.commands,
             vec![SideEffect::RegisterRunner {
@@ -1094,8 +1147,15 @@ mod tests {
         drop(journal);
         let recovered = Journal::open(dir.join("journal.db")).unwrap();
         let state = recovered.load_state().unwrap();
-        assert!(state.slots.iter().any(|slot| slot.slot_id == s));
-        assert!(!state.slots[0].registered);
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == s)
+            .expect("slot");
+        assert!(slot.permit_held);
+        assert!(slot.executor_proven);
+        assert!(slot.session_live);
+        assert!(!slot.registered);
     }
 
     #[test]
@@ -1245,15 +1305,15 @@ mod tests {
             })
             .unwrap();
         assert!(complete.rejected);
-        let cleanup = reduce(
-            complete.state,
-            Event::SlotHeartbeat {
+        let cleanup = journal
+            .apply(Event::CleanupIntended {
                 slot_id: slot("scope-1"),
+                isolation_id: "job-1".to_owned(),
                 generation: gen(),
-                pid: 1,
-            },
-        );
+            })
+            .unwrap();
         assert!(cleanup.rejected);
+        assert!(cleanup.commands.is_empty());
     }
 
     #[test]

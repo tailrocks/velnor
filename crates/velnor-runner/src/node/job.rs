@@ -20,6 +20,10 @@ pub struct JobArgs {
     #[arg(long, default_value_t = 1)]
     pub generation: u64,
     #[arg(long)]
+    pub slot_index: Option<usize>,
+    #[arg(long)]
+    pub scope: Option<String>,
+    #[arg(long)]
     pub once: bool,
 }
 
@@ -33,14 +37,31 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
         generation,
     })?;
     let mut ready_announced = false;
-    loop {
-        // Heartbeat is a journal apply, never a blocking child wait.
-        let _ = journal.load_state()?;
-        let _ = feed_after_cycle(LocalCycle::finished(), !ready_announced);
-        ready_announced = true;
-        if args.once {
-            return Ok(());
+    let beat = async {
+        loop {
+            let _ = journal.load_state()?;
+            let _ = feed_after_cycle(LocalCycle::finished(), !ready_announced);
+            ready_announced = true;
+            if args.once {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+    if let Ok(daemon) = super::exec::load_exec_config(&args.state_dir) {
+        let config_base = daemon
+            .config_dir
+            .clone()
+            .unwrap_or_else(|| args.state_dir.clone());
+        let slot_index = args.slot_index.unwrap_or(1);
+        let slots = daemon.slots.max(1);
+        tokio::select! {
+            result = beat => result,
+            result = crate::runner::run_daemon_slot(daemon, config_base, slot_index, slots) => {
+                result
+            }
+        }
+    } else {
+        beat.await
     }
 }

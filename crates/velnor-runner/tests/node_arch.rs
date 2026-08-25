@@ -216,4 +216,26 @@ fn packaged_units_have_no_controller_partof_to_workers() {
     assert!(!code.contains("GITHUB_TOKEN"));
     assert!(!code.contains("docker.sock"));
     assert!(!code.contains("reqwest"));
+    let slot_src = include_str!("../src/node/slot.rs");
+    assert!(
+        !slot_src.contains("run_daemon_slot"),
+        "assigned work must not run in the slot process"
+    );
+    let job_src = include_str!("../src/node/job.rs");
+    assert!(
+        job_src.contains("run_daemon_slot"),
+        "job process is the transitional executor"
+    );
+    let daemon_src = include_str!("../src/runner.rs");
+    let reserve = daemon_src
+        .find("reserve_capacity_permits")
+        .expect("permits first");
+    let configure = daemon_src
+        .find("configure_daemon_slots(&resolved_args")
+        .expect("jit configure");
+    assert!(
+        reserve < configure,
+        "journal permits must be reserved before GitHub JIT"
+    );
+    assert!(!daemon_src.contains("daemon-args.json"));
 }

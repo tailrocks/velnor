@@ -48,9 +48,9 @@ pub fn run(args: &CanaryArgs) -> anyhow::Result<CanaryReport> {
     let started = Instant::now();
     let report = if args.fixture {
         fixture_path(timeout, started)
-    } else if std::env::var_os("GITHUB_TOKEN").is_none() {
-        // No credentials: the full path cannot run; timeout is the honest
-        // outcome, not a fabricated success.
+    } else {
+        // A GitHub token is not a completed path. Without a real dispatch
+        // against the production runner group, the canary times out.
         let _ = (timeout, started);
         CanaryReport {
             queue_unix: None,
@@ -59,8 +59,6 @@ pub fn run(args: &CanaryArgs) -> anyhow::Result<CanaryReport> {
             completion_unix: None,
             timed_out: true,
         }
-    } else {
-        fixture_path(timeout, started)
     };
     if let Some(path) = &args.report {
         if let Some(parent) = path.parent() {
@@ -118,9 +116,20 @@ mod tests {
             report: None,
         })
         .unwrap();
-        if std::env::var_os("GITHUB_TOKEN").is_none() {
-            assert!(report.timed_out);
-            assert!(!report.complete_path());
-        }
+        assert!(report.timed_out);
+        assert!(!report.complete_path());
+    }
+
+    #[test]
+    fn token_without_fixture_does_not_fake_four_stages() {
+        let report = run(&CanaryArgs {
+            timeout_seconds: 1,
+            fixture: false,
+            report: None,
+        })
+        .unwrap();
+        assert!(report.timed_out);
+        assert!(report.queue_unix.is_none());
+        assert!(!report.complete_path());
     }
 }

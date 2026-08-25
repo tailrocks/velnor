@@ -1068,7 +1068,14 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
-    let usable_slots = configure_daemon_slots(&resolved_args, &config_base, slots).await?;
+    let surge: u32 = if resolved_args.dry_run_registration || resolved_args.once {
+        0
+    } else {
+        1
+    };
+    let total_slots = slots.saturating_add(surge as usize);
+    reserve_capacity_permits(&config_base, &resolved_args, slots as u32, surge)?;
+    let usable_slots = configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
     // Startup preflight covered every executable slot before JIT configuration.
     // Child cycles must not repeat the same expensive check.
     resolved_args.skip_preflight = true;
@@ -1079,7 +1086,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
     }
-    notify_daemon_ready(usable_slots, slots);
+    notify_daemon_ready(usable_slots, total_slots);
     if let Some(sink) = crate::ops::global() {
         // Current instance state row: identity, version, and slot counts.
         let _ = sink.upsert_instance(
@@ -1098,27 +1105,26 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         });
     }
     println!(
-        "Starting Velnor controller with {slots} runner slot process{}.",
-        if slots == 1 { "" } else { "es" }
+        "Starting Velnor controller with {total_slots} runner slot process{} (M={slots}, surge={surge}).",
+        if total_slots == 1 { "" } else { "es" }
     );
-    if slots > 1 {
+    if total_slots > 1 {
         println!(
             "Each slot is one OS process with config under {}/slots/slot-N.",
             config_base.display()
         );
     }
-    crate::sd_notify::status(&format!("supervising {slots} runner slot process(es)"));
+    crate::sd_notify::status(&format!(
+        "supervising {total_slots} runner slot process(es)"
+    ));
     daemon_forensic_log(
         &config_base,
         &format!(
-            "supervising {slots} slot process(es), version={}",
+            "supervising {total_slots} slot process(es) M={slots} surge={surge} version={}",
             env!("CARGO_PKG_VERSION")
         ),
     );
-    std::fs::write(
-        config_base.join("daemon-args.json"),
-        serde_json::to_vec(&resolved_args)?,
-    )?;
+    crate::node::exec::write_exec_config(&config_base, &resolved_args, total_slots)?;
     let scope = resolved_args
         .name
         .clone()
@@ -1127,6 +1133,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         config_base.clone(),
         scope,
         slots as u32,
+        surge,
         resolved_args.once,
     )
     .await;
@@ -1695,6 +1702,59 @@ async fn configure_daemon_slots(
         );
     }
     Ok(usable_slots)
+}
+
+fn reserve_capacity_permits(
+    config_base: &Path,
+    args: &DaemonArgs,
+    desired: u32,
+    surge: u32,
+) -> Result<()> {
+    use velnor_control::journal::{Event, Journal};
+    use velnor_model::{Generation, SlotId};
+    std::fs::create_dir_all(config_base)?;
+    let mut journal = Journal::open(config_base.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    journal
+        .apply(Event::ControlLive)
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    journal
+        .apply(Event::JournalWritable)
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    journal
+        .apply(Event::DesiredCapacity {
+            ready: desired,
+            surge,
+        })
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let scope = args.name.clone().unwrap_or_else(|| "velnor".to_owned());
+    let total = desired.saturating_add(surge).max(1);
+    for index in 1..=total {
+        journal
+            .apply(Event::PermitReserved {
+                slot_id: SlotId(format!("{scope}-{index}")),
+                generation: Generation::INITIAL,
+                surge: index > desired,
+            })
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    }
+    Ok(())
+}
+
+/// JIT-register one already-permitted slot. Called from the controller
+/// `RegisterRunner` side effect, never before a journal permit exists.
+pub(crate) async fn jit_configure_one_slot(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Result<()> {
+    validate_daemon_slot_index(slot_index, slot_count)?;
+    if args.url.is_none() {
+        return Ok(());
+    }
+    let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slot_count)?;
+    configure(configure_args).await
 }
 
 async fn cleanup_configured_daemon_slots(
