@@ -992,6 +992,35 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         }
     }
 
+    // P1: host the GitHub cache contract when the operator enables it. Both
+    // the service spawn and the runtime-env injection key off the same two
+    // variables, so an enabled fleet serves warm gha-cache traffic to job
+    // containers through their bridge gateway while disabled fleets remain
+    // byte-for-byte unchanged.
+    if let Some((url, _token)) = crate::gha_cache::enabled_from_env() {
+        let root = crate::storage::StorageLayout::resolve()
+            .map(|layout| layout.cache_root.join("gha-cache"))
+            .unwrap_or_else(|| {
+                daemon_config_dir(&args)
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join("gha-cache")
+            });
+        match crate::gha_cache::CacheService::open(root) {
+            Ok(service) => match crate::gha_cache::bind_configured(service).await {
+                Ok(bound) => {
+                    crate::sd_notify::status(&format!("gha cache service ready at {bound}"));
+                    println!("gha cache service listening on {bound} (public base {url})");
+                }
+                Err(error) => eprintln!(
+                    "Warning: gha cache service failed to bind ({error:#}); caches stay unavailable"
+                ),
+            },
+            Err(error) => {
+                eprintln!("Warning: gha cache store init failed: {error:#}");
+            }
+        }
+    }
+
     if !supervised {
         return daemon_pass(&args, slots).await;
     }
