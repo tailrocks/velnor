@@ -25,6 +25,7 @@ mod fs_copy;
 mod git_mirror;
 mod github_adapter;
 mod job_message;
+mod leftover_disk;
 mod manifest;
 mod mise;
 mod ops;
