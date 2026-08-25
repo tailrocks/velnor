@@ -39,6 +39,20 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
     assert!(postrm.contains("systemctl disable \"$unit\""));
 }
 
+#[test]
+fn activate_hashes_the_shipped_velnorctl_binary() {
+    let src = include_str!("../release.rs");
+    assert!(
+        !src.contains("/usr/bin/velnor-runner"),
+        "activate must not hash the retired velnor-runner path after the velnorctl cutover"
+    );
+    assert!(
+        src.contains("INSTALLED_BINARY_PATH"),
+        "activate must hash the same shipped binary verify-installed uses"
+    );
+    assert_eq!(crate::args::INSTALLED_BINARY_PATH, "/usr/bin/velnorctl");
+}
+
 // --- deterministic fixtures ------------------------------------------------
 
 fn digest_of(seed: &str) -> Sha256Hex {

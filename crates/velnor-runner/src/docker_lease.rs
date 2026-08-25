@@ -130,6 +130,20 @@ pub fn list_job_image_format_args() -> Vec<String> {
     ]
 }
 
+/// Created `velnor-preflight-*` leftovers from prior job-image tags. After a
+/// release retags `velnor/job-ubuntu:26.04`, `ancestor=` no longer matches
+/// those older image IDs, so name prefix is the remaining ownership key.
+pub fn list_preflight_format_args() -> Vec<String> {
+    vec![
+        "ps".into(),
+        "--all".into(),
+        "--filter".into(),
+        "name=velnor-preflight-".into(),
+        "--format".into(),
+        "{{.ID}}\t{{.Label \"velnor.job-id\"}}".into(),
+    ]
+}
+
 pub fn force_remove_container_args(ids: &[String]) -> Vec<String> {
     let mut args = vec!["rm".into(), "--force".into()];
     args.extend(ids.iter().cloned());
@@ -352,6 +366,40 @@ pub fn rewrite_docker_api_request(
     Ok(out)
 }
 
+/// Docker Engine 29 keeps HTTP/1.1 connections open after a response. This
+/// proxy handles one request then `io::copy` until host EOF, so a keepalive
+/// engine deadlocks the guest `docker` CLI on the second request (`docker
+/// version` prints Client then hangs on Server; `docker login` never returns).
+/// Forcing `Connection: close` on non-upgrade traffic matches that one-shot
+/// architecture: dockerd EOFs, `io::copy` returns, the CLI reconnects.
+fn with_connection_close(request: &[u8]) -> Result<Vec<u8>> {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .context("Docker API request is missing header terminator")?;
+    let header_text =
+        std::str::from_utf8(&request[..header_end]).context("Docker API headers must be UTF-8")?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().context("Docker API request line")?;
+    let mut out = Vec::new();
+    out.extend_from_slice(request_line.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if line.len() >= 11 && line[..11].eq_ignore_ascii_case("connection:") {
+            continue;
+        }
+        out.extend_from_slice(line.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(&request[header_end..]);
+    Ok(out)
+}
+
 pub fn reclaim_job_owned(
     job_id: &str,
     mut docker: impl FnMut(&[String]) -> Result<String>,
@@ -413,8 +461,12 @@ pub fn reclaim_unlabeled_testcontainers(
 pub fn reclaim_unlabeled_job_image_siblings(
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
-    let formatted = docker(&list_job_image_format_args())?;
-    let ids = unlabeled_job_image_ids(&formatted);
+    let mut ids = unlabeled_job_image_ids(&docker(&list_job_image_format_args())?);
+    ids.extend(unlabeled_job_image_ids(&docker(
+        &list_preflight_format_args(),
+    )?));
+    ids.sort();
+    ids.dedup();
     if ids.is_empty() {
         return Ok(());
     }
@@ -585,14 +637,6 @@ fn handle_client(
 
     let request = read_http_request(&mut client)?;
     let forwarded = rewrite_docker_api_request(&request, job_id, daemon_id)?;
-    let mut host = UnixStream::connect(host_socket).with_context(|| {
-        format!(
-            "connect job Docker lease to host engine {}",
-            host_socket.display()
-        )
-    })?;
-    host.write_all(&forwarded)
-        .context("forward Docker API request through job lease")?;
     let upgrade = std::str::from_utf8(&request).is_ok_and(|header| {
         header.lines().any(|line| {
             (line.len() >= 8 && line[..8].eq_ignore_ascii_case("upgrade:"))
@@ -601,6 +645,19 @@ fn handle_client(
                     && line.to_ascii_lowercase().contains("upgrade"))
         })
     });
+    let forwarded = if upgrade {
+        forwarded
+    } else {
+        with_connection_close(&forwarded)?
+    };
+    let mut host = UnixStream::connect(host_socket).with_context(|| {
+        format!(
+            "connect job Docker lease to host engine {}",
+            host_socket.display()
+        )
+    })?;
+    host.write_all(&forwarded)
+        .context("forward Docker API request through job lease")?;
     if upgrade {
         let mut host_reader = host.try_clone().context("clone host Docker lease stream")?;
         let mut client_writer = client
@@ -740,6 +797,16 @@ mod tests {
     }
 
     #[test]
+    fn with_connection_close_replaces_keepalive_and_preserves_body() {
+        let request = b"POST /auth HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}";
+        let closed = with_connection_close(request).unwrap();
+        let text = String::from_utf8(closed).unwrap();
+        assert!(text.contains("Connection: close\r\n\r\n{}"));
+        assert!(!text.to_ascii_lowercase().contains("keep-alive"));
+        assert_eq!(text.matches("Connection:").count(), 1);
+    }
+
+    #[test]
     fn reclaim_job_owned_removes_guest_container_network_and_volume() {
         let mut calls = Vec::new();
         let mut outputs = vec![
@@ -844,6 +911,7 @@ velnor-job-dead\tvelnor-job-dead\texited
         let mut calls = Vec::new();
         let mut outputs = vec![
             "gagarin\t\nvelnor-job-live\tvelnor-job-live\nride\t\n".to_string(),
+            "preflight1\t\nlive-pre\tvelnor-job-live\n".to_string(),
             String::new(),
         ];
         reclaim_unlabeled_job_image_siblings(|args| {
@@ -852,9 +920,10 @@ velnor-job-dead\tvelnor-job-dead\texited
         })
         .unwrap();
         assert_eq!(calls[0], list_job_image_format_args());
+        assert_eq!(calls[1], list_preflight_format_args());
         assert_eq!(
-            calls[1],
-            force_remove_container_args(&["gagarin".into(), "ride".into()])
+            calls[2],
+            force_remove_container_args(&["gagarin".into(), "preflight1".into(), "ride".into()])
         );
     }
 
@@ -926,5 +995,65 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
                 .all(|call| !call.iter().any(|arg| arg == "other")),
             "foreign daemon job leaked into reclaim calls: {calls:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_client_finishes_when_engine_honors_injected_connection_close() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-lease-ka-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine_path = dir.join("engine.sock");
+        let engine = UnixListener::bind(&engine_path).unwrap();
+        let engine_thread = std::thread::spawn(move || {
+            let (mut sock, _) = engine.accept().unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = sock.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .unwrap();
+            if req.contains("connection: close") {
+                let _ = sock.shutdown(std::net::Shutdown::Both);
+            } else {
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        let (mut client, proxy_client) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let engine_for_proxy = engine_path.clone();
+        std::thread::spawn(move || {
+            let result = handle_client(proxy_client, &engine_for_proxy, "job", "daemon");
+            let _ = tx.send(result);
+        });
+
+        client
+            .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\n\r\n")
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0_u8; 256];
+        let n = client.read(&mut buf).unwrap();
+        assert!(
+            std::str::from_utf8(&buf[..n]).unwrap().contains("200 OK"),
+            "guest should receive the ping response, got {}",
+            String::from_utf8_lossy(&buf[..n])
+        );
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("handle_client must return after injecting Connection: close; keepalive io::copy deadlocks docker CLI")
+            .unwrap();
+        engine_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
