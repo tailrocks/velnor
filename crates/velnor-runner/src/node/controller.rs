@@ -497,6 +497,7 @@ fn ingest_slot_heartbeats(
     seen: &mut HashMap<String, (u32, u64)>,
 ) -> anyhow::Result<()> {
     let state = journal.load_state()?;
+    let mut pending = Vec::new();
     for index in 1..=total {
         let path = heartbeat_path(&args.state_dir, index);
         let Ok(bytes) = std::fs::read(path) else {
@@ -517,11 +518,15 @@ fn ingest_slot_heartbeats(
         {
             continue;
         }
-        let outcome = journal.apply(Event::SlotHeartbeat {
+        pending.push((id, heartbeat));
+    }
+    let outcomes =
+        journal.apply_many(pending.iter().map(|(id, heartbeat)| Event::SlotHeartbeat {
             slot_id: id.clone(),
             generation: Generation(heartbeat.generation),
             pid: heartbeat.pid,
-        })?;
+        }))?;
+    for ((id, heartbeat), outcome) in pending.into_iter().zip(outcomes) {
         if !outcome.rejected {
             seen.insert(id.0, (heartbeat.pid, heartbeat.sequence));
         }
