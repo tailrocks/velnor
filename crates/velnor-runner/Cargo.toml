@@ -6,10 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "Velnor self-hosted GitHub Actions runner daemon"
 
-# No [[bin]]: the crate is a pure runtime library. `/usr/bin/velnorctl` (the
-# velnorctl command center) is the single product binary and executes the
-# daemon, doctor, and release hooks through this library — the Velnor CLI
-# lives only in velnorctl.
+# Two-binary estate: /usr/bin/velnor-runner is the daemon/service binary
+# (systemd ExecStart + release/capability hooks); /usr/bin/velnorctl is the
+# kubectl-style control panel and the ONLY operator-facing CLI.
+
+[[bin]]
+name = "velnor-runner"
+path = "src/main.rs"
 
 # Debian packaging (cargo-deb).
 # The unified release.yml (on tag) handles:
@@ -41,7 +44,9 @@ depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, docker.io | d
 conf-files = ["/etc/velnor/velnor.env"]
 maintainer-scripts = "debian/"
 assets = [
-  # The single product binary: the velnorctl command center (Plan 064/079).
+  # The daemon/service binary executed by systemd.
+  ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
+  # The kubectl-style operator control panel.
   ["target/release/velnorctl", "usr/bin/velnorctl", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
@@ -67,6 +72,7 @@ assets = [
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 libc = "0.2"
 velnor-control = { path = "../velnor-control", version = "0.1.0" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }

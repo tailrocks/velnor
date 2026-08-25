@@ -37,6 +37,7 @@ pub mod runner;
 mod runtime_env;
 mod script_step;
 mod sd_notify;
+pub mod service;
 mod slot_log;
 mod storage;
 mod telemetry;
