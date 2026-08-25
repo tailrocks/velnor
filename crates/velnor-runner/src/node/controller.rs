@@ -13,8 +13,9 @@ use clap::Args;
 use velnor_control::journal::{Event, Journal, SideEffect};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
+use super::assign;
 use super::cleanup;
-use super::exec::{load_exec_config, EXEC_FILE};
+use super::exec::load_exec_config;
 use super::health::HealthServer;
 use super::prove;
 use super::slot::slot_id;
@@ -95,12 +96,7 @@ async fn reconcile_once(
         execute_effect(args, journal, slots, jobs, command).await?;
     }
 
-    let _ = prove::reconcile_from_dir(&args.state_dir)?;
-    let routing = prove::observe_routing(&args.state_dir);
-    journal.apply(Event::Routing {
-        valid: routing.valid,
-        group_valid: routing.group_valid,
-    })?;
+    observe_github_and_routing(args, journal).await?;
 
     let mut proof_effects = Vec::new();
     let executor = prove::observe_executor(&args.state_dir);
@@ -150,40 +146,8 @@ async fn reconcile_once(
         execute_effect(args, journal, slots, jobs, command).await?;
     }
 
-    let mut job_effects = Vec::new();
-    if args.state_dir.join(EXEC_FILE).is_file() {
-        let state = journal.load_state()?;
-        for slot in &state.slots {
-            if slot.phase != ActorPhase::Ready {
-                continue;
-            }
-            if state.jobs.iter().any(|job| job.slot_id == slot.slot_id) {
-                continue;
-            }
-            let index = slot_index_from_id(&slot.slot_id);
-            let job_id = worker_job_id(index);
-            let assigned = journal.apply(Event::Assigned {
-                slot_id: slot.slot_id.clone(),
-                job_id: job_id.clone(),
-                generation: slot.generation,
-            })?;
-            if assigned.rejected {
-                continue;
-            }
-            let owned = journal.apply(Event::JobOwned {
-                job_id: job_id.clone(),
-                slot_id: slot.slot_id.clone(),
-                attempt: 1,
-                generation: slot.generation,
-                worker: format!("velnor-job@{}", job_id.0),
-            })?;
-            if owned.rejected {
-                continue;
-            }
-            cleanup::claim_owned(&args.state_dir, &job_id.0, slot.generation.0)?;
-            job_effects.extend(owned.commands);
-        }
-    }
+    bind_live_queued_jobs(args, journal).await?;
+    let job_effects = ingest_assignments(args, journal)?;
     for command in job_effects {
         execute_effect(args, journal, slots, jobs, command).await?;
     }
@@ -224,7 +188,7 @@ async fn execute_effect(
             generation,
         } => register_runner(args, journal, slot_id, generation).await,
         SideEffect::StartJob { job_id, generation } => {
-            maybe_spawn_job(args, jobs, &job_id.0, generation.0)
+            maybe_spawn_job(args, journal, jobs, &job_id.0, generation.0)
         }
         SideEffect::AdvertiseCapacity { permits } => {
             std::fs::write(
@@ -302,6 +266,122 @@ async fn register_runner(
     Ok(())
 }
 
+async fn observe_github_and_routing(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+) -> anyhow::Result<()> {
+    let mut reachable = false;
+    if let Ok(exec) = load_exec_config(&args.state_dir) {
+        let group = exec
+            .pool_name
+            .clone()
+            .or_else(|| exec.name.clone())
+            .unwrap_or_else(|| "default".to_owned());
+        let trust = prove::runtime_trust_scope(&exec.trust_scope);
+        if let Some(url) = exec.url.as_deref() {
+            if let Some(policy) =
+                prove::policy_from_github_url(url, group, exec.labels.clone(), trust.clone())
+            {
+                prove::write_policy_if_absent(&args.state_dir, &policy)?;
+            }
+        }
+        let policy = prove::read_policy(&args.state_dir);
+        if let (Some(url), Some(token), Some(policy)) =
+            (exec.url.as_deref(), exec.pat.as_deref(), policy.as_ref())
+        {
+            let probe = prove::probe_github(prove::GitHubProbeRequest {
+                url,
+                token,
+                policy,
+                pool_id: exec.pool_id,
+                configured_labels: &exec.labels,
+                configured_trust: &exec.trust_scope,
+            })
+            .await;
+            reachable = probe.reachable;
+            if let Some(evidence) = probe.evidence {
+                prove::write_evidence(&args.state_dir, &evidence)?;
+            }
+        }
+    }
+    journal.apply(Event::Dependency {
+        github_reachable: reachable,
+    })?;
+    let _ = prove::reconcile_from_dir(&args.state_dir)?;
+    let routing = prove::observe_routing(&args.state_dir);
+    journal.apply(Event::Routing {
+        valid: routing.valid,
+        group_valid: routing.group_valid,
+    })?;
+    Ok(())
+}
+
+async fn bind_live_queued_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow::Result<()> {
+    let state = journal.load_state()?;
+    if !state.github_reachable {
+        return Ok(());
+    }
+    let Ok(exec) = load_exec_config(&args.state_dir) else {
+        return Ok(());
+    };
+    let (Some(url), Some(token), Some(policy)) = (
+        exec.url.as_deref(),
+        exec.pat.as_deref(),
+        prove::read_policy(&args.state_dir),
+    ) else {
+        return Ok(());
+    };
+    let queued = prove::queued_job_ids(url, token, &policy).await;
+    assign::bind_queued(&args.state_dir, journal, &queued)?;
+    Ok(())
+}
+
+fn ingest_assignments(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+) -> anyhow::Result<Vec<velnor_control::journal::SideEffect>> {
+    let mut effects = Vec::new();
+    for assignment in assign::read_dir(&args.state_dir)? {
+        let state = journal.load_state()?;
+        if state
+            .jobs
+            .iter()
+            .any(|job| job.job_id.0 == assignment.job_id)
+        {
+            continue;
+        }
+        let Some(slot) = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id.0 == assignment.slot_id && slot.phase == ActorPhase::Ready)
+        else {
+            continue;
+        };
+        let job_id = JobId(assignment.job_id.clone());
+        let assigned = journal.apply(Event::Assigned {
+            slot_id: slot.slot_id.clone(),
+            job_id: job_id.clone(),
+            generation: slot.generation,
+        })?;
+        if assigned.rejected {
+            continue;
+        }
+        let owned = journal.apply(Event::JobOwned {
+            job_id: job_id.clone(),
+            slot_id: slot.slot_id.clone(),
+            attempt: 1,
+            generation: slot.generation,
+            worker: format!("velnor-job@{}", job_id.0),
+        })?;
+        if owned.rejected {
+            continue;
+        }
+        cleanup::claim_owned(&args.state_dir, &job_id.0, slot.generation.0)?;
+        effects.extend(owned.commands);
+    }
+    Ok(effects)
+}
+
 fn slot_index_from_id(slot_id: &SlotId) -> usize {
     slot_id
         .0
@@ -309,10 +389,6 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
         .next()
         .and_then(|part| part.parse::<usize>().ok())
         .unwrap_or(1)
-}
-
-fn worker_job_id(slot_index: usize) -> JobId {
-    JobId(format!("slot-{slot_index}-worker"))
 }
 
 fn maybe_spawn_slot(
@@ -351,6 +427,7 @@ fn maybe_spawn_slot(
 
 fn maybe_spawn_job(
     args: &ControllerArgs,
+    journal: &Journal,
     jobs: &mut HashMap<String, Child>,
     job_id: &str,
     generation: u64,
@@ -363,10 +440,16 @@ fn maybe_spawn_job(
         return Ok(());
     }
     let exe = std::env::current_exe()?;
-    let slot_index = job_id
-        .strip_prefix("slot-")
-        .and_then(|rest| rest.strip_suffix("-worker"))
-        .and_then(|index| index.parse::<usize>().ok())
+    let slot_index = journal
+        .load_state()
+        .ok()
+        .and_then(|state| {
+            state
+                .jobs
+                .into_iter()
+                .find(|job| job.job_id.0 == job_id)
+                .map(|job| slot_index_from_id(&job.slot_id))
+        })
         .unwrap_or(1);
     let child = Command::new(exe)
         .arg("job")

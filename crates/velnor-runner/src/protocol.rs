@@ -243,6 +243,34 @@ impl GitHubScope {
             .context("build GitHub runner groups URL")
     }
 
+    pub fn runner_group_url(&self, group_id: i64) -> Result<Url> {
+        if !self.runner_scope_path.starts_with("orgs/")
+            && !self.runner_scope_path.starts_with("enterprises/")
+        {
+            bail!("runner groups apply only to organization or enterprise scopes");
+        }
+        self.api_base_url
+            .join(&format!(
+                "{}/actions/runner-groups/{group_id}",
+                self.runner_scope_path
+            ))
+            .context("build GitHub runner group URL")
+    }
+
+    pub fn runner_group_repositories_url(&self, group_id: i64) -> Result<Url> {
+        if !self.runner_scope_path.starts_with("orgs/")
+            && !self.runner_scope_path.starts_with("enterprises/")
+        {
+            bail!("runner groups apply only to organization or enterprise scopes");
+        }
+        self.api_base_url
+            .join(&format!(
+                "{}/actions/runner-groups/{group_id}/repositories",
+                self.runner_scope_path
+            ))
+            .context("build GitHub runner group repositories URL")
+    }
+
     pub fn kind(&self) -> &'static str {
         if self.runner_scope_path.starts_with("orgs/") {
             "organization"
@@ -397,6 +425,8 @@ pub struct ListedRunner {
     pub status: Option<String>,
     #[serde(default)]
     pub busy: Option<bool>,
+    #[serde(default)]
+    pub labels: Vec<GitHubJitRunnerLabel>,
 }
 
 fn deser_bool_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
@@ -4772,6 +4802,14 @@ mod tests {
         assert_eq!(
             scope.runner_groups_url().unwrap().as_str(),
             "https://api.github.com/orgs/ChainArgos/actions/runner-groups"
+        );
+        assert_eq!(
+            scope.runner_group_url(7).unwrap().as_str(),
+            "https://api.github.com/orgs/ChainArgos/actions/runner-groups/7"
+        );
+        assert_eq!(
+            scope.runner_group_repositories_url(7).unwrap().as_str(),
+            "https://api.github.com/orgs/ChainArgos/actions/runner-groups/7/repositories"
         );
     }
 

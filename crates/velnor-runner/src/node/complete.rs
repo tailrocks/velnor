@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use velnor_control::journal::{payload_checksum, Event, Journal};
-use velnor_model::{Generation, JobId, SlotId};
+use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use super::cleanup;
 
@@ -81,33 +81,107 @@ pub async fn guarded_complete_async<T>(
     send.await
 }
 
-/// Own `job_id` on an existing permitted slot, then return that generation.
+/// Return the generation that already owns `job_id`. Never creates ownership.
 ///
 /// # Errors
-/// No permit, or `JobOwned` rejected.
+/// Job is missing from the journal.
 pub fn ensure_owned(journal: &mut Journal, job_id: &JobId) -> anyhow::Result<Generation> {
     let state = journal.load_state()?;
+    state
+        .jobs
+        .iter()
+        .find(|job| job.job_id == *job_id)
+        .map(|job| job.generation)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "job {} is not owned; completion cannot attach a permit at send time",
+                job_id.0
+            )
+        })
+}
+
+/// Bind `job_id` to the slot that accepted it. `Assigned` is best-effort when
+/// the slot is already Assigned; `JobOwned` must succeed.
+///
+/// # Errors
+/// Missing slot or rejected `JobOwned`.
+pub fn accept_job(
+    journal: &mut Journal,
+    job_id: &JobId,
+    slot_id: &SlotId,
+) -> anyhow::Result<Generation> {
+    let state = journal.load_state()?;
     if let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id) {
+        if job.slot_id != *slot_id {
+            anyhow::bail!(
+                "job {} is owned by slot {}, not {}",
+                job_id.0,
+                job.slot_id.0,
+                slot_id.0
+            );
+        }
         return Ok(job.generation);
     }
     let slot = state
         .slots
         .iter()
-        .find(|slot| slot.permit_held)
-        .ok_or_else(|| anyhow::anyhow!("no capacity permit to own job {}", job_id.0))?;
+        .find(|slot| slot.slot_id == *slot_id)
+        .ok_or_else(|| anyhow::anyhow!("slot {} is missing from the journal", slot_id.0))?;
     let generation = slot.generation;
-    let slot_id = SlotId(slot.slot_id.0.clone());
+    let _ = journal.apply(Event::Assigned {
+        slot_id: slot_id.clone(),
+        job_id: job_id.clone(),
+        generation,
+    })?;
     let owned = journal.apply(Event::JobOwned {
         job_id: job_id.clone(),
-        slot_id,
+        slot_id: slot_id.clone(),
         attempt: 1,
         generation,
         worker: format!("velnor-job@{}", job_id.0),
     })?;
     if owned.rejected {
-        anyhow::bail!("JobOwned rejected for {}", job_id.0);
+        anyhow::bail!("JobOwned rejected for {} on {}", job_id.0, slot_id.0);
     }
     Ok(generation)
+}
+
+/// Slot this runner config belongs to. `None` when the journal has no slots.
+#[must_use]
+pub fn infer_slot_id(journal: &Journal, config_dir: &Path) -> Option<SlotId> {
+    let state = journal.load_state().ok()?;
+    if state.slots.is_empty() {
+        return None;
+    }
+    if let Some(name) = config_dir.file_name().and_then(|name| name.to_str()) {
+        if let Some(index) = name.strip_prefix("slot-") {
+            if let Some(slot) = state
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id.0.rsplit('-').next() == Some(index))
+            {
+                return Some(slot.slot_id.clone());
+            }
+        }
+    }
+    if state.slots.len() == 1 {
+        return Some(state.slots[0].slot_id.clone());
+    }
+    let running: Vec<&SlotId> = state
+        .jobs
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.phase,
+                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Starting
+            )
+        })
+        .map(|job| &job.slot_id)
+        .collect();
+    if running.len() == 1 {
+        return Some(running[0].clone());
+    }
+    None
 }
 
 fn commit_intent(
@@ -267,6 +341,47 @@ mod tests {
         let slot = dir.join("slots").join("slot-1");
         std::fs::create_dir_all(&slot).unwrap();
         assert_eq!(journal_dir_near(&slot), dir);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn ensure_owned_does_not_attach_to_the_first_permit() {
+        let dir = tmp("no-attach");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let _ = prime_owned(&mut journal, &JobId("already".into()));
+        let error = ensure_owned(&mut journal, &JobId("other".into())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot attach a permit at send time"),
+            "{error}"
+        );
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id.0, "already");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn accept_job_owns_the_named_slot() {
+        let dir = tmp("accept");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let slot = SlotId("scope-1".into());
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::PermitReserved {
+                slot_id: slot.clone(),
+                generation: Generation::INITIAL,
+                surge: false,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let generation = accept_job(&mut journal, &JobId("gh-1".into()), &slot).unwrap();
+        assert_eq!(generation, Generation::INITIAL);
+        let found = ensure_owned(&mut journal, &JobId("gh-1".into())).unwrap();
+        assert_eq!(found, generation);
         std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -10,6 +10,8 @@ use std::process::Child;
 
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::{github_json_request, GitHubScope, ListedWorkflowJob, RunnerGroup};
+
 /// On-disk routing observation. Missing or invalid file is not valid routing.
 pub const ROUTING_FILE: &str = "routing.json";
 /// Desired routing policy. Reconciled independently of the scheduler backend.
@@ -165,6 +167,294 @@ pub fn routing_drift(policy: &RoutingFields, evidence: &RoutingFields) -> Routin
         labels_mismatch: want.labels != got.labels,
         trust_mismatch: want.trust_scope != got.trust_scope,
     }
+}
+
+const GITHUB_PROBE_TIMEOUT_SECS: u64 = 10;
+
+/// Inputs for a live GitHub routing/reachability probe.
+pub struct GitHubProbeRequest<'a> {
+    pub url: &'a str,
+    pub token: &'a str,
+    pub policy: &'a RoutingFields,
+    pub pool_id: Option<i64>,
+    pub configured_labels: &'a [String],
+    pub configured_trust: &'a str,
+}
+
+/// Live GitHub observation. Missing credentials are not reachable.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GitHubProbe {
+    pub reachable: bool,
+    pub evidence: Option<RoutingFields>,
+}
+
+/// Trust scope the process is actually running with.
+#[must_use]
+pub fn runtime_trust_scope(configured: &str) -> String {
+    std::env::var("VELNOR_TRUST_SCOPE").unwrap_or_else(|_| configured.to_owned())
+}
+
+/// Desired policy from a GitHub URL plus configured labels/trust.
+#[must_use]
+pub fn policy_from_github_url(
+    url: &str,
+    group: String,
+    labels: Vec<String>,
+    trust_scope: String,
+) -> Option<RoutingFields> {
+    let scope = GitHubScope::parse(url).ok()?;
+    let selected_repositories = match scope.repo_full_name() {
+        Some((owner, repo)) => vec![format!("{owner}/{repo}")],
+        None => return None,
+    };
+    let fields = RoutingFields {
+        group,
+        selected_repositories,
+        labels,
+        trust_scope,
+    };
+    fields_complete(&fields).then_some(fields)
+}
+
+/// Read `routing-policy.json` when present.
+#[must_use]
+pub fn read_policy(state_dir: &Path) -> Option<RoutingFields> {
+    read_fields(&state_dir.join(ROUTING_POLICY_FILE))
+}
+
+/// Write desired policy only when the operator has not already done so.
+///
+/// # Errors
+/// Filesystem or JSON failures.
+pub fn write_policy_if_absent(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
+    let path = state_dir.join(ROUTING_POLICY_FILE);
+    if path.is_file() {
+        return Ok(());
+    }
+    write_fields(&path, policy)
+}
+
+/// Persist live GitHub routing evidence. Never a boolean Ready stamp.
+///
+/// # Errors
+/// Filesystem or JSON failures.
+pub fn write_evidence(state_dir: &Path, evidence: &RoutingFields) -> anyhow::Result<PathBuf> {
+    let path = state_dir.join(ROUTING_EVIDENCE_FILE);
+    write_fields(&path, evidence)?;
+    Ok(path)
+}
+
+/// Probe GitHub reachability and compare live group/repos to desired policy.
+/// Labels and trust are the process-configured values (what JIT will send).
+pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
+    let Ok(scope) = GitHubScope::parse(request.url) else {
+        return GitHubProbe::default();
+    };
+    let Ok(runners_url) = scope.runners_url() else {
+        return GitHubProbe::default();
+    };
+    let Ok((status, body)) = github_json_request(
+        "GET",
+        runners_url.as_str(),
+        request.token,
+        None,
+        GITHUB_PROBE_TIMEOUT_SECS,
+    )
+    .await
+    else {
+        return GitHubProbe::default();
+    };
+    if !(200..300).contains(&status) {
+        return GitHubProbe::default();
+    }
+    let _ = body;
+    let labels = if request.configured_labels.is_empty() {
+        request.policy.labels.clone()
+    } else {
+        request.configured_labels.to_vec()
+    };
+    let trust_scope = runtime_trust_scope(request.configured_trust);
+    let mut evidence = RoutingFields {
+        group: request.policy.group.clone(),
+        selected_repositories: request.policy.selected_repositories.clone(),
+        labels,
+        trust_scope,
+    };
+    if let Some((owner, repo)) = scope.repo_full_name() {
+        evidence.selected_repositories = vec![format!("{owner}/{repo}")];
+    } else if let Some((group_name, repos)) =
+        live_group_and_repos(&scope, request.token, request.policy, request.pool_id).await
+    {
+        evidence.group = group_name;
+        if !repos.is_empty() {
+            evidence.selected_repositories = repos;
+        }
+    }
+    GitHubProbe {
+        reachable: true,
+        evidence: Some(evidence),
+    }
+}
+
+/// Queued, unassigned workflow jobs whose labels this fleet can serve.
+pub async fn queued_job_ids(url: &str, token: &str, policy: &RoutingFields) -> Vec<String> {
+    let Ok(scope) = GitHubScope::parse(url) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for repository in &policy.selected_repositories {
+        ids.extend(queued_job_ids_for_repo(&scope, token, repository, policy).await);
+    }
+    ids
+}
+
+fn read_fields(path: &Path) -> Option<RoutingFields> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_fields(path: &Path, fields: &RoutingFields) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(fields)?)?;
+    Ok(())
+}
+
+async fn live_group_and_repos(
+    scope: &GitHubScope,
+    token: &str,
+    policy: &RoutingFields,
+    pool_id: Option<i64>,
+) -> Option<(String, Vec<String>)> {
+    let url = scope.runner_groups_url().ok()?;
+    let (status, body) =
+        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS)
+            .await
+            .ok()?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Groups {
+        runner_groups: Vec<RunnerGroup>,
+    }
+    let groups: Groups = serde_json::from_str(&body).ok()?;
+    let group = groups
+        .runner_groups
+        .into_iter()
+        .find(|group| pool_id == Some(group.id) || group.name == policy.group)?;
+    let repos = live_group_repos(scope, token, group.id)
+        .await
+        .unwrap_or_default();
+    Some((group.name, repos))
+}
+
+async fn live_group_repos(scope: &GitHubScope, token: &str, group_id: i64) -> Option<Vec<String>> {
+    let url = scope.runner_group_repositories_url(group_id).ok()?;
+    let (status, body) =
+        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS)
+            .await
+            .ok()?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Page {
+        repositories: Vec<Repo>,
+    }
+    #[derive(Deserialize)]
+    struct Repo {
+        full_name: String,
+    }
+    let page: Page = serde_json::from_str(&body).ok()?;
+    Some(
+        page.repositories
+            .into_iter()
+            .map(|repo| repo.full_name)
+            .collect(),
+    )
+}
+
+async fn queued_job_ids_for_repo(
+    scope: &GitHubScope,
+    token: &str,
+    repository: &str,
+    policy: &RoutingFields,
+) -> Vec<String> {
+    let mut url = match scope.repo_queued_runs_url(repository) {
+        Ok(url) => url,
+        Err(_) => return Vec::new(),
+    };
+    url.query_pairs_mut()
+        .append_pair("status", "queued")
+        .append_pair("per_page", "20");
+    let Ok((status, body)) =
+        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS).await
+    else {
+        return Vec::new();
+    };
+    if !(200..300).contains(&status) {
+        return Vec::new();
+    }
+    #[derive(Deserialize)]
+    struct Runs {
+        workflow_runs: Vec<Run>,
+    }
+    #[derive(Deserialize)]
+    struct Run {
+        id: u64,
+    }
+    let Ok(runs) = serde_json::from_str::<Runs>(&body) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for run in runs.workflow_runs {
+        ids.extend(queued_jobs_for_run(scope, token, repository, run.id, policy).await);
+    }
+    ids
+}
+
+async fn queued_jobs_for_run(
+    scope: &GitHubScope,
+    token: &str,
+    repository: &str,
+    run_id: u64,
+    policy: &RoutingFields,
+) -> Vec<String> {
+    let Ok(url) = scope
+        .api_base_url
+        .join(&format!("repos/{repository}/actions/runs/{run_id}/jobs"))
+    else {
+        return Vec::new();
+    };
+    let Ok((status, body)) =
+        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS).await
+    else {
+        return Vec::new();
+    };
+    if !(200..300).contains(&status) {
+        return Vec::new();
+    }
+    #[derive(Deserialize)]
+    struct Jobs {
+        jobs: Vec<ListedWorkflowJob>,
+    }
+    let Ok(jobs) = serde_json::from_str::<Jobs>(&body) else {
+        return Vec::new();
+    };
+    jobs.jobs
+        .into_iter()
+        .filter(|job| {
+            job.runner_id.is_none()
+                && job.status.as_deref() == Some("queued")
+                && job
+                    .labels
+                    .iter()
+                    .all(|label| policy.labels.iter().any(|have| have == label))
+        })
+        .map(|job| job.id.to_string())
+        .collect()
 }
 
 /// Write `routing.json` from policy + evidence files when both exist.
@@ -356,5 +646,29 @@ mod tests {
         write_routing_document(&dir, fields.clone(), fields).unwrap();
         assert_eq!(observe_routing(&dir), RoutingObservation::invalid());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn policy_from_repo_url_is_complete() {
+        let policy = policy_from_github_url(
+            "https://github.com/tailrocks/velnor",
+            "velnor".into(),
+            vec!["velnor".into()],
+            "trusted".into(),
+        )
+        .unwrap();
+        assert_eq!(policy.selected_repositories, vec!["tailrocks/velnor"]);
+        assert!(fields_complete(&policy));
+    }
+
+    #[test]
+    fn policy_from_org_url_is_not_inferred() {
+        assert!(policy_from_github_url(
+            "https://github.com/tailrocks",
+            "velnor".into(),
+            vec!["velnor".into()],
+            "trusted".into(),
+        )
+        .is_none());
     }
 }

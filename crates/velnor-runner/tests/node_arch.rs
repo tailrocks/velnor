@@ -321,6 +321,7 @@ fn run_runner(dir: &Path, args: &[&str]) -> std::process::ExitStatus {
     let stderr = std::fs::File::create(dir.join("cmd.err")).unwrap();
     Command::new(runner())
         .args(args)
+        .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -544,8 +545,8 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
 }
 
 #[test]
-fn controller_claims_job_owned_before_spawning_worker() {
-    let dir = scratch("owned");
+fn controller_keeps_ready_when_exec_exists_without_assignment() {
+    let dir = scratch("no-synth");
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "own");
     drop(journal);
@@ -573,13 +574,62 @@ fn controller_claims_job_owned_before_spawning_worker() {
         .unwrap()
         .load_state()
         .unwrap();
+    assert!(state.jobs.is_empty(), "{:?}", state.jobs);
+    let slot = state
+        .slots
+        .iter()
+        .find(|item| item.slot_id.0 == "own-1")
+        .expect("slot");
+    assert_eq!(slot.phase, velnor_model::ActorPhase::Ready, "{slot:?}");
+    assert!(!state.github_reachable, "{state:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn controller_claims_job_owned_on_real_assignment_before_spawn() {
+    let dir = scratch("owned");
+    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    prime_named_ready(&mut journal, "own");
+    drop(journal);
+    velnor_runner::node::assign::write(
+        &dir,
+        &velnor_runner::node::assign::Assignment {
+            job_id: "gh-job-42".into(),
+            slot_id: "own-1".into(),
+        },
+    )
+    .unwrap();
+
+    let status = run_runner(
+        &dir,
+        &[
+            "controller",
+            "--state-dir",
+            dir.to_str().unwrap(),
+            "--scope",
+            "own",
+            "--desired-ready",
+            "1",
+            "--surge",
+            "0",
+            "--once",
+            "--spawn-slots",
+            "false",
+        ],
+    );
+    assert!(status.success(), "{}", cmd_err(&dir));
+    let state = Journal::open(dir.join("journal.db"))
+        .unwrap()
+        .load_state()
+        .unwrap();
     assert_eq!(state.jobs.len(), 1, "{:?}", state.jobs);
-    assert_eq!(state.jobs[0].job_id.0, "slot-1-worker");
+    assert_eq!(state.jobs[0].job_id.0, "gh-job-42");
+    assert_eq!(state.jobs[0].slot_id.0, "own-1");
     assert!(
-        dir.join("owned").join("slot-1-worker.1").exists(),
+        dir.join("owned").join("gh-job-42.1").exists(),
         "JobOwned must create the ownership marker before StartJob"
     );
-    if let Some(pid) = velnor_runner::node::cleanup::read_owned_pid(&dir, "slot-1-worker", 1) {
+    if let Some(pid) = velnor_runner::node::cleanup::read_owned_pid(&dir, "gh-job-42", 1) {
         assert!(
             velnor_runner::node::prove::pid_is_alive(pid),
             "worker must still be running (not exited on beat --once)"
@@ -588,6 +638,36 @@ fn controller_claims_job_owned_before_spawning_worker() {
     } else {
         panic!("StartJob must record the worker pid in the ownership marker");
     }
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn controller_applies_dependency_false_without_github() {
+    let dir = scratch("dep");
+    let status = run_runner(
+        &dir,
+        &[
+            "controller",
+            "--state-dir",
+            dir.to_str().unwrap(),
+            "--scope",
+            "dep",
+            "--desired-ready",
+            "1",
+            "--surge",
+            "0",
+            "--once",
+            "--spawn-slots",
+            "false",
+        ],
+    );
+    assert!(status.success(), "{}", cmd_err(&dir));
+    let state = Journal::open(dir.join("journal.db"))
+        .unwrap()
+        .load_state()
+        .unwrap();
+    assert!(!state.github_reachable, "{state:?}");
+    assert!(state.jobs.is_empty(), "{:?}", state.jobs);
     std::fs::remove_dir_all(dir).ok();
 }
 

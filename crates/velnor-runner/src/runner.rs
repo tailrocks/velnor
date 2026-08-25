@@ -159,6 +159,29 @@ fn in_flight_job_path(config_dir: &Path) -> PathBuf {
     config_dir.join("in-flight-job.json")
 }
 
+fn accept_run_service_job_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    github_job_id: &str,
+) -> Result<()> {
+    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let state = journal
+        .load_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    if state.slots.is_empty() {
+        return Ok(());
+    }
+    let slot_id = crate::node::complete::infer_slot_id(&journal, config_dir)
+        .ok_or_else(|| anyhow::anyhow!("no slot accepted GitHub job {github_job_id}"))?;
+    crate::node::complete::accept_job(
+        &mut journal,
+        &velnor_model::JobId(github_job_id.to_owned()),
+        &slot_id,
+    )?;
+    Ok(())
+}
+
 fn persist_in_flight_job(
     config_dir: &Path,
     run_service_job: &RunServiceJobContext,
@@ -3325,6 +3348,7 @@ async fn handle_job_request(
     hydrate_github_variables_from_context(&mut job, &early_context);
     let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
     persist_in_flight_job(config_dir, &run_service_job, &job)?;
+    accept_run_service_job_in_journal(&run_service_job.journal_dir, config_dir, &job.job_id)?;
 
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
@@ -9064,6 +9088,7 @@ mod tests {
             name: Some("velnor-test-slot-1".to_string()),
             status: Some(status.to_string()),
             busy: Some(false),
+            labels: Vec::new(),
         }
     }
 
@@ -9454,6 +9479,7 @@ mod tests {
             name: Some("velnor-test-slot-1".to_string()),
             status: None,
             busy: None,
+            labels: Vec::new(),
         };
         assert_eq!(
             assess_registry_lookup(Some(&runner), 0),
