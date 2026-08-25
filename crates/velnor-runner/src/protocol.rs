@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fmt,
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 use url::Url;
@@ -1172,9 +1173,9 @@ impl RegistrationClient {
     }
 
     /// Look up one runner registration by id. `Ok(None)` means GitHub no
-    /// longer knows the runner (404). Uses the curl transport because this is
-    /// called periodically from every idle daemon slot (reqwest/hyper draws
-    /// TLS-fingerprint throttling under that load).
+    /// longer knows the runner (404). Curl is the production default because
+    /// reqwest/hyper has drawn TLS-fingerprint throttling under idle-slot load;
+    /// `VELNOR_GITHUB_HTTP_TRANSPORT=native` enables the pooled canary path.
     pub async fn get_runner(
         &self,
         scope: &GitHubScope,
@@ -1182,7 +1183,7 @@ impl RegistrationClient {
         runner_id: i64,
     ) -> Result<Option<ListedRunner>> {
         let url = scope.runner_url(runner_id)?;
-        let (status, body) = curl_json_request("GET", url.as_str(), pat, None, 30).await?;
+        let (status, body) = github_json_request("GET", url.as_str(), pat, None, 30).await?;
         parse_runner_lookup(status, &body)
     }
 
@@ -1253,14 +1254,101 @@ impl RegistrationClient {
     }
 }
 
-/// Make an HTTP request via curl subprocess. GitHub's infrastructure applies TLS-fingerprint-based
-/// throttling to reqwest/hyper connections; curl (LibreSSL) is not affected.
-/// Returns (http_status_code, response_body_string).
+/// Transport selector for GitHub JSON requests.
+///
+/// Curl remains the production default because GitHub has historically
+/// throttled the native TLS fingerprint under concurrent Velnor load. The
+/// native path is an explicit canary so it can be measured and rolled back by
+/// removing one daemon environment value, without changing workflow behavior.
+pub const GITHUB_HTTP_TRANSPORT_ENV: &str = "VELNOR_GITHUB_HTTP_TRANSPORT";
+
+pub fn github_http_transport() -> &'static str {
+    match std::env::var(GITHUB_HTTP_TRANSPORT_ENV)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "native" | "reqwest" => "native",
+        _ => "curl",
+    }
+}
+
+/// Make an authenticated JSON request using the selected GitHub transport.
+/// Returns `(http_status_code, response_body_string)`.
+pub async fn github_json_request(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<(u16, String)> {
+    if github_http_transport() == "native" {
+        native_json_request(method, url, bearer_token, json_body, max_time_secs).await
+    } else {
+        curl_json_request(method, url, bearer_token, json_body, max_time_secs).await
+    }
+}
+
+fn native_http_client() -> Result<Client> {
+    static CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| {
+        Client::builder()
+            .user_agent(RUNNER_USER_AGENT)
+            .use_native_tls()
+            .tcp_keepalive(None)
+            .connection_verbose(false)
+            .build()
+            .map_err(|error| format!("build native GitHub HTTP client: {error}"))
+    }) {
+        Ok(client) => Ok(client.clone()),
+        Err(error) => bail!("{error}"),
+    }
+}
+
+async fn native_json_request(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<(u16, String)> {
+    let method_name = method.to_string();
+    let method = Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("parse GitHub HTTP method '{method}'"))?;
+    let client = native_http_client()?;
+    let mut request = client
+        .request(method, url)
+        .bearer_auth(bearer_token)
+        .header(USER_AGENT, RUNNER_USER_AGENT)
+        .header(ACCEPT, "application/json")
+        .timeout(std::time::Duration::from_secs(max_time_secs));
+    if let Some(body) = json_body {
+        request = request
+            .header("Content-Type", "application/json")
+            .body(body);
+    }
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .context("read native GitHub response body")?;
+    Ok((status, body))
+}
+
+/// Make an HTTP request via the curl subprocess. GitHub's infrastructure
+/// applies TLS-fingerprint-based throttling to reqwest/hyper connections;
+/// curl (LibreSSL) is the proven production fallback.
+/// Returns `(http_status_code, response_body_string)`.
 ///
 /// The Authorization header and request body are written to mode-0600 temp files
 /// and passed via `--config` / `--data @file` so they do not appear on argv
 /// (which is visible in `ps aux` and audit logs).
-pub async fn curl_json_request(
+async fn curl_json_request(
     method: &str,
     url: &str,
     bearer_token: &str,
@@ -1520,7 +1608,7 @@ impl BrokerClient {
         let url = broker_session_url(&self.base_url)?;
         let body = serde_json::to_string(session).context("serialize session")?;
         let (status, text) =
-            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+            github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if !(200..300).contains(&status) {
             return Err(github_api_error("create broker session", status, text));
         }
@@ -1530,7 +1618,7 @@ impl BrokerClient {
     pub async fn delete_session(&self) -> Result<()> {
         let url = broker_session_url(&self.base_url)?;
         let (status, text) =
-            curl_json_request("DELETE", url.as_str(), &self.bearer_token, None, 30).await?;
+            github_json_request("DELETE", url.as_str(), &self.bearer_token, None, 30).await?;
         if status != 0 && !(200..300).contains(&status) {
             return Err(github_api_error("delete broker session", status, text));
         }
@@ -1545,7 +1633,7 @@ impl BrokerClient {
     ) -> Result<BrokerPoll> {
         let url = broker_message_url(&self.base_url, session_id, status, disable_update)?;
         let (http_status, text) =
-            curl_json_request("GET", url.as_str(), &self.bearer_token, None, 70).await?;
+            github_json_request("GET", url.as_str(), &self.bearer_token, None, 70).await?;
         match classify_broker_poll(http_status, &text) {
             BrokerPollClass::Empty => Ok(BrokerPoll {
                 status: http_status,
@@ -1574,7 +1662,7 @@ impl BrokerClient {
         let url = broker_acknowledge_url(&self.base_url, session_id, status)?;
         let body = json!({ "runnerRequestId": runner_request_id }).to_string();
         let (http_status, text) =
-            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+            github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if http_status != 0 && !(200..300).contains(&http_status) {
             return Err(github_api_error(
                 "acknowledge broker runner request",
@@ -1628,7 +1716,7 @@ impl RunServiceClient {
         })
         .context("serialize acquire job request")?;
         let (status, text) =
-            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+            github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         if is_non_retriable_acquire_status(status_code) {
             return Ok(AcquireJobOutcome::Skipped {
@@ -1655,7 +1743,7 @@ impl RunServiceClient {
         let body = serde_json::to_string(&RenewJobRequest { plan_id, job_id })
             .context("serialize renew job request")?;
         let (status, text) =
-            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+            github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if !(200..300).contains(&status) {
             return Err(github_api_error("renew run-service job", status, text));
         }
@@ -1676,7 +1764,7 @@ impl RunServiceClient {
         let body = serde_json::to_string(&completion).context("serialize complete job request")?;
         let mut attempt: u32 = 1;
         loop {
-            let outcome = curl_json_request(
+            let outcome = github_json_request(
                 "POST",
                 url.as_str(),
                 &self.bearer_token,
@@ -3376,14 +3464,16 @@ impl TwirpResultsClient {
             workflow_job_run_backend_id,
             workflow_run_backend_id,
         };
-        // Route through curl: GitHub throttles reqwest/hyper by TLS fingerprint (native-tls/OpenSSL)
-        // under heavy concurrent load, which silently dropped step records (the
-        // job's step list went incomplete in the UI). curl (LibreSSL) is immune.
+        // Route through the selected transport: GitHub has throttled
+        // reqwest/hyper by TLS fingerprint (native-tls/OpenSSL) under heavy
+        // concurrent load, which silently dropped step records (the job's step
+        // list went incomplete in the UI). Curl remains the default fallback.
         // Retry a couple times so a transient blip never loses a step record.
         let body_json = serde_json::to_string(&body).context("serialize WorkflowStepsUpdate")?;
         let mut last_err = String::new();
         for attempt in 0..3 {
-            match curl_json_request("POST", &url, &self.token, Some(body_json.clone()), 30).await {
+            match github_json_request("POST", &url, &self.token, Some(body_json.clone()), 30).await
+            {
                 Ok((status, _)) if (200..300).contains(&status) => return Ok(()),
                 Ok((status, resp)) => last_err = format!("status={status}, body={resp}"),
                 Err(e) => last_err = e.to_string(),
@@ -3451,8 +3541,8 @@ impl TwirpResultsClient {
         // The two Twirp calls hit GitHub infra and are throttled by TLS
         // fingerprint under heavy concurrent load — if they drop, the step
         // renders with an EMPTY log body (less detail than GitHub). Route them
-        // through curl (LibreSSL, not throttled) and retry the whole flow so log
-        // content always lands. The PUT goes to Azure blob storage (not GitHub,
+        // through the selected transport and retry the whole flow so log content
+        // always lands. The PUT goes to Azure blob storage (not GitHub,
         // not throttled), so it stays on reqwest.
         let mut last_err = String::new();
         for attempt in 0..3 {
@@ -3553,7 +3643,7 @@ impl TwirpResultsClient {
         }
 
         let (status, body) =
-            curl_json_request("POST", get_url, &self.token, Some(get_body.to_string()), 30)
+            github_json_request("POST", get_url, &self.token, Some(get_body.to_string()), 30)
                 .await
                 .context("GetJobLogsSignedBlobURL request")?;
         if !(200..300).contains(&status) {
@@ -3596,7 +3686,7 @@ impl TwirpResultsClient {
         })
         .context("serialize CreateJobLogsMetadata")?;
         let (meta_status, meta_body_resp) =
-            curl_json_request("POST", meta_url, &self.token, Some(meta_body), 30)
+            github_json_request("POST", meta_url, &self.token, Some(meta_body), 30)
                 .await
                 .context("CreateJobLogsMetadata request")?;
         if !(200..300).contains(&meta_status) {
@@ -3639,9 +3729,9 @@ impl TwirpResultsClient {
             ok: bool,
         }
 
-        // 1. Get signed upload URL (curl — GitHub infra).
+        // 1. Get signed upload URL through the selected GitHub transport.
         let (status, body) =
-            curl_json_request("POST", get_url, &self.token, Some(get_body.to_string()), 30)
+            github_json_request("POST", get_url, &self.token, Some(get_body.to_string()), 30)
                 .await
                 .context("GetStepLogsSignedBlobURL request")?;
         if !(200..300).contains(&status) {
@@ -3671,7 +3761,7 @@ impl TwirpResultsClient {
             bail!("step log PUT failed: status={put_status}, body={body}");
         }
 
-        // 3. Finalize with metadata (curl — GitHub infra).
+        // 3. Finalize with metadata through the selected GitHub transport.
         let ts = {
             use time::{format_description::well_known::Rfc3339, OffsetDateTime};
             OffsetDateTime::now_utc()
@@ -3687,7 +3777,7 @@ impl TwirpResultsClient {
         })
         .context("serialize CreateStepLogsMetadata")?;
         let (meta_status, meta_body_resp) =
-            curl_json_request("POST", meta_url, &self.token, Some(meta_body), 30)
+            github_json_request("POST", meta_url, &self.token, Some(meta_body), 30)
                 .await
                 .context("CreateStepLogsMetadata request")?;
         if !(200..300).contains(&meta_status) {
@@ -4218,6 +4308,39 @@ pub fn download_artifacts_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_json_request_reuses_reqwest_transport_shape() {
+        use wiremock::{
+            matchers::{body_string, header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/github"))
+            .and(header("authorization", "Bearer test-token"))
+            .and(body_string(r#"{"hello":"world"}"#))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(r#"{"ok":true}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let result = native_json_request(
+            "POST",
+            &format!("{}/github", server.uri()),
+            "test-token",
+            Some(r#"{"hello":"world"}"#.to_string()),
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
+    }
 
     #[test]
     fn runner_delete_204_and_404_are_gone() {

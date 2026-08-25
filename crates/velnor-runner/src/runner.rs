@@ -6080,7 +6080,7 @@ async fn fetch_workflow_file(source: &WorkflowSourceContext, token: &str) -> Res
     }
     url.query_pairs_mut().append_pair("ref", &source.sha);
     let (status, body) =
-        crate::protocol::curl_json_request("GET", url.as_str(), token, None, 30).await?;
+        crate::protocol::github_json_request("GET", url.as_str(), token, None, 30).await?;
     if !(200..300).contains(&status) {
         bail!(
             "fetch workflow file failed: status={status}, repository={}, path={}, ref={}",
