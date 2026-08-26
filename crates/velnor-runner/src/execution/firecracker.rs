@@ -966,8 +966,25 @@ fn drive_vsock(
                     exit_code,
                 });
             }
-            VsockMessage::CommandFile { path, .. } => {
-                events.push(ExecutionEvent::CommandFile { path });
+            VsockMessage::CommandFile { path, bytes } => {
+                events.push(ExecutionEvent::CommandFile { path, bytes });
+            }
+            VsockMessage::ResultExport {
+                digest_sha256,
+                bytes,
+            } => {
+                let actual = crate::execution::hex_sha256(&bytes);
+                if actual != digest_sha256 {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.result_export",
+                        format!("digest {digest_sha256} != sha256(bytes) {actual}"),
+                    )
+                    .into());
+                }
+                events.push(ExecutionEvent::ResultExport {
+                    digest_sha256,
+                    bytes,
+                });
             }
             VsockMessage::Stdio { stream, bytes } => {
                 events.push(ExecutionEvent::Log {

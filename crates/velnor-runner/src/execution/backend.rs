@@ -29,6 +29,7 @@ pub struct ValidatedStep {
     pub id: String,
     pub script: String,
     pub action: Option<String>,
+    pub inputs: Vec<(String, String)>,
 }
 
 /// Admitted service container. Alias/ports stay GitHub-visible; no host socket.
@@ -91,6 +92,7 @@ impl ValidatedPlan {
                     id: step.id.clone(),
                     script: step.script.clone(),
                     action: step.action.clone(),
+                    inputs: guest_env(&step.inputs),
                 })
                 .collect(),
             timeout_ms: self.timeout_ms,
@@ -111,6 +113,7 @@ impl ValidatedPlan {
             cache: self
                 .cache
                 .iter()
+                .filter(|digest| digest.starts_with("sha256:") || digest.len() == 64)
                 .map(|digest| velnor_model::GuestCacheOp {
                     digest: digest.clone(),
                 })
@@ -140,6 +143,7 @@ impl ValidatedPlan {
                 id: "run".into(),
                 script: "echo run".into(),
                 action: None,
+                inputs: Vec::new(),
             }],
             job_container_image: "velnor/job-ubuntu:26.04".into(),
             services: vec![ValidatedService {
@@ -233,6 +237,7 @@ impl ValidatedPlan {
                     id: step.id.clone(),
                     script: step.script.clone(),
                     action: None,
+                    inputs: Vec::new(),
                 })
                 .collect(),
             job_container_image: docker_image.into(),
@@ -293,6 +298,38 @@ fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
             _ => String::new(),
         },
         action: executable_action(step),
+        inputs: executable_inputs(step),
+    }
+}
+
+fn executable_inputs(step: &crate::executor::ExecutableStep) -> Vec<(String, String)> {
+    match step {
+        crate::executor::ExecutableStep::Checkout(plan) => {
+            let mut inputs = vec![("clone_url".into(), plan.clone_url.clone())];
+            if let Some(version) = &plan.version {
+                inputs.push(("version".into(), version.clone()));
+            }
+            let dest = plan.destination.to_string_lossy();
+            inputs.push((
+                "destination".into(),
+                if dest.starts_with("/__w") {
+                    dest.into_owned()
+                } else {
+                    format!("/__w/{}", dest.trim_start_matches('/'))
+                },
+            ));
+            if let Some(depth) = plan.fetch_depth {
+                inputs.push(("fetch_depth".into(), depth.to_string()));
+            }
+            inputs
+        }
+        crate::executor::ExecutableStep::Native { invocation, .. } => invocation
+            .inputs
+            .iter()
+            .filter(|(name, value)| !name.contains("docker.sock") && !value.contains("docker.sock"))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -391,6 +428,32 @@ fn plan_artifacts(steps: &[crate::executor::ExecutableStep]) -> Vec<(String, Str
         .collect()
 }
 
+fn result_export_outputs(bytes: &[u8]) -> Option<Vec<(String, String)>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    Some(
+        value
+            .get("outputs")?
+            .as_array()?
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry.get("name")?.as_str()?.to_string(),
+                    entry.get("value")?.as_str()?.to_string(),
+                ))
+            })
+            .collect(),
+    )
+}
+
+fn result_export_environment_url(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("environment_url")?
+        .as_str()
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn executable_action(step: &crate::executor::ExecutableStep) -> Option<String> {
     match step {
         crate::executor::ExecutableStep::Script(_) => None,
@@ -418,7 +481,9 @@ pub struct ExecutionOutcome {
     pub log_lines: Vec<String>,
     pub masked: bool,
     pub command_file: Option<String>,
+    pub command_file_bytes: Vec<(String, Vec<u8>)>,
     pub outputs: Vec<(String, String)>,
+    pub environment_url: Option<String>,
     pub annotations: Vec<String>,
     pub summary: String,
     pub cache: Vec<String>,
@@ -440,10 +505,15 @@ pub enum ExecutionEvent {
     },
     CommandFile {
         path: String,
+        bytes: Vec<u8>,
     },
     Output {
         name: String,
         value: String,
+    },
+    ResultExport {
+        digest_sha256: String,
+        bytes: Vec<u8>,
     },
     JobCompleted {
         conclusion: JobConclusion,
@@ -748,17 +818,31 @@ impl BackendSession {
                 _ => None,
             })
             .collect();
-        if outputs.is_empty() {
-            outputs.clone_from(&self.plan_outputs);
-        }
-        let command_file = self
+        let command_file_bytes: Vec<(String, Vec<u8>)> = self
             .events
             .iter()
-            .find_map(|event| match event {
-                ExecutionEvent::CommandFile { path } => Some(path.clone()),
+            .filter_map(|event| match event {
+                ExecutionEvent::CommandFile { path, bytes } => Some((path.clone(), bytes.clone())),
                 _ => None,
             })
+            .collect();
+        let command_file = command_file_bytes
+            .first()
+            .map(|(path, _)| path.clone())
             .or_else(|| self.plan_command_files.first().cloned());
+        let environment_url = self.events.iter().find_map(|event| match event {
+            ExecutionEvent::ResultExport { bytes, .. } => result_export_environment_url(bytes),
+            _ => None,
+        });
+        let exported_outputs = self.events.iter().find_map(|event| match event {
+            ExecutionEvent::ResultExport { bytes, .. } => result_export_outputs(bytes),
+            _ => None,
+        });
+        if let Some(exported) = exported_outputs {
+            outputs = exported;
+        } else if outputs.is_empty() {
+            outputs.clone_from(&self.plan_outputs);
+        }
         Ok(ExecutionOutcome {
             conclusion: conclusion.as_str(),
             exit_code,
@@ -767,7 +851,9 @@ impl BackendSession {
                 |event| matches!(event, ExecutionEvent::Log { line, .. } if line.contains("***")),
             ),
             command_file,
+            command_file_bytes,
             outputs,
+            environment_url,
             annotations: self.plan_annotations.clone(),
             summary: self.plan_summary.clone(),
             cache: self.plan_cache.clone(),
@@ -812,7 +898,9 @@ impl BackendSession {
             log_lines: Vec::new(),
             masked: false,
             command_file: self.plan_command_files.first().cloned(),
+            command_file_bytes: Vec::new(),
             outputs: self.plan_outputs.clone(),
+            environment_url: None,
             annotations: self.plan_annotations.clone(),
             summary: self.plan_summary.clone(),
             cache: self.plan_cache.clone(),

@@ -10,6 +10,7 @@ mod cache_transport;
 mod docker;
 mod firecracker;
 mod guest;
+mod guest_actions;
 mod guest_agent;
 mod guest_image;
 mod guest_runtime;
@@ -64,9 +65,18 @@ pub use unix_api::UnixFirecrackerClient;
 /// # Errors
 /// Plan decode or guest Docker failure.
 pub fn run_guest_plan_bytes(plan_bytes: &[u8]) -> Result<i32, String> {
+    Ok(run_guest_plan_with_events(plan_bytes)?.0)
+}
+
+/// Decode a vsock plan, run it on guest Docker, and return result-bridge events.
+///
+/// # Errors
+/// Plan decode or guest Docker failure.
+pub fn run_guest_plan_with_events(plan_bytes: &[u8]) -> Result<(i32, Vec<ExecutionEvent>), String> {
     let mut runner = crate::executor::ProcessCommandRunner;
     let mut events = Vec::new();
-    handle_delivered_plan(plan_bytes, &mut runner, &mut events)
+    let code = handle_delivered_plan(plan_bytes, &mut runner, &mut events)?;
+    Ok((code, events))
 }
 
 /// Production GitHub job engine owned by the Docker backend.
