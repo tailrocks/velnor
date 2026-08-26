@@ -80,6 +80,7 @@ const BROKER_SESSION_CREATE_MAX_ATTEMPTS: u32 = 5;
 const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
 const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const BROKER_HANDOFF_START_GRACE: Duration = Duration::from_secs(30);
 
 // Idle-slot health (master-plan P1.9, 2026-06-11 zombie-fleet incident).
 // Broker poll success alone is NOT health: GitHub's runner registry can drop
@@ -964,7 +965,7 @@ pub(crate) struct ScopeBrokerSession {
     current_broker_url: String,
     session_id: String,
     stored: StoredRunnerConfig,
-    pending_completion: Option<(PathBuf, String)>,
+    pending_completion: Option<(PathBuf, String, Instant)>,
     retry_at: tokio::time::Instant,
     forensics: SlotForensics,
 }
@@ -1036,9 +1037,17 @@ impl ScopeBrokerSession {
         if tokio::time::Instant::now() < self.retry_at {
             return Ok(ScopeBrokerPoll::Idle);
         }
-        if let Some((path, nonce)) = self.pending_completion.take() {
+        if let Some((path, nonce, started)) = self.pending_completion.take() {
             if crate::node::handoff::read_completion(&path, &nonce, self.generation).is_err() {
-                self.pending_completion = Some((path, nonce));
+                let worker_alive =
+                    crate::node::cleanup::read_owned_pid(state_dir, &nonce, self.generation.0)
+                        .is_some_and(crate::node::prove::pid_is_alive);
+                if started.elapsed() >= BROKER_HANDOFF_START_GRACE && !worker_alive {
+                    anyhow::bail!(
+                        "broker assignment {nonce} has no live worker or completion marker"
+                    );
+                }
+                self.pending_completion = Some((path, nonce, started));
                 return Ok(ScopeBrokerPoll::Idle);
             }
             let _ = fs::remove_file(path);
@@ -1054,19 +1063,16 @@ impl ScopeBrokerSession {
         }) {
             return Ok(ScopeBrokerPoll::Stopped);
         }
-        let message = poll_broker_step(
-            &mut self.broker,
-            &self.session_id,
-            RunnerStatus::Online,
-            self.stored.settings.disable_update,
-            &signals.broker_metrics,
-        )
-        .await?;
-        signals
-            .recovery
-            .lock()
-            .await
-            .recovered(Duration::from_secs(crate::node::controller::epoch_now()));
+        let message = tokio::select! {
+            result = poll_broker_step(
+                &mut self.broker,
+                &self.session_id,
+                RunnerStatus::Online,
+                self.stored.settings.disable_update,
+                &signals.broker_metrics,
+            ) => result?,
+            _ = wait_for_drain_signal() => return Ok(ScopeBrokerPoll::Stopped),
+        };
         let Some(message) = message else {
             return Ok(ScopeBrokerPoll::Idle);
         };
@@ -1122,7 +1128,7 @@ impl ScopeBrokerSession {
         })
         .await
         .context("deliver broker assignment to controller")?;
-        self.pending_completion = Some((done_path.clone(), nonce));
+        self.pending_completion = Some((done_path.clone(), nonce, Instant::now()));
         signals.reconcile_notify.notify_one();
         Ok(ScopeBrokerPoll::Idle)
     }
@@ -1144,6 +1150,12 @@ impl ScopeBrokerSession {
     }
 }
 
+async fn wait_for_drain_signal() {
+    while !draining() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct BrokerMetrics {
     pub requests: AtomicU64,
@@ -1152,6 +1164,38 @@ pub(crate) struct BrokerMetrics {
     pub errors: AtomicU64,
     pub error_statuses: std::sync::Mutex<std::collections::BTreeMap<u16, u64>>,
     pub latency_ms: AtomicU64,
+    pub cpu_user_us: AtomicU64,
+    pub cpu_system_us: AtomicU64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProcessCpuTime {
+    user_us: u64,
+    system_us: u64,
+}
+
+fn process_cpu_time() -> ProcessCpuTime {
+    #[cfg(unix)]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: `getrusage` initializes the provided rusage structure when
+        // it returns success; the zeroed fallback is valid for the fields read.
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if result == 0 {
+            // SAFETY: success above initialized `usage`.
+            let usage = unsafe { usage.assume_init() };
+            let user_us = u64::try_from(usage.ru_utime.tv_sec)
+                .unwrap_or_default()
+                .saturating_mul(1_000_000)
+                .saturating_add(u64::try_from(usage.ru_utime.tv_usec).unwrap_or_default());
+            let system_us = u64::try_from(usage.ru_stime.tv_sec)
+                .unwrap_or_default()
+                .saturating_mul(1_000_000)
+                .saturating_add(u64::try_from(usage.ru_stime.tv_usec).unwrap_or_default());
+            return ProcessCpuTime { user_us, system_us };
+        }
+    }
+    ProcessCpuTime::default()
 }
 
 #[derive(Default)]
@@ -1225,13 +1269,29 @@ pub(crate) struct BrokerMetricsSnapshot {
     pub errors: u64,
     pub error_statuses: std::collections::BTreeMap<u16, u64>,
     pub latency_ms: u64,
+    pub cpu_user_us: u64,
+    pub cpu_system_us: u64,
 }
 
 impl BrokerMetrics {
-    fn record(&self, result: &Result<crate::protocol::BrokerPoll>, elapsed: Duration) {
+    fn record(
+        &self,
+        result: &Result<crate::protocol::BrokerPoll>,
+        elapsed: Duration,
+        cpu_before: ProcessCpuTime,
+    ) {
         self.requests.fetch_add(1, Ordering::Relaxed);
         self.latency_ms.fetch_add(
             u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let cpu_after = process_cpu_time();
+        self.cpu_user_us.fetch_add(
+            cpu_after.user_us.saturating_sub(cpu_before.user_us),
+            Ordering::Relaxed,
+        );
+        self.cpu_system_us.fetch_add(
+            cpu_after.system_us.saturating_sub(cpu_before.system_us),
             Ordering::Relaxed,
         );
         match result {
@@ -1265,6 +1325,8 @@ impl BrokerMetrics {
                 |statuses| statuses.clone(),
             ),
             latency_ms: self.latency_ms.load(Ordering::Relaxed),
+            cpu_user_us: self.cpu_user_us.load(Ordering::Relaxed),
+            cpu_system_us: self.cpu_system_us.load(Ordering::Relaxed),
         }
     }
 }
@@ -3729,10 +3791,11 @@ async fn poll_broker_step(
     metrics: &BrokerMetrics,
 ) -> Result<Option<crate::protocol::TaskAgentMessage>> {
     let started = Instant::now();
+    let cpu_before = process_cpu_time();
     let result = broker
         .get_runner_message(session_id, status, disable_update)
         .await;
-    metrics.record(&result, started.elapsed());
+    metrics.record(&result, started.elapsed(), cpu_before);
     Ok(result?.message)
 }
 

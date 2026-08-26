@@ -44,6 +44,7 @@ pub struct RecoveryCoordinator {
     retry_budget_used: u32,
     retry_at: Duration,
     quarantine_until: Option<Duration>,
+    last_error_at: Option<Duration>,
 }
 
 impl Default for RecoveryCoordinator {
@@ -54,6 +55,7 @@ impl Default for RecoveryCoordinator {
             retry_budget_used: 0,
             retry_at: Duration::ZERO,
             quarantine_until: None,
+            last_error_at: None,
         }
     }
 }
@@ -95,6 +97,10 @@ impl RecoveryCoordinator {
                 RecoveryAction::None
             }
             RecoverySignal::Error(BrokerPollErrorClass::Authentication) => {
+                if self.last_error_at == Some(now) {
+                    return RecoveryAction::None;
+                }
+                self.last_error_at = Some(now);
                 if self.state == RecoveryState::Backoff {
                     return self.schedule_retry(now);
                 }
@@ -103,6 +109,10 @@ impl RecoveryCoordinator {
                 RecoveryAction::RefreshCredentials
             }
             RecoverySignal::Error(BrokerPollErrorClass::MissingSession) => {
+                if self.last_error_at == Some(now) {
+                    return RecoveryAction::None;
+                }
+                self.last_error_at = Some(now);
                 if self.state == RecoveryState::MissingSession {
                     return self.schedule_retry(now);
                 }
@@ -115,7 +125,13 @@ impl RecoveryCoordinator {
             | RecoverySignal::Error(BrokerPollErrorClass::Client)
             | RecoverySignal::Error(BrokerPollErrorClass::RateLimited)
             | RecoverySignal::Error(BrokerPollErrorClass::Server)
-            | RecoverySignal::Error(BrokerPollErrorClass::Transport) => self.schedule_retry(now),
+            | RecoverySignal::Error(BrokerPollErrorClass::Transport) => {
+                if self.last_error_at == Some(now) {
+                    return RecoveryAction::None;
+                }
+                self.last_error_at = Some(now);
+                self.schedule_retry(now)
+            }
         }
     }
 
@@ -135,6 +151,7 @@ impl RecoveryCoordinator {
         self.retry_budget_used = 0;
         self.retry_at = now;
         self.quarantine_until = None;
+        self.last_error_at = None;
     }
 
     fn schedule_retry(&mut self, now: Duration) -> RecoveryAction {
@@ -258,5 +275,16 @@ mod tests {
             assert!(coordinator.retry_at() <= now + MAX_BACKOFF);
             assert!(coordinator.retry_streak() <= MAX_RETRY_STREAK);
         }
+    }
+
+    #[test]
+    fn sibling_failures_same_control_second_consume_one_retry_budget() {
+        let mut coordinator = RecoveryCoordinator::default();
+        let now = Duration::from_secs(500);
+        coordinator.observe(RecoverySignal::Error(BrokerPollErrorClass::Server), now);
+        coordinator.observe(RecoverySignal::Error(BrokerPollErrorClass::Server), now);
+        assert_eq!(coordinator.retry_budget_used(), 1);
+        assert_eq!(coordinator.retry_streak(), 1);
+        assert_eq!(coordinator.state(), RecoveryState::Backoff);
     }
 }

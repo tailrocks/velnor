@@ -36,7 +36,7 @@ isolation tradeoff is allowed.
 - [x] SQLite transaction/commit timing, lock timing, WAL size, and journal size are exposed.
 - [x] Broker request/status/latency and JIT create/delete status/latency are emitted.
 - [x] Registration/session generation, retry streak/deadline, budget, and quarantine are observable.
-- [ ] CPU attribution by journal, filesystem, GitHub, broker, and child-supervision phase is measured.
+- [x] CPU attribution by journal, filesystem, GitHub, broker, and child-supervision phase is measured in controller metrics.
 - [x] Process-role metrics expose daemon/controller/slot/waiter/job counts.
 - [x] Health exposes jobs, idle slots, recovery state, and resource safety; doctor/status integration still needs proof.
 - [ ] Deterministic zero-job/high-CPU reproduction harness is run and recorded.
@@ -150,6 +150,9 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - `cargo nextest run --workspace`: 1,384/1,384 passed after the scope event-loop and retry changes.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed after the scope event-loop changes.
 - `cargo nextest run -p velnor-runner --test node_arch`: 14/14 passed, including live idle-controller zero-worker and one-event-loop source invariants.
+- Current follow-up adds process CPU attribution, scope recovery gating/deduplication, drain cancellation, and dead-handoff detection; verification pending.
+- Follow-up verification: clippy passed; recovery dedup test and node architecture tests passed. Full workspace nextest passed 1,387/1,387.
+- Recovery now gates all session opens/polls, deduplicates same-cycle sibling failures, cancels long polls on drain, bounds session DELETE wait, supervises manager restart, and detects dead handoff workers.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed after `cc03e0c`.
 - `cargo nextest run -p velnor-runner -p velnor-control -p velnor-model`: 1,163/1,163 passed after `cc03e0c`.
 - Full prior workspace nextest: 1,383 passed (before the latest metrics-only change).

@@ -266,6 +266,7 @@ struct ControllerMetrics {
     journal: JournalStats,
     broker: crate::runner::BrokerMetricsSnapshot,
     jit: JitMetrics,
+    cpu: CpuAttribution,
     #[serde(skip)]
     durations_ms: VecDeque<u64>,
     #[serde(skip)]
@@ -281,6 +282,61 @@ struct DurationQuantiles {
     p50: u64,
     p95: u64,
     p99: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+struct CpuPhase {
+    user_us: u64,
+    system_us: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct CpuAttribution {
+    journal: CpuPhase,
+    filesystem: CpuPhase,
+    github: CpuPhase,
+    broker: CpuPhase,
+    child_supervision: CpuPhase,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ControllerCpuTime {
+    user_us: u64,
+    system_us: u64,
+}
+
+fn controller_cpu_time() -> ControllerCpuTime {
+    #[cfg(unix)]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: `getrusage` initializes the structure on success.
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if result == 0 {
+            // SAFETY: success above initialized `usage`.
+            let usage = unsafe { usage.assume_init() };
+            return ControllerCpuTime {
+                user_us: u64::try_from(usage.ru_utime.tv_sec)
+                    .unwrap_or_default()
+                    .saturating_mul(1_000_000)
+                    .saturating_add(u64::try_from(usage.ru_utime.tv_usec).unwrap_or_default()),
+                system_us: u64::try_from(usage.ru_stime.tv_sec)
+                    .unwrap_or_default()
+                    .saturating_mul(1_000_000)
+                    .saturating_add(u64::try_from(usage.ru_stime.tv_usec).unwrap_or_default()),
+            };
+        }
+    }
+    ControllerCpuTime::default()
+}
+
+fn account_cpu(phase: &mut CpuPhase, before: ControllerCpuTime) {
+    let after = controller_cpu_time();
+    phase.user_us = phase
+        .user_us
+        .saturating_add(after.user_us.saturating_sub(before.user_us));
+    phase.system_us = phase
+        .system_us
+        .saturating_add(after.system_us.saturating_sub(before.system_us));
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -307,6 +363,7 @@ impl ControllerMetrics {
         journal: &JournalStats,
         broker: &crate::runner::BrokerMetricsSnapshot,
         jit: &JitMetrics,
+        cpu: &CpuAttribution,
     ) {
         self.schema_version = 1;
         self.sequence = self.sequence.saturating_add(1);
@@ -339,6 +396,11 @@ impl ControllerMetrics {
         self.journal = journal.clone();
         self.broker = broker.clone();
         self.jit = jit.clone();
+        self.cpu = cpu.clone();
+        self.cpu.broker = CpuPhase {
+            user_us: broker.cpu_user_us,
+            system_us: broker.cpu_system_us,
+        };
         let event_total = journal
             .events
             .values()
@@ -400,25 +462,44 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut pacing = GithubPacing::default();
     let mut metrics = ControllerMetrics::default();
     let mut jit_metrics = JitMetrics::default();
+    let mut cpu = CpuAttribution::default();
     let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
     let recovery = Arc::new(Mutex::new(RecoveryCoordinator::default()));
     let broker_metrics = Arc::new(crate::runner::BrokerMetrics::default());
     let reconcile_notify = Arc::new(Notify::new());
-    let manager_task = tokio::spawn(run_scope_broker_manager(
+    let mut manager_task = tokio::spawn(run_scope_broker_manager(
         args.clone(),
-        assignment_tx,
+        assignment_tx.clone(),
         recovery.clone(),
         reconcile_notify.clone(),
         broker_metrics.clone(),
     ));
     let mut ready_announced = false;
     loop {
+        if manager_task.is_finished() {
+            match manager_task.await {
+                Ok(()) => eprintln!("scope broker manager exited; restarting"),
+                Err(error) => eprintln!("scope broker manager stopped unexpectedly: {error}"),
+            }
+            recovery.lock().await.observe(
+                RecoverySignal::Error(crate::protocol::BrokerPollErrorClass::Transport),
+                Duration::from_secs(epoch_now()),
+            );
+            manager_task = tokio::spawn(run_scope_broker_manager(
+                args.clone(),
+                assignment_tx.clone(),
+                recovery.clone(),
+                reconcile_notify.clone(),
+                broker_metrics.clone(),
+            ));
+        }
         if crate::runner::draining() {
             let _ = manager_task.await;
             drain_children(&args.state_dir, &mut slots, &mut jobs, &mut job_generations).await?;
             return Ok(());
         }
         let started = Instant::now();
+        let supervision_cpu = controller_cpu_time();
         recover_pending_handoffs(&args, &journal, &mut jobs, &mut job_generations)?;
         drain_broker_assignments(
             &args,
@@ -427,6 +508,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut job_generations,
             &mut assignment_rx,
         )?;
+        account_cpu(&mut cpu.child_supervision, supervision_cpu);
         let (cycle, mut health) = reconcile_once(
             &args,
             &mut journal,
@@ -439,6 +521,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut pacing,
             &recovery,
             &mut jit_metrics,
+            &mut cpu,
         )
         .await?;
         let recovery = recovery.lock().await;
@@ -482,6 +565,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &journal.telemetry_stats(),
             &broker_metrics.snapshot(),
             &jit_metrics,
+            &cpu,
         );
         if let Err(error) = metrics.publish(&args.state_dir) {
             eprintln!("Warning: controller metrics publication failed: {error:#}");
@@ -530,7 +614,7 @@ impl ScopeBrokerManager {
         loop {
             if crate::runner::draining() {
                 for (_, session) in self.sessions.drain() {
-                    session.close().await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), session.close()).await;
                 }
                 return;
             }
@@ -557,6 +641,10 @@ impl ScopeBrokerManager {
             .await
             {
                 eprintln!("scope broker manager reconcile failed: {error:#}");
+            }
+            if !recovery.lock().await.due(Duration::from_secs(epoch_now())) {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
             }
             let signals = crate::runner::BrokerManagerSignals {
                 recovery: recovery.clone(),
@@ -605,12 +693,12 @@ impl ScopeBrokerManager {
                 .await;
             for id in stopped.lock().await.drain(..) {
                 if let Some(session) = self.sessions.remove(&id) {
-                    session.close().await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), session.close()).await;
                 }
             }
             for (id, wait) in failed.lock().await.drain(..) {
                 if let Some(session) = self.sessions.remove(&id) {
-                    session.close().await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), session.close()).await;
                 }
                 let delay = wait.max(Duration::from_secs(1));
                 self.open_retries
@@ -683,9 +771,17 @@ async fn ensure_broker_sessions(
     for id in stale {
         open_retries.remove(&id);
         if let Some(session) = managers.remove(&id) {
-            session.close().await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), session.close()).await;
         }
     }
+    let recovery_due = {
+        let coordinator = recovery.lock().await;
+        coordinator.due(Duration::from_secs(epoch_now()))
+    };
+    if !recovery_due {
+        return Ok(());
+    }
+    let desired_len = desired.len();
     for (id, (generation, index)) in desired {
         if managers.contains_key(&id) {
             continue;
@@ -730,11 +826,17 @@ async fn ensure_broker_sessions(
             }
         }
     }
+    if managers.len() == desired_len && open_retries.is_empty() {
+        recovery
+            .lock()
+            .await
+            .recovered(Duration::from_secs(epoch_now()));
+    }
     Ok(())
 }
 
 fn broker_open_retry_delay(streak: u32) -> Duration {
-    let shift = streak.saturating_sub(1).min(9);
+    let shift = streak.saturating_sub(1).min(10);
     (Duration::from_secs(1) * (1u32 << shift)).min(BROKER_OPEN_RETRY_MAX_BACKOFF)
 }
 
@@ -1033,8 +1135,10 @@ async fn reconcile_once(
     pacing: &mut GithubPacing,
     recovery: &Arc<Mutex<RecoveryCoordinator>>,
     jit_metrics: &mut JitMetrics,
+    cpu: &mut CpuAttribution,
 ) -> anyhow::Result<(LocalCycle, velnor_model::HealthDocument)> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
+    let journal_cpu = controller_cpu_time();
     let existing = journal.materialized_state()?;
     let permit_events = (1..=total).map(|index| {
         let id = slot_id(&args.scope, index as usize);
@@ -1057,9 +1161,11 @@ async fn reconcile_once(
     for command in effects {
         execute_effect(args, journal, slots, &mut *pacing, command).await?;
     }
+    account_cpu(&mut cpu.journal, journal_cpu);
     // Slot process recovery is supervision, not a durable state transition.
     // Keep checking the child boundary without re-journaling PermitReserved
     // (a dead child may leave the slot in Provisioning with the same permit).
+    let filesystem_cpu = controller_cpu_time();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
         let generation = existing
@@ -1071,14 +1177,20 @@ async fn reconcile_once(
     }
 
     ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
+    account_cpu(&mut cpu.filesystem, filesystem_cpu);
 
+    let github_cpu = controller_cpu_time();
     observe_github_and_routing(args, journal, pacing).await?;
+    account_cpu(&mut cpu.github, github_cpu);
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
+        let github_cpu = controller_cpu_time();
         reconcile_remote_registrations(args, journal, jobs, recovery).await?;
+        account_cpu(&mut cpu.github, github_cpu);
     }
 
+    let journal_cpu = controller_cpu_time();
     let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
     let executor = prove::observe_executor(&args.state_dir, execution.backend());
     let snapshot = journal.materialized_state()?;
@@ -1133,7 +1245,10 @@ async fn reconcile_once(
             command => execute_effect(args, journal, slots, &mut *pacing, command).await?,
         }
     }
+    let github_cpu = controller_cpu_time();
     register_runners(args, journal, pacing, registrations, Some(jit_metrics)).await?;
+    account_cpu(&mut cpu.github, github_cpu);
+    account_cpu(&mut cpu.journal, journal_cpu);
 
     // Controller-owned broker managers own the idle session lifecycle. The
     // controller only starts a transient child after receiving an assignment.
@@ -1816,6 +1931,7 @@ mod tests {
         assert_eq!(broker_open_retry_delay(3), Duration::from_secs(4));
         assert_eq!(broker_open_retry_delay(10), Duration::from_secs(512));
         assert_eq!(broker_open_retry_delay(11), Duration::from_secs(600));
+        assert_eq!(broker_open_retry_delay(12), Duration::from_secs(600));
         assert_eq!(broker_open_retry_delay(100), Duration::from_secs(600));
     }
 
@@ -1831,6 +1947,7 @@ mod tests {
             &JournalStats::default(),
             &crate::runner::BrokerMetricsSnapshot::default(),
             &JitMetrics::default(),
+            &CpuAttribution::default(),
         );
         let value = serde_json::to_value(metrics).unwrap();
         assert_eq!(value["slot_processes"], 16);
