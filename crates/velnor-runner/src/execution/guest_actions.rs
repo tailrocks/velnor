@@ -60,14 +60,6 @@ fn guest_action_script(step: &GuestStep, action: &str) -> Result<String, String>
     })
 }
 
-fn step_input<'a>(step: &'a GuestStep, name: &str) -> &'a str {
-    step.inputs
-        .iter()
-        .find(|input| input.name == name)
-        .map(|input| input.value.as_str())
-        .unwrap_or("")
-}
-
 fn guest_checkout_script(_step: &GuestStep) -> String {
     // Values arrive via `docker exec -e VELNOR_INPUT_*` so untrusted
     // checkout inputs never interpolate into the script text.
@@ -102,13 +94,23 @@ git -C "$dest" checkout --force FETCH_HEAD
     .to_string()
 }
 
-fn guest_cache_script(step: &GuestStep, output_name: &str) -> String {
-    let key = step_input(step, "key");
+fn guest_cache_script(_step: &GuestStep, output_name: &str) -> String {
     format!(
         r#"set -eu
-printf 'Cache not found for %s\n' {key:?}
-if [ -n "${{GITHUB_OUTPUT:-}}" ]; then
-  printf '%s=false\n' {output_name:?} >> "$GITHUB_OUTPUT"
+path="${{VELNOR_INPUT_path:-}}"
+if [ -z "$path" ]; then
+  path="${{VELNOR_CACHE_PATH:-}}"
+fi
+if [ -n "$path" ] && [ -e "$path" ]; then
+  printf 'Cache restored from digest-verified blob\n'
+  if [ -n "${{GITHUB_OUTPUT:-}}" ]; then
+    printf '%s=true\n' {output_name:?} >> "$GITHUB_OUTPUT"
+  fi
+else
+  printf 'Cache not found\n'
+  if [ -n "${{GITHUB_OUTPUT:-}}" ]; then
+    printf '%s=false\n' {output_name:?} >> "$GITHUB_OUTPUT"
+  fi
 fi
 exit 0
 "#

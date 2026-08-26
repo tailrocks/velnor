@@ -884,6 +884,17 @@ fn drive_vsock(
         .into());
     }
     let deadline = std::time::Instant::now() + timeout;
+    for cache in &expected.cache {
+        if cache.bytes.is_empty() {
+            continue;
+        }
+        vsock
+            .send(VsockMessage::ImportBlob {
+                digest_sha256: cache.digest.clone(),
+                bytes: cache.bytes.clone(),
+            })
+            .map_err(|detail| MicroVmPreflightFailure::new("vsock.import_blob", detail))?;
+    }
     vsock
         .send(message)
         .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?;
