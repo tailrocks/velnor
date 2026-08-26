@@ -50,7 +50,6 @@ struct PrivateTempFiles {
     dir: PathBuf,
     paths: Vec<PathBuf>,
 }
-
 impl PrivateTempFiles {
     fn new(_prefix: &str) -> Result<Self> {
         let dir = std::env::temp_dir().join("velnor-curl");
