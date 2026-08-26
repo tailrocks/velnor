@@ -28,10 +28,10 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
-/// Keep remote reconciliation well below the controller's 30s systemd
-/// watchdog. A stalled GitHub request must skip this observation pass, not
-/// starve the completed-cycle heartbeat and kill active job children.
-const REGISTRATION_RECONCILE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Reserve half of the controller's 30s watchdog budget for local journal,
+/// process, and health work. Every remote operation in one cycle shares this
+/// deadline; one slow API cannot consume the budget of later operations.
+const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -341,6 +341,7 @@ async fn reconcile_once(
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
 ) -> anyhow::Result<LocalCycle> {
+    let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
     let total = args.desired_ready.saturating_add(args.surge).max(1);
     let generation = Generation::INITIAL;
     let mut effects = Vec::new();
@@ -358,18 +359,27 @@ async fn reconcile_once(
         );
     }
     for command in effects {
-        execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?;
+        execute_effect(
+            args,
+            journal,
+            slots,
+            jobs,
+            &mut *pacing,
+            remote_deadline,
+            command,
+        )
+        .await?;
     }
 
     ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
 
-    observe_github_and_routing(args, journal, pacing).await?;
+    observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
         run_bounded_remote_reconciliation(
             reconcile_remote_registrations(args, journal, jobs),
-            REGISTRATION_RECONCILE_TIMEOUT,
+            remaining_remote_budget(remote_deadline),
         )
         .await?;
     }
@@ -428,10 +438,21 @@ async fn reconcile_once(
                 slot_id,
                 generation,
             } => registrations.push((slot_id, generation)),
-            command => execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?,
+            command => {
+                execute_effect(
+                    args,
+                    journal,
+                    slots,
+                    jobs,
+                    &mut *pacing,
+                    remote_deadline,
+                    command,
+                )
+                .await?
+            }
         }
     }
-    register_runners(args, journal, pacing, registrations).await?;
+    register_runners(args, journal, pacing, registrations, remote_deadline).await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
     reclaim_orphaned_jobs(args, journal)?;
@@ -456,6 +477,10 @@ async fn reconcile_once(
 
 /// Remote registration state is advisory. Keep a slow or wedged GitHub API
 /// from preventing the controller from completing its local supervision cycle.
+fn remaining_remote_budget(deadline: tokio::time::Instant) -> Duration {
+    deadline.saturating_duration_since(tokio::time::Instant::now())
+}
+
 async fn run_bounded_remote_reconciliation<F>(operation: F, timeout: Duration) -> anyhow::Result<()>
 where
     F: Future<Output = anyhow::Result<()>>,
@@ -478,6 +503,7 @@ async fn execute_effect(
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
     pacing: &mut GithubPacing,
+    remote_deadline: tokio::time::Instant,
     command: SideEffect,
 ) -> anyhow::Result<()> {
     match command {
@@ -488,7 +514,7 @@ async fn execute_effect(
         SideEffect::RegisterRunner {
             slot_id,
             generation,
-        } => register_runner(args, journal, pacing, slot_id, generation).await,
+        } => register_runner(args, journal, pacing, slot_id, generation, remote_deadline).await,
         SideEffect::StartJob { job_id, generation } => {
             maybe_spawn_job(args, journal, jobs, &job_id.0, generation.0, None)
         }
@@ -518,8 +544,16 @@ async fn register_runner(
     pacing: &mut GithubPacing,
     slot_id: SlotId,
     generation: Generation,
+    remote_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
-    register_runners(args, journal, pacing, vec![(slot_id, generation)]).await
+    register_runners(
+        args,
+        journal,
+        pacing,
+        vec![(slot_id, generation)],
+        remote_deadline,
+    )
+    .await
 }
 
 /// Configure independent, already-proven slots concurrently, then commit the
@@ -531,6 +565,7 @@ async fn register_runners(
     journal: &mut Journal,
     pacing: &mut GithubPacing,
     registrations: Vec<(SlotId, Generation)>,
+    remote_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
     if registrations.is_empty() {
         return Ok(());
@@ -557,9 +592,29 @@ async fn register_runners(
             let config_base = config_base.clone();
             async move {
                 let index = slot_index_from_id(&slot_id);
-                let result =
-                    crate::runner::jit_configure_one_slot(&exec, &config_base, index, slot_count)
-                        .await;
+                let timeout = remaining_remote_budget(remote_deadline);
+                let result = if timeout.is_zero() {
+                    Err(anyhow::anyhow!(
+                        "JIT registration skipped: controller remote budget exhausted"
+                    ))
+                } else {
+                    match tokio::time::timeout(
+                        timeout,
+                        crate::runner::jit_configure_one_slot(
+                            &exec,
+                            &config_base,
+                            index,
+                            slot_count,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!(
+                            "JIT registration timed out before controller remote budget expired"
+                        )),
+                    }
+                };
                 (slot_id, generation, result)
             }
         })
@@ -709,6 +764,7 @@ async fn observe_github_and_routing(
     args: &ControllerArgs,
     journal: &mut Journal,
     pacing: &mut GithubPacing,
+    remote_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
     let mut reachable = false;
     let mut dependency_observed = false;
@@ -760,15 +816,25 @@ async fn observe_github_and_routing(
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
             let now = tokio::time::Instant::now();
             if pacing.probe_due(now) {
-                let probe = prove::probe_github(prove::GitHubProbeRequest {
-                    url,
-                    token,
-                    policy: policy.as_ref(),
-                    pool_id: exec.pool_id,
-                    configured_labels: &exec.labels,
-                    configured_trust: &exec.trust_scope,
-                })
-                .await;
+                let probe = match tokio::time::timeout(
+                    remaining_remote_budget(remote_deadline),
+                    prove::probe_github(prove::GitHubProbeRequest {
+                        url,
+                        token,
+                        policy: policy.as_ref(),
+                        pool_id: exec.pool_id,
+                        configured_labels: &exec.labels,
+                        configured_trust: &exec.trust_scope,
+                    }),
+                )
+                .await
+                {
+                    Ok(probe) => probe,
+                    Err(_) => {
+                        eprintln!("GitHub probe timed out before controller remote budget expired");
+                        prove::GitHubProbe::default()
+                    }
+                };
                 if probe.rate_limited {
                     let reset = probe
                         .rate_limit_reset_epoch
@@ -1270,16 +1336,21 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_remote_reconciliation_does_not_block_local_cycle() {
-        let result = run_bounded_remote_reconciliation(
-            async {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                Ok(())
-            },
-            Duration::from_millis(1),
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_bounded_remote_reconciliation(
+                std::future::pending::<anyhow::Result<()>>(),
+                Duration::from_millis(1),
+            ),
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(Ok(()))));
+    }
+
+    #[test]
+    fn remote_budget_leaves_controller_watchdog_margin() {
+        assert!(CONTROLLER_REMOTE_BUDGET < Duration::from_secs(30));
     }
 
     #[tokio::test]
@@ -1358,9 +1429,14 @@ mod tests {
             spawn_slots: false,
         };
         let mut pacing = GithubPacing::default();
-        observe_github_and_routing(&args, &mut journal, &mut pacing)
-            .await
-            .unwrap();
+        observe_github_and_routing(
+            &args,
+            &mut journal,
+            &mut pacing,
+            tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET,
+        )
+        .await
+        .unwrap();
         let state = journal.load_state().unwrap();
         assert!(state.github_reachable, "{state:?}");
         let evidence: crate::node::prove::RoutingFields =
@@ -1581,18 +1657,28 @@ mod tests {
         let mut pacing = GithubPacing::default();
 
         // First tick: the 403 is observed, health degrades honestly.
-        observe_github_and_routing(&args, &mut journal, &mut pacing)
-            .await
-            .unwrap();
+        observe_github_and_routing(
+            &args,
+            &mut journal,
+            &mut pacing,
+            tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET,
+        )
+        .await
+        .unwrap();
         let state = journal.load_state().unwrap();
         assert!(!state.github_reachable, "{state:?}");
 
         // Simulate a burst of reconcile ticks inside the reset window: the
         // pacer must not send another request (Mock::expect(1) enforces it).
         for _ in 0..10 {
-            observe_github_and_routing(&args, &mut journal, &mut pacing)
-                .await
-                .unwrap();
+            observe_github_and_routing(
+                &args,
+                &mut journal,
+                &mut pacing,
+                tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET,
+            )
+            .await
+            .unwrap();
         }
         server.verify().await;
 

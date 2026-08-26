@@ -34,8 +34,9 @@ pub fn velnor_runner_display() -> String {
     format!("Velnor Runner/{VELNOR_VERSION} (protocol: {RUNNER_VERSION})")
 }
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
-const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 10;
-const GITHUB_CURL_MAX_TIME_SECS: u64 = 30;
+const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
+const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
+const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
@@ -756,6 +757,8 @@ impl OAuthClient {
                  header = \"Accept: application/json\"\n\
                  header = \"Content-Type: application/x-www-form-urlencoded\"\n\
                  request = POST\n\
+                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
                  silent\n\
                  write-out = \"\\n%{{http_code}}\"\n"
             );
@@ -886,7 +889,7 @@ impl RegistrationClient {
             .use_native_tls()
             .tcp_keepalive(None)
             .connection_verbose(false)
-            .timeout(Duration::from_secs(GITHUB_CURL_MAX_TIME_SECS))
+            .timeout(Duration::from_secs(10))
             .build()
             .context("build GitHub runner HTTP client")?;
         Ok(Self { http })
@@ -898,10 +901,10 @@ impl RegistrationClient {
         pat: &str,
         request: &GitHubJitConfigRequest,
     ) -> Result<GitHubJitConfigResponse> {
-        // Use curl for runner registration. GitHub's infrastructure applies TLS-fingerprint-based
-        // throttling that causes reqwest/hyper connections to hang for 120+ seconds without a
-        // response, while libcurl (LibreSSL) succeeds instantly. Using curl as a subprocess is
-        // the reliable workaround.
+        // Use curl for runner registration. GitHub's infrastructure applies
+        // TLS-fingerprint-based throttling to reqwest/hyper connections while
+        // libcurl (LibreSSL) succeeds reliably. The subprocess is time-bounded
+        // because registration runs inside a watchdog-supervised controller.
         let url = scope.jit_config_url.to_string();
         let body = serde_json::to_string(request).context("serialize JIT config request")?;
         let pat = pat.to_string();
@@ -913,7 +916,8 @@ impl RegistrationClient {
             if attempt > 0 {
                 let backoff = retry_delay
                     .take()
-                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5));
+                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5))
+                    .min(GITHUB_RETRY_SLEEP_MAX);
                 eprintln!(
                     "JIT config error (attempt {}/3), retrying in {}s",
                     attempt,
@@ -998,7 +1002,11 @@ impl RegistrationClient {
                         format!("{json_part}, stderr={stderr}"),
                         hint,
                     );
-                    if status == 409 {
+                    // Permission and quota failures cannot recover during
+                    // this attempt. Return immediately so controller pacing
+                    // owns the retry schedule; never sleep for an hour on a
+                    // GitHub reset header.
+                    if matches!(status, 403 | 429) || status == 409 {
                         return Err(last_err);
                     }
                     retry_delay = hint.delay(
@@ -4559,6 +4567,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
+    }
+
+    #[tokio::test]
+    async fn jit_rate_limit_returns_without_waiting_for_reset() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v3/orgs/tailrocks/actions/runners/generate-jitconfig",
+            ))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("retry-after", "3600")
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-reset", "4102444800")
+                    .set_body_string(r#"{"message":"rate limited"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let scope = GitHubScope::parse(&format!("{}/tailrocks", server.uri())).unwrap();
+        let request = GitHubJitConfigRequest {
+            name: "velnor-test".to_owned(),
+            runner_group_id: 1,
+            labels: vec!["velnor".to_owned()],
+            work_folder: None,
+        };
+        let started = std::time::Instant::now();
+        let error = RegistrationClient::new()
+            .unwrap()
+            .generate_jit_config(&scope, "test-token", &request)
+            .await
+            .unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "rate-limit retry waited too long: {error:#}"
+        );
+        assert_eq!(
+            error
+                .downcast_ref::<GitHubApiError>()
+                .map(|error| error.status),
+            Some(403)
+        );
     }
 
     #[test]
