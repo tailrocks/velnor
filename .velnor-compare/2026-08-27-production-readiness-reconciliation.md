@@ -77,7 +77,6 @@ cleanup gate remains open.
 | `Velnor` | `32989529327` | completed | cancelled | `20:37:17` | 15 |
 | `Velnor` | `32987778460` | completed | cancelled | `20:37:18` | 15 |
 | `tailrocks/velnor` | `33012336003` | 404 / unknown (prior/indexed: queued) | unknown | not recorded | not recorded; check suite `89435047597` |
-| `tailrocks/velnor` | `33012336003` | 404 / unknown (prior/indexed: queued) | unknown | not recorded | not recorded; check suite `89435047597` |
 
 ## Unresolved queue objects
 
@@ -102,7 +101,6 @@ clear the terminal-run, runner-registration, admission/readiness, dispatch, or
 verification gates. No further mutation occurred after the exact-target
 normal/force cancellation attempts, and no dispatch/rerun/rerequest/deletion/
 runner/workflow/policy mutation occurred.
-
 ## Current read-only refresh — 2026-08-26T23:30:38Z
 
 Successful read-only facts captured in this refresh:
