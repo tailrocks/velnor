@@ -5,6 +5,8 @@ kernel_version = "6.1.102"
 kernel_tarball_sha256 = "1ba5f93b411ead7587fe48b2eec6c656f6796d31f5e406d236913c77512497ec"
 # Firecracker-tested LTS class. Exact source:
 # https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.102.tar.xz
+# Ubuntu packages come from this immutable snapshot, not moving noble.
+ubuntu_snapshot = "https://snapshot.ubuntu.com/ubuntu/20260826T000000Z"
 
 [kconfig]
 required = [

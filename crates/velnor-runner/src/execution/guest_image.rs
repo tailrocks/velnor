@@ -8,6 +8,7 @@ use super::artifacts::{hex_sha256, ArtifactChecksums, FIRECRACKER_VERSION, JAILE
 use super::guest::{
     validate_built_kernel_config, validate_guest_toml, validate_kernel_config,
     validate_rootfs_packages, KERNEL_TARBALL_SHA256, KERNEL_VERSION, ROOTFS_PACKAGES,
+    UBUNTU_SNAPSHOT,
 };
 use super::HostFs;
 use crate::executor::{CommandResult, CommandRunner};
@@ -454,6 +455,7 @@ fn build_rootfs(
         "--components=main,universe".into(),
         "noble".into(),
         tree.display().to_string(),
+        UBUNTU_SNAPSHOT.into(),
     ]);
     let mmdebstrap = runner.run("env", &mmdebstrap_args);
     match mmdebstrap {
@@ -491,6 +493,7 @@ fn build_rootfs(
                     format!("--arch={deb_arch}"),
                     "noble".into(),
                     tree.display().to_string(),
+                    UBUNTU_SNAPSHOT.into(),
                 ],
                 "guest.rootfs",
             )?;

@@ -265,6 +265,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   Manifest pins were refreshed; candidate advances to `0.1.220` because
   `v0.1.219` is immutable. The moving-index reproducibility defect remains
   open and is not hidden by the release gate.
+- Release run `33014345046` reproduced different rootfs bytes again despite
+  refreshed pins, proving moving `noble` indexes are not release-safe. The
+  build code now uses immutable Ubuntu snapshot
+  `https://snapshot.ubuntu.com/ubuntu/20260826T000000Z` for both architectures
+  and validates the pin from `microvm/guest.toml`; guest-image tests pass.
+  Candidate advances to `0.1.221` because `v0.1.220` is immutable.
 
 ## Non-goals
 
