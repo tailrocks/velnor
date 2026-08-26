@@ -27,13 +27,42 @@ fail() {
 }
 
 require_package_transaction_lock() {
-  [ "${VELNOR_PACKAGE_TRANSACTION_LOCK_HELD:-}" = 1 ] \
-    || fail "refusing package configuration: run apt through the exclusive Velnor transaction-lock wrapper"
-  lock_status=0
-  /usr/bin/flock --exclusive --nonblock --conflict-exit-code 75 \
-    "$PACKAGE_TRANSACTION_LOCK" -c ':' || lock_status=$?
-  [ "$lock_status" -eq 75 ] \
-    || fail "refusing package configuration: $PACKAGE_TRANSACTION_LOCK is not held by the apt wrapper"
+  # The deployment wrapper opens fd 9, takes an exclusive flock on it, exports
+  # the fd number, and execs apt. A marker plus a second lock probe is not
+  # proof: it accepts an arbitrary environment value and cannot distinguish a
+  # conflicting shared lock from the wrapper's exclusive lock.
+  lock_fd=${VELNOR_PACKAGE_TRANSACTION_FD:-}
+  case "$lock_fd" in
+    ''|*[!0-9]*) fail "refusing package configuration: wrapper lock fd is missing or invalid" ;;
+    0|1|2) fail "refusing package configuration: wrapper lock fd must not be a standard stream" ;;
+  esac
+  lock_fd_path="/proc/self/fd/$lock_fd"
+  [ -e "$lock_fd_path" ] \
+    || fail "refusing package configuration: wrapper lock fd $lock_fd was not inherited"
+  lock_fd_target=$(readlink "$lock_fd_path" 2>/dev/null || true)
+  [ "$lock_fd_target" = "$PACKAGE_TRANSACTION_LOCK" ] \
+    || fail "refusing package configuration: wrapper fd $lock_fd is not $PACKAGE_TRANSACTION_LOCK"
+  lock_inode=$(stat -c '%i' "$PACKAGE_TRANSACTION_LOCK" 2>/dev/null || true)
+  [ -n "$lock_inode" ] \
+    || fail "refusing package configuration: cannot stat $PACKAGE_TRANSACTION_LOCK"
+  lock_mode=$(awk -v inode="$lock_inode" '
+    $2 == "FLOCK" && $4 == "WRITE" {
+      split($6, device_inode, ":")
+      if (device_inode[3] == inode) { print $4; exit }
+    }' /proc/locks 2>/dev/null || true)
+  [ "$lock_mode" = WRITE ] \
+    || fail "refusing package configuration: inherited fd has no exclusive lock for $PACKAGE_TRANSACTION_LOCK"
+}
+
+all_velnor_units_drained() {
+  # Recheck under the verified outer lock immediately before any package-owned
+  # filesystem or configuration side effect. Timers are included because an
+  # active timer can start an old doctor during package unpack/configure.
+  active_services_raw=$(systemctl list-units --type=service --all --no-legend --plain 'velnor*.service' 2>/dev/null) || return 1
+  active_timers_raw=$(systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer' 2>/dev/null) || return 1
+  active_units=$(printf '%s\n%s\n' "$active_services_raw" "$active_timers_raw" \
+    | awk '$3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
+  [ -z "$active_units" ]
 }
 
 microvm_verify_sha256() {
@@ -50,6 +79,10 @@ microvm_verify_sha256() {
 case "$1" in
   configure)
     require_package_transaction_lock
+    if [ -d /run/systemd/system ]; then
+      active_units=
+      all_velnor_units_drained || fail "refusing package configuration: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
+    fi
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
     install -d -m 0750 "$RELEASE_DIR" "$RELEASE_DIR/records"
     # Pre-010 packages may have left an empty concrete active directory. The

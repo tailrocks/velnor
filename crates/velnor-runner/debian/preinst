@@ -34,20 +34,36 @@ guardian_inactive() {
 }
 
 require_package_transaction_lock() {
-  # The deployment wrapper holds the exclusive lock for the full apt/dpkg
-  # transaction. A maintainer script cannot hold a descriptor past its own
-  # exit, so accepting a script-local lock would leave a replacement race.
-  [ "${VELNOR_PACKAGE_TRANSACTION_LOCK_HELD:-}" = 1 ] \
-    || fail "refusing package transaction: run apt through the exclusive Velnor transaction-lock wrapper"
+  # The deployment wrapper opens fd 9, takes an exclusive flock on it, exports
+  # the fd number, and execs apt. A marker plus a second lock probe is not
+  # proof: it accepts an arbitrary environment value and cannot distinguish a
+  # conflicting shared lock from the wrapper's exclusive lock.
+  lock_fd=${VELNOR_PACKAGE_TRANSACTION_FD:-}
+  case "$lock_fd" in
+    ''|*[!0-9]*) fail "refusing package transaction: wrapper lock fd is missing or invalid" ;;
+    0|1|2) fail "refusing package transaction: wrapper lock fd must not be a standard stream" ;;
+  esac
+  lock_fd_path="/proc/self/fd/$lock_fd"
+  [ -e "$lock_fd_path" ] \
+    || fail "refusing package transaction: wrapper lock fd $lock_fd was not inherited"
+  lock_fd_target=$(readlink "$lock_fd_path" 2>/dev/null || true)
+  [ "$lock_fd_target" = "$PACKAGE_TRANSACTION_LOCK" ] \
+    || fail "refusing package transaction: wrapper fd $lock_fd is not $PACKAGE_TRANSACTION_LOCK"
 
-  # Prove that another process currently owns the lock. The wrapper uses the
-  # non-forking parent only for service units; package deployment deliberately
-  # uses flock's waiting parent so it retains the lock until apt exits.
-  lock_status=0
-  /usr/bin/flock --exclusive --nonblock --conflict-exit-code 75 \
-    "$PACKAGE_TRANSACTION_LOCK" -c ':' || lock_status=$?
-  [ "$lock_status" -eq 75 ] \
-    || fail "refusing package transaction: $PACKAGE_TRANSACTION_LOCK is not held by the apt wrapper"
+  # Linux exposes flock mode in /proc/locks. Require a WRITE lock for this
+  # inode. This rejects a shared-lock spoof (READ) and, together with the
+  # inherited fd/path check above, binds the kernel proof to the apt wrapper's
+  # open file description without acquiring a new lock in this script.
+  lock_inode=$(stat -c '%i' "$PACKAGE_TRANSACTION_LOCK" 2>/dev/null || true)
+  [ -n "$lock_inode" ] \
+    || fail "refusing package transaction: cannot stat $PACKAGE_TRANSACTION_LOCK"
+  lock_mode=$(awk -v inode="$lock_inode" '
+    $2 == "FLOCK" && $4 == "WRITE" {
+      split($6, device_inode, ":")
+      if (device_inode[3] == inode) { print $4; exit }
+    }' /proc/locks 2>/dev/null || true)
+  [ "$lock_mode" = WRITE ] \
+    || fail "refusing package transaction: inherited fd has no exclusive lock for $PACKAGE_TRANSACTION_LOCK"
 }
 
 all_velnor_units_drained() {

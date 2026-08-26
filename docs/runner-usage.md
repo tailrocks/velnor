@@ -14,9 +14,12 @@ version:
 sudo apt-get update
 apt-cache policy velnor-runner
 sudo install -d -m 0750 /run/velnor
-sudo env VELNOR_PACKAGE_TRANSACTION_LOCK_HELD=1 \
-  /usr/bin/flock --exclusive --nonblock /run/velnor/package-transaction.lock \
-  apt-get install velnor-runner=X.Y.Z
+sudo sh -c '
+  exec 9>>/run/velnor/package-transaction.lock
+  /usr/bin/flock --exclusive --nonblock 9
+  export VELNOR_PACKAGE_TRANSACTION_FD=9
+  exec apt-get install velnor-runner=X.Y.Z
+'
 ```
 
 For first-install repository/keyring setup and the maintainer's complete
@@ -36,10 +39,12 @@ build. A verified release record is activation metadata, not an installation
 path.
 
 Before the exact apt install, stop the exact Velnor services and doctor timers
-after the fleet is drained. The command above holds the exclusive
-`/run/velnor/package-transaction.lock` for the full apt/dpkg transaction.
-Maintainer scripts verify that outer lock and recheck every Velnor service/timer
-state plus guardian state; they refuse direct unwrapped package configuration.
+after the fleet is drained. The command above passes an inherited fd holding
+the exclusive `/run/velnor/package-transaction.lock` for the full apt/dpkg
+transaction. Maintainer scripts verify the inherited fd's kernel-reported
+`FLOCK WRITE` mode, then recheck every Velnor service/timer state plus guardian
+state; marker-only, shared-lock, and direct unwrapped package configuration are
+refused.
 Every shipped Velnor service takes the same lock shared with `--no-fork`, so the
 lock remains held by the actual Velnor process across `exec` and preserves
 systemd signals and `Type=notify`. Package scripts never stop, mask, restart,

@@ -34,7 +34,18 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
     assert!(!postinst.contains("install -d -m 0750 \"$ACTIVE_DIR\""));
     assert!(postinst.contains("rmdir \"$ACTIVE_DIR\""));
     assert!(postinst.contains("require_package_transaction_lock"));
-    assert!(postinst.contains("/usr/bin/flock --exclusive --nonblock --conflict-exit-code 75"));
+    assert!(postinst.contains("VELNOR_PACKAGE_TRANSACTION_FD"));
+    assert!(postinst.contains("/proc/locks"));
+    assert!(!postinst.contains("VELNOR_PACKAGE_TRANSACTION_LOCK_HELD"));
+    assert!(postinst.contains("all_velnor_units_drained"));
+    assert!(
+        postinst.find("require_package_transaction_lock").unwrap()
+            < postinst.find("all_velnor_units_drained || fail").unwrap()
+    );
+    assert!(
+        postinst.find("all_velnor_units_drained || fail").unwrap()
+            < postinst.find("install -d -m 0750 /var/lib/velnor").unwrap()
+    );
     assert!(postinst.contains("legacy active directory is nonempty; refusing pointer migration"));
     assert!(
         !postinst.contains("release verify-installed"),
@@ -51,8 +62,11 @@ fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
     let preinst = include_str!("../../debian/preinst");
 
     assert!(preinst.contains("PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock"));
-    assert!(preinst.contains("VELNOR_PACKAGE_TRANSACTION_LOCK_HELD"));
-    assert!(preinst.contains("/usr/bin/flock --exclusive --nonblock --conflict-exit-code 75"));
+    assert!(preinst.contains("VELNOR_PACKAGE_TRANSACTION_FD"));
+    assert!(preinst.contains("/proc/locks"));
+    assert!(preinst.contains("$2 == \"FLOCK\" && $4 == \"WRITE\""));
+    assert!(preinst.contains("inherited fd has no exclusive lock"));
+    assert!(!preinst.contains("VELNOR_PACKAGE_TRANSACTION_LOCK_HELD"));
     assert!(preinst.contains("systemctl show --property=LoadState --value velnor-guardian.service"));
     assert!(preinst.contains("not-found) return 0"));
     assert!(preinst.contains(
@@ -66,6 +80,84 @@ fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
     assert!(preinst.contains(
         "guardian_inactive || fail \"refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service.\""
     ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    if !Path::new("/proc/locks").is_file() || !Path::new("/usr/bin/flock").is_file() {
+        return;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "velnor-package-lock-test-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let lock = root.join("package-transaction.lock");
+    let script = root.join("preinst");
+    let script_source = include_str!("../../debian/preinst")
+        .replace(
+            "PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock",
+            &format!("PACKAGE_TRANSACTION_LOCK={}", lock.display()),
+        )
+        .replace(
+            "if [ -d /run/systemd/system ]; then",
+            "if [ -d /__velnor-lock-test-no-systemd ]; then",
+        );
+    fs::write(&script, script_source).unwrap();
+
+    let marker_spoof = Command::new("sh")
+        .arg(&script)
+        .arg("install")
+        .env("VELNOR_PACKAGE_TRANSACTION_LOCK_HELD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        !marker_spoof.status.success(),
+        "a marker without an inherited fd must fail: {}",
+        String::from_utf8_lossy(&marker_spoof.stderr)
+    );
+
+    let run_wrapped = |mode: &str| {
+        Command::new("sh")
+            .arg("-c")
+            .arg(
+                "exec 9>>\"$1\"; export VELNOR_PACKAGE_TRANSACTION_FD=9; \
+                 /usr/bin/flock --$3 --nonblock 9; \
+                 exec sh \"$2\" install",
+            )
+            .arg("velnor-lock-test")
+            .arg(&lock)
+            .arg(&script)
+            .arg(mode)
+            .output()
+            .unwrap()
+    };
+    let shared_spoof = run_wrapped("shared");
+    assert!(
+        !shared_spoof.status.success(),
+        "a shared inherited lock must fail: {}",
+        String::from_utf8_lossy(&shared_spoof.stderr)
+    );
+    let exclusive_wrapper = run_wrapped("exclusive");
+    assert!(
+        exclusive_wrapper.status.success(),
+        "the explicit exclusive wrapper must pass: {}",
+        String::from_utf8_lossy(&exclusive_wrapper.stderr)
+    );
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
