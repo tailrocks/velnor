@@ -43,6 +43,7 @@ const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
 
+
 /// Private curl inputs are removed even when an async caller is cancelled.
 /// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
 /// running with secrets or mutate GitHub after its owning operation ended.
@@ -51,7 +52,7 @@ struct PrivateTempFiles {
     paths: Vec<PathBuf>,
 }
 impl PrivateTempFiles {
-    fn new(_prefix: &str) -> Result<Self> {
+    fn new(prefix: &str) -> Result<Self> {
         let dir = std::env::temp_dir().join("velnor-curl");
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("create private curl directory {}", dir.display()))?;
@@ -63,11 +64,12 @@ impl PrivateTempFiles {
         std::fs::set_permissions(&dir, permissions)
             .with_context(|| format!("protect private curl directory {}", dir.display()))?;
 
+        let prefix = format!("{prefix}-");
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let stale = entry.file_type().is_ok_and(|file_type| file_type.is_file())
-                    && entry.file_name().to_string_lossy().starts_with("velnor-")
+                    && entry.file_name().to_string_lossy().starts_with(&prefix)
                     && entry
                         .metadata()
                         .and_then(|metadata| metadata.modified())
@@ -122,77 +124,6 @@ async fn run_private_curl(
     capture_headers: bool,
 ) -> Result<(std::process::Output, Vec<u8>)> {
     let mut files = PrivateTempFiles::new(prefix)?;
-    let config_path = files.write(prefix, "cfg", config.as_bytes())?;
-    let body_path = body
-        .map(|body| files.write(prefix, "body", body))
-        .transpose()?;
-    let headers_path = capture_headers
-        // Header output is not secret, but keep it mode-0600 and clean it via
-        // the same guard so cancellation cannot leave request metadata behind.
-        .then(|| files.write(prefix, "headers", &[]))
-        .transpose()?;
-
-    let mut command = tokio::process::Command::new("curl");
-    command.kill_on_drop(true).arg("--config").arg(&config_path);
-    if let Some(path) = &headers_path {
-        command.arg("--dump-header").arg(path);
-    }
-    if let Some(path) = &body_path {
-        command.arg("--data").arg(format!("@{}", path.display()));
-    }
-    let output = command.arg(url).output().await.context("run curl")?;
-    let headers = headers_path
-        .as_deref()
-        .map(std::fs::read)
-        .transpose()
-        .context("read curl response headers")?
-        .unwrap_or_default();
-    Ok((output, headers))
-}
-
-/// Private curl inputs are removed even when an async caller is cancelled.
-/// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
-/// running with secrets or mutate GitHub after its owning operation ended.
-#[derive(Default)]
-struct PrivateTempFiles {
-    paths: Vec<PathBuf>,
-}
-
-impl PrivateTempFiles {
-    fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let path = std::env::temp_dir().join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
-        self.paths.push(path.clone());
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("create private curl file {}", path.display()))?;
-        file.write_all(content)
-            .with_context(|| format!("write private curl file {}", path.display()))?;
-        Ok(path)
-    }
-}
-
-impl Drop for PrivateTempFiles {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-async fn run_private_curl(
-    prefix: &str,
-    config: &str,
-    body: Option<&[u8]>,
-    url: &str,
-    capture_headers: bool,
-) -> Result<(std::process::Output, Vec<u8>)> {
-    let mut files = PrivateTempFiles::default();
     let config_path = files.write(prefix, "cfg", config.as_bytes())?;
     let body_path = body
         .map(|body| files.write(prefix, "body", body))
