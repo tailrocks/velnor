@@ -49,7 +49,7 @@ pub use microvm::{
 };
 pub use node::{
     ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthDocument, JobId,
-    NotReady, ReadyProof, SliDimension, SlotId,
+    NotReady, ReadyProof, RecoveryHealthState, SliDimension, SlotId,
 };
 pub use phase::{SlotKind, SlotPhase};
 pub use resources::{

@@ -367,14 +367,24 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut pacing,
         )
         .await?;
-        if recovery.lock().await.state() == RecoveryState::Quarantined {
-            // Useful capacity is not schedulable while the scope's sole
-            // recovery authority is quarantined. Keep control liveness, but
-            // fail readiness instead of advertising a broker-dead slot.
-            health.github_reachable = false;
-            health = health.with_derived_state();
-            server.publish(&health)?;
-        }
+        let recovery = recovery.lock().await;
+        health.recovery_state = match recovery.state() {
+            RecoveryState::Healthy => velnor_model::RecoveryHealthState::Healthy,
+            RecoveryState::MissingSession => velnor_model::RecoveryHealthState::MissingSession,
+            RecoveryState::Backoff => velnor_model::RecoveryHealthState::Backoff,
+            RecoveryState::Quarantined => velnor_model::RecoveryHealthState::Quarantined,
+        };
+        health.recovery_retry_streak = recovery.retry_streak();
+        health.recovery_budget_used = recovery.retry_budget_used();
+        health.recovery_retry_at_seconds = recovery.retry_at().as_secs();
+        health.recovery_quarantine_until_seconds = recovery
+            .quarantine_until()
+            .map(|deadline| deadline.as_secs());
+        health.recovery_affected_slots =
+            u32::from(recovery.state() != RecoveryState::Healthy && health.actual_ready_slots > 0)
+                * health.actual_ready_slots;
+        health = health.with_derived_state();
+        server.publish(&health)?;
         drain_broker_assignments(
             &args,
             &journal,

@@ -39,6 +39,16 @@ pub enum CanaryStatus {
     Unknown,
 }
 
+/// Broker/session recovery state, separate from control-loop liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryHealthState {
+    Healthy,
+    MissingSession,
+    Backoff,
+    Quarantined,
+}
+
 impl CanaryStatus {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -71,6 +81,13 @@ pub struct HealthDocument {
     /// Ready capacity not currently occupied by a job.
     #[serde(default)]
     pub idle_slots: u32,
+    pub recovery_state: RecoveryHealthState,
+    pub recovery_retry_streak: u32,
+    pub recovery_budget_used: u32,
+    pub recovery_retry_at_seconds: u64,
+    pub recovery_quarantine_until_seconds: Option<u64>,
+    pub recovery_affected_slots: u32,
+    pub resource_safe: bool,
     pub oldest_queued_job_seconds: u64,
     pub oldest_outbox_entry_seconds: u64,
     pub external_canary: CanaryStatus,
@@ -80,7 +97,7 @@ pub struct HealthDocument {
 
 impl HealthDocument {
     /// Every JSON object key the health contract requires, in document order.
-    pub const REQUIRED_KEYS: [&'static str; 18] = [
+    pub const REQUIRED_KEYS: [&'static str; 25] = [
         "control_live",
         "journal_writable",
         "github_reachable",
@@ -94,6 +111,13 @@ impl HealthDocument {
         "executor_ready_slots",
         "jobs",
         "idle_slots",
+        "recovery_state",
+        "recovery_retry_streak",
+        "recovery_budget_used",
+        "recovery_retry_at_seconds",
+        "recovery_quarantine_until_seconds",
+        "recovery_affected_slots",
+        "resource_safe",
         "oldest_queued_job_seconds",
         "oldest_outbox_entry_seconds",
         "external_canary",
@@ -119,6 +143,13 @@ impl HealthDocument {
             executor_ready_slots: 0,
             jobs: 0,
             idle_slots: 0,
+            recovery_state: RecoveryHealthState::Healthy,
+            recovery_retry_streak: 0,
+            recovery_budget_used: 0,
+            recovery_retry_at_seconds: 0,
+            recovery_quarantine_until_seconds: None,
+            recovery_affected_slots: 0,
+            resource_safe: true,
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,
             external_canary: CanaryStatus::Unknown,
@@ -143,6 +174,8 @@ impl HealthDocument {
         if !self.github_reachable
             || !self.routing_valid
             || !self.runner_group_valid
+            || !self.resource_safe
+            || self.recovery_state != RecoveryHealthState::Healthy
             || self.actual_ready_slots < self.desired_ready_slots
         {
             return FleetHealthState::Degraded;
@@ -336,6 +369,13 @@ mod tests {
             executor_ready_slots: 4,
             jobs: 0,
             idle_slots: 4,
+            recovery_state: RecoveryHealthState::Healthy,
+            recovery_retry_streak: 0,
+            recovery_budget_used: 0,
+            recovery_retry_at_seconds: 0,
+            recovery_quarantine_until_seconds: None,
+            recovery_affected_slots: 0,
+            resource_safe: true,
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,
             external_canary: CanaryStatus::Unknown,
@@ -346,6 +386,32 @@ mod tests {
         assert!(doc.control_live);
         assert_eq!(doc.state, FleetHealthState::Degraded);
         assert_ne!(doc.state.as_str(), "ready");
+    }
+
+    #[test]
+    fn quarantined_recovery_and_unsafe_resources_cannot_report_ready() {
+        let mut doc = HealthDocument::empty();
+        doc.control_live = true;
+        doc.journal_writable = true;
+        doc.github_reachable = true;
+        doc.routing_valid = true;
+        doc.runner_group_valid = true;
+        doc.desired_ready_slots = 1;
+        doc.actual_ready_slots = 1;
+        doc.capacity_permits = 1;
+        doc.executor_ready_slots = 1;
+        doc.recovery_state = RecoveryHealthState::Quarantined;
+        doc.recovery_retry_streak = 8;
+        doc.recovery_budget_used = 13;
+        doc.recovery_affected_slots = 1;
+        assert_eq!(
+            doc.clone().with_derived_state().state,
+            FleetHealthState::Degraded
+        );
+
+        doc.recovery_state = RecoveryHealthState::Healthy;
+        doc.resource_safe = false;
+        assert_eq!(doc.with_derived_state().state, FleetHealthState::Degraded);
     }
 
     #[test]

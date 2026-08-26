@@ -70,6 +70,11 @@ impl RecoveryCoordinator {
     }
 
     #[must_use]
+    pub fn retry_budget_used(&self) -> u32 {
+        self.retry_budget_used
+    }
+
+    #[must_use]
     pub fn retry_at(&self) -> Duration {
         self.retry_at
     }
