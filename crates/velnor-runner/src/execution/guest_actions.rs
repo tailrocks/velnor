@@ -85,10 +85,12 @@ header=""
 if [ -n "$token" ]; then
   header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 fi
-# persist-credentials=true (upstream default): keep the header in the
-# workspace .git/config so later steps authenticate the same way.
-if [ -n "$header" ] && [ "$persist" = "1" ]; then
-  git -C "$dest" config http.extraheader "$header"
+# Scope the credential to the checkout server (upstream parity): an
+# unqualified http.extraheader would also authorize unrelated remotes in
+# this workspace.
+scope="$(printf '%s' "$clone_url" | sed -E 's#^(https?://[^/]+/).*$#\1#')"
+if [ -n "$token" ] && [ "$persist" = "1" ]; then
+  git -C "$dest" config "http.${scope}.extraheader" "$header"
 fi
 git -C "$dest" remote remove origin >/dev/null 2>&1 || true
 git -C "$dest" remote add origin "$clone_url"
@@ -111,7 +113,7 @@ if [ -n "${GITHUB_REF:-}" ] && [ -n "$version" ]; then
 fi
 # shellcheck disable=SC2086
 if [ -n "$header" ] && [ "$persist" != "1" ]; then
-  git -c "http.extraheader=$header" -C "$dest" -c protocol.version=2 fetch --prune --no-tags $tags_flag $depth_arg origin "$refspec"
+  git -c "http.${scope}.extraheader=$header" -C "$dest" -c protocol.version=2 fetch --prune --no-tags $tags_flag $depth_arg origin "$refspec"
 else
   git -C "$dest" -c protocol.version=2 fetch --prune --no-tags $tags_flag $depth_arg origin "$refspec"
 fi

@@ -888,8 +888,13 @@ impl BackendSession {
                 _ => None,
             })
             .collect();
+        // Deterministic identity for the transported command files: prefer
+        // the outputs file regardless of which lane emitted which file
+        // first, so docker/microvm parity stays order-independent.
         let command_file = command_file_bytes
-            .first()
+            .iter()
+            .find(|(path, _)| path == "GITHUB_OUTPUT")
+            .or_else(|| command_file_bytes.first())
             .map(|(path, _)| path.clone())
             .or_else(|| self.plan_command_files.first().cloned());
         let environment_url = self.events.iter().find_map(|event| match event {

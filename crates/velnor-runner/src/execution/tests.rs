@@ -4,6 +4,75 @@ use std::path::{Path, PathBuf};
 use velnor_model::{ExecutionBackendKind, ExecutionFile};
 
 #[test]
+fn each_guest_step_summary_is_captured_before_the_next_step_writes() {
+    let mut runner = RecordingCommands {
+        results: vec![
+            CommandResult {
+                code: 0,
+                stdout: "step-one-summary\n".into(),
+                stderr: String::new(),
+            },
+            CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            CommandResult {
+                code: 0,
+                stdout: "step-two-overwrites-with-\x3e\n".into(),
+                stderr: String::new(),
+            },
+            CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ],
+        ..RecordingCommands::default()
+    };
+    let files = vec!["GITHUB_STEP_SUMMARY".to_string()];
+    let mut events = Vec::new();
+    let mut first = crate::script_step::StepCommandState::default();
+    super::guest_runtime::apply_step_command_files(
+        "job",
+        &mut runner,
+        &mut events,
+        false,
+        &files,
+        &mut first,
+    )
+    .unwrap();
+    assert_eq!(first.summary, "step-one-summary\n");
+    let mut second = crate::script_step::StepCommandState::default();
+    super::guest_runtime::apply_step_command_files(
+        "job",
+        &mut runner,
+        &mut events,
+        false,
+        &files,
+        &mut second,
+    )
+    .unwrap();
+    assert_eq!(second.summary, "step-two-overwrites-with->\n");
+    let captured: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ExecutionEvent::CommandFile { path, bytes } if path == "GITHUB_STEP_SUMMARY" => {
+                Some(bytes.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        captured,
+        [
+            b"step-one-summary\n".to_vec(),
+            b"step-two-overwrites-with->\n".to_vec()
+        ]
+    );
+}
+
+#[test]
 fn checkout_guest_inputs_carry_token_and_flags() {
     let plan = crate::checkout::CheckoutPlan {
         step_id: "co".into(),

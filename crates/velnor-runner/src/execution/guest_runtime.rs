@@ -705,6 +705,12 @@ fn collect_guest_command_files(
 ) -> Result<(), String> {
     let mut live_outputs = Vec::new();
     for path in &plan.command_files {
+        // GITHUB_STEP_SUMMARY is captured per step by
+        // `apply_step_command_files` so a later step cannot erase an earlier
+        // one; reading it here again would double-publish the last buffer.
+        if path == "GITHUB_STEP_SUMMARY" {
+            continue;
+        }
         let contents = cat_guest_file(job_name, path, runner, events, host_docker)?;
         if path == "GITHUB_OUTPUT" && !contents.trim().is_empty() {
             if let Ok(parsed) = parse_file_commands(&contents) {
@@ -751,7 +757,7 @@ fn cat_guest_file(
     Ok(result.stdout)
 }
 
-fn apply_step_command_files(
+pub(super) fn apply_step_command_files(
     job_name: &str,
     runner: &mut dyn CommandRunner,
     events: &mut Vec<ExecutionEvent>,
@@ -785,7 +791,24 @@ fn apply_step_command_files(
             .map(ToOwned::to_owned)
             .collect();
     }
-    if !has_output && !has_env && !has_path {
+    // Capture this step's summary contribution BEFORE any later step can
+    // truncate or overwrite the job-wide file; each step's bytes are emitted
+    // separately so the outcome accumulates every step's summary.
+    let has_summary = command_files
+        .iter()
+        .any(|path| path == "GITHUB_STEP_SUMMARY");
+    if has_summary {
+        let summary_file =
+            cat_guest_file(job_name, "GITHUB_STEP_SUMMARY", runner, events, host_docker)?;
+        if !summary_file.trim().is_empty() {
+            command_state.summary = summary_file.clone();
+            events.push(ExecutionEvent::CommandFile {
+                path: "GITHUB_STEP_SUMMARY".into(),
+                bytes: summary_file.into_bytes(),
+            });
+        }
+    }
+    if !has_output && !has_env && !has_path && !has_summary {
         return Ok(());
     }
     docker(
