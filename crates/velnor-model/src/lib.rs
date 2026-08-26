@@ -66,8 +66,8 @@ pub use since::{InvalidSince, Since};
 pub use source::Source;
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};
 pub use vsock_protocol::{
-    VsockCodecError, VsockMessage, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION, STDERR_STREAM,
-    STDOUT_STREAM,
+    derive_execution_nonce, VsockCodecError, VsockMessage, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
+    STDERR_STREAM, STDOUT_STREAM,
 };
 
 /// Crate version reported by `velnorctl --version`.

@@ -80,6 +80,27 @@ pub enum GuestArch {
     Aarch64,
 }
 
+const GUEST_INIT_SCRIPT: &[u8] = b"#!/bin/sh
+set -e
+mount -t proc proc /proc || true
+mount -t sysfs sys /sys || true
+mount -t devtmpfs dev /dev || true
+VELNOR_ISOLATION_ID=
+VELNOR_ISOLATION_GENERATION=
+for arg in $(cat /proc/cmdline); do
+  case \"$arg\" in
+    velnor.isolation_id=*) VELNOR_ISOLATION_ID=\"${arg#*=}\" ;;
+    velnor.isolation_generation=*) VELNOR_ISOLATION_GENERATION=\"${arg#*=}\" ;;
+  esac
+done
+[ -n \"$VELNOR_ISOLATION_ID\" ]
+[ -n \"$VELNOR_ISOLATION_GENERATION\" ]
+export VELNOR_ISOLATION_ID VELNOR_ISOLATION_GENERATION
+if command -v dockerd >/dev/null 2>&1; then dockerd &
+fi
+exec /usr/bin/velnor-guest-agent
+";
+
 impl GuestArch {
     /// # Errors
     /// Unknown architecture name.
@@ -493,11 +514,9 @@ fn build_rootfs(
         })?;
     }
     let init = tree.join("init");
-    std::fs::write(
-        &init,
-        b"#!/bin/sh\nset -e\nmount -t proc proc /proc || true\nmount -t sysfs sys /sys || true\nmount -t devtmpfs dev /dev || true\nif command -v dockerd >/dev/null 2>&1; then dockerd &\nfi\nexec /usr/bin/velnor-guest-agent\n",
-    )
-    .map_err(|error| MicroVmPreflightFailure::new("guest.rootfs", format!("write init: {error}")))?;
+    std::fs::write(&init, GUEST_INIT_SCRIPT).map_err(|error| {
+        MicroVmPreflightFailure::new("guest.rootfs", format!("write init: {error}"))
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -630,6 +649,15 @@ mod tests {
         assert_eq!(debian_package("buildkit"), "docker-buildx");
         assert_eq!(debian_package("containerd"), "containerd");
         assert_eq!(debian_package("runc"), "runc");
+    }
+
+    #[test]
+    fn guest_init_requires_identity_from_kernel_cmdline() {
+        let script = std::str::from_utf8(GUEST_INIT_SCRIPT).unwrap();
+        assert!(script.contains("velnor.isolation_id=*)"));
+        assert!(script.contains("velnor.isolation_generation=*)"));
+        assert!(script.contains("export VELNOR_ISOLATION_ID VELNOR_ISOLATION_GENERATION"));
+        assert!(script.contains("exec /usr/bin/velnor-guest-agent"));
     }
 
     #[test]

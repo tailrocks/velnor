@@ -29,10 +29,11 @@ impl UnixFirecrackerClient {
 }
 
 impl FirecrackerApi for UnixFirecrackerClient {
-    fn put_boot_source(&mut self, kernel: &Path) -> Result<(), String> {
+    fn put_boot_source(&mut self, kernel: &Path, boot_args: &str) -> Result<(), String> {
         let body = format!(
-            r#"{{"kernel_image_path":"{}","boot_args":"console=ttyS0 reboot=k panic=1 pci=off"}}"#,
-            json_escape(&kernel.display().to_string())
+            r#"{{"kernel_image_path":"{}","boot_args":"{}"}}"#,
+            json_escape(&kernel.display().to_string()),
+            json_escape(boot_args)
         );
         self.put_json("/boot-source", &body)
     }
@@ -205,11 +206,15 @@ mod tests {
         });
         let mut client = UnixFirecrackerClient::new(sock);
         client
-            .put_boot_source(Path::new("/usr/share/velnor/microvm/vmlinux"))
+            .put_boot_source(
+                Path::new("/usr/share/velnor/microvm/vmlinux"),
+                "console=ttyS0 velnor.isolation_id=job-1 velnor.isolation_generation=1",
+            )
             .unwrap();
         let req = server.join().unwrap();
         assert!(req.starts_with("PUT /boot-source HTTP/1.1"), "{req}");
         assert!(req.contains("kernel_image_path"), "{req}");
+        assert!(req.contains("velnor.isolation_id=job-1"), "{req}");
         assert!(!req.contains("virtio-fs"), "{req}");
         std::fs::remove_dir_all(dir).ok();
     }

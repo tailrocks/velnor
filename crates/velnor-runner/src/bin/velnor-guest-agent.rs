@@ -18,16 +18,21 @@ fn run() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         use velnor_runner::execution::{
-            accept_af_vsock, bind_af_vsock, serve_guest_session, GuestSessionEnv, GUEST_AGENT_PORT,
+            accept_af_vsock, bind_af_vsock, serve_guest_session_with_state, GuestAgentState,
+            GuestSessionEnv, GUEST_AGENT_PORT,
         };
         let port = std::env::var("VELNOR_GUEST_VSOCK_PORT")
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(GUEST_AGENT_PORT);
         let listener = bind_af_vsock(port)?;
-        let mut stream = accept_af_vsock(&listener)?;
-        serve_guest_session(&mut stream, &GuestSessionEnv::from_guest_env(), |bytes| {
-            velnor_runner::execution::run_guest_plan_bytes(bytes)
-        })
+        let mut state = GuestAgentState::default();
+        loop {
+            let mut stream = accept_af_vsock(&listener)?;
+            let env = GuestSessionEnv::from_guest_env()?;
+            serve_guest_session_with_state(&mut stream, &env, &mut state, |bytes| {
+                velnor_runner::execution::run_guest_plan_bytes(bytes)
+            })?;
+        }
     }
 }

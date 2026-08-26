@@ -6,8 +6,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use velnor_model::{GuestJobPlan, JobConclusion, VsockMessage};
+use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMessage};
 
+use super::artifacts::hex_sha256;
 use super::backend::ExecutionEvent;
 use super::VsockChannel;
 use crate::executor::{CommandResult, CommandRunner};
@@ -58,6 +59,10 @@ impl UnixVsockChannel {
 }
 
 impl VsockChannel for UnixVsockChannel {
+    fn reset(&mut self) {
+        self.stream = None;
+    }
+
     fn set_idle_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
         if let Some(stream) = self.stream.as_mut() {
@@ -84,17 +89,117 @@ impl VsockChannel for UnixVsockChannel {
 pub struct LoopbackVsock {
     pub sent: Vec<VsockMessage>,
     pending: Vec<VsockMessage>,
+    ready: Option<VsockMessage>,
+    rebootstrap_ready: Option<VsockMessage>,
+    guest_challenge: Option<String>,
+    teardown_ack: Option<(String, String, u64)>,
+    teardown_proof: Option<(String, String)>,
+}
+
+impl LoopbackVsock {
+    /// Construct a test channel with a proved guest readiness frame.
+    #[must_use]
+    pub fn with_ready(isolation_id: impl Into<String>, generation: u64) -> Self {
+        let isolation_id = isolation_id.into();
+        let initial_nonce = "00000000-0000-4000-8000-000000000001".to_string();
+        Self {
+            ready: Some(VsockMessage::GuestReady {
+                isolation_id: isolation_id.clone(),
+                generation,
+                docker_healthy: true,
+                job_credentials_absent: true,
+                session_challenge: initial_nonce.clone(),
+            }),
+            rebootstrap_ready: Some(VsockMessage::GuestReady {
+                isolation_id,
+                generation,
+                docker_healthy: true,
+                job_credentials_absent: true,
+                session_challenge: "00000000-0000-4000-8000-000000000002".into(),
+            }),
+            guest_challenge: Some(initial_nonce),
+            ..Self::default()
+        }
+    }
+
+    /// Override the acknowledgement identity for negative host-side tests.
+    #[must_use]
+    pub fn with_teardown_ack(
+        mut self,
+        job_id: impl Into<String>,
+        isolation_id: impl Into<String>,
+        generation: u64,
+    ) -> Self {
+        self.teardown_ack = Some((job_id.into(), isolation_id.into(), generation));
+        self
+    }
+
+    /// Override the acknowledgement nonce and plan digest for replay tests.
+    #[must_use]
+    pub fn with_teardown_proof(
+        mut self,
+        execution_nonce: impl Into<String>,
+        plan_sha256: impl Into<String>,
+    ) -> Self {
+        self.teardown_proof = Some((execution_nonce.into(), plan_sha256.into()));
+        self
+    }
 }
 
 impl VsockChannel for LoopbackVsock {
     fn send(&mut self, message: VsockMessage) -> Result<(), String> {
+        if matches!(&message, VsockMessage::PrepareSnapshot) {
+            self.pending.push(VsockMessage::SnapshotReady);
+            if let Some(ready) = self.rebootstrap_ready.take() {
+                if let VsockMessage::GuestReady {
+                    session_challenge, ..
+                } = &ready
+                {
+                    self.guest_challenge = Some(session_challenge.clone());
+                }
+                self.pending.push(ready);
+            }
+        }
         if let VsockMessage::DeliverPlan {
+            job_id,
             isolation_id,
             generation,
+            execution_nonce,
+            plan_sha256,
             plan_bytes,
         } = &message
         {
-            let plan = GuestJobPlan::decode(plan_bytes)?;
+            if execution_nonce.is_empty() {
+                return Err("loopback rejected empty execution nonce".into());
+            }
+            let actual_plan_sha256 = hex_sha256(plan_bytes);
+            if *plan_sha256 != actual_plan_sha256 {
+                return Err(format!(
+                    "loopback rejected plan digest {plan_sha256}; expected {actual_plan_sha256}"
+                ));
+            }
+            let session_challenge = self.guest_challenge.as_deref().ok_or_else(|| {
+                "loopback rejected DeliverPlan without a guest readiness challenge".to_string()
+            })?;
+            let expected_nonce = derive_execution_nonce(
+                session_challenge,
+                job_id,
+                isolation_id,
+                *generation,
+                plan_sha256,
+            );
+            if *execution_nonce != expected_nonce {
+                return Err(format!(
+                    "loopback rejected execution nonce {execution_nonce}; expected challenge-bound nonce {expected_nonce}"
+                ));
+            }
+            let plan = decode_guest_plan(plan_bytes)?;
+            if plan.job_id != *job_id
+                || plan.isolation_id != *isolation_id
+                || plan.generation != *generation
+            {
+                return Err("loopback rejected plan identity mismatch".into());
+            }
             validate_guest_plan(&plan)?;
             let (conclusion, exit_code) = plan
                 .planned_conclusion()
@@ -103,9 +208,20 @@ impl VsockChannel for LoopbackVsock {
                 conclusion,
                 exit_code,
             });
+            let (job_id, isolation_id, generation) = self
+                .teardown_ack
+                .take()
+                .unwrap_or_else(|| (job_id.clone(), isolation_id.clone(), *generation));
+            let (ack_nonce, ack_plan_sha256) = self
+                .teardown_proof
+                .take()
+                .unwrap_or_else(|| (execution_nonce.clone(), plan_sha256.clone()));
             self.pending.push(VsockMessage::TeardownAck {
-                isolation_id: isolation_id.clone(),
-                generation: *generation,
+                job_id,
+                isolation_id,
+                generation,
+                execution_nonce: ack_nonce,
+                plan_sha256: ack_plan_sha256,
             });
         }
         self.sent.push(message);
@@ -113,6 +229,9 @@ impl VsockChannel for LoopbackVsock {
     }
 
     fn recv(&mut self) -> Result<VsockMessage, String> {
+        if let Some(ready) = self.ready.take() {
+            return Ok(ready);
+        }
         if self.pending.is_empty() {
             return Err("loopback vsock empty".into());
         }
@@ -131,7 +250,9 @@ pub fn execute_guest_plan(
     events: &mut Vec<ExecutionEvent>,
     host_docker: bool,
 ) -> Result<i32, String> {
-    validate_guest_plan(plan)?;
+    if !host_docker {
+        validate_guest_plan(plan)?;
+    }
     if let Some((conclusion, exit_code)) = plan.planned_conclusion() {
         record_plan_files(plan, events);
         events.push(ExecutionEvent::JobCompleted {
@@ -232,6 +353,64 @@ pub fn execute_guest_plan(
 }
 
 pub(crate) fn validate_guest_plan(plan: &GuestJobPlan) -> Result<(), String> {
+    if let Some(cache_digest) = plan.cache_digest.as_deref() {
+        if !cache_digest.is_empty() {
+            return Err(guest_capability_error(
+                "guest.cache_digest",
+                cache_digest,
+                "absent or empty",
+            ));
+        }
+    }
+    if !plan.command_files.is_empty() {
+        return Err(guest_capability_error(
+            "guest.command_files",
+            &format!("{:?}", plan.command_files),
+            "empty until guest result-file transfer is implemented",
+        ));
+    }
+    if !plan.cache.is_empty() {
+        return Err(guest_capability_error(
+            "guest.cache",
+            &format!("{:?}", plan.cache),
+            "empty until native guest cache transfer is implemented",
+        ));
+    }
+    if !plan.artifacts.is_empty() {
+        return Err(guest_capability_error(
+            "guest.artifacts",
+            &format!("{:?}", plan.artifacts),
+            "empty until native guest artifact export is implemented",
+        ));
+    }
+    if !plan.annotations.is_empty() {
+        return Err(guest_capability_error(
+            "guest.annotations",
+            &format!("{:?}", plan.annotations),
+            "empty until native guest annotation transfer is implemented",
+        ));
+    }
+    if !plan.summary.is_empty() {
+        return Err(guest_capability_error(
+            "guest.summary",
+            &plan.summary,
+            "empty until native guest summary transfer is implemented",
+        ));
+    }
+    if plan.buildx {
+        return Err(guest_capability_error(
+            "guest.buildx",
+            "true",
+            "false until native guest buildx execution is implemented",
+        ));
+    }
+    if plan.testcontainers {
+        return Err(guest_capability_error(
+            "guest.testcontainers",
+            "true",
+            "false until native guest testcontainers execution is implemented",
+        ));
+    }
     if plan.image.trim().is_empty() {
         return Err(guest_capability_error(
             "guest.image",
@@ -256,6 +435,48 @@ pub(crate) fn validate_guest_plan(plan: &GuestJobPlan) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn decode_guest_plan(plan_bytes: &[u8]) -> Result<GuestJobPlan, String> {
+    GuestJobPlan::decode(plan_bytes).map_err(|error| {
+        if let Some(field) = unknown_json_field(&error) {
+            let received = format!("unknown JSON key '{field}'");
+            guest_capability_error(
+                &format!("guest.plan.{field}"),
+                &received,
+                "declared GuestJobPlan JSON fields",
+            )
+        } else if let Some(field) = missing_json_field(&error) {
+            guest_capability_error(
+                &format!("guest.plan.{field}"),
+                "<missing>",
+                "the complete GuestJobPlan schema including this field",
+            )
+        } else {
+            format!(
+                "{} ({error})",
+                guest_capability_error("guest.plan", "malformed", "valid serialized GuestJobPlan",)
+            )
+        }
+    })
+}
+
+fn missing_json_field(error: &str) -> Option<&str> {
+    let marker = "missing field `";
+    let start = error.find(marker)? + marker.len();
+    let end = error[start..].find('`')? + start;
+    Some(&error[start..end])
+}
+
+fn unknown_json_field(error: &str) -> Option<&str> {
+    let marker = "unknown field ";
+    let start = error.find(marker)? + marker.len();
+    let quote = error.as_bytes().get(start).copied()?;
+    if quote != b'`' && quote != b'\'' {
+        return None;
+    }
+    let end = error[start + 1..].find(char::from(quote))? + start + 1;
+    Some(&error[start + 1..end])
 }
 
 pub(crate) fn guest_capability_error(field: &str, received: &str, accepted: &str) -> String {
@@ -328,7 +549,7 @@ pub fn handle_delivered_plan(
     runner: &mut dyn CommandRunner,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<i32, String> {
-    let plan = GuestJobPlan::decode(plan_bytes)?;
+    let plan = decode_guest_plan(plan_bytes)?;
     if plan_bytes.windows(11).any(|w| w == b"docker.sock") {
         return Err("delivered plan mentioned docker.sock".into());
     }
@@ -364,7 +585,7 @@ mod tests {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            command_files: vec!["GITHUB_OUTPUT".into()],
+            command_files: Vec::new(),
             outputs: vec![velnor_model::GuestOutput {
                 name: "result".into(),
                 value: "ok".into(),
@@ -421,6 +642,14 @@ mod tests {
             .calls
             .iter()
             .any(|(_, args)| args.windows(2).any(|w| w == ["-e", "CI=true"])));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.windows(2).any(|w| w == ["-w", "/__w"])));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::Output { name, value } if name == "result" && value == "ok"
+        )));
     }
 
     #[test]
@@ -455,6 +684,161 @@ mod tests {
         );
     }
 
+    fn assert_unsupported_guest_field(
+        plan: GuestJobPlan,
+        field: &str,
+        received: &str,
+        accepted: &str,
+    ) {
+        let mut runner = RecordingCommands::default();
+        let error = execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap_err();
+        assert!(error.contains(&format!("field '{field}'")), "{error}");
+        assert!(error.contains(&format!("received '{received}'")), "{error}");
+        assert!(error.contains(&format!("accepted '{accepted}'")), "{error}");
+        assert!(
+            error.contains(&format!(
+                "manifest version {}",
+                crate::manifest::MANIFEST_VERSION
+            )),
+            "{error}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "guest plan ran Docker: {:?}",
+            runner.calls
+        );
+    }
+
+    #[test]
+    fn unsupported_guest_fields_fail_closed_before_docker_side_effects() {
+        let mut plan = sample_plan();
+        plan.cache_digest = Some("sha256:cache".into());
+        assert_unsupported_guest_field(
+            plan,
+            "guest.cache_digest",
+            "sha256:cache",
+            "absent or empty",
+        );
+
+        let mut plan = sample_plan();
+        plan.command_files = vec!["GITHUB_OUTPUT".into()];
+        assert_unsupported_guest_field(
+            plan,
+            "guest.command_files",
+            "[\"GITHUB_OUTPUT\"]",
+            "empty until guest result-file transfer is implemented",
+        );
+
+        let mut plan = sample_plan();
+        plan.cache = vec![velnor_model::GuestCacheOp {
+            digest: "sha256:cache".into(),
+        }];
+        assert_unsupported_guest_field(
+            plan,
+            "guest.cache",
+            "[GuestCacheOp { digest: \"sha256:cache\" }]",
+            "empty until native guest cache transfer is implemented",
+        );
+
+        let mut plan = sample_plan();
+        plan.artifacts = vec![velnor_model::GuestArtifactOp {
+            name: "logs".into(),
+            path: "/__w/logs".into(),
+        }];
+        assert_unsupported_guest_field(
+            plan,
+            "guest.artifacts",
+            "[GuestArtifactOp { name: \"logs\", path: \"/__w/logs\" }]",
+            "empty until native guest artifact export is implemented",
+        );
+
+        let mut plan = sample_plan();
+        plan.annotations = vec!["notice".into()];
+        assert_unsupported_guest_field(
+            plan,
+            "guest.annotations",
+            "[\"notice\"]",
+            "empty until native guest annotation transfer is implemented",
+        );
+
+        let mut plan = sample_plan();
+        plan.summary = "ok".into();
+        assert_unsupported_guest_field(
+            plan,
+            "guest.summary",
+            "ok",
+            "empty until native guest summary transfer is implemented",
+        );
+
+        let mut plan = sample_plan();
+        plan.buildx = true;
+        assert_unsupported_guest_field(
+            plan,
+            "guest.buildx",
+            "true",
+            "false until native guest buildx execution is implemented",
+        );
+
+        let mut plan = sample_plan();
+        plan.testcontainers = true;
+        assert_unsupported_guest_field(
+            plan,
+            "guest.testcontainers",
+            "true",
+            "false until native guest testcontainers execution is implemented",
+        );
+    }
+
+    #[test]
+    fn unknown_guest_json_key_fails_closed_before_docker_side_effects() {
+        let plan = sample_plan();
+        let mut json = serde_json::to_value(plan).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("unadmitted".into(), serde_json::json!("value"));
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let mut runner = RecordingCommands::default();
+        let error = handle_delivered_plan(&bytes, &mut runner, &mut Vec::new()).unwrap_err();
+        assert!(error.contains("field 'guest.plan.unadmitted'"), "{error}");
+        assert!(
+            error.contains("received 'unknown JSON key 'unadmitted''"),
+            "{error}"
+        );
+        assert!(
+            error.contains("accepted 'declared GuestJobPlan JSON fields'"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!(
+                "manifest version {}",
+                crate::manifest::MANIFEST_VERSION
+            )),
+            "{error}"
+        );
+        assert!(runner.calls.is_empty());
+    }
+
+    #[test]
+    fn missing_guest_json_field_fails_closed_before_docker_side_effects() {
+        let mut json = serde_json::to_value(sample_plan()).unwrap();
+        json.as_object_mut().unwrap().remove("workspace");
+        let mut runner = RecordingCommands::default();
+        let error = handle_delivered_plan(
+            &serde_json::to_vec(&json).unwrap(),
+            &mut runner,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("field 'guest.plan.workspace'"), "{error}");
+        assert!(error.contains("received '<missing>'"), "{error}");
+        assert!(
+            error.contains("accepted 'the complete GuestJobPlan schema including this field'"),
+            "{error}"
+        );
+        assert!(error.contains("manifest version"), "{error}");
+        assert!(runner.calls.is_empty());
+    }
+
     #[test]
     fn delivered_plan_rejects_docker_sock_bytes() {
         let mut plan = sample_plan();
@@ -469,13 +853,29 @@ mod tests {
 
     #[test]
     fn loopback_vsock_acks_deliver_plan() {
-        let mut vsock = LoopbackVsock::default();
+        let mut vsock = LoopbackVsock::with_ready("job-1", 1);
+        assert!(matches!(
+            vsock.recv().unwrap(),
+            VsockMessage::GuestReady { .. }
+        ));
         let plan = sample_plan();
+        let plan_bytes = plan.encode().unwrap();
+        let plan_sha256 = hex_sha256(&plan_bytes);
+        let execution_nonce = derive_execution_nonce(
+            "00000000-0000-4000-8000-000000000001",
+            &plan.job_id,
+            &plan.isolation_id,
+            plan.generation,
+            &plan_sha256,
+        );
         vsock
             .send(VsockMessage::DeliverPlan {
+                job_id: plan.job_id.clone(),
                 isolation_id: plan.isolation_id.clone(),
                 generation: plan.generation,
-                plan_bytes: plan.encode().unwrap(),
+                execution_nonce,
+                plan_sha256: plan_sha256.clone(),
+                plan_bytes,
             })
             .unwrap();
         assert!(matches!(
@@ -488,9 +888,20 @@ mod tests {
         assert!(matches!(
             vsock.recv().unwrap(),
             VsockMessage::TeardownAck {
+                job_id,
                 isolation_id,
-                generation: 1
-            } if isolation_id == "job-1"
+                generation: 1,
+                execution_nonce,
+                plan_sha256,
+            } if job_id == "job-1" && isolation_id == "job-1"
+                && execution_nonce == derive_execution_nonce(
+                    "00000000-0000-4000-8000-000000000001",
+                    "job-1",
+                    "job-1",
+                    1,
+                    &hex_sha256(&plan.encode().unwrap()),
+                )
+                && plan_sha256 == hex_sha256(&plan.encode().unwrap())
         ));
         assert!(matches!(vsock.sent[0], VsockMessage::DeliverPlan { .. }));
     }

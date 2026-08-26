@@ -3,12 +3,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use velnor_model::{JobConclusion, MicroVmKind, MicroVmPreflightFailure, VsockMessage};
+use velnor_model::{
+    derive_execution_nonce, JobConclusion, MicroVmKind, MicroVmPreflightFailure, VsockMessage,
+};
 
 use super::artifacts::{
-    verify_microvm_artifacts, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION,
+    hex_sha256, verify_microvm_artifacts, MicroVmArtifactSet, MicroVmGeneration,
+    FIRECRACKER_VERSION,
 };
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
+use super::guest_runtime::validate_guest_plan;
 use super::isolation::{IsolationIdentity, IsolationResources};
 use super::net::{setup_net_invocations, teardown_net_invocations};
 use super::snapshot::{read_identity, vmstate_path, write_identity, GuestReady, SnapshotIdentity};
@@ -19,7 +23,7 @@ use crate::executor::SpawnedProcess;
 pub trait FirecrackerApi {
     /// # Errors
     /// API transport or protocol failures.
-    fn put_boot_source(&mut self, kernel: &Path) -> Result<(), String>;
+    fn put_boot_source(&mut self, kernel: &Path, boot_args: &str) -> Result<(), String>;
     /// # Errors
     /// API transport or protocol failures.
     fn put_drive(&mut self, drive_id: &str, path: &Path, read_only: bool) -> Result<(), String>;
@@ -63,9 +67,11 @@ pub struct RecordingFirecracker {
 }
 
 impl FirecrackerApi for RecordingFirecracker {
-    fn put_boot_source(&mut self, kernel: &Path) -> Result<(), String> {
-        self.calls
-            .push(format!("put_boot_source {}", kernel.display()));
+    fn put_boot_source(&mut self, kernel: &Path, boot_args: &str) -> Result<(), String> {
+        self.calls.push(format!(
+            "put_boot_source {} args={boot_args}",
+            kernel.display()
+        ));
         Ok(())
     }
 
@@ -143,6 +149,23 @@ pub struct FirecrackerBackend {
     pub started: bool,
     pub restored: bool,
     pub jailer: Option<SpawnedProcess>,
+    pub(crate) execution: Option<GuestExecutionState>,
+    pub(crate) session_challenge: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GuestExecutionState {
+    pub(crate) job_id: String,
+    pub(crate) isolation_id: String,
+    pub(crate) generation: u64,
+    pub(crate) execution_nonce: String,
+    pub(crate) plan_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestHandshake {
+    ready: GuestReady,
+    session_challenge: String,
 }
 
 impl FirecrackerBackend {
@@ -219,9 +242,19 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
+        if plan.job_id != resources.identity.id {
+            return Err(MicroVmPreflightFailure::new(
+                "guest.plan.job_id",
+                format!("{} != expected {}", plan.job_id, resources.identity.id),
+            )
+            .into());
+        }
+        let guest = plan.to_guest(&resources.identity.id, resources.identity.generation);
+        validate_guest_plan(&guest)
+            .map_err(|detail| MicroVmPreflightFailure::new("guest.plan", detail))?;
+        let _ = guest_boot_args(&resources.identity)?;
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
-        let _ = plan;
-        let identity_ok = snapshot_identity_matches(&set, world);
+        let identity_ok = snapshot_identity_matches(&set, world, &resources.identity);
         setup_guest_net(resources, world, events)?;
         self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
         if identity_ok && try_restore_snapshot(&set, world, events)? {
@@ -247,6 +280,7 @@ impl FirecrackerBackend {
 
     pub(crate) fn start(
         &mut self,
+        isolation: &IsolationIdentity,
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
@@ -259,19 +293,27 @@ impl FirecrackerBackend {
         }
         self.started = true;
         events.push(ExecutionEvent::GuestDocker("guest started".into()));
-        if !self.restored {
+        if world.allow_inline_guest_plan {
+            return Ok(());
+        }
+
+        // A restored VM is already running because snapshot/load uses
+        // resume_vm=true. Both cold boot and restore must complete a fresh
+        // control handshake before a plan can be delivered.
+        let handshake = establish_guest_session(world, isolation, self.restored)?;
+        if self.restored {
+            self.session_challenge = Some(handshake.session_challenge);
+        } else {
+            // The guest leaves the first session before the VM is paused. The
+            // snapshot therefore contains an agent waiting in accept(), not a
+            // plan-read loop. Resume it through a second, real handshake.
+            prepare_guest_snapshot(world)?;
             // Errors here leave the guest resumed (see create_golden_snapshot);
             // the snapshot itself is an optimization, so its failure is an
             // event, not a job failure.
-            create_golden_snapshot(
-                world,
-                GuestReady {
-                    agent_listening: true,
-                    docker_healthy: true,
-                    job_credentials_absent: true,
-                },
-                events,
-            )?;
+            create_golden_snapshot(world, isolation, handshake.ready, events)?;
+            let rebootstrap = establish_guest_session(world, isolation, false)?;
+            self.session_challenge = Some(rebootstrap.session_challenge);
         }
         Ok(())
     }
@@ -283,19 +325,57 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
+        validate_plan_identity(plan, isolation)?;
+        if self.execution.is_some() {
+            return Err(MicroVmPreflightFailure::new(
+                "guest.execution_nonce",
+                "one execution is already bound to this microVM session; replay rejected",
+            )
+            .into());
+        }
         let guest = plan.to_guest(&isolation.id, isolation.generation);
         let bytes = guest
             .encode()
             .map_err(|detail| MicroVmPreflightFailure::new("vsock.plan", detail))?;
+        let execution_nonce = if world.vsock.is_some() {
+            let session_challenge = self.session_challenge.as_deref().ok_or_else(|| {
+                MicroVmPreflightFailure::new(
+                    "guest.ready.session_challenge",
+                    "missing guest-issued session challenge; fresh GuestReady required",
+                )
+            })?;
+            derive_execution_nonce(
+                session_challenge,
+                &guest.job_id,
+                &guest.isolation_id,
+                guest.generation,
+                &hex_sha256(&bytes),
+            )
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        let state = GuestExecutionState {
+            job_id: guest.job_id.clone(),
+            isolation_id: guest.isolation_id.clone(),
+            generation: guest.generation,
+            execution_nonce,
+            plan_sha256: hex_sha256(&bytes),
+        };
+        self.execution = Some(state.clone());
         events.push(ExecutionEvent::FirecrackerApi("vsock DeliverPlan".into()));
         if let Some(vsock) = world.vsock.as_mut() {
             return drive_vsock(
                 &mut **vsock,
                 VsockMessage::DeliverPlan {
-                    isolation_id: guest.isolation_id,
+                    job_id: guest.job_id.clone(),
+                    isolation_id: guest.isolation_id.clone(),
                     generation: guest.generation,
+                    execution_nonce: state.execution_nonce.clone(),
+                    plan_sha256: state.plan_sha256.clone(),
                     plan_bytes: bytes,
                 },
+                &guest,
+                &state,
                 events,
                 Duration::from_millis(plan.timeout_ms.max(1)),
             );
@@ -402,6 +482,155 @@ fn setup_guest_net(
     Ok(())
 }
 
+fn validate_plan_identity(
+    plan: &ValidatedPlan,
+    isolation: &IsolationIdentity,
+) -> Result<(), ExecutionError> {
+    if plan.job_id != isolation.id {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.plan.job_id",
+            format!("{} != expected {}", plan.job_id, isolation.id),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn send_guest_identity(
+    world: &mut ExecutionWorld<'_>,
+    identity: &IsolationIdentity,
+    restored: bool,
+) -> Result<(), ExecutionError> {
+    let Some(vsock) = world.vsock.as_mut() else {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.identity",
+            "production microVM requires a vsock control channel",
+        )
+        .into());
+    };
+    vsock
+        .send(VsockMessage::GuestIdentity {
+            isolation_id: identity.id.clone(),
+            generation: identity.generation,
+            restored,
+        })
+        .map_err(|detail| MicroVmPreflightFailure::new("guest.identity", detail).into())
+}
+
+fn establish_guest_session(
+    world: &mut ExecutionWorld<'_>,
+    expected: &IsolationIdentity,
+    restored: bool,
+) -> Result<GuestHandshake, ExecutionError> {
+    send_guest_identity(world, expected, restored)?;
+    let ready = receive_guest_ready(world, expected)?;
+    let session_challenge = ready.session_challenge.clone();
+    Ok(GuestHandshake {
+        ready: ready.ready,
+        session_challenge,
+    })
+}
+
+fn receive_guest_ready(
+    world: &mut ExecutionWorld<'_>,
+    expected: &IsolationIdentity,
+) -> Result<ReadyMessage, ExecutionError> {
+    let Some(vsock) = world.vsock.as_mut() else {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.ready",
+            "production microVM requires a guest readiness handshake over vsock",
+        )
+        .into());
+    };
+    vsock.set_idle_timeout(Duration::from_secs(30));
+    let message = vsock.recv().map_err(|detail| {
+        MicroVmPreflightFailure::new(
+            "guest.ready",
+            format!("readiness handshake failed: {detail}"),
+        )
+    })?;
+    let VsockMessage::GuestReady {
+        isolation_id,
+        generation,
+        docker_healthy,
+        job_credentials_absent,
+        session_challenge,
+    } = message
+    else {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.ready",
+            "expected GuestReady as the first guest message",
+        )
+        .into());
+    };
+    if isolation_id != expected.id {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.ready.isolation_id",
+            format!("{isolation_id} != expected {}", expected.id),
+        )
+        .into());
+    }
+    if generation != expected.generation {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.ready.generation",
+            format!("{generation} != expected {}", expected.generation),
+        )
+        .into());
+    }
+    if uuid::Uuid::parse_str(&session_challenge).is_err() {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.ready.session_challenge",
+            format!("received {session_challenge:?}; accepted a guest-generated UUID challenge"),
+        )
+        .into());
+    }
+    let ready = GuestReady {
+        agent_listening: true,
+        docker_healthy,
+        job_credentials_absent,
+    };
+    ready.credential_free_or_err()?;
+    Ok(ReadyMessage {
+        ready,
+        session_challenge,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadyMessage {
+    ready: GuestReady,
+    session_challenge: String,
+}
+
+fn prepare_guest_snapshot(world: &mut ExecutionWorld<'_>) -> Result<(), ExecutionError> {
+    let Some(vsock) = world.vsock.as_mut() else {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.snapshot",
+            "production microVM requires a vsock control channel before snapshot",
+        )
+        .into());
+    };
+    vsock
+        .send(VsockMessage::PrepareSnapshot)
+        .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
+    match vsock.recv() {
+        Ok(VsockMessage::SnapshotReady) => {
+            vsock.reset();
+            Ok(())
+        }
+        Ok(other) => Err(MicroVmPreflightFailure::new(
+            "guest.snapshot",
+            format!("expected SnapshotReady, received {other:?}"),
+        )
+        .into()),
+        Err(detail) => Err(MicroVmPreflightFailure::new(
+            "guest.snapshot",
+            format!("pre-snapshot handshake failed: {detail}"),
+        )
+        .into()),
+    }
+}
+
 fn spawn_jailer(
     set: &MicroVmArtifactSet,
     resources: &IsolationResources,
@@ -428,9 +657,10 @@ fn cold_configure(
     world: &mut ExecutionWorld<'_>,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<(), ExecutionError> {
+    let boot_args = guest_boot_args(&resources.identity)?;
     world
         .firecracker
-        .put_boot_source(&set.kernel.path)
+        .put_boot_source(&set.kernel.path, &boot_args)
         .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("put_boot_source".into()));
     world
@@ -454,6 +684,35 @@ fn cold_configure(
     Ok(())
 }
 
+fn guest_boot_args(identity: &IsolationIdentity) -> Result<String, ExecutionError> {
+    if identity.id.is_empty()
+        || !identity
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.identity",
+            format!(
+                "received {:?}; accepted ASCII letters, digits, '-' or '_' in isolation_id",
+                identity.id
+            ),
+        )
+        .into());
+    }
+    if identity.generation == 0 {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.identity.generation",
+            "received 0; accepted a non-zero generation",
+        )
+        .into());
+    }
+    Ok(format!(
+        "console=ttyS0 reboot=k panic=1 pci=off velnor.isolation_id={} velnor.isolation_generation={}",
+        identity.id, identity.generation
+    ))
+}
+
 fn snapshot_mem_path(set: &MicroVmArtifactSet, root: &Path) -> PathBuf {
     set.snapshot
         .as_ref()
@@ -461,13 +720,22 @@ fn snapshot_mem_path(set: &MicroVmArtifactSet, root: &Path) -> PathBuf {
         .unwrap_or_else(|| root.join("snapshot.mem"))
 }
 
-fn snapshot_identity_matches(set: &MicroVmArtifactSet, world: &ExecutionWorld<'_>) -> bool {
+fn snapshot_identity_matches(
+    set: &MicroVmArtifactSet,
+    world: &ExecutionWorld<'_>,
+    isolation: &IsolationIdentity,
+) -> bool {
     let mem = snapshot_mem_path(set, world.artifact_root);
     if !world.host_fs.exists(&mem) || !world.host_fs.exists(&vmstate_path(&mem)) {
         return false;
     }
     let generation = MicroVmGeneration::from_set(set);
-    let want = SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    let want = SnapshotIdentity::from_generation(
+        &generation,
+        std::env::consts::ARCH,
+        "linux-6.1",
+        isolation,
+    );
     let Ok(have) = read_identity(world.host_fs, &mem) else {
         return false;
     };
@@ -485,6 +753,7 @@ fn snapshot_identity_matches(set: &MicroVmArtifactSet, world: &ExecutionWorld<'_
 /// Credentials present, artifact load, or Firecracker API failure.
 pub fn create_golden_snapshot(
     world: &mut ExecutionWorld<'_>,
+    isolation: &IsolationIdentity,
     ready: GuestReady,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<(), ExecutionError> {
@@ -497,7 +766,7 @@ pub fn create_golden_snapshot(
         .pause_vm()
         .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("pause_vm".into()));
-    let persisted = persist_snapshot(world, &set, &mem, &vmstate, events);
+    let persisted = persist_snapshot(world, &set, &mem, &vmstate, isolation, events);
     if let Err(failure) = persisted {
         world
             .firecracker
@@ -528,6 +797,7 @@ fn persist_snapshot(
     set: &MicroVmArtifactSet,
     mem: &Path,
     vmstate: &Path,
+    isolation: &IsolationIdentity,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<(), ExecutionError> {
     world
@@ -536,8 +806,12 @@ fn persist_snapshot(
         .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("create_snapshot".into()));
     let generation = MicroVmGeneration::from_set(set);
-    let identity =
-        SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    let identity = SnapshotIdentity::from_generation(
+        &generation,
+        std::env::consts::ARCH,
+        "linux-6.1",
+        isolation,
+    );
     write_identity(world.host_fs, mem, &identity)?;
     Ok(())
 }
@@ -572,13 +846,48 @@ fn try_restore_snapshot(
 fn drive_vsock(
     vsock: &mut dyn super::VsockChannel,
     message: VsockMessage,
+    expected: &velnor_model::GuestJobPlan,
+    state: &GuestExecutionState,
     events: &mut Vec<ExecutionEvent>,
     timeout: Duration,
 ) -> Result<(), ExecutionError> {
+    let VsockMessage::DeliverPlan {
+        job_id,
+        isolation_id,
+        generation,
+        execution_nonce,
+        plan_sha256,
+        plan_bytes,
+        ..
+    } = &message
+    else {
+        return Err(MicroVmPreflightFailure::new(
+            "vsock.plan",
+            "host attempted to send a non-plan message",
+        )
+        .into());
+    };
+    if job_id != &expected.job_id
+        || isolation_id != &expected.isolation_id
+        || *generation != expected.generation
+        || job_id != &state.job_id
+        || isolation_id != &state.isolation_id
+        || *generation != state.generation
+        || execution_nonce != &state.execution_nonce
+        || plan_sha256 != &state.plan_sha256
+        || plan_sha256 != &hex_sha256(plan_bytes)
+    {
+        return Err(MicroVmPreflightFailure::new(
+            "vsock.plan",
+            "delivery identity does not match the expected job, isolation, and generation",
+        )
+        .into());
+    }
     let deadline = std::time::Instant::now() + timeout;
     vsock
         .send(message)
         .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?;
+    let mut completed = false;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -609,11 +918,49 @@ fn drive_vsock(
             }
         };
         match received {
-            VsockMessage::TeardownAck { .. } => return Ok(()),
+            VsockMessage::TeardownAck {
+                job_id,
+                isolation_id,
+                generation,
+                execution_nonce,
+                plan_sha256,
+            } => {
+                if !completed {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.teardown_ack",
+                        "acknowledgement arrived before JobCompleted",
+                    )
+                    .into());
+                }
+                if job_id != expected.job_id
+                    || isolation_id != expected.isolation_id
+                    || generation != expected.generation
+                    || job_id != state.job_id
+                    || isolation_id != state.isolation_id
+                    || generation != state.generation
+                    || execution_nonce != state.execution_nonce
+                    || plan_sha256 != state.plan_sha256
+                {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.teardown_ack",
+                        "acknowledgement identity does not match the expected job, isolation, and generation",
+                    )
+                    .into());
+                }
+                return Ok(());
+            }
             VsockMessage::JobCompleted {
                 conclusion,
                 exit_code,
             } => {
+                if completed {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.job_completed",
+                        "duplicate completion message (replay)",
+                    )
+                    .into());
+                }
+                completed = true;
                 events.push(ExecutionEvent::JobCompleted {
                     conclusion,
                     exit_code,
