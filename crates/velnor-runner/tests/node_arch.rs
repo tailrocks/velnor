@@ -309,6 +309,82 @@ fn live_idle_controller_reports_zero_job_workers() {
 }
 
 #[test]
+fn one_scope_controller_failure_does_not_stop_another_scope() {
+    let failed_scope = scratch("scope-failure");
+    let surviving_scope = scratch("scope-survivor");
+    let spawn_controller = |dir: &Path, scope: &str| {
+        Command::new(runner())
+            .args([
+                "controller",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                scope,
+                "--desired-ready",
+                "1",
+                "--surge",
+                "0",
+                "--spawn-slots",
+                "false",
+            ])
+            .env_remove("GITHUB_TOKEN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn scope controller")
+    };
+
+    let mut failed = spawn_controller(&failed_scope, "failed");
+    let mut survivor = spawn_controller(&surviving_scope, "survivor");
+    let metrics_path = surviving_scope.join("controller-metrics.json");
+    let mut initial_sequence = None;
+    for _ in 0..100 {
+        if let Ok(bytes) = std::fs::read(&metrics_path) {
+            if let Some(sequence) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|metrics| metrics["sequence"].as_u64())
+            {
+                initial_sequence = Some(sequence);
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let initial_sequence = initial_sequence.expect("surviving scope did not publish metrics");
+
+    failed.kill().expect("kill failed scope controller");
+    let _ = failed.wait();
+
+    let mut advanced = false;
+    for _ in 0..260 {
+        assert!(
+            survivor.try_wait().unwrap().is_none(),
+            "unrelated scope controller exited after sibling failure"
+        );
+        if let Ok(bytes) = std::fs::read(&metrics_path) {
+            let sequence = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|metrics| metrics["sequence"].as_u64());
+            if sequence.is_some_and(|sequence| sequence > initial_sequence) {
+                advanced = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        advanced,
+        "surviving scope stopped publishing control cycles after sibling failure"
+    );
+
+    survivor.kill().ok();
+    let _ = survivor.wait();
+    std::fs::remove_dir_all(failed_scope).ok();
+    std::fs::remove_dir_all(surviving_scope).ok();
+}
+
+#[test]
 fn packaged_units_have_no_controller_partof_to_workers() {
     let controller = include_str!("../debian/velnor-controller@.service");
     let slot = include_str!("../debian/velnor-slot@.service");
