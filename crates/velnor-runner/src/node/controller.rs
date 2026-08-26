@@ -406,6 +406,7 @@ async fn reconcile_once(
     register_runners(args, journal, pacing, registrations).await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
+    reclaim_orphaned_jobs(args, journal)?;
 
     for row in journal.pending_outbox()? {
         preserve_outbox(
@@ -570,14 +571,40 @@ async fn observe_github_and_routing(
             .or_else(|| exec.name.clone())
             .unwrap_or_else(|| "default".to_owned());
         let trust = prove::runtime_trust_scope(&exec.trust_scope);
-        if let Some(url) = exec.url.as_deref() {
-            if let Some(policy) =
-                prove::policy_from_github_url(url, group, exec.labels.clone(), trust.clone())
-            {
-                prove::write_policy_if_absent(&args.state_dir, &policy)?;
+        // Repo-scoped fleets derive policy from the URL (operator override
+        // on disk wins). Org-scoped fleets load the generated
+        // `<org>-desired-policy.json` allowlist every cycle and replace
+        // `routing-policy.json`. Never snapshot live group membership: a
+        // truncated GitHub group would become the desired baseline and hide
+        // drift.
+        let repo_policy = exec.url.as_deref().and_then(|url| {
+            prove::policy_from_github_url(url, group.clone(), exec.labels.clone(), trust.clone())
+        });
+        let policy = if let Some(policy) = repo_policy {
+            prove::write_policy_if_absent(&args.state_dir, &policy)?;
+            Some(policy)
+        } else if let Some(url) = exec.url.as_deref() {
+            if let Ok(scope) = crate::protocol::GitHubScope::parse(url) {
+                if let Some(org) = scope.org_login() {
+                    let generated = prove::org_policy_from_generated(
+                        org,
+                        exec.labels.clone(),
+                        trust.clone(),
+                        &prove::generated_policy_dir(),
+                    );
+                    if let Some(policy) = &generated {
+                        prove::write_policy(&args.state_dir, policy)?;
+                    }
+                    generated
+                } else {
+                    prove::read_policy(&args.state_dir)
+                }
+            } else {
+                prove::read_policy(&args.state_dir)
             }
-        }
-        let policy = prove::read_policy(&args.state_dir);
+        } else {
+            prove::read_policy(&args.state_dir)
+        };
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
             let now = tokio::time::Instant::now();
             if pacing.probe_due(now) {
@@ -687,6 +714,44 @@ fn spawn_ready_waiters(
             slot.generation.0,
             Some(&slot.slot_id.0),
         )?;
+    }
+    Ok(())
+}
+
+/// Return slots occupied by job workers that died without a terminal
+/// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
+/// slot stays `Assigned` forever and advertised capacity never recovers.
+fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow::Result<()> {
+    let state = journal.load_state()?;
+    for job in &state.jobs {
+        if !matches!(
+            job.phase,
+            ActorPhase::Assigned | ActorPhase::Starting | ActorPhase::Running
+        ) {
+            continue;
+        }
+        // A ready-slot waiter is spawned before GitHub assigns a job, so its
+        // durable ownership marker is keyed by the waiter identity rather
+        // than the later journal job id. Check both markers: otherwise a
+        // controller restart sees the live waiter as an orphan immediately
+        // after it accepts a job and reclaims the slot underneath it.
+        let waiter_id = format!("wait-{}", job.slot_id.0);
+        let worker_live = cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
+            .or_else(|| cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0))
+            .is_some_and(prove::pid_is_alive);
+        if worker_live {
+            continue;
+        }
+        let lost = journal.apply(Event::JobWorkerLost {
+            job_id: job.job_id.clone(),
+            generation: job.generation,
+        })?;
+        if !lost.rejected {
+            eprintln!(
+                "Warning: job {} worker lost on {}; slot restored to Ready",
+                job.job_id.0, job.slot_id.0
+            );
+        }
     }
     Ok(())
 }
@@ -875,7 +940,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn org_url_probe_sets_github_reachable_without_inferred_policy() {
+    async fn org_url_probe_bootstraps_policy_from_generated_allowlist() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
@@ -910,8 +975,33 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let policy_dir = dir.join("fleet-policy");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(
+            policy_dir.join("tailrocks-desired-policy.json"),
+            serde_json::to_vec(&json!({
+                "organization": "tailrocks",
+                "group_name": "velnor",
+                "selected_repositories": ["tailrocks/velnor", "tailrocks/velnor-apt"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("VELNOR_FLEET_POLICY_DIR", policy_dir.as_os_str());
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        // Stale live-membership snapshot must not win over generated JSON.
+        std::fs::write(
+            dir.join(prove::ROUTING_POLICY_FILE),
+            serde_json::to_vec_pretty(&json!({
+                "group": "velnor",
+                "selected_repositories": ["tailrocks/velnor"],
+                "labels": ["velnor"],
+                "trust_scope": "trusted"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         std::env::set_var("GITHUB_TOKEN", "ghs_test");
         std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
@@ -934,7 +1024,20 @@ mod tests {
                 .unwrap();
         assert_eq!(evidence.group, "velnor");
         assert_eq!(evidence.selected_repositories, vec!["tailrocks/velnor"]);
+        let policy: crate::node::prove::RoutingFields =
+            serde_json::from_slice(&std::fs::read(dir.join(prove::ROUTING_POLICY_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(
+            policy.selected_repositories,
+            vec!["tailrocks/velnor", "tailrocks/velnor-apt"],
+            "generated allowlist must replace a stale live-membership snapshot"
+        );
+        assert!(
+            !state.routing_valid,
+            "drift against generated allowlist must fail closed: {state:?}"
+        );
         std::env::remove_var("GITHUB_TOKEN");
+        std::env::remove_var("VELNOR_FLEET_POLICY_DIR");
         std::fs::remove_dir_all(dir).ok();
     }
 
