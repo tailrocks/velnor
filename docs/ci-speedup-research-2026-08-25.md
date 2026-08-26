@@ -280,3 +280,18 @@ Connection abortion and Docker ownership cleanup remain unchanged. The new
 regression test requires idle lease shutdown below 500 ms. Post-deploy proof
 must show zero new accept-thread warnings and reduced teardown tail on the same
 workload mix.
+
+### 2026-08-26 journal hot-path measurement
+
+The controller still called `load_state()` repeatedly inside its 2-second
+reconcile cycle. That function replays and checksum-verifies the entire event
+log, even though the SQLite materialized tables are committed atomically with
+each event. A local Rust nextest microbenchmark with 5,000 events and 16 reads
+measured **317.638 ms** for replay versus **0.612 ms** for materialized reads
+(about **519× faster**, **99.8% lower** read time). The implementation now
+reads the bounded materialized state for hot paths, takes an immediate SQLite
+write transaction before reducing events, and retains full replay for open-time
+integrity verification and explicit recovery reads. The v1→v2 migration stores
+`JobOwned.accepted_unix` so queue-age semantics remain exact. This is local
+evidence only; live Sentry before/after timing remains required after the
+signed APT release is available.
