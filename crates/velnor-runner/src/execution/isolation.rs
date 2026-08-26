@@ -57,6 +57,15 @@ fn sanitize(raw: &str) -> String {
 /// Jailer chroot, writable disks, and vsock UDS. Must be exec-capable: not
 /// tmpfs `noexec` `/run`, not packaged `/usr/share/velnor/microvm`.
 pub const MICROVM_ISOLATION_ROOT: &str = "/var/lib/velnor/microvm";
+/// Path wired into the microVM execution world so the host control socket is
+/// never even named. Not a real listener.
+pub const MICROVM_NO_HOST_DOCKER_SOCKET: &str = "/var/lib/velnor/microvm/no-host-docker.sock";
+
+/// Host Docker Engine control sockets. The microVM backend must not use these.
+#[must_use]
+pub fn is_host_docker_control_socket(path: &Path) -> bool {
+    path == Path::new("/var/run/docker.sock") || path == Path::new("/run/docker.sock")
+}
 
 /// Production isolation root under `VELNOR_STORAGE_ROOT` lib, else the packaged
 /// `/var/lib/velnor/microvm` path.
@@ -169,5 +178,17 @@ mod tests {
             Path::new(MICROVM_ISOLATION_ROOT)
         );
         assert_ne!(layout.lib_root.join("microvm"), layout.run_root);
+    }
+
+    #[test]
+    fn microvm_world_must_not_name_the_host_docker_socket() {
+        assert!(MICROVM_NO_HOST_DOCKER_SOCKET.starts_with(MICROVM_ISOLATION_ROOT));
+        assert!(!is_host_docker_control_socket(Path::new(
+            MICROVM_NO_HOST_DOCKER_SOCKET
+        )));
+        assert!(is_host_docker_control_socket(Path::new(
+            "/var/run/docker.sock"
+        )));
+        assert!(is_host_docker_control_socket(Path::new("/run/docker.sock")));
     }
 }

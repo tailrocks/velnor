@@ -243,7 +243,19 @@ pub fn live_job_ids_from_host_docker() -> Result<BTreeSet<String>> {
     Ok(live_job_ids_from_docker_ps(&listed))
 }
 
-pub fn reclaim_production_leftovers(prune_dangling_images: bool) -> Result<LeftoverReclaimReport> {
+/// List live job IDs from host Docker only when that backend is selected.
+/// Missing selection and `microvm` return an empty set and never open the socket.
+pub fn live_job_ids_for_reclaim(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+) -> Result<BTreeSet<String>> {
+    if velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
+        live_job_ids_from_host_docker()
+    } else {
+        Ok(BTreeSet::new())
+    }
+}
+
+fn reclaim_production_leftovers(prune_dangling_images: bool) -> Result<LeftoverReclaimReport> {
     let work_roots = discover_daemon_work_roots();
     let live = match live_job_ids_from_host_docker() {
         Ok(ids) => ids,
@@ -297,31 +309,27 @@ pub fn reclaim_production_if_hard_pressure_for(
     if usage_percent < HARD_PRESSURE_PERCENT {
         return Ok(LeftoverReclaimReport::default());
     }
-    match backend {
-        Some(velnor_model::ExecutionBackendKind::Docker) => {
-            let work_roots = discover_daemon_work_roots();
-            let live = match live_job_ids_from_host_docker() {
-                Ok(ids) => ids,
-                Err(error) => {
-                    eprintln!(
-                        "leftover workspace reclaim skipped (cannot list live jobs): {error:#}"
-                    );
-                    return Ok(LeftoverReclaimReport {
-                        skipped_docker: true,
-                        ..LeftoverReclaimReport::default()
-                    });
-                }
-            };
-            reclaim_if_hard_pressure(
-                usage_percent,
-                &work_roots,
-                &live,
-                host_docker_if_safe,
-                remove_dir_all,
-            )
-        }
-        Some(velnor_model::ExecutionBackendKind::MicroVm) | None => reclaim_microvm_leftovers(),
+    if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
+        return reclaim_microvm_leftovers();
     }
+    let work_roots = discover_daemon_work_roots();
+    let live = match live_job_ids_from_host_docker() {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
+            return Ok(LeftoverReclaimReport {
+                skipped_docker: true,
+                ..LeftoverReclaimReport::default()
+            });
+        }
+    };
+    reclaim_if_hard_pressure(
+        usage_percent,
+        &work_roots,
+        &live,
+        host_docker_if_safe,
+        remove_dir_all,
+    )
 }
 
 fn host_docker_if_safe(args: &[String]) -> Result<String> {
@@ -478,6 +486,16 @@ velnor-job-not-a-uuid\n\
         .unwrap();
         assert!(report.docker_commands.is_empty());
         assert!(!report.skipped_docker);
+    }
+
+    #[test]
+    fn live_job_ids_for_reclaim_skip_host_docker_when_unselected_or_microvm() {
+        assert!(live_job_ids_for_reclaim(None).unwrap().is_empty());
+        assert!(
+            live_job_ids_for_reclaim(Some(velnor_model::ExecutionBackendKind::MicroVm))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

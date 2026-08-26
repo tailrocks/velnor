@@ -32,6 +32,13 @@ fn seed_microvm_world(fs: &mut MemoryFs, root: &Path) {
     .unwrap();
 }
 
+fn socket_for(kind: ExecutionBackendKind) -> PathBuf {
+    match kind {
+        ExecutionBackendKind::Docker => PathBuf::from("/var/run/docker.sock"),
+        ExecutionBackendKind::MicroVm => PathBuf::from(MICROVM_NO_HOST_DOCKER_SOCKET),
+    }
+}
+
 fn world<'a>(
     fs: &'a mut MemoryFs,
     runner: &'a mut RecordingCommands,
@@ -94,7 +101,7 @@ fn microvm_missing_kvm_does_not_invoke_host_docker() {
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm-missing");
     let artifacts = PathBuf::from("/microvm");
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
     let error = preflight_selected(&file, &mut world).unwrap_err();
@@ -103,6 +110,26 @@ fn microvm_missing_kvm_does_not_invoke_host_docker() {
     assert!(text.contains("docker backend was not used"), "{text}");
     assert!(runner.calls.is_empty());
     assert!(api.calls.is_empty());
+}
+
+#[test]
+fn microvm_world_naming_host_docker_socket_fails_closed() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let mut runner = RecordingCommands::default();
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let docker = socket_for(ExecutionBackendKind::Docker);
+    fs.write(&docker, b"socket").unwrap();
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    let error = preflight_selected(&file, &mut world).unwrap_err();
+    assert!(
+        matches!(error, ExecutionError::HostDockerForbidden),
+        "{error}"
+    );
+    assert!(runner.calls.is_empty());
 }
 
 #[test]
@@ -120,13 +147,17 @@ fn superseded_docker_script_executor_paths_are_gone() {
             "host_docker_executor must not construct a host Docker engine outside ValidatedPlan"
         );
     }
+    assert!(
+        !runner.contains("backend != Some(velnor_model::ExecutionBackendKind::MicroVm)"),
+        "missing execution.toml must not be treated as docker for host Docker prune"
+    );
 }
 
 #[test]
 fn docker_backend_does_not_boot_firecracker() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::Docker);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -174,8 +205,10 @@ fn run_plan(kind: ExecutionBackendKind, cancel: bool) -> super::backend::Executi
     };
     let file = ExecutionFile::parse_toml(toml).unwrap();
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
-    fs.write(&docker, b"socket").unwrap();
+    let docker = socket_for(kind);
+    if kind == ExecutionBackendKind::Docker {
+        fs.write(&docker, b"socket").unwrap();
+    }
     let artifacts = PathBuf::from("/microvm");
     if kind == ExecutionBackendKind::MicroVm {
         seed_microvm_world(&mut fs, &artifacts);
@@ -225,7 +258,7 @@ fn run_cancel(kind: ExecutionBackendKind) -> super::backend::ExecutionOutcome {
 fn collect_while_live_is_forbidden_and_snapshot_mismatch_fails_closed() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::Docker);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -273,8 +306,10 @@ fn run_custom(kind: ExecutionBackendKind, plan: ValidatedPlan) -> super::backend
     };
     let file = ExecutionFile::parse_toml(toml).unwrap();
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
-    fs.write(&docker, b"socket").unwrap();
+    let docker = socket_for(kind);
+    if kind == ExecutionBackendKind::Docker {
+        fs.write(&docker, b"socket").unwrap();
+    }
     let artifacts = PathBuf::from("/microvm");
     if kind == ExecutionBackendKind::MicroVm {
         seed_microvm_world(&mut fs, &artifacts);
@@ -301,7 +336,7 @@ fn faults_fail_closed_without_host_docker_or_sibling_teardown() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -375,7 +410,7 @@ fn snapshot_checksum_mismatch_cold_boots() {
         &serde_json::to_vec(&checksums).unwrap(),
     )
     .unwrap();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -456,7 +491,7 @@ fn matching_snapshot_loads_only_after_jailer() {
         &serde_json::to_vec(&checksums).unwrap(),
     )
     .unwrap();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -541,7 +576,7 @@ fn wrong_job_snapshot_identity_cold_boots_without_load() {
         &serde_json::to_vec(&checksums).unwrap(),
     )
     .unwrap();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -580,7 +615,7 @@ fn golden_snapshot_create_pauses_then_writes_sidecar() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -660,7 +695,7 @@ fn golden_snapshot_create_refuses_job_credentials() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands::default();
     let mut api = RecordingFirecracker::default();
@@ -770,7 +805,7 @@ fn microvm_advertise_requires_coherent_packaged_generation() {
 fn docker_backend_uses_production_engine_when_present() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::Docker);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -833,7 +868,7 @@ fn microvm_execute_sends_deliver_plan_over_vsock() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -895,7 +930,7 @@ fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -956,7 +991,7 @@ fn microvm_execute_without_vsock_fails_closed() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -989,7 +1024,7 @@ fn microvm_rejects_unsupported_guest_plan_before_network_setup() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands::default();
     let mut api = RecordingFirecracker::default();
@@ -1042,7 +1077,7 @@ fn microvm_rejects_mismatched_teardown_ack_identity() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands::default();
     let mut api = RecordingFirecracker::default();
@@ -1071,7 +1106,7 @@ fn microvm_rejects_replayed_teardown_proof() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands::default();
     let mut api = RecordingFirecracker::default();
@@ -1147,7 +1182,7 @@ fn microvm_spawns_jailer_with_api_socket_and_unique_net() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -1219,7 +1254,7 @@ fn microvm_teardown_kill_failure_fences_and_attempts_network_cleanup() {
         Path::new(MICROVM_ISOLATION_ROOT),
     );
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     let artifacts = PathBuf::from("/microvm");
     let kvm = PathBuf::from("/dev/kvm");
     let mut runner = RecordingCommands {
@@ -1256,7 +1291,7 @@ fn microvm_teardown_network_failure_is_not_reported_clean() {
         Path::new(MICROVM_ISOLATION_ROOT),
     );
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     let artifacts = PathBuf::from("/microvm");
     let kvm = PathBuf::from("/dev/kvm");
     let mut runner = RecordingCommands {
@@ -1283,7 +1318,7 @@ fn microvm_teardown_network_failure_is_not_reported_clean() {
 fn log_substring_does_not_override_explicit_exit() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -1401,7 +1436,7 @@ fn synthetic_microvm_probe_runs_guest_docker_without_host_socket() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         next: CommandResult {
@@ -1432,7 +1467,7 @@ fn synthetic_microvm_probe_fails_closed_when_guest_docker_unhealthy() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands::default();
     let mut api = RecordingFirecracker::default();
@@ -1454,7 +1489,7 @@ fn jailer_failure_does_not_touch_host_docker_socket() {
     let mut fs = MemoryFs::default();
     let artifacts = PathBuf::from("/microvm");
     seed_microvm_world(&mut fs, &artifacts);
-    let docker = PathBuf::from("/var/run/docker.sock");
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
     fs.write(&docker, b"socket").unwrap();
     let mut runner = RecordingCommands {
         fail_spawn: Some("jailer killed".into()),

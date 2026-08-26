@@ -222,9 +222,14 @@ fn run_gc(
     }
     let backend = crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None)
         .ok()
-        .map(|file| file.backend())
-        .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
-    match crate::leftover_disk::reclaim_production_leftovers_for(backend, false) {
+        .map(|file| file.backend());
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("leftover-after-Velnor host Docker reclaim skipped: {reason}");
+    }
+    let reclaim_backend = backend.unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
+    match crate::leftover_disk::reclaim_production_leftovers_for(reclaim_backend, false) {
         Ok(report) => {
             println!(
                 "leftover_workspace_deleted\t{}",
@@ -242,11 +247,15 @@ fn print_leftover_workspace_candidates() {
     for root in &roots {
         println!("leftover_work_root\t{}", root.display());
     }
-    let live =
-        match crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None) {
-            Ok(file) if !file.backend().uses_host_docker_socket() => Default::default(),
-            _ => crate::leftover_disk::live_job_ids_from_host_docker().unwrap_or_default(),
-        };
+    let backend = crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None)
+        .ok()
+        .map(|file| file.backend());
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("leftover live-job listing skipped: {reason}");
+    }
+    let live = crate::leftover_disk::live_job_ids_for_reclaim(backend).unwrap_or_default();
     let orphans = crate::leftover_disk::orphan_job_workspace_paths(&roots, &live);
     println!("leftover_workspace_candidates\t{}", orphans.len());
     for path in orphans {
