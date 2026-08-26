@@ -89,7 +89,9 @@ impl RecoveryCoordinator {
     pub fn observe(&mut self, signal: RecoverySignal, now: Duration) -> RecoveryAction {
         match signal {
             RecoverySignal::Empty | RecoverySignal::Message => {
-                self.recovered(now);
+                if self.state != RecoveryState::Quarantined {
+                    self.recovered(now);
+                }
                 RecoveryAction::None
             }
             RecoverySignal::Error(BrokerPollErrorClass::Authentication) => {
@@ -125,6 +127,9 @@ impl RecoveryCoordinator {
 
     /// Record successful session/credential recovery.
     pub fn recovered(&mut self, now: Duration) {
+        if self.state == RecoveryState::Quarantined {
+            return;
+        }
         self.state = RecoveryState::Healthy;
         self.retry_streak = 0;
         self.retry_budget_used = 0;
@@ -201,5 +206,22 @@ mod tests {
         coordinator.observe(RecoverySignal::Empty, Duration::from_secs(10));
         assert_eq!(coordinator.retry_streak(), 0);
         assert_eq!(coordinator.state(), RecoveryState::Healthy);
+    }
+
+    #[test]
+    fn quarantine_is_not_cleared_by_another_idle_signal() {
+        let mut coordinator = RecoveryCoordinator::default();
+        for attempt in 0..=RETRY_BUDGET {
+            coordinator.observe(
+                RecoverySignal::Error(BrokerPollErrorClass::Server),
+                Duration::from_secs(1_000 + u64::from(attempt) * 600),
+            );
+        }
+        assert_eq!(coordinator.state(), RecoveryState::Quarantined);
+        assert_eq!(
+            coordinator.observe(RecoverySignal::Empty, Duration::from_secs(99_999)),
+            RecoveryAction::None
+        );
+        assert_eq!(coordinator.state(), RecoveryState::Quarantined);
     }
 }

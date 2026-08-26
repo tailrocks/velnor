@@ -997,7 +997,6 @@ pub(crate) async fn run_broker_manager(
         config_dir.join("logs"),
         format!("broker-manager slot={slot_id} generation={}", generation.0),
     );
-    let manager_started = Instant::now();
 
     let run_result: Result<()> = async {
         loop {
@@ -1027,7 +1026,7 @@ pub(crate) async fn run_broker_manager(
                 .recovery
                 .lock()
                 .await
-                .recovered(manager_started.elapsed());
+                .recovered(Duration::from_secs(crate::node::controller::epoch_now()));
             let Some(message) = message else {
                 // One request per control cycle. Recovery owns retry timing;
                 // this yield only prevents an empty broker response from

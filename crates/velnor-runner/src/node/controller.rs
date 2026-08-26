@@ -86,7 +86,7 @@ impl Default for GithubPacing {
     }
 }
 
-fn epoch_now() -> u64 {
+pub(crate) fn epoch_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -543,7 +543,6 @@ async fn supervise_broker_manager(
     assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
     signals: crate::runner::BrokerManagerSignals,
 ) {
-    let started = Instant::now();
     loop {
         if crate::runner::draining() {
             return;
@@ -566,7 +565,7 @@ async fn supervise_broker_manager(
                     .map_or(crate::protocol::BrokerPollErrorClass::Transport, |api| {
                         classify_broker_poll_error(api.status)
                     });
-                let now = started.elapsed();
+                let now = Duration::from_secs(epoch_now());
                 let (action, wait) = {
                     let mut coordinator = signals.recovery.lock().await;
                     let action = coordinator.observe(RecoverySignal::Error(class), now);
