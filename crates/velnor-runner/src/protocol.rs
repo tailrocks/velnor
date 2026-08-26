@@ -5841,6 +5841,31 @@ mod tests {
         assert!(!is_non_retriable_acquire_status(StatusCode::UNAUTHORIZED));
     }
 
+    #[test]
+    fn acquire_failure_classifies_local_faults_separately_from_transport() {
+        let permission = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private curl directory",
+        ));
+        assert!(!acquire_failure_is_transient(&permission));
+
+        let timeout = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "request timed out",
+        ));
+        assert!(acquire_failure_is_transient(&timeout));
+
+        let unauthorized = anyhow::Error::from(GitHubApiError {
+            status: StatusCode::UNAUTHORIZED.as_u16(),
+            action: "acquire".into(),
+            body: "invalid token".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+            remaining: Some(4999),
+        });
+        assert!(!acquire_failure_is_transient(&unauthorized));
+    }
+
     #[tokio::test]
     async fn acquire_job_retries_transient_failure_before_parsing_job() {
         use std::sync::{
