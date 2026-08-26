@@ -1642,6 +1642,23 @@ mod tests {
         assert_eq!(quantile(&[], 50), 0);
     }
 
+    #[test]
+    fn zero_job_metrics_report_no_waiter_or_job_processes() {
+        let health = velnor_model::HealthDocument::empty();
+        let mut metrics = ControllerMetrics::default();
+        metrics.record(
+            Duration::from_millis(4),
+            &health,
+            16,
+            0,
+            &JournalStats::default(),
+        );
+        let value = serde_json::to_value(metrics).unwrap();
+        assert_eq!(value["slot_processes"], 16);
+        assert_eq!(value["waiter_processes"], 0);
+        assert_eq!(value["job_processes"], 0);
+    }
+
     fn dummy_exec(url: &str) -> DaemonArgs {
         serde_json::from_value(json!({
             "url": url,
