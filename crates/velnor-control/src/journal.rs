@@ -862,18 +862,31 @@ impl Journal {
         conn.execute_batch(SCHEMA)?;
         let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let stored = u32::try_from(stored).unwrap_or(0);
-        let write_blocked = stored > JOURNAL_SCHEMA_VERSION;
-        let refresh_materialized_jobs = stored == 1;
+        let mut write_blocked = stored > JOURNAL_SCHEMA_VERSION;
+        let mut verified_during_migration = false;
         if stored == 0 {
             conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
         } else if stored == 1 {
             let transaction =
                 conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            transaction.execute(
-                "ALTER TABLE jobs ADD COLUMN accepted_unix INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-            transaction.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+            let current: i64 =
+                transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            let current = u32::try_from(current).unwrap_or(0);
+            if current == 1 {
+                transaction.execute(
+                    "ALTER TABLE jobs ADD COLUMN accepted_unix INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+                transaction.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+                // Keep checksum verification and materialization under the
+                // same write lock. Another process cannot commit an event
+                // between the replay and the v1 rebuild.
+                let verified_state = load_state_from_conn(&transaction)?;
+                persist_state(&transaction, &verified_state)?;
+                verified_during_migration = true;
+            } else {
+                write_blocked = current > JOURNAL_SCHEMA_VERSION;
+            }
             transaction.commit()?;
         }
         let mut journal = Self {
@@ -883,16 +896,8 @@ impl Journal {
         };
         // Verify all existing event checksums once. The controller's steady
         // state must not replay an ever-growing log every two seconds.
-        let verified_state = journal.load_state()?;
-        if refresh_materialized_jobs {
-            // The v1 materialization did not retain JobOwned's timestamp.
-            // Rebuild it once during the schema transition so the hot path
-            // preserves queue-age semantics exactly.
-            let transaction = journal
-                .conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            persist_state(&transaction, &verified_state)?;
-            transaction.commit()?;
+        if !verified_during_migration {
+            journal.load_state()?;
         }
         Ok(journal)
     }
@@ -917,7 +922,10 @@ impl Journal {
     /// # Errors
     /// SQLite reads or invalid materialized values.
     pub fn materialized_state(&self) -> StoreResult<FleetState> {
-        load_materialized_state(&self.conn)
+        let transaction = self.conn.unchecked_transaction()?;
+        let state = load_materialized_state(&transaction)?;
+        transaction.commit()?;
+        Ok(state)
     }
 
     /// Persist `event` then return the commands. Crash after this returns
@@ -995,39 +1003,7 @@ impl Journal {
     /// # Errors
     /// SQLite or payload decode failures.
     pub fn load_state(&self) -> StoreResult<FleetState> {
-        // Journal open succeeded, so the file is writable unless a later
-        // apply fails; recovery treats an opened journal as writable.
-        let mut state = FleetState {
-            journal_writable: true,
-            ..FleetState::default()
-        };
-        let mut stmt = self
-            .conn
-            .prepare("SELECT payload, checksum FROM events ORDER BY id ASC")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Conflict,
-                    "journal.checksum.mismatch",
-                )
-                .with_remediation("the event log failed integrity verification"));
-            }
-            let event: Event = match serde_json::from_str(&payload) {
-                Ok(event) => event,
-                Err(_) => {
-                    // Newer writer's unknown envelope: N-1 skips it. Checksum
-                    // already matched, so this is not corruption.
-                    continue;
-                }
-            };
-            let outcome = reduce(state, event);
-            state = outcome.state;
-        }
-        Ok(state)
+        load_state_from_conn(&self.conn)
     }
 
     /// Pending completion outbox rows that still need remote reconciliation.
@@ -1042,6 +1018,40 @@ impl Journal {
             .filter(|row| row.intended && !row.remote_acked)
             .collect())
     }
+}
+
+fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
+    // Journal open succeeded, so the file is writable unless a later apply
+    // fails; recovery treats an opened journal as writable.
+    let mut state = FleetState {
+        journal_writable: true,
+        ..FleetState::default()
+    };
+    let mut stmt = conn.prepare("SELECT payload, checksum FROM events ORDER BY id ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (payload, checksum) = row?;
+        if sha256_hex(payload.as_bytes()) != checksum {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.checksum.mismatch",
+            )
+            .with_remediation("the event log failed integrity verification"));
+        }
+        let event: Event = match serde_json::from_str(&payload) {
+            Ok(event) => event,
+            Err(_) => {
+                // Newer writer's unknown envelope: N-1 skips it. Checksum
+                // already matched, so this is not corruption.
+                continue;
+            }
+        };
+        let outcome = reduce(state, event);
+        state = outcome.state;
+    }
+    Ok(state)
 }
 
 fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
