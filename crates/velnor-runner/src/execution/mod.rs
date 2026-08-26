@@ -469,6 +469,7 @@ impl From<MicroVmPreflightFailure> for ExecutionError {
 pub struct RecordingCommands {
     pub calls: Vec<(String, Vec<String>)>,
     pub next: CommandResult,
+    pub results: Vec<CommandResult>,
     pub codes: Vec<i32>,
     pub next_pid: u32,
     pub fail_spawn: Option<String>,
@@ -486,6 +487,7 @@ impl Default for RecordingCommands {
                 stdout: String::new(),
                 stderr: String::new(),
             },
+            results: Vec::new(),
             codes: Vec::new(),
             next_pid: 1,
             fail_spawn: None,
@@ -499,7 +501,11 @@ impl Default for RecordingCommands {
 impl CommandRunner for RecordingCommands {
     fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
         self.calls.push((program.to_string(), args.to_vec()));
-        let mut result = self.next.clone();
+        let mut result = if self.results.is_empty() {
+            self.next.clone()
+        } else {
+            self.results.remove(0)
+        };
         if !self.codes.is_empty() {
             result.code = self.codes.remove(0);
         }

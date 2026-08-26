@@ -290,14 +290,12 @@ pub fn reclaim_production_leftovers_for(
 }
 
 fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
-    let work_roots = discover_daemon_work_roots();
-    reclaim_leftover_after_velnor(
-        &work_roots,
-        &BTreeSet::new(),
-        |_args| bail!("microvm leftover reclaim does not use host docker"),
-        remove_dir_all,
-        false,
-    )
+    // Work roots are shared by all daemon pools. MicroVM selection alone does
+    // not identify ownership, so deleting every UUID absent from the current
+    // pool's live set can remove an active Docker job from another pool.
+    // Leave reclamation to the coordinator until it supplies a pool-scoped
+    // ownership lease.
+    Ok(LeftoverReclaimReport::default())
 }
 
 /// Hard-pressure reclaim that skips host Docker when the selected backend is
@@ -328,13 +326,11 @@ pub fn reclaim_production_if_hard_pressure_with(
         return Ok(LeftoverReclaimReport::default());
     }
     if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
-        return reclaim_leftover_after_velnor(
-            work_roots,
-            &BTreeSet::new(),
-            |_args| bail!("microvm leftover reclaim does not use host docker"),
-            remove_dir,
-            false,
-        );
+        // A backend choice is not an ownership proof: `work_roots` can contain
+        // active jobs belonging to another daemon/pool. Fail closed until the
+        // cross-daemon coordinator exposes pool-scoped leases here.
+        let _ = (work_roots, remove_dir);
+        return Ok(LeftoverReclaimReport::default());
     }
     let live = match docker(&list_live_job_names_args()) {
         Ok(listed) => live_job_ids_from_docker_ps(&listed),
@@ -518,16 +514,24 @@ velnor-job-not-a-uuid\n\
     #[test]
     fn hard_pressure_microvm_and_missing_never_invoke_host_docker() {
         for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
+            let mut removed = Vec::new();
             let report = reclaim_production_if_hard_pressure_with(
                 backend,
                 HARD_PRESSURE_PERCENT,
-                &[],
+                &[PathBuf::from("/var/lib/velnor-trusted/work/active-job")],
                 |_| panic!("host docker must not run for {backend:?}"),
-                |_| Ok(()),
+                |path| {
+                    removed.push(path.to_path_buf());
+                    Ok(())
+                },
             )
             .unwrap();
             assert!(report.docker_commands.is_empty(), "{backend:?}");
             assert!(!report.skipped_docker, "{backend:?}");
+            assert!(
+                removed.is_empty(),
+                "cross-pool workspace was reclaimed: {removed:?}"
+            );
         }
     }
 
