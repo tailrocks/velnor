@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Args;
@@ -18,7 +19,7 @@ use crate::config;
 use crate::protocol::{
     classify_broker_poll_error, GitHubApiError, GitHubScope, ListedRunner, RegistrationClient,
 };
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::{mpsc, Mutex};
 
 use super::cleanup;
 use super::exec::load_exec_config;
@@ -333,6 +334,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
     let mut broker_managers: HashMap<String, (Generation, tokio::task::JoinHandle<()>)> =
         HashMap::new();
+    let recovery = Arc::new(Mutex::new(RecoveryCoordinator::default()));
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
@@ -344,7 +346,13 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             return Ok(());
         }
         let started = Instant::now();
-        ensure_broker_managers(&args, &journal, &mut broker_managers, assignment_tx.clone())?;
+        ensure_broker_managers(
+            &args,
+            &journal,
+            &mut broker_managers,
+            assignment_tx.clone(),
+            recovery.clone(),
+        )?;
         drain_broker_assignments(&args, &journal, &mut jobs, &mut assignment_rx)?;
         let (cycle, health) = reconcile_once(
             &args,
@@ -387,6 +395,7 @@ fn ensure_broker_managers(
     journal: &Journal,
     managers: &mut HashMap<String, (Generation, tokio::task::JoinHandle<()>)>,
     tx: mpsc::Sender<crate::runner::BrokerAssignment>,
+    recovery: Arc<Mutex<RecoveryCoordinator>>,
 ) -> anyhow::Result<()> {
     let daemon = match load_exec_config(&args.state_dir) {
         Ok(daemon) => daemon,
@@ -419,9 +428,16 @@ fn ensure_broker_managers(
         let generation = slot.generation;
         let task_id = manager_id.clone();
         let manager_tx = tx.clone();
+        let manager_recovery = recovery.clone();
         let task = tokio::spawn(async move {
             supervise_broker_manager(
-                run_args, state_dir, manager_id, generation, index, manager_tx,
+                run_args,
+                state_dir,
+                manager_id,
+                generation,
+                index,
+                manager_tx,
+                manager_recovery,
             )
             .await;
         });
@@ -437,9 +453,9 @@ async fn supervise_broker_manager(
     generation: Generation,
     slot_index: usize,
     assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
+    recovery: Arc<Mutex<RecoveryCoordinator>>,
 ) {
     let started = Instant::now();
-    let mut recovery = RecoveryCoordinator::default();
     loop {
         if crate::runner::draining() {
             return;
@@ -462,8 +478,12 @@ async fn supervise_broker_manager(
                         classify_broker_poll_error(api.status)
                     });
                 let now = started.elapsed();
-                let action = recovery.observe(RecoverySignal::Error(class), now);
-                let wait = recovery.retry_at().saturating_sub(now);
+                let (action, wait) = {
+                    let mut coordinator = recovery.lock().await;
+                    let action = coordinator.observe(RecoverySignal::Error(class), now);
+                    let wait = coordinator.retry_at().saturating_sub(now);
+                    (action, wait)
+                };
                 eprintln!(
                     "broker manager {slot_id} generation {} failed class={class:?} action={action:?}; retrying in {}s: {error:#}",
                     generation.0,
@@ -474,7 +494,7 @@ async fn supervise_broker_manager(
                 }
                 tokio::time::sleep(wait).await;
                 if matches!(action, super::recovery::RecoveryAction::Quarantine) {
-                    recovery.recovered(started.elapsed());
+                    recovery.lock().await.recovered(started.elapsed());
                 }
             }
         }
@@ -485,7 +505,7 @@ fn drain_broker_assignments(
     args: &ControllerArgs,
     journal: &Journal,
     jobs: &mut HashMap<String, Child>,
-    receiver: &mut Receiver<crate::runner::BrokerAssignment>,
+    receiver: &mut mpsc::Receiver<crate::runner::BrokerAssignment>,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(args.state_dir.join("handoffs"))?;
     while let Ok(assignment) = receiver.try_recv() {

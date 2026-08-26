@@ -89,18 +89,18 @@ impl RecoveryCoordinator {
             }
             RecoverySignal::Error(BrokerPollErrorClass::Authentication) => {
                 if self.state == RecoveryState::Backoff {
-                    return RecoveryAction::None;
+                    return self.schedule_retry(now);
                 }
                 self.state = RecoveryState::Backoff;
-                self.retry_at = now;
+                self.retry_at = now.saturating_add(Duration::from_secs(5));
                 RecoveryAction::RefreshCredentials
             }
             RecoverySignal::Error(BrokerPollErrorClass::MissingSession) => {
                 if self.state == RecoveryState::MissingSession {
-                    return RecoveryAction::None;
+                    return self.schedule_retry(now);
                 }
                 self.state = RecoveryState::MissingSession;
-                self.retry_at = now;
+                self.retry_at = now.saturating_add(Duration::from_secs(5));
                 RecoveryAction::RecreateSession
             }
             RecoverySignal::Error(BrokerPollErrorClass::Conflict)
