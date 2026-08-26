@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::job_summary::JobConclusion;
 
 /// Protocol version. Mismatch fails closed.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
 /// stdout stream tag in [`VsockMessage::Stdio`].
@@ -28,8 +28,10 @@ pub enum VsockMessage {
         isolation_id: String,
         generation: u64,
         docker_healthy: bool,
+        job_credentials_absent: bool,
     },
     DeliverPlan {
+        job_id: String,
         isolation_id: String,
         generation: u64,
         plan_bytes: Vec<u8>,
@@ -66,6 +68,7 @@ pub enum VsockMessage {
         bytes: Vec<u8>,
     },
     TeardownAck {
+        job_id: String,
         isolation_id: String,
         generation: u64,
     },
@@ -210,16 +213,20 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             isolation_id,
             generation,
             docker_healthy,
+            job_credentials_absent,
         } => {
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
             payload.push(u8::from(*docker_healthy));
+            payload.push(u8::from(*job_credentials_absent));
         }
         VsockMessage::DeliverPlan {
+            job_id,
             isolation_id,
             generation,
             plan_bytes,
         } => {
+            write_string(&mut payload, job_id)?;
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
             write_bytes(&mut payload, plan_bytes)?;
@@ -261,9 +268,11 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             write_bytes(&mut payload, bytes)?;
         }
         VsockMessage::TeardownAck {
+            job_id,
             isolation_id,
             generation,
         } => {
+            write_string(&mut payload, job_id)?;
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
         }
@@ -285,17 +294,21 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
             let docker_healthy = read_u8(&mut cur)? != 0;
+            let job_credentials_absent = read_u8(&mut cur)? != 0;
             VsockMessage::GuestReady {
                 isolation_id,
                 generation,
                 docker_healthy,
+                job_credentials_absent,
             }
         }
         2 => {
+            let job_id = read_string(&mut cur)?;
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
             let plan_bytes = read_bytes(&mut cur)?;
             VsockMessage::DeliverPlan {
+                job_id,
                 isolation_id,
                 generation,
                 plan_bytes,
@@ -347,9 +360,11 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
             }
         }
         12 => {
+            let job_id = read_string(&mut cur)?;
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
             VsockMessage::TeardownAck {
+                job_id,
                 isolation_id,
                 generation,
             }
@@ -503,6 +518,7 @@ mod tests {
             isolation_id: "job-1".into(),
             generation: 7,
             docker_healthy: true,
+            job_credentials_absent: true,
         };
         let bytes = ready.encode().unwrap();
         assert_eq!(VsockMessage::decode(&bytes).unwrap(), ready);
@@ -547,6 +563,7 @@ mod tests {
                 isolation_id: "job-1".into(),
                 generation: 1,
                 docker_healthy: true,
+                job_credentials_absent: true,
             }
             .encode()
             .unwrap(),
@@ -562,6 +579,7 @@ mod tests {
                 isolation_id: "job-1".into(),
                 generation: 1,
                 docker_healthy: true,
+                job_credentials_absent: true,
             }
         );
     }

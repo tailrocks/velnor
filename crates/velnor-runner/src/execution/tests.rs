@@ -288,14 +288,10 @@ fn run_custom(kind: ExecutionBackendKind, plan: ValidatedPlan) -> super::backend
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
+    let job_id = plan.job_id.clone();
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
-    crate::execution::run_validated_job(
-        &file,
-        IsolationIdentity::new("job-x", 1),
-        &plan,
-        &mut world,
-    )
-    .unwrap()
+    crate::execution::run_validated_job(&file, IsolationIdentity::new(job_id, 1), &plan, &mut world)
+        .unwrap()
 }
 
 #[test]
@@ -387,8 +383,10 @@ fn snapshot_checksum_mismatch_cold_boots() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-gold", 1);
     {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        world.vsock = Some(&mut vsock);
         let mut session =
             open_session(&file, IsolationIdentity::new("job-snap", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
@@ -462,8 +460,11 @@ fn matching_snapshot_loads_only_after_jailer() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-gold", 1);
     {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        world.allow_inline_guest_plan = false;
+        world.vsock = Some(&mut vsock);
         let mut session =
             open_session(&file, IsolationIdentity::new("job-restore", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
@@ -508,8 +509,11 @@ fn golden_snapshot_create_pauses_then_writes_sidecar() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-gold", 1);
     {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        world.allow_inline_guest_plan = false;
+        world.vsock = Some(&mut vsock);
         let mut session =
             open_session(&file, IsolationIdentity::new("job-gold", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
@@ -717,17 +721,17 @@ fn microvm_execute_sends_deliver_plan_over_vsock() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
-    let mut vsock = LoopbackVsock::default();
+    let mut vsock = LoopbackVsock::with_ready("job-vsock", 1);
     {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         world.allow_inline_guest_plan = false;
+        world.vsock = Some(&mut vsock);
         let mut session =
             open_session(&file, IsolationIdentity::new("job-vsock", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
         let plan = ValidatedPlan::example_success("job-vsock");
         session.prepare(&plan, &mut world).unwrap();
         session.start(&mut world).unwrap();
-        world.vsock = Some(&mut vsock);
         session.execute(&plan, &mut world).unwrap();
         assert!(!session.used_host_docker());
         assert!(session.used_firecracker());
@@ -767,12 +771,41 @@ fn microvm_execute_without_vsock_fails_closed() {
     session.reserve(&mut world).unwrap();
     let plan = ValidatedPlan::example_success("job-novsock");
     session.prepare(&plan, &mut world).unwrap();
+    let error = session.start(&mut world).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("guest.ready"), "{text}");
+    assert!(text.contains("docker backend was not used"), "{text}");
+    assert!(!session.used_host_docker());
+    assert!(api.calls.iter().all(|call| call != "instance_start"));
+}
+
+#[test]
+fn microvm_rejects_mismatched_teardown_ack_identity() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands::default();
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock =
+        LoopbackVsock::with_ready("job-ack", 2).with_teardown_ack("job-old", "job-ack", 2);
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    world.allow_inline_guest_plan = false;
+    world.vsock = Some(&mut vsock);
+    let mut session =
+        open_session(&file, IsolationIdentity::new("job-ack", 2), &mut world).unwrap();
+    session.reserve(&mut world).unwrap();
+    let plan = ValidatedPlan::example_success("job-ack");
+    session.prepare(&plan, &mut world).unwrap();
     session.start(&mut world).unwrap();
     let error = session.execute(&plan, &mut world).unwrap_err();
     let text = error.to_string();
-    assert!(text.contains("vsock"), "{text}");
-    assert!(text.contains("docker backend was not used"), "{text}");
-    assert!(!session.used_host_docker());
+    assert!(text.contains("vsock.teardown_ack"), "{text}");
+    assert!(text.contains("identity"), "{text}");
+    session.teardown(&mut world).unwrap();
 }
 
 fn script_step(id: &str, script: &str) -> crate::script_step::ScriptStep {

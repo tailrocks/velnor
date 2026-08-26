@@ -84,17 +84,54 @@ impl VsockChannel for UnixVsockChannel {
 pub struct LoopbackVsock {
     pub sent: Vec<VsockMessage>,
     pending: Vec<VsockMessage>,
+    ready: Option<VsockMessage>,
+    teardown_ack: Option<(String, String, u64)>,
+}
+
+impl LoopbackVsock {
+    /// Construct a test channel with a proved guest readiness frame.
+    #[must_use]
+    pub fn with_ready(isolation_id: impl Into<String>, generation: u64) -> Self {
+        Self {
+            ready: Some(VsockMessage::GuestReady {
+                isolation_id: isolation_id.into(),
+                generation,
+                docker_healthy: true,
+                job_credentials_absent: true,
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Override the acknowledgement identity for negative host-side tests.
+    #[must_use]
+    pub fn with_teardown_ack(
+        mut self,
+        job_id: impl Into<String>,
+        isolation_id: impl Into<String>,
+        generation: u64,
+    ) -> Self {
+        self.teardown_ack = Some((job_id.into(), isolation_id.into(), generation));
+        self
+    }
 }
 
 impl VsockChannel for LoopbackVsock {
     fn send(&mut self, message: VsockMessage) -> Result<(), String> {
         if let VsockMessage::DeliverPlan {
+            job_id,
             isolation_id,
             generation,
             plan_bytes,
         } = &message
         {
             let plan = GuestJobPlan::decode(plan_bytes)?;
+            if plan.job_id != *job_id
+                || plan.isolation_id != *isolation_id
+                || plan.generation != *generation
+            {
+                return Err("loopback rejected plan identity mismatch".into());
+            }
             validate_guest_plan(&plan)?;
             let (conclusion, exit_code) = plan
                 .planned_conclusion()
@@ -103,9 +140,14 @@ impl VsockChannel for LoopbackVsock {
                 conclusion,
                 exit_code,
             });
+            let (job_id, isolation_id, generation) = self
+                .teardown_ack
+                .take()
+                .unwrap_or_else(|| (job_id.clone(), isolation_id.clone(), *generation));
             self.pending.push(VsockMessage::TeardownAck {
-                isolation_id: isolation_id.clone(),
-                generation: *generation,
+                job_id,
+                isolation_id,
+                generation,
             });
         }
         self.sent.push(message);
@@ -113,6 +155,9 @@ impl VsockChannel for LoopbackVsock {
     }
 
     fn recv(&mut self) -> Result<VsockMessage, String> {
+        if let Some(ready) = self.ready.take() {
+            return Ok(ready);
+        }
         if self.pending.is_empty() {
             return Err("loopback vsock empty".into());
         }
@@ -473,6 +518,7 @@ mod tests {
         let plan = sample_plan();
         vsock
             .send(VsockMessage::DeliverPlan {
+                job_id: plan.job_id.clone(),
                 isolation_id: plan.isolation_id.clone(),
                 generation: plan.generation,
                 plan_bytes: plan.encode().unwrap(),
@@ -488,9 +534,10 @@ mod tests {
         assert!(matches!(
             vsock.recv().unwrap(),
             VsockMessage::TeardownAck {
+                job_id,
                 isolation_id,
                 generation: 1
-            } if isolation_id == "job-1"
+            } if job_id == "job-1" && isolation_id == "job-1"
         ));
         assert!(matches!(vsock.sent[0], VsockMessage::DeliverPlan { .. }));
     }

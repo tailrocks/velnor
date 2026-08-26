@@ -652,7 +652,7 @@ impl BackendSession {
             }
             ExecutionBackendKind::MicroVm => {
                 if let Some(firecracker) = &mut self.firecracker {
-                    firecracker.start(world, &mut self.events)?;
+                    firecracker.start(&self.isolation, world, &mut self.events)?;
                 }
             }
         }

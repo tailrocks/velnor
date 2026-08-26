@@ -26,7 +26,8 @@ fn run() -> Result<(), String> {
             .unwrap_or(GUEST_AGENT_PORT);
         let listener = bind_af_vsock(port)?;
         let mut stream = accept_af_vsock(&listener)?;
-        serve_guest_session(&mut stream, &GuestSessionEnv::from_guest_env(), |bytes| {
+        let env = GuestSessionEnv::from_guest_env()?;
+        serve_guest_session(&mut stream, &env, |bytes| {
             velnor_runner::execution::run_guest_plan_bytes(bytes)
         })
     }
