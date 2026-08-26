@@ -247,7 +247,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
-            drain_children(&mut journal, &mut slots, &mut jobs).await?;
+            drain_children(&journal, &mut slots, &mut jobs).await?;
             return Ok(());
         }
         let cycle = reconcile_once(
