@@ -93,9 +93,9 @@ isolation tradeoff is allowed.
 - [x] Stale generations cannot mutate newer sessions or registrations.
 - [x] Retry deadlines and quarantine are tested.
 - [x] Killing one slot leaves siblings alive.
-- [ ] Restarting one controller proves unrelated scopes remain alive.
+- [x] Restarting one controller proves unrelated scopes remain alive.
 - [x] Killing/blocking one broker session proves other slots remain schedulable.
-- [ ] One scope API failure proves another scope continues normally.
+- [x] One scope API failure proves another scope continues normally.
 - [x] Controller restart during an active job proves preservation or explicit recovery.
 - [x] Drain seam test sends SIGTERM to an idle slot, preserves a finishing job,
   reaps both children, and completes under a 2-second bounded deadline.
@@ -224,6 +224,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   verifies its `Exited` completion record; no production or fixture changes.
 - Latest full validation after drain proof: 1,400/1,400 workspace nextest tests,
   strict Clippy, formatting, and diff checks passed.
+- Restart-isolation proof now kills and relaunches one scope controller while
+  asserting the unrelated controller remains alive; focused node-architecture
+  tests pass.
+- Asymmetric wiremock API proof runs failing and healthy scope controllers
+  against independent GitHub API paths; the failing scope reports degraded
+  reachability while the healthy scope continues cycles. Focused node tests
+  pass.
 
 ## Non-goals
 

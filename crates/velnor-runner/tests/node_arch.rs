@@ -8,6 +8,10 @@ use velnor_control::journal::{Event, Journal};
 use velnor_model::{FleetHealthState, Generation, HealthDocument, SlotId};
 
 use velnor_runner::node::slot::heartbeat_path;
+use wiremock::{
+    matchers::{method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 fn scratch(label: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -378,10 +382,219 @@ fn one_scope_controller_failure_does_not_stop_another_scope() {
         "surviving scope stopped publishing control cycles after sibling failure"
     );
 
+    let mut restarted_controller = spawn_controller(&failed_scope, "failed");
+    let restarted_metrics = failed_scope.join("controller-metrics.json");
+    let mut restarted_seen = false;
+    for _ in 0..100 {
+        if restarted_metrics.is_file() {
+            restarted_seen = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(restarted_seen, "failed scope controller did not restart");
+    assert!(
+        survivor.try_wait().unwrap().is_none(),
+        "unrelated scope controller exited during sibling restart"
+    );
+
+    restarted_controller.kill().ok();
+    let _ = restarted_controller.wait();
     survivor.kill().ok();
     let _ = survivor.wait();
     std::fs::remove_dir_all(failed_scope).ok();
     std::fs::remove_dir_all(surviving_scope).ok();
+}
+
+struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn is_running(&mut self) -> bool {
+        self.0
+            .as_mut()
+            .is_some_and(|child| child.try_wait().ok().flatten().is_none())
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn write_api_test_exec_config(dir: &Path, url: &str) {
+    std::fs::write(
+        dir.join("daemon-exec.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "config_dir": null,
+            "url": url,
+            "name": "api-isolation",
+            "labels": [],
+            "target_mvp_labels": false,
+            "target_mvp_arm_label": false,
+            "replace": false,
+            "pool_id": null,
+            "pool_name": null,
+            "routing_policy_file": null,
+            "dry_run_registration": false,
+            "slots": 1,
+            "max_idle_slot_age_seconds": null,
+            "once": false,
+            "idle_timeout_seconds": null,
+            "complete_noop": false,
+            "execute_scripts": false,
+            "dry_run_jobs": false,
+            "dump_job_message": null,
+            "docker_image": "img",
+            "job_cpus": "",
+            "job_memory": "",
+            "trust_scope": "trusted",
+            "emergency_reserve_bytes": 0,
+            "job_peak_bytes": 0,
+            "node_action_image": "img",
+            "work_dir": null,
+            "docker_host_work_dir": null,
+            "skip_preflight": false,
+            "require_docker_socket": false
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+#[tokio::test]
+async fn one_scope_api_failure_does_not_stop_unrelated_controller() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/orgs/failing/actions/runners"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/orgs/healthy/actions/runners"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_count": 0,
+            "runners": []
+        })))
+        .mount(&server)
+        .await;
+
+    let failing_dir = scratch("api-failing");
+    let healthy_dir = scratch("api-healthy");
+    write_api_test_exec_config(&failing_dir, &format!("{}/failing", server.uri()));
+    write_api_test_exec_config(&healthy_dir, &format!("{}/healthy", server.uri()));
+
+    let spawn = |dir: &Path, scope: &str| {
+        Command::new(runner())
+            .args([
+                "controller",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                scope,
+                "--desired-ready",
+                "0",
+                "--surge",
+                "0",
+                "--spawn-slots",
+                "false",
+            ])
+            .env("GITHUB_TOKEN", "wiremock-token")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut failing = ChildGuard::new(spawn(&failing_dir, "failing"));
+    let mut healthy = ChildGuard::new(spawn(&healthy_dir, "healthy"));
+    let failing_health_path = failing_dir.join("health.json");
+    let healthy_health_path = healthy_dir.join("health.json");
+    let healthy_metrics_path = healthy_dir.join("controller-metrics.json");
+
+    let mut initial_healthy_sequence = None;
+    for _ in 0..200 {
+        let failing_health = read_json(&failing_health_path);
+        let healthy_health = read_json(&healthy_health_path);
+        let healthy_metrics = read_json(&healthy_metrics_path);
+        if failing_health
+            .as_ref()
+            .is_some_and(|health| health["github_reachable"] == false)
+            && healthy_health
+                .as_ref()
+                .is_some_and(|health| health["github_reachable"] == true)
+            && healthy_metrics
+                .as_ref()
+                .and_then(|metrics| metrics["sequence"].as_u64())
+                .is_some()
+        {
+            initial_healthy_sequence =
+                healthy_metrics.and_then(|metrics| metrics["sequence"].as_u64());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let initial_healthy_sequence =
+        initial_healthy_sequence.expect("both scope health documents were not observed");
+
+    let mut advanced = false;
+    // The watchdog reconciliation is intentionally slow (10 seconds); wait
+    // past one complete interval so continued healthy control cycles are
+    // observed rather than inferred from startup.
+    for _ in 0..600 {
+        assert!(failing.is_running(), "failing scope controller exited");
+        assert!(healthy.is_running(), "healthy scope controller exited");
+        let sequence =
+            read_json(&healthy_metrics_path).and_then(|metrics| metrics["sequence"].as_u64());
+        if sequence.is_some_and(|sequence| sequence > initial_healthy_sequence) {
+            advanced = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        advanced,
+        "healthy scope stopped publishing after sibling API failure"
+    );
+    assert_eq!(
+        read_json(&failing_health_path).expect("failing health document")["github_reachable"],
+        false
+    );
+    assert_eq!(
+        read_json(&healthy_health_path).expect("healthy health document")["github_reachable"],
+        true
+    );
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    let failing_requests = requests
+        .iter()
+        .filter(|request| request.url.path() == "/api/v3/orgs/failing/actions/runners")
+        .count();
+    let healthy_requests = requests
+        .iter()
+        .filter(|request| request.url.path() == "/api/v3/orgs/healthy/actions/runners")
+        .count();
+    assert!(failing_requests >= 1, "failing API path was not exercised");
+    assert!(
+        healthy_requests >= 1,
+        "healthy API path was not exercised independently"
+    );
+
+    drop(failing);
+    drop(healthy);
+    std::fs::remove_dir_all(failing_dir).ok();
+    std::fs::remove_dir_all(healthy_dir).ok();
 }
 
 #[test]
