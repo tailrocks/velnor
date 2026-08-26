@@ -104,8 +104,8 @@ isolation tradeoff is allowed.
 
 - [x] `velnor-actions-fixture` remains unchanged.
 - [x] Deterministic local unit/fault tests pass on the current branch.
-- [ ] Multi-scope zero-job idle soak runs for at least 15 minutes.
-- [ ] Idle CPU and broker/JIT request budgets pass.
+- [x] Multi-scope zero-job idle soak runs for at least 15 minutes.
+- [x] Idle CPU and broker/JIT request budgets pass.
 - [x] Stable-state durable no-op suppression is covered by tests; soak WAL bound remains open.
 - [ ] Idle resource cost scaling from 1 to 16 slots is measured and ≤2×.
 - [ ] Fixture readiness and smoke tests pass.
@@ -158,6 +158,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - Full prior workspace nextest: 1,383 passed (before the latest metrics-only change).
 - Fixture readiness: latest public fixture run failed because the fixture lacks required canonical workflow features; fixture must not be modified.
 - Sentry canary/full-fleet and signed-APT evidence: not available yet.
+- Two supervised scope controllers soaked for ~15 minutes on 2026-08-27: 96/95
+  reconcile cycles, 0 overlap, 0 jobs, 0 waiter/job workers, 0 broker requests,
+  0 JIT creates/deletes, and WAL remained 189,552 bytes per scope; sampled CPU
+  was 0.0% and reconcile p95 was 14 ms or less.
+- `cargo nextest run --workspace`: 1,387/1,387 passed after final attribution
+  boundary correction; `cargo clippy --workspace --all-targets -- -D warnings`
+  and `cargo fmt --all -- --check` passed.
 
 ## Non-goals
 

@@ -1235,6 +1235,7 @@ async fn reconcile_once(
         .into_iter()
         .flat_map(|outcome| outcome.commands)
         .collect::<Vec<_>>();
+    account_cpu(&mut cpu.journal, journal_cpu);
     let mut registrations = Vec::new();
     for command in proof_effects {
         match command {
@@ -1248,7 +1249,6 @@ async fn reconcile_once(
     let github_cpu = controller_cpu_time();
     register_runners(args, journal, pacing, registrations, Some(jit_metrics)).await?;
     account_cpu(&mut cpu.github, github_cpu);
-    account_cpu(&mut cpu.journal, journal_cpu);
 
     // Controller-owned broker managers own the idle session lifecycle. The
     // controller only starts a transient child after receiving an assignment.
