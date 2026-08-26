@@ -831,7 +831,7 @@ pub(super) fn apply_step_command_files(
             ],
         )?;
     }
-    if !has_output && !has_env && !has_path && !has_summary {
+    if !has_output && !has_env && !has_path {
         return Ok(());
     }
     docker(
@@ -1511,11 +1511,9 @@ mod tests {
                 result(0, ""),         // first step
                 result(0, "first\n"),  // first summary snapshot
                 result(0, ""),         // first summary truncate
-                result(0, ""),         // existing output/env/path cleanup
                 result(1, ""),         // second step fails
                 result(0, "second\n"), // second summary snapshot
                 result(0, ""),         // second summary truncate
-                result(0, ""),         // existing output/env/path cleanup
                 result(0, ""),         // job cleanup
                 result(0, ""),         // network cleanup
             ],
