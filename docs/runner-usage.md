@@ -32,6 +32,16 @@ downloaded `.deb`, `dpkg -i`, a local apt path, a copied binary, or a local
 build. A verified release record is activation metadata, not an installation
 path.
 
+Before the exact apt install, stop the exact Velnor services and doctor timers
+after the fleet is drained. The package preinst takes the exclusive
+`/run/velnor/package-transaction.lock` with util-linux `flock`, then rechecks
+all active Velnor services/timers and guardian state; it refuses the transaction
+if the lock or any process is still present. Every shipped Velnor service takes
+the same lock shared with `--no-fork`, so the lock remains held by the actual
+Velnor process across `exec` and preserves systemd signals and `Type=notify`.
+The upgrade preinst/postinst never stop, mask, restart, or enable units; removal
+cleanup remains a separate operator-state teardown path.
+
 The package ships the canonical job-image Dockerfile and acyclic build identity.
 During configuration, `postinst` verifies the installed binary and compiled
 manifest against that package-owned identity. It performs no network work,

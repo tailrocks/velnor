@@ -48,6 +48,9 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
 fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
     let preinst = include_str!("../../debian/preinst");
 
+    assert!(preinst.contains("PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock"));
+    assert!(preinst.contains("exec 9>>\"$PACKAGE_TRANSACTION_LOCK\""));
+    assert!(preinst.contains("/usr/bin/flock --exclusive --nonblock 9"));
     assert!(preinst.contains("systemctl show --property=LoadState --value velnor-guardian.service"));
     assert!(preinst.contains("not-found) return 0"));
     assert!(preinst.contains(
@@ -57,8 +60,45 @@ fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
         "systemctl list-units --type=service --state=active --no-legend --plain 'velnor*.service'"
     ));
     assert!(preinst.contains(
+        "systemctl list-units --type=timer --state=active --no-legend --plain 'velnor*.timer'"
+    ));
+    assert!(preinst.contains(
         "guardian_inactive || fail \"refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service.\""
     ));
+}
+
+#[test]
+fn shipped_velnor_services_hold_shared_package_lock_across_exec() {
+    let debian_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("debian");
+    let expected = "/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock";
+    let mut service_count = 0;
+
+    for entry in std::fs::read_dir(&debian_dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("service") {
+            continue;
+        }
+        service_count += 1;
+        let unit = std::fs::read_to_string(entry.path()).unwrap();
+        for line in unit.lines().filter(|line| line.starts_with("ExecStart")) {
+            assert!(
+                line.contains(expected),
+                "{} has an unguarded Velnor command: {line}",
+                entry.path().display()
+            );
+        }
+    }
+
+    assert_eq!(
+        service_count, 8,
+        "all shipped Velnor service units must be audited"
+    );
+}
+
+#[test]
+fn debian_package_declares_flock_provider() {
+    let manifest = include_str!("../../Cargo.toml");
+    assert!(manifest.contains("util-linux (>= 2.37.2)"));
 }
 
 #[test]

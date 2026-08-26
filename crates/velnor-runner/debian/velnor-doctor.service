@@ -12,7 +12,8 @@ EnvironmentFile=-/etc/velnor/secrets.env
 # Same StateDirectory as velnor-daemon.service so STATE_DIRECTORY wins over
 # VELNOR_STORAGE_ROOT. Never $HOME/.velnor.
 StateDirectory=velnor
-ExecStart=/usr/bin/velnorctl doctor \
+RuntimeDirectory=velnor
+ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnorctl doctor \
   --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \
   --slots ${VELNOR_SLOTS}

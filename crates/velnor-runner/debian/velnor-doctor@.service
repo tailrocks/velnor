@@ -17,7 +17,8 @@ EnvironmentFile=-/etc/velnor/%i.secrets.env
 # VELNOR_STORAGE_ROOT. Doctor SLO samples and in-flight heal read
 # /var/lib/velnor-%i/runner/daemons/<name>, not /var/lib/velnor/runner.
 StateDirectory=velnor-%i
-ExecStart=/usr/bin/velnorctl doctor \
+RuntimeDirectory=velnor
+ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnorctl doctor \
   --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \
   --slots ${VELNOR_SLOTS}
