@@ -241,6 +241,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   sccache, kache, provenance, artifact, Docker, Pages, Renovate,
   merge-group, and environment-injection features. Fixture remains unchanged;
   no dispatch or workflow mutation was performed.
+- A merge-base controller smoke was attempted in a detached temporary
+  worktree; without a configured GitHub endpoint/token it exercised no broker
+  or waiter path and did not reproduce historical high CPU. The temporary
+  worktree and state were removed. The high-CPU reproduction checkbox remains
+  open rather than claiming a synthetic reproduction.
 
 ## Non-goals
 
