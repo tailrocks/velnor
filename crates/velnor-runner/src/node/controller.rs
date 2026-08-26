@@ -2095,6 +2095,62 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// Drain must deliver a real termination signal to idle slot children,
+    /// while allowing an active job child to finish naturally. The timeout
+    /// makes the systemd-facing bound executable rather than documenting an
+    /// unbounded wait.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drain_children_terminates_idle_slot_and_waits_for_job_boundedly() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-drain-test-{}-{}",
+            std::process::id(),
+            epoch_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut slots = HashMap::new();
+        let slot = Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn idle slot stand-in");
+        slots.insert("slot-1".to_owned(), slot);
+
+        let mut jobs = HashMap::new();
+        let job = Command::new("sleep")
+            .arg("0.2")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn active job stand-in");
+        jobs.insert("job-1".to_owned(), job);
+        let mut job_generations = HashMap::from([(String::from("job-1"), 7)]);
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            drain_children(&dir, &mut slots, &mut jobs, &mut job_generations),
+        )
+        .await
+        .expect("drain exceeded bounded test deadline")
+        .expect("drain failed");
+
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(slots.is_empty(), "idle slot must be reaped");
+        assert!(jobs.is_empty(), "completed job must be reaped");
+        assert!(job_generations.is_empty());
+        let completion = crate::node::handoff::completion_path(&dir, "job-1");
+        let completion =
+            crate::node::handoff::read_completion(&completion, "job-1", Generation(7)).unwrap();
+        assert_eq!(
+            completion.status,
+            crate::node::handoff::CompletionStatus::Exited
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn broker_session_open_retry_is_exponential_and_capped() {
         assert_eq!(broker_open_retry_delay(1), Duration::from_secs(1));

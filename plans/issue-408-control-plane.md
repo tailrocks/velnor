@@ -97,7 +97,8 @@ isolation tradeoff is allowed.
 - [x] Killing/blocking one broker session proves other slots remain schedulable.
 - [ ] One scope API failure proves another scope continues normally.
 - [x] Controller restart during an active job proves preservation or explicit recovery.
-- [ ] Drain proves idle polling stops while active jobs finish within systemd bounds.
+- [x] Drain seam test sends SIGTERM to an idle slot, preserves a finishing job,
+  reaps both children, and completes under a 2-second bounded deadline.
 - [x] Rust verification uses `cargo nextest run`.
 
 ## Phase 6 — fixture and performance proof
@@ -216,6 +217,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - Process-isolation evidence combines slot sibling survival, independent
   multi-scope controller survival, transient-worker-only topology assertions,
   and packaged systemd boundary checks.
+- `cargo nextest run -p velnor-runner --lib
+  drain_children_terminates_idle_slot_and_waits_for_job_boundedly`: passed
+  (1/1). The test uses real Unix child processes and SIGTERM, verifies the
+  idle slot is reaped, verifies the short-lived job is allowed to finish, and
+  verifies its `Exited` completion record; no production or fixture changes.
 
 ## Non-goals
 
