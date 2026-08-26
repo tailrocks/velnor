@@ -42,8 +42,6 @@ const PRIVATE_CURL_STALE_AFTER: Duration = Duration::from_secs(600);
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
-
-
 /// Private curl inputs are removed even when an async caller is cancelled.
 /// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
 /// running with secrets or mutate GitHub after its owning operation ended.
