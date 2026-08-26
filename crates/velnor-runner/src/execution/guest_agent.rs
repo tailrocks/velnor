@@ -93,7 +93,7 @@ pub fn serve_guest_session<S, F>(
 ) -> Result<(), String>
 where
     S: Read + Write,
-    F: FnMut(&[u8]) -> Result<i32, String>,
+    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String>,
 {
     let mut state = GuestAgentState::default();
     serve_guest_session_with_state(stream, env, &mut state, run_plan)
@@ -111,7 +111,7 @@ pub fn serve_guest_session_with_state<S, F>(
 ) -> Result<(), String>
 where
     S: Read + Write,
-    F: FnMut(&[u8]) -> Result<i32, String>,
+    F: FnMut(&[u8]) -> Result<(i32, Vec<super::backend::ExecutionEvent>), String>,
 {
     if env.isolation_id.is_empty() || env.generation == 0 {
         return Err("guest readiness proof has incomplete isolation identity".into());
@@ -223,10 +223,13 @@ where
             require_identity("guest.plan.isolation_id", &plan.isolation_id, &isolation_id)?;
             require_generation(plan.generation, generation)?;
             validate_guest_plan(&plan)?;
-            let (conclusion, code) = if let Some(planned) = plan.planned_conclusion() {
-                planned
+            let (conclusion, code, events) = if let Some(planned) = plan.planned_conclusion() {
+                let (conclusion, code) = planned;
+                let mut events = Vec::new();
+                super::guest_runtime::record_planned_result_bridge(&plan, &mut events);
+                (conclusion, code, events)
             } else {
-                let code = run_plan(&plan_bytes)?;
+                let (code, events) = run_plan(&plan_bytes)?;
                 (
                     if code == 0 {
                         JobConclusion::Success
@@ -234,8 +237,10 @@ where
                         JobConclusion::Failure
                     },
                     code,
+                    events,
                 )
             };
+            write_result_bridge(stream, &events)?;
             VsockMessage::JobCompleted {
                 conclusion,
                 exit_code: code,
@@ -265,6 +270,41 @@ where
         }
         Err(error) => Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
     }
+}
+
+fn write_result_bridge<S: Write>(
+    stream: &mut S,
+    events: &[super::backend::ExecutionEvent],
+) -> Result<(), String> {
+    use super::backend::ExecutionEvent;
+    for event in events {
+        let message = match event {
+            ExecutionEvent::Log { stream, line } => VsockMessage::Stdio {
+                stream: *stream,
+                bytes: line.as_bytes().to_vec(),
+            },
+            ExecutionEvent::CommandFile { path, bytes } => VsockMessage::CommandFile {
+                path: path.clone(),
+                bytes: bytes.clone(),
+            },
+            ExecutionEvent::ResultExport {
+                digest_sha256,
+                bytes,
+            } => VsockMessage::ResultExport {
+                digest_sha256: digest_sha256.clone(),
+                bytes: bytes.clone(),
+            },
+            ExecutionEvent::Output { .. }
+            | ExecutionEvent::JobCompleted { .. }
+            | ExecutionEvent::HostDockerInvoked(_)
+            | ExecutionEvent::FirecrackerApi(_)
+            | ExecutionEvent::GuestDocker(_) => continue,
+        };
+        message
+            .write_to(stream)
+            .map_err(|error| format!("write result bridge: {error}"))?;
+    }
+    Ok(())
 }
 
 fn wait_for_guest_docker<F, S>(
@@ -516,7 +556,9 @@ mod tests {
             docker_healthy: true,
             job_credentials_absent: true,
         };
-        let thread = std::thread::spawn(move || serve_guest_session(&mut guest, &env, |_| Ok(0)));
+        let thread = std::thread::spawn(move || {
+            serve_guest_session(&mut guest, &env, |_| Ok((0, Vec::new())))
+        });
         VsockMessage::GuestIdentity {
             isolation_id: "wrong-identity".into(),
             generation: 7,
@@ -543,9 +585,11 @@ mod tests {
         let restored_env = env.clone();
         let first = std::thread::spawn(move || {
             let mut state = GuestAgentState::default();
-            serve_guest_session_with_state(&mut first_guest, &first_env, &mut state, |_| Ok(0))?;
+            serve_guest_session_with_state(&mut first_guest, &first_env, &mut state, |_| {
+                Ok((0, Vec::new()))
+            })?;
             serve_guest_session_with_state(&mut restored_guest, &restored_env, &mut state, |_| {
-                Ok(0)
+                Ok((0, Vec::new()))
             })
         });
         VsockMessage::GuestIdentity {
@@ -637,9 +681,11 @@ mod tests {
         let restored_env = env;
         let thread = std::thread::spawn(move || {
             let mut state = GuestAgentState::default();
-            serve_guest_session_with_state(&mut first_guest, &first_env, &mut state, |_| Ok(0))?;
+            serve_guest_session_with_state(&mut first_guest, &first_env, &mut state, |_| {
+                Ok((0, Vec::new()))
+            })?;
             serve_guest_session_with_state(&mut restored_guest, &restored_env, &mut state, |_| {
-                Ok(0)
+                Ok((0, Vec::new()))
             })
         });
         VsockMessage::GuestIdentity {
@@ -734,7 +780,7 @@ mod tests {
         let thread = std::thread::spawn(move || {
             serve_guest_session(&mut guest, &guest_env, |delivered| {
                 assert_eq!(delivered, plan_bytes.as_slice());
-                Ok(0)
+                Ok((0, Vec::new()))
             })
         });
         VsockMessage::GuestIdentity {
@@ -802,7 +848,7 @@ mod tests {
         let thread = std::thread::spawn(move || {
             serve_guest_session(&mut guest, &env, move |_| {
                 called_by_guest.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(0)
+                Ok((0, Vec::new()))
             })
         });
         VsockMessage::GuestIdentity {
@@ -857,7 +903,7 @@ mod tests {
         let thread = std::thread::spawn(move || {
             serve_guest_session(&mut guest, &env, move |_| {
                 called_by_guest.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(0)
+                Ok((0, Vec::new()))
             })
         });
         VsockMessage::GuestIdentity {

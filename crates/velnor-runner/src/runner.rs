@@ -5269,11 +5269,7 @@ fn execute_microvm_script_job(
             "false",
         ));
     }
-    let steps = script_steps
-        .iter()
-        .cloned()
-        .map(crate::executor::ExecutableStep::Script)
-        .collect();
+    let steps = microvm_executable_steps(job, script_steps)?;
     let normalized = crate::github_adapter::github_normalized_job_plan(
         job,
         run_service_url,
@@ -5283,7 +5279,166 @@ fn execute_microvm_script_job(
         crate::runtime_env::job_environment_variables(job),
         job_context_data(job),
     );
-    reject_incomplete_microvm_plan(job, script_steps, &normalized)
+    reject_incomplete_microvm_plan(job, &normalized)?;
+    let validated = crate::execution::ValidatedPlan::from_normalized(&normalized);
+    let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
+    let artifact_root = std::path::PathBuf::from(crate::execution::PACKAGED_MICROVM_ROOT);
+    let resources =
+        crate::execution::IsolationResources::for_identity(isolation.clone(), &artifact_root);
+    let mut vsock = crate::execution::UnixVsockChannel::lazy(
+        resources.vsock.clone(),
+        crate::execution::FIRECRACKER_GUEST_CID,
+        crate::execution::GUEST_AGENT_PORT,
+    );
+    let mut firecracker = crate::execution::UnixFirecrackerClient::new(resources.api_socket());
+    let mut fs = crate::execution::RealHostFs;
+    let mut runner = crate::executor::ProcessCommandRunner;
+    let kvm = std::path::PathBuf::from("/dev/kvm");
+    let docker_sock = std::path::PathBuf::from("/var/run/docker.sock");
+    let execution_file = velnor_model::ExecutionFile {
+        execution: velnor_model::ExecutionSection {
+            backend: velnor_model::ExecutionBackendKind::MicroVm,
+        },
+    };
+    let mut world = crate::execution::ExecutionWorld {
+        kvm: &kvm,
+        artifact_root: &artifact_root,
+        host_docker_socket: &docker_sock,
+        runner: &mut runner,
+        firecracker: &mut firecracker,
+        host_fs: &mut fs,
+        vsock: Some(&mut vsock),
+        docker_engine: None,
+        allow_inline_guest_plan: false,
+    };
+    let outcome =
+        crate::execution::run_validated_job(&execution_file, isolation, &validated, &mut world)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(script_job_result_from_outcome(job, outcome))
+}
+
+fn microvm_executable_steps(
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+) -> Result<Vec<crate::executor::ExecutableStep>> {
+    let mut scripts = script_steps.iter();
+    let mut ordered = Vec::new();
+    let workspace = std::path::Path::new("/__w");
+    for (index, step) in job
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| step.enabled)
+    {
+        match step.reference_type() {
+            Some(crate::job_message::ActionReferenceType::Script) => {
+                let script = scripts
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("script step mapping count mismatch"))?;
+                ordered.push(crate::executor::ExecutableStep::Script(script.clone()));
+            }
+            Some(crate::job_message::ActionReferenceType::Repository) => {
+                let repository = step
+                    .reference
+                    .as_ref()
+                    .and_then(|reference| reference.name.as_deref())
+                    .unwrap_or("");
+                if crate::checkout::is_checkout_step(step) {
+                    ordered.push(crate::executor::ExecutableStep::Checkout(
+                        crate::checkout::checkout_plan(job, workspace, step, index)?,
+                    ));
+                    continue;
+                }
+                let Some(adapter) = crate::action::native_action_adapter(repository) else {
+                    return Err(microvm_capability_error(
+                        &format!("jobs.steps[{index}].reference.name"),
+                        repository,
+                        "an admitted native adapter",
+                    ));
+                };
+                let git_ref = step
+                    .reference
+                    .as_ref()
+                    .and_then(|reference| reference.git_ref.clone())
+                    .unwrap_or_else(|| repository.to_string());
+                let invocation = crate::action::NativeActionInvocation {
+                    git_ref,
+                    adapter,
+                    cache_kind: crate::action::cache_action_kind(
+                        step.reference
+                            .as_ref()
+                            .and_then(|reference| reference.path.as_deref()),
+                    )
+                    .ok(),
+                    source_path: step
+                        .reference
+                        .as_ref()
+                        .and_then(|reference| reference.path.clone()),
+                    inputs: crate::action::string_inputs(step)?,
+                    env: crate::script_step::step_environment(step)?,
+                };
+                ordered.push(crate::executor::ExecutableStep::Native {
+                    step_id: step.id.clone().unwrap_or_else(|| format!("step-{index}")),
+                    display_name: step.display_name_template().unwrap_or_default(),
+                    invocation,
+                    condition: step.condition.clone(),
+                    continue_on_error: crate::script_step::step_continue_on_error(step),
+                    timeout_minutes: crate::script_step::step_timeout_minutes(step),
+                });
+            }
+            other => {
+                let received =
+                    other.map_or_else(|| "absent".to_string(), |kind| format!("{kind:?}"));
+                return Err(microvm_capability_error(
+                    &format!("jobs.steps[{index}].reference.type"),
+                    &received,
+                    "Script or native Repository",
+                ));
+            }
+        }
+    }
+    Ok(ordered)
+}
+
+fn script_job_result_from_outcome(
+    job: &AgentJobRequestMessage,
+    outcome: crate::execution::ExecutionOutcome,
+) -> ScriptJobResult {
+    let result = if outcome.exit_code == 0 {
+        crate::protocol::TaskResult::Succeeded
+    } else {
+        crate::protocol::TaskResult::Failed
+    };
+    ScriptJobResult {
+        result,
+        outputs: outcome.outputs.into_iter().collect(),
+        environment_url: outcome.environment_url,
+        step_logs: vec![StepLog {
+            step_id: "microvm".into(),
+            display_name: "microvm result bridge".into(),
+            order: 1,
+            started_at: unix_now_iso8601(),
+            completed_at: unix_now_iso8601(),
+            lines: outcome.log_lines,
+            masks: job_secret_mask_values(job),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: outcome.exit_code,
+            skipped: false,
+            failure_ignored: false,
+            error_count: i32::from(outcome.exit_code != 0),
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        }],
+        teardown: None,
+        timings: ExecutionTimings {
+            first_step_ms: 0,
+            checkout_ms: 0,
+            container_boot_ms: 0,
+            steps_ms: 0,
+        },
+    }
 }
 
 fn microvm_capability_error(field: &str, received: &str, accepted: &str) -> anyhow::Error {
@@ -5295,9 +5450,8 @@ fn microvm_capability_error(field: &str, received: &str, accepted: &str) -> anyh
 
 fn reject_incomplete_microvm_plan(
     job: &AgentJobRequestMessage,
-    script_steps: &[crate::script_step::ScriptStep],
     plan: &crate::plan::NormalizedJobPlan,
-) -> Result<ScriptJobResult> {
+) -> Result<()> {
     if plan.execution.job_container.image.trim().is_empty() {
         return Err(microvm_capability_error(
             "execution.job_container.image",
@@ -5305,27 +5459,19 @@ fn reject_incomplete_microvm_plan(
             "non-empty guest image",
         ));
     }
-    if let Some((index, step)) = job.steps.iter().enumerate().find(|(_, step)| {
-        step.enabled
-            && !matches!(
-                step.reference_type(),
-                Some(crate::job_message::ActionReferenceType::Script)
-            )
-    }) {
+    if let Some((index, step)) = job
+        .steps
+        .iter()
+        .enumerate()
+        .find(|(_, step)| step.enabled && !microvm_step_is_admitted(step))
+    {
         let received = step
             .reference_type()
             .map_or_else(|| "absent".to_string(), |kind| format!("{kind:?}"));
         return Err(microvm_capability_error(
             &format!("jobs.steps[{index}].reference.type"),
             &received,
-            "Script until native guest action execution is complete",
-        ));
-    }
-    if plan.steps.len() != script_steps.len() {
-        return Err(microvm_capability_error(
-            "execution.steps",
-            "script-only projection",
-            "complete ordered normalized job steps",
+            "Script or native Repository",
         ));
     }
     if plan
@@ -5346,11 +5492,23 @@ fn reject_incomplete_microvm_plan(
             "complete GitHub context data",
         ));
     }
-    Err(microvm_capability_error(
-        "execution.microvm.result_bridge",
-        "unimplemented",
-        "complete guest command-file bytes, outputs, environment URL, logs, and teardown result",
-    ))
+    Ok(())
+}
+
+fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
+    match step.reference_type() {
+        Some(crate::job_message::ActionReferenceType::Script) => true,
+        Some(crate::job_message::ActionReferenceType::Repository) => {
+            let repository = step
+                .reference
+                .as_ref()
+                .and_then(|reference| reference.name.as_deref())
+                .unwrap_or("");
+            crate::checkout::is_checkout_step(step)
+                || crate::action::native_action_adapter(repository).is_some()
+        }
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9429,6 +9587,62 @@ mod tests {
             "variables": variables
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn microvm_job_admits_native_checkout_and_no_longer_stubs_result_bridge() {
+        let job: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job-checkout",
+                "jobDisplayName": "Checkout",
+                "requestId": 1,
+                "resources": {
+                    "repositories": [{
+                        "alias": "self",
+                        "url": "https://github.com/tailrocks/velnor",
+                        "name": "tailrocks/velnor",
+                        "version": "abc123"
+                    }]
+                },
+                "variables": {
+                    "system.github.token": { "value": "ghs", "isSecret": true }
+                },
+                "contextData": { "github": { "sha": "abc123", "ref": "refs/heads/main" } },
+                "steps": [{
+                    "id": "checkout",
+                    "enabled": true,
+                    "reference": {
+                        "type": "Repository",
+                        "name": "actions/checkout",
+                        "ref": "v4"
+                    }
+                }]
+            }))
+            .unwrap();
+        let error = execute_microvm_script_job(
+            &job,
+            &[],
+            "ubuntu:24.04",
+            "node:24",
+            "trusted",
+            "https://run.service/jobs/1",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("jobs.steps[0].reference.type"), "{error}");
+        assert!(!error.contains("result_bridge"), "{error}");
+        assert!(
+            error.contains("unsupported capability")
+                || error.contains("preflight")
+                || error.contains("kvm")
+                || error.contains("microvm")
+                || error.contains("guest"),
+            "{error}"
+        );
     }
 
     #[test]

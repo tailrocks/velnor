@@ -676,7 +676,7 @@ where
     Ok(())
 }
 
-fn is_checkout_step(step: &ActionStep) -> bool {
+pub(crate) fn is_checkout_step(step: &ActionStep) -> bool {
     step.reference_type() == Some(ActionReferenceType::Repository)
         && step
             .reference

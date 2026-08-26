@@ -70,15 +70,18 @@ pub struct GuestArtifactOp {
     pub path: String,
 }
 
-/// One workflow step. `script` may be empty in contract fixtures.
+/// One workflow step. `script` may be empty when `action` names a native adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestStep {
     pub id: String,
     pub script: String,
-    /// Native/JS/Docker `uses:` identity when this step is an action.
+    /// Native `uses:` identity when this step is an action.
     #[serde(default)]
     pub action: Option<String>,
+    /// Admitted action inputs (clone URL, cache key, paths). Never host sockets.
+    #[serde(default)]
+    pub inputs: Vec<GuestEnvVar>,
 }
 
 /// Declared job output name and admitted value/expression.
@@ -183,6 +186,7 @@ mod tests {
                 id: "run".into(),
                 script: "echo hi".into(),
                 action: None,
+                inputs: Vec::new(),
             }],
             timeout_ms: 1000,
             cancel_requested: false,

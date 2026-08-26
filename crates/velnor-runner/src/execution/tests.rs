@@ -892,6 +892,67 @@ fn microvm_execute_sends_deliver_plan_over_vsock() {
 }
 
 #[test]
+fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-bridge", 1);
+    let outcome = {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        world.allow_inline_guest_plan = false;
+        world.vsock = Some(&mut vsock);
+        let mut session =
+            open_session(&file, IsolationIdentity::new("job-bridge", 1), &mut world).unwrap();
+        session.reserve(&mut world).unwrap();
+        let mut plan = ValidatedPlan::example_success("job-bridge");
+        plan.buildx = false;
+        plan.testcontainers = false;
+        plan.cache.clear();
+        plan.artifacts.clear();
+        plan.annotations.clear();
+        plan.summary.clear();
+        session.prepare(&plan, &mut world).unwrap();
+        session.start(&mut world).unwrap();
+        session.execute(&plan, &mut world).unwrap();
+        session.collect().unwrap()
+    };
+    assert_eq!(outcome.conclusion, "success");
+    assert!(
+        outcome
+            .command_file_bytes
+            .iter()
+            .any(|(path, bytes)| path == "GITHUB_ENV" && !bytes.is_empty()),
+        "{:?}",
+        outcome.command_file_bytes
+    );
+    assert_eq!(
+        outcome.environment_url.as_deref(),
+        Some("https://example.test/env")
+    );
+    assert!(outcome
+        .outputs
+        .iter()
+        .any(|(name, value)| name == "result" && value == "ok"));
+    assert!(outcome
+        .log_lines
+        .iter()
+        .any(|line| line.contains("result-bridge")));
+}
+
+#[test]
 fn microvm_execute_without_vsock_fails_closed() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
     let mut fs = MemoryFs::default();
@@ -944,13 +1005,13 @@ fn microvm_rejects_unsupported_guest_plan_before_network_setup() {
     .unwrap();
     session.reserve(&mut world).unwrap();
     let mut plan = microvm_plan("job-unsupported");
-    plan.command_files = vec!["GITHUB_OUTPUT".into()];
+    plan.buildx = true;
     let error = session.prepare(&plan, &mut world).unwrap_err();
     let text = error.to_string();
-    assert!(text.contains("field 'guest.command_files'"), "{text}");
-    assert!(text.contains("received '[\"GITHUB_OUTPUT\"]'"), "{text}");
+    assert!(text.contains("field 'guest.buildx'"), "{text}");
+    assert!(text.contains("received 'true'"), "{text}");
     assert!(
-        text.contains("accepted 'empty until guest result-file transfer is implemented'"),
+        text.contains("accepted 'false until native guest buildx execution is implemented'"),
         "{text}"
     );
     assert!(
