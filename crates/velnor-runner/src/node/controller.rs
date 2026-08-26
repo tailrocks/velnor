@@ -254,6 +254,11 @@ struct ControllerMetrics {
     idle_slots: u32,
     slot_processes: usize,
     child_processes: usize,
+    /// Process-role counts make zero-job waiter regressions visible.
+    daemon_processes: u32,
+    controller_processes: u32,
+    waiter_processes: u32,
+    job_processes: u32,
     journal: JournalStats,
     #[serde(skip)]
     durations_ms: VecDeque<u64>,
@@ -295,6 +300,10 @@ impl ControllerMetrics {
         self.idle_slots = health.idle_slots;
         self.slot_processes = slots;
         self.child_processes = jobs;
+        self.daemon_processes = 1;
+        self.controller_processes = 1;
+        self.waiter_processes = 0;
+        self.job_processes = u32::try_from(jobs).unwrap_or(u32::MAX);
         self.journal = journal.clone();
     }
 
