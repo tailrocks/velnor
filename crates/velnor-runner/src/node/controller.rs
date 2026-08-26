@@ -1398,6 +1398,7 @@ mod tests {
     /// one per 2s reconcile tick.
     #[tokio::test]
     async fn rate_limited_probe_parks_instead_of_retrying_per_tick() {
+        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         let reset_epoch = epoch_now() + 3600;
         Mock::given(method("GET"))
