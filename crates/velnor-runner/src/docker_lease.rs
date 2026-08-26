@@ -1092,7 +1092,30 @@ fn accept_loop(
         }
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            // Transient accept failures (a client aborts between connect and
+            // accept, or the kernel refuses a peer) must not kill the lease
+            // proxy mid-job: a dropped accept loop hangs every later Docker
+            // call for this job. Keep the pre-poll behavior of tolerating
+            // them and only exit on errors that leave the listener unusable.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) {
+                    eprintln!(
+                        "Warning: job Docker lease accept retry after transient error: {error}"
+                    );
+                }
+                continue;
+            }
             Err(_) => break,
         };
         if conns.is_shutdown() {
