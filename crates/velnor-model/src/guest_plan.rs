@@ -9,6 +9,7 @@ use crate::job_summary::JobConclusion;
 
 /// Serializable plan both backends execute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestJobPlan {
     pub isolation_id: String,
     pub generation: u64,
@@ -20,30 +21,21 @@ pub struct GuestJobPlan {
     pub cancel_requested: bool,
     pub fail: bool,
     pub cache_digest: Option<String>,
-    #[serde(default)]
     pub command_files: Vec<String>,
-    #[serde(default)]
     pub outputs: Vec<GuestOutput>,
-    #[serde(default)]
     pub env: Vec<GuestEnvVar>,
-    #[serde(default)]
     pub workspace: String,
-    #[serde(default)]
     pub cache: Vec<GuestCacheOp>,
-    #[serde(default)]
     pub artifacts: Vec<GuestArtifactOp>,
-    #[serde(default)]
     pub annotations: Vec<String>,
-    #[serde(default)]
     pub summary: String,
-    #[serde(default)]
     pub buildx: bool,
-    #[serde(default)]
     pub testcontainers: bool,
 }
 
 /// Job or service environment pair. Never a host docker.sock path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestEnvVar {
     pub name: String,
     pub value: String,
@@ -51,6 +43,7 @@ pub struct GuestEnvVar {
 
 /// Service container inside the job (guest Docker or host Docker backend).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestService {
     pub name: String,
     pub image: String,
@@ -64,12 +57,14 @@ pub struct GuestService {
 
 /// Digest-addressed cache import/export. No host bind mount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestCacheOp {
     pub digest: String,
 }
 
 /// Artifact name and guest path for bounded export.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestArtifactOp {
     pub name: String,
     pub path: String,
@@ -77,6 +72,7 @@ pub struct GuestArtifactOp {
 
 /// One workflow step. `script` may be empty in contract fixtures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestStep {
     pub id: String,
     pub script: String,
@@ -87,6 +83,7 @@ pub struct GuestStep {
 
 /// Declared job output name and admitted value/expression.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestOutput {
     pub name: String,
     pub value: String,
@@ -106,7 +103,38 @@ impl GuestJobPlan {
     /// # Errors
     /// JSON or schema failure.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|error| format!("guest plan decode: {error}"))
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| format!("guest plan decode: {error}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "guest plan decode: expected a JSON object".to_string())?;
+        for field in [
+            "isolation_id",
+            "generation",
+            "job_id",
+            "image",
+            "services",
+            "steps",
+            "timeout_ms",
+            "cancel_requested",
+            "fail",
+            "cache_digest",
+            "command_files",
+            "outputs",
+            "env",
+            "workspace",
+            "cache",
+            "artifacts",
+            "annotations",
+            "summary",
+            "buildx",
+            "testcontainers",
+        ] {
+            if !object.contains_key(field) {
+                return Err(format!("guest plan decode: missing field `{field}`"));
+            }
+        }
+        serde_json::from_value(value).map_err(|error| format!("guest plan decode: {error}"))
     }
 
     /// Isolation label for Docker objects owned by this plan.
@@ -187,5 +215,37 @@ mod tests {
         let json = String::from_utf8(bytes).unwrap();
         assert!(!json.contains("docker.sock"));
         assert!(!json.contains("signing"));
+    }
+
+    #[test]
+    fn rejects_unknown_guest_plan_json_keys() {
+        let mut value = serde_json::json!({
+            "isolation_id": "job-1",
+            "generation": 1,
+            "job_id": "job-1",
+            "image": "velnor/job-ubuntu:26.04",
+            "services": [],
+            "steps": [],
+            "timeout_ms": 1000,
+            "cancel_requested": false,
+            "fail": false,
+            "cache_digest": null,
+            "command_files": [],
+            "outputs": [],
+            "env": [],
+            "workspace": "/__w",
+            "cache": [],
+            "artifacts": [],
+            "annotations": [],
+            "summary": "",
+            "buildx": false,
+            "testcontainers": false,
+            "unadmitted": "value"
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(GuestJobPlan::decode(&bytes).is_err());
+
+        value.as_object_mut().unwrap().remove("unadmitted");
+        assert!(GuestJobPlan::decode(&serde_json::to_vec(&value).unwrap()).is_ok());
     }
 }

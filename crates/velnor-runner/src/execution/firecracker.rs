@@ -6,9 +6,11 @@ use std::time::Duration;
 use velnor_model::{JobConclusion, MicroVmKind, MicroVmPreflightFailure, VsockMessage};
 
 use super::artifacts::{
-    verify_microvm_artifacts, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION,
+    hex_sha256, verify_microvm_artifacts, MicroVmArtifactSet, MicroVmGeneration,
+    FIRECRACKER_VERSION,
 };
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
+use super::guest_runtime::validate_guest_plan;
 use super::isolation::{IsolationIdentity, IsolationResources};
 use super::net::{setup_net_invocations, teardown_net_invocations};
 use super::snapshot::{read_identity, vmstate_path, write_identity, GuestReady, SnapshotIdentity};
@@ -19,7 +21,7 @@ use crate::executor::SpawnedProcess;
 pub trait FirecrackerApi {
     /// # Errors
     /// API transport or protocol failures.
-    fn put_boot_source(&mut self, kernel: &Path) -> Result<(), String>;
+    fn put_boot_source(&mut self, kernel: &Path, boot_args: &str) -> Result<(), String>;
     /// # Errors
     /// API transport or protocol failures.
     fn put_drive(&mut self, drive_id: &str, path: &Path, read_only: bool) -> Result<(), String>;
@@ -63,9 +65,11 @@ pub struct RecordingFirecracker {
 }
 
 impl FirecrackerApi for RecordingFirecracker {
-    fn put_boot_source(&mut self, kernel: &Path) -> Result<(), String> {
-        self.calls
-            .push(format!("put_boot_source {}", kernel.display()));
+    fn put_boot_source(&mut self, kernel: &Path, boot_args: &str) -> Result<(), String> {
+        self.calls.push(format!(
+            "put_boot_source {} args={boot_args}",
+            kernel.display()
+        ));
         Ok(())
     }
 
@@ -143,6 +147,16 @@ pub struct FirecrackerBackend {
     pub started: bool,
     pub restored: bool,
     pub jailer: Option<SpawnedProcess>,
+    pub(crate) execution: Option<GuestExecutionState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GuestExecutionState {
+    pub(crate) job_id: String,
+    pub(crate) isolation_id: String,
+    pub(crate) generation: u64,
+    pub(crate) execution_nonce: String,
+    pub(crate) plan_sha256: String,
 }
 
 impl FirecrackerBackend {
@@ -226,6 +240,10 @@ impl FirecrackerBackend {
             )
             .into());
         }
+        let guest = plan.to_guest(&resources.identity.id, resources.identity.generation);
+        validate_guest_plan(&guest)
+            .map_err(|detail| MicroVmPreflightFailure::new("guest.plan", detail))?;
+        let _ = guest_boot_args(&resources.identity)?;
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
         let identity_ok = snapshot_identity_matches(&set, world);
         setup_guest_net(resources, world, events)?;
@@ -257,11 +275,6 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let ready = if world.allow_inline_guest_plan {
-            None
-        } else {
-            Some(receive_guest_ready(world, isolation)?)
-        };
         if !self.restored {
             world
                 .firecracker
@@ -271,6 +284,12 @@ impl FirecrackerBackend {
         }
         self.started = true;
         events.push(ExecutionEvent::GuestDocker("guest started".into()));
+        let ready = if world.allow_inline_guest_plan {
+            None
+        } else {
+            send_guest_identity(world, isolation)?;
+            Some(receive_guest_ready(world, isolation)?)
+        };
         if let Some(ready) = ready {
             // Errors here leave the guest resumed (see create_golden_snapshot);
             // the snapshot itself is an optimization, so its failure is an
@@ -294,6 +313,14 @@ impl FirecrackerBackend {
         let bytes = guest
             .encode()
             .map_err(|detail| MicroVmPreflightFailure::new("vsock.plan", detail))?;
+        let state = GuestExecutionState {
+            job_id: guest.job_id.clone(),
+            isolation_id: guest.isolation_id.clone(),
+            generation: guest.generation,
+            execution_nonce: uuid::Uuid::new_v4().to_string(),
+            plan_sha256: hex_sha256(&bytes),
+        };
+        self.execution = Some(state.clone());
         events.push(ExecutionEvent::FirecrackerApi("vsock DeliverPlan".into()));
         if let Some(vsock) = world.vsock.as_mut() {
             return drive_vsock(
@@ -302,9 +329,12 @@ impl FirecrackerBackend {
                     job_id: guest.job_id.clone(),
                     isolation_id: guest.isolation_id.clone(),
                     generation: guest.generation,
+                    execution_nonce: state.execution_nonce.clone(),
+                    plan_sha256: state.plan_sha256.clone(),
                     plan_bytes: bytes,
                 },
                 &guest,
+                &state,
                 events,
                 Duration::from_millis(plan.timeout_ms.max(1)),
             );
@@ -425,6 +455,25 @@ fn validate_plan_identity(
     Ok(())
 }
 
+fn send_guest_identity(
+    world: &mut ExecutionWorld<'_>,
+    identity: &IsolationIdentity,
+) -> Result<(), ExecutionError> {
+    let Some(vsock) = world.vsock.as_mut() else {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.identity",
+            "production microVM requires a vsock control channel",
+        )
+        .into());
+    };
+    vsock
+        .send(VsockMessage::GuestIdentity {
+            isolation_id: identity.id.clone(),
+            generation: identity.generation,
+        })
+        .map_err(|detail| MicroVmPreflightFailure::new("guest.identity", detail).into())
+}
+
 fn receive_guest_ready(
     world: &mut ExecutionWorld<'_>,
     expected: &IsolationIdentity,
@@ -505,9 +554,10 @@ fn cold_configure(
     world: &mut ExecutionWorld<'_>,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<(), ExecutionError> {
+    let boot_args = guest_boot_args(&resources.identity)?;
     world
         .firecracker
-        .put_boot_source(&set.kernel.path)
+        .put_boot_source(&set.kernel.path, &boot_args)
         .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("put_boot_source".into()));
     world
@@ -529,6 +579,35 @@ fn cold_configure(
         .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("devices".into()));
     Ok(())
+}
+
+fn guest_boot_args(identity: &IsolationIdentity) -> Result<String, ExecutionError> {
+    if identity.id.is_empty()
+        || !identity
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.identity",
+            format!(
+                "received {:?}; accepted ASCII letters, digits, '-' or '_' in isolation_id",
+                identity.id
+            ),
+        )
+        .into());
+    }
+    if identity.generation == 0 {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.identity.generation",
+            "received 0; accepted a non-zero generation",
+        )
+        .into());
+    }
+    Ok(format!(
+        "console=ttyS0 reboot=k panic=1 pci=off velnor.isolation_id={} velnor.isolation_generation={}",
+        identity.id, identity.generation
+    ))
 }
 
 fn snapshot_mem_path(set: &MicroVmArtifactSet, root: &Path) -> PathBuf {
@@ -650,6 +729,7 @@ fn drive_vsock(
     vsock: &mut dyn super::VsockChannel,
     message: VsockMessage,
     expected: &velnor_model::GuestJobPlan,
+    state: &GuestExecutionState,
     events: &mut Vec<ExecutionEvent>,
     timeout: Duration,
 ) -> Result<(), ExecutionError> {
@@ -657,6 +737,9 @@ fn drive_vsock(
         job_id,
         isolation_id,
         generation,
+        execution_nonce,
+        plan_sha256,
+        plan_bytes,
         ..
     } = &message
     else {
@@ -669,6 +752,12 @@ fn drive_vsock(
     if job_id != &expected.job_id
         || isolation_id != &expected.isolation_id
         || *generation != expected.generation
+        || job_id != &state.job_id
+        || isolation_id != &state.isolation_id
+        || *generation != state.generation
+        || execution_nonce != &state.execution_nonce
+        || plan_sha256 != &state.plan_sha256
+        || plan_sha256 != &hex_sha256(plan_bytes)
     {
         return Err(MicroVmPreflightFailure::new(
             "vsock.plan",
@@ -715,6 +804,8 @@ fn drive_vsock(
                 job_id,
                 isolation_id,
                 generation,
+                execution_nonce,
+                plan_sha256,
             } => {
                 if !completed {
                     return Err(MicroVmPreflightFailure::new(
@@ -726,6 +817,11 @@ fn drive_vsock(
                 if job_id != expected.job_id
                     || isolation_id != expected.isolation_id
                     || generation != expected.generation
+                    || job_id != state.job_id
+                    || isolation_id != state.isolation_id
+                    || generation != state.generation
+                    || execution_nonce != state.execution_nonce
+                    || plan_sha256 != state.plan_sha256
                 {
                     return Err(MicroVmPreflightFailure::new(
                         "vsock.teardown_ack",

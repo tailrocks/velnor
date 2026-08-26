@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::job_summary::JobConclusion;
 
 /// Protocol version. Mismatch fails closed.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
 /// stdout stream tag in [`VsockMessage::Stdio`].
@@ -24,6 +24,10 @@ const CHECKSUM_LEN: usize = 32;
 /// Typed vsock messages. Host control uses vsock, never SSH or a TCP port.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VsockMessage {
+    GuestIdentity {
+        isolation_id: String,
+        generation: u64,
+    },
     GuestReady {
         isolation_id: String,
         generation: u64,
@@ -34,6 +38,8 @@ pub enum VsockMessage {
         job_id: String,
         isolation_id: String,
         generation: u64,
+        execution_nonce: String,
+        plan_sha256: String,
         plan_bytes: Vec<u8>,
     },
     ImportBlob {
@@ -71,6 +77,8 @@ pub enum VsockMessage {
         job_id: String,
         isolation_id: String,
         generation: u64,
+        execution_nonce: String,
+        plan_sha256: String,
     },
     JobCompleted {
         conclusion: JobConclusion,
@@ -82,6 +90,7 @@ impl VsockMessage {
     #[must_use]
     pub fn kind(&self) -> u16 {
         match self {
+            Self::GuestIdentity { .. } => 14,
             Self::GuestReady { .. } => 1,
             Self::DeliverPlan { .. } => 2,
             Self::ImportBlob { .. } => 3,
@@ -209,6 +218,13 @@ impl VsockMessage {
 fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
     let mut payload = Vec::new();
     match message {
+        VsockMessage::GuestIdentity {
+            isolation_id,
+            generation,
+        } => {
+            write_string(&mut payload, isolation_id)?;
+            payload.extend_from_slice(&generation.to_be_bytes());
+        }
         VsockMessage::GuestReady {
             isolation_id,
             generation,
@@ -224,11 +240,15 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             job_id,
             isolation_id,
             generation,
+            execution_nonce,
+            plan_sha256,
             plan_bytes,
         } => {
             write_string(&mut payload, job_id)?;
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
+            write_string(&mut payload, execution_nonce)?;
+            write_string(&mut payload, plan_sha256)?;
             write_bytes(&mut payload, plan_bytes)?;
         }
         VsockMessage::ImportBlob {
@@ -271,10 +291,14 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             job_id,
             isolation_id,
             generation,
+            execution_nonce,
+            plan_sha256,
         } => {
             write_string(&mut payload, job_id)?;
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
+            write_string(&mut payload, execution_nonce)?;
+            write_string(&mut payload, plan_sha256)?;
         }
         VsockMessage::JobCompleted {
             conclusion,
@@ -290,6 +314,14 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
 fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecError> {
     let mut cur = payload;
     let message = match kind {
+        14 => {
+            let isolation_id = read_string(&mut cur)?;
+            let generation = read_u64(&mut cur)?;
+            VsockMessage::GuestIdentity {
+                isolation_id,
+                generation,
+            }
+        }
         1 => {
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
@@ -306,11 +338,15 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
             let job_id = read_string(&mut cur)?;
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
+            let execution_nonce = read_string(&mut cur)?;
+            let plan_sha256 = read_string(&mut cur)?;
             let plan_bytes = read_bytes(&mut cur)?;
             VsockMessage::DeliverPlan {
                 job_id,
                 isolation_id,
                 generation,
+                execution_nonce,
+                plan_sha256,
                 plan_bytes,
             }
         }
@@ -363,10 +399,14 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
             let job_id = read_string(&mut cur)?;
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
+            let execution_nonce = read_string(&mut cur)?;
+            let plan_sha256 = read_string(&mut cur)?;
             VsockMessage::TeardownAck {
                 job_id,
                 isolation_id,
                 generation,
+                execution_nonce,
+                plan_sha256,
             }
         }
         13 => {

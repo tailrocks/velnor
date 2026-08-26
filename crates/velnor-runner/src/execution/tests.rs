@@ -32,6 +32,12 @@ fn seed_microvm_world(fs: &mut MemoryFs, root: &Path) {
     .unwrap();
 }
 
+fn microvm_plan(job_id: impl Into<String>) -> ValidatedPlan {
+    let mut plan = ValidatedPlan::example_success(job_id);
+    plan.command_files.clear();
+    plan
+}
+
 fn world<'a>(
     fs: &'a mut MemoryFs,
     runner: &'a mut RecordingCommands,
@@ -158,7 +164,7 @@ fn contract_success_failure_cancel_identical_conclusions() {
     assert!(docker_out.cleaned);
     assert!(micro_out.cleaned);
     assert!(docker_out.command_file.is_some());
-    assert_eq!(docker_out.command_file, micro_out.command_file);
+    assert!(micro_out.command_file.is_none());
 
     docker_out = run_cancel(ExecutionBackendKind::Docker);
     micro_out = run_cancel(ExecutionBackendKind::MicroVm);
@@ -194,7 +200,11 @@ fn run_plan(kind: ExecutionBackendKind, cancel: bool) -> super::backend::Executi
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
     let mut session = open_session(&file, IsolationIdentity::new("job-1", 1), &mut world).unwrap();
     session.reserve(&mut world).unwrap();
-    let mut plan = ValidatedPlan::example_success("job-1");
+    let mut plan = if kind == ExecutionBackendKind::MicroVm {
+        microvm_plan("job-1")
+    } else {
+        ValidatedPlan::example_success("job-1")
+    };
     plan.cancel_requested = cancel;
     session.prepare(&plan, &mut world).unwrap();
     session.start(&mut world).unwrap();
@@ -288,6 +298,13 @@ fn run_custom(kind: ExecutionBackendKind, plan: ValidatedPlan) -> super::backend
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
+    let plan = if kind == ExecutionBackendKind::MicroVm {
+        let mut plan = plan;
+        plan.command_files.clear();
+        plan
+    } else {
+        plan
+    };
     let job_id = plan.job_id.clone();
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
     crate::execution::run_validated_job(&file, IsolationIdentity::new(job_id, 1), &plan, &mut world)
@@ -318,7 +335,7 @@ fn faults_fail_closed_without_host_docker_or_sibling_teardown() {
         open_session(&file, IsolationIdentity::new("job-fault", 1), &mut world).unwrap();
     session.reserve(&mut world).unwrap();
     let err = session
-        .prepare(&ValidatedPlan::example_success("job-fault"), &mut world)
+        .prepare(&microvm_plan("job-fault"), &mut world)
         .unwrap_err();
     assert!(err.to_string().contains("jailer"), "{err}");
     assert!(!session.used_host_docker());
@@ -391,7 +408,7 @@ fn snapshot_checksum_mismatch_cold_boots() {
             open_session(&file, IsolationIdentity::new("job-snap", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
         session
-            .prepare(&ValidatedPlan::example_success("job-snap"), &mut world)
+            .prepare(&microvm_plan("job-snap"), &mut world)
             .unwrap();
     }
     assert!(
@@ -469,7 +486,7 @@ fn matching_snapshot_loads_only_after_jailer() {
             open_session(&file, IsolationIdentity::new("job-restore", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
         session
-            .prepare(&ValidatedPlan::example_success("job-restore"), &mut world)
+            .prepare(&microvm_plan("job-restore"), &mut world)
             .unwrap();
     }
     let jailer_at = runner
@@ -518,7 +535,7 @@ fn golden_snapshot_create_pauses_then_writes_sidecar() {
             open_session(&file, IsolationIdentity::new("job-gold", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
         session
-            .prepare(&ValidatedPlan::example_success("job-gold"), &mut world)
+            .prepare(&microvm_plan("job-gold"), &mut world)
             .unwrap();
         session.start(&mut world).unwrap();
     }
@@ -729,17 +746,36 @@ fn microvm_execute_sends_deliver_plan_over_vsock() {
         let mut session =
             open_session(&file, IsolationIdentity::new("job-vsock", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
-        let plan = ValidatedPlan::example_success("job-vsock");
+        let plan = microvm_plan("job-vsock");
         session.prepare(&plan, &mut world).unwrap();
         session.start(&mut world).unwrap();
         session.execute(&plan, &mut world).unwrap();
         assert!(!session.used_host_docker());
         assert!(session.used_firecracker());
     }
-    assert!(matches!(
-        vsock.sent[0],
-        velnor_model::VsockMessage::DeliverPlan { .. }
-    ));
+    assert!(vsock
+        .sent
+        .iter()
+        .any(|message| matches!(message, velnor_model::VsockMessage::GuestIdentity { .. })));
+    assert!(vsock
+        .sent
+        .iter()
+        .any(|message| matches!(message, velnor_model::VsockMessage::DeliverPlan { .. })));
+    let deliver = vsock
+        .sent
+        .iter()
+        .find_map(|message| match message {
+            velnor_model::VsockMessage::DeliverPlan {
+                execution_nonce,
+                plan_sha256,
+                plan_bytes,
+                ..
+            } => Some((execution_nonce, plan_sha256, plan_bytes)),
+            _ => None,
+        })
+        .expect("deliver plan");
+    assert!(!deliver.0.is_empty());
+    assert_eq!(deliver.1, &hex_sha256(deliver.2));
     assert!(!runner
         .calls
         .iter()
@@ -769,14 +805,67 @@ fn microvm_execute_without_vsock_fails_closed() {
     let mut session =
         open_session(&file, IsolationIdentity::new("job-novsock", 1), &mut world).unwrap();
     session.reserve(&mut world).unwrap();
-    let plan = ValidatedPlan::example_success("job-novsock");
+    let plan = microvm_plan("job-novsock");
     session.prepare(&plan, &mut world).unwrap();
     let error = session.start(&mut world).unwrap_err();
     let text = error.to_string();
-    assert!(text.contains("guest.ready"), "{text}");
+    assert!(text.contains("guest.identity"), "{text}");
     assert!(text.contains("docker backend was not used"), "{text}");
     assert!(!session.used_host_docker());
-    assert!(api.calls.iter().all(|call| call != "instance_start"));
+    assert!(api.calls.iter().any(|call| call == "instance_start"));
+}
+
+#[test]
+fn microvm_rejects_unsupported_guest_plan_before_network_setup() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands::default();
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    let mut session = open_session(
+        &file,
+        IsolationIdentity::new("job-unsupported", 1),
+        &mut world,
+    )
+    .unwrap();
+    session.reserve(&mut world).unwrap();
+    let mut plan = microvm_plan("job-unsupported");
+    plan.command_files = vec!["GITHUB_OUTPUT".into()];
+    let error = session.prepare(&plan, &mut world).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("field 'guest.command_files'"), "{text}");
+    assert!(text.contains("received '[\"GITHUB_OUTPUT\"]'"), "{text}");
+    assert!(
+        text.contains("accepted 'empty until guest result-file transfer is implemented'"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "manifest version {}",
+            crate::manifest::MANIFEST_VERSION
+        )),
+        "{text}"
+    );
+    assert!(
+        runner.spawned.is_empty(),
+        "jailer started: {:?}",
+        runner.spawned
+    );
+    assert!(
+        runner.calls.iter().all(|(program, _)| program != "ip"),
+        "network setup ran: {:?}",
+        runner.calls
+    );
+    assert!(
+        api.calls.is_empty(),
+        "Firecracker API was called: {:?}",
+        api.calls
+    );
 }
 
 #[test]
@@ -798,7 +887,37 @@ fn microvm_rejects_mismatched_teardown_ack_identity() {
     let mut session =
         open_session(&file, IsolationIdentity::new("job-ack", 2), &mut world).unwrap();
     session.reserve(&mut world).unwrap();
-    let plan = ValidatedPlan::example_success("job-ack");
+    let plan = microvm_plan("job-ack");
+    session.prepare(&plan, &mut world).unwrap();
+    session.start(&mut world).unwrap();
+    let error = session.execute(&plan, &mut world).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("vsock.teardown_ack"), "{text}");
+    assert!(text.contains("identity"), "{text}");
+    session.teardown(&mut world).unwrap();
+}
+
+#[test]
+fn microvm_rejects_replayed_teardown_proof() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands::default();
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let plan = microvm_plan("job-replay");
+    let digest = hex_sha256(&plan.to_guest("job-replay", 2).encode().unwrap());
+    let mut vsock =
+        LoopbackVsock::with_ready("job-replay", 2).with_teardown_proof("replayed-nonce", digest);
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    world.allow_inline_guest_plan = false;
+    world.vsock = Some(&mut vsock);
+    let mut session =
+        open_session(&file, IsolationIdentity::new("job-replay", 2), &mut world).unwrap();
+    session.reserve(&mut world).unwrap();
     session.prepare(&plan, &mut world).unwrap();
     session.start(&mut world).unwrap();
     let error = session.execute(&plan, &mut world).unwrap_err();
@@ -844,7 +963,8 @@ fn both_backends_execute_the_same_admitted_plan() {
     let micro = run_custom(ExecutionBackendKind::MicroVm, plan);
     assert_eq!(docker.conclusion, micro.conclusion);
     assert_eq!(docker.exit_code, micro.exit_code);
-    assert_eq!(docker.command_file, micro.command_file);
+    assert!(docker.command_file.is_some());
+    assert!(micro.command_file.is_none());
     assert_eq!(docker.outputs, micro.outputs);
     assert_eq!(docker.cache, micro.cache);
     assert_eq!(docker.artifacts, micro.artifacts);
@@ -877,7 +997,7 @@ fn microvm_spawns_jailer_with_api_socket_and_unique_net() {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         let mut session = open_session(&file, isolation, &mut world).unwrap();
         session.reserve(&mut world).unwrap();
-        let plan = ValidatedPlan::example_success("job-net");
+        let plan = microvm_plan("job-net");
         session.prepare(&plan, &mut world).unwrap();
         session.start(&mut world).unwrap();
         session.execute(&plan, &mut world).unwrap();
@@ -1057,7 +1177,7 @@ fn debian_package_binds_complete_microvm_identity() {
 }
 
 #[test]
-fn full_github_visible_plan_matches_across_backends() {
+fn full_github_visible_plan_preserves_docker_contract_and_guest_projection() {
     let mut plan = ValidatedPlan::example_success("job-full");
     plan.env = vec![("CI".into(), "true".into())];
     plan.workspace = "/__w".into();
@@ -1068,15 +1188,12 @@ fn full_github_visible_plan_matches_across_backends() {
     plan.buildx = true;
     plan.testcontainers = true;
     let docker = run_custom(ExecutionBackendKind::Docker, plan.clone());
-    let micro = run_custom(ExecutionBackendKind::MicroVm, plan.clone());
-    assert_eq!(docker.conclusion, micro.conclusion);
     assert_eq!(docker.cache, plan.cache);
-    assert_eq!(micro.cache, plan.cache);
     assert_eq!(docker.artifacts, plan.artifacts);
     assert_eq!(docker.annotations, plan.annotations);
     assert_eq!(docker.summary, plan.summary);
-    assert!(docker.buildx && micro.buildx);
-    assert!(docker.testcontainers && micro.testcontainers);
+    assert!(docker.buildx);
+    assert!(docker.testcontainers);
     let guest = plan.to_guest("job-full", 1);
     assert!(guest.buildx);
     assert!(guest.testcontainers);
