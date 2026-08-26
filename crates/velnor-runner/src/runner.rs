@@ -1523,7 +1523,7 @@ async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
 
 /// Minimum free disk space below which a slot parks instead of registering
 /// runners whose jobs are doomed.
-const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Returns a problem description when any of the slot's writable roots is
 /// low on space. Best-effort (`df` failures are treated as healthy — a
@@ -1573,7 +1573,7 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
 
 /// Free bytes on the filesystem holding `path`, via `df -Pk` (POSIX output,
 /// no extra crate). `None` when the probe itself fails.
-fn free_space_bytes(path: &Path) -> Option<u64> {
+pub(crate) fn free_space_bytes(path: &Path) -> Option<u64> {
     let probe = if path.exists() {
         path
     } else {

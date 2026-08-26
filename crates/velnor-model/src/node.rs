@@ -149,7 +149,7 @@ impl HealthDocument {
             recovery_retry_at_seconds: 0,
             recovery_quarantine_until_seconds: None,
             recovery_affected_slots: 0,
-            resource_safe: true,
+            resource_safe: false,
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,
             external_canary: CanaryStatus::Unknown,

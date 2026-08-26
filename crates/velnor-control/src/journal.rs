@@ -174,7 +174,10 @@ impl FleetState {
             recovery_retry_at_seconds: 0,
             recovery_quarantine_until_seconds: None,
             recovery_affected_slots: 0,
-            resource_safe: true,
+            // The journal has no authoritative filesystem reservation view;
+            // the controller must replace this fail-safe value after probing
+            // the scoped capacity coordinator.
+            resource_safe: false,
             oldest_queued_job_seconds: oldest_queued_job_seconds(&self.jobs),
             oldest_outbox_entry_seconds: oldest_outbox_age_seconds(&self.outbox),
             external_canary: self.canary,

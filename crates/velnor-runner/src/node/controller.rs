@@ -368,6 +368,8 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
         )
         .await?;
         let recovery = recovery.lock().await;
+        health.resource_safe = crate::runner::free_space_bytes(&args.state_dir)
+            .is_some_and(|free| free >= crate::runner::DISK_MIN_FREE_BYTES);
         health.recovery_state = match recovery.state() {
             RecoveryState::Healthy => velnor_model::RecoveryHealthState::Healthy,
             RecoveryState::MissingSession => velnor_model::RecoveryHealthState::MissingSession,
