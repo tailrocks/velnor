@@ -281,6 +281,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   was insufficient. The rootfs builder now normalizes all tree file and
   directory mtimes to epoch before `mke2fs`; candidate advances to `0.1.223`
   because `v0.1.222` is immutable.
+- Release run `33019379349` still varied after snapshot, fake-time, and mtime
+  normalization (`x86_64=c545a05461cf13da4af987d2f3e7170179df443f2146a6d43c364339668dcb2f`,
+  `aarch64=a6bcf38550058a736d6c68f8bc46a718a098b7a032b80eb9488732421357399b`).
+  The builder now removes volatile apt/log/run/temp state and machine identity
+  before image population. Candidate advances to `0.1.224` because
+  `v0.1.223` is immutable.
 
 ## Non-goals
 

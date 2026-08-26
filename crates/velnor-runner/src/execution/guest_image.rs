@@ -516,6 +516,57 @@ fn build_rootfs(
             MicroVmPreflightFailure::new("guest.agent", format!("write guest-agent: {error}"))
         })?;
     }
+    for relative in [
+        "var/cache/apt/archives",
+        "var/lib/apt/lists",
+        "var/log",
+        "run",
+        "tmp",
+        "var/tmp",
+    ] {
+        let path = tree.join(relative);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                MicroVmPreflightFailure::new(
+                    "guest.rootfs",
+                    format!("remove volatile {relative}: {error}"),
+                )
+            })?;
+        }
+        std::fs::create_dir_all(&path).map_err(|error| {
+            MicroVmPreflightFailure::new(
+                "guest.rootfs",
+                format!("recreate volatile {relative}: {error}"),
+            )
+        })?;
+    }
+    for relative in ["var/lib/systemd/random-seed", "etc/machine-id"] {
+        let path = tree.join(relative);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| {
+                MicroVmPreflightFailure::new(
+                    "guest.rootfs",
+                    format!("remove volatile {relative}: {error}"),
+                )
+            })?;
+        }
+        std::fs::File::create(&path).map_err(|error| {
+            MicroVmPreflightFailure::new(
+                "guest.rootfs",
+                format!("create deterministic {relative}: {error}"),
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for relative in ["tmp", "var/tmp"] {
+            std::fs::set_permissions(tree.join(relative), std::fs::Permissions::from_mode(0o1777))
+                .map_err(|error| {
+                    MicroVmPreflightFailure::new("guest.rootfs", format!("chmod {relative}: {error}"))
+                })?;
+        }
+    }
     let init = tree.join("init");
     std::fs::write(&init, GUEST_INIT_SCRIPT).map_err(|error| {
         MicroVmPreflightFailure::new("guest.rootfs", format!("write init: {error}"))
