@@ -177,7 +177,8 @@ Units (all shipped by the package):
   drift exits nonzero and stops the remaining organizations. Enable with
   `sudo systemctl enable --now velnor-fleet-policy-audit.timer`. Host
   enablement is an operator action performed only after policy cutover
-  approval (not yet packaged; pending velnor-tools deb wiring).
+  approval. The binary is shipped by the signed `velnor-runner` Debian package
+  at `/usr/bin/velnor-tools`.
 
 Persistent stores use `/var/cache/velnor/v1/<trust-scope>/...`; durable state,
 runtime leases, and logs use `/var/lib/velnor`, `/run/velnor`, and

@@ -57,6 +57,8 @@ assets = [
   ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
   # The kubectl-style operator control panel.
   ["target/release/velnorctl", "usr/bin/velnorctl", "755"],
+  # Maintainer-only fleet policy and verification tooling.
+  ["target/release/velnor-tools", "usr/bin/velnor-tools", "755"],
   ["target/release/velnor-guest-agent", "usr/bin/velnor-guest-agent", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
