@@ -38,21 +38,60 @@ pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
 const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
+const PRIVATE_CURL_STALE_AFTER: Duration = Duration::from_secs(600);
 
 /// Private curl inputs are removed even when an async caller is cancelled.
 /// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
 /// running with secrets or mutate GitHub after its owning operation ended.
-#[derive(Default)]
 struct PrivateTempFiles {
+    dir: PathBuf,
     paths: Vec<PathBuf>,
 }
 
 impl PrivateTempFiles {
+    fn new(prefix: &str) -> Result<Self> {
+        let dir = std::env::temp_dir().join("velnor-curl");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create private curl directory {}", dir.display()))?;
+        let mut permissions = std::fs::metadata(&dir)
+            .with_context(|| format!("stat private curl directory {}", dir.display()))?
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&dir, permissions)
+            .with_context(|| format!("protect private curl directory {}", dir.display()))?;
+
+        let prefix = format!("{prefix}-");
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let stale = entry.file_type().is_ok_and(|file_type| file_type.is_file())
+                    && entry.file_name().to_string_lossy().starts_with(&prefix)
+                    && entry
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                        .is_some_and(|age| age > PRIVATE_CURL_STALE_AFTER);
+                if stale {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+
+        Ok(Self {
+            dir,
+            paths: Vec::new(),
+        })
+    }
+
     fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
 
-        let path = std::env::temp_dir().join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
+        let path = self
+            .dir
+            .join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
         self.paths.push(path.clone());
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -81,7 +120,7 @@ async fn run_private_curl(
     url: &str,
     capture_headers: bool,
 ) -> Result<(std::process::Output, Vec<u8>)> {
-    let mut files = PrivateTempFiles::default();
+    let mut files = PrivateTempFiles::new(prefix)?;
     let config_path = files.write(prefix, "cfg", config.as_bytes())?;
     let body_path = body
         .map(|body| files.write(prefix, "body", body))
@@ -984,6 +1023,8 @@ impl RegistrationClient {
             match result {
                 Err(e) => {
                     last_err = e.context("send JIT runner config request");
+                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
+                        .await;
                 }
                 Ok((output, headers)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1009,6 +1050,8 @@ impl RegistrationClient {
                     if matches!(status, 403 | 429) || status == 409 {
                         return Err(last_err);
                     }
+                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
+                        .await;
                     retry_delay = hint.delay(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -1070,6 +1113,41 @@ impl RegistrationClient {
                 return Ok(all);
             }
             page_number += 1;
+        }
+    }
+
+    async fn cleanup_named_jit_orphans(&self, scope: &GitHubScope, pat: &str, agent_name: &str) {
+        let cleanup = async {
+            let runners = self.list_runners(scope, pat).await?;
+            for runner in runners
+                .iter()
+                .filter(|runner| runner.name.as_deref() == Some(agent_name))
+            {
+                let Some(id) = runner.id else {
+                    continue;
+                };
+                match self.delete_runner(scope, pat, id).await {
+                    Ok(()) => eprintln!(
+                        "deleted uncertain JIT runner '{agent_name}' id {id} before retry"
+                    ),
+                    Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
+                        eprintln!(
+                            "kept busy JIT runner '{agent_name}' id {id} during retry cleanup"
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        match tokio::time::timeout(Duration::from_secs(GITHUB_CURL_MAX_TIME_SECS), cleanup).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                eprintln!("JIT retry orphan cleanup failed for '{agent_name}': {error:#}");
+            }
+            Err(_) => {
+                eprintln!("JIT retry orphan cleanup timed out for '{agent_name}'");
+            }
         }
     }
 
@@ -1537,7 +1615,7 @@ async fn curl_json_request_impl(
     max_time_secs: u64,
     capture_headers: bool,
 ) -> Result<(u16, String, Option<GitHubRetryHint>)> {
-    let cfg = format!(
+    let mut cfg = format!(
         "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
          header = \"Authorization: Bearer {bearer_token}\"\n\
          header = \"Accept: application/json\"\n\
@@ -1548,6 +1626,9 @@ async fn curl_json_request_impl(
          silent\n\
          write-out = \"\\n%{{http_code}}\"\n"
     );
+    if json_body.is_some() {
+        cfg.push_str("header = \"Content-Type: application/json\"\n");
+    }
     let (output, headers) = run_private_curl(
         "velnor-curl",
         &cfg,
@@ -4478,6 +4559,78 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
+    }
+
+    #[tokio::test]
+    async fn curl_json_request_sets_content_type_for_json_bodies() {
+        use wiremock::matchers::{body_string, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/github"))
+            .and(header("authorization", "Bearer test-token"))
+            .and(header("content-type", "application/json"))
+            .and(body_string(r#"{"hello":"world"}"#))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(r#"{"ok":true}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let result = curl_json_request(
+            "POST",
+            &format!("{}/github", server.uri()),
+            "test-token",
+            Some(r#"{"hello":"world"}"#.to_string()),
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
+    }
+
+    #[tokio::test]
+    async fn canceled_curl_kills_child_and_cleans_private_inputs() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("delayed")
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+
+        let prefix = format!("velnor-cancel-test-{}", Uuid::new_v4());
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            run_private_curl(
+                &prefix,
+                "max-time = 30\nconnect-timeout = 2\nsilent\n",
+                None,
+                &server.uri(),
+                false,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "curl unexpectedly completed before cancellation"
+        );
+
+        let temp_dir = std::env::temp_dir().join("velnor-curl");
+        let leaked = std::fs::read_dir(temp_dir)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+        assert!(!leaked, "canceled curl left private input files behind");
     }
 
     #[tokio::test]

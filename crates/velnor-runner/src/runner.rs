@@ -2026,6 +2026,30 @@ pub(crate) async fn jit_configure_one_slot(
     configure(configure_args).await
 }
 
+/// Remove a JIT runner whose POST may have succeeded after its caller timed
+/// out before receiving or persisting the response. The name is deterministic
+/// per daemon slot, so cleanup cannot target another slot's registration.
+pub(crate) async fn cleanup_orphaned_jit_one_slot(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Result<()> {
+    validate_daemon_slot_index(slot_index, slot_count)?;
+    let Some(url) = args.url.as_deref() else {
+        return Ok(());
+    };
+    let Some(pat) = args.pat.as_deref() else {
+        return Ok(());
+    };
+    let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slot_count)?;
+    let Some(agent_name) = configure_args.name.as_deref() else {
+        return Ok(());
+    };
+    let scope = GitHubScope::parse(url)?;
+    delete_orphaned_jit_runner_by_name(&scope, pat, agent_name).await
+}
+
 async fn cleanup_configured_daemon_slots(
     args: &DaemonArgs,
     config_base: &Path,

@@ -32,6 +32,10 @@ const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 /// process, and health work. Every remote operation in one cycle shares this
 /// deadline; one slow API cannot consume the budget of later operations.
 const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
+/// A canceled JIT POST may have been accepted by GitHub before curl died.
+/// Reserve time to remove that deterministic-name orphan before the next
+/// controller cycle retries registration.
+const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -593,13 +597,14 @@ async fn register_runners(
             async move {
                 let index = slot_index_from_id(&slot_id);
                 let timeout = remaining_remote_budget(remote_deadline);
-                let result = if timeout.is_zero() {
+                let jit_timeout = timeout.saturating_sub(JIT_ORPHAN_CLEANUP_BUDGET);
+                let result = if jit_timeout.is_zero() {
                     Err(anyhow::anyhow!(
                         "JIT registration skipped: controller remote budget exhausted"
                     ))
                 } else {
                     match tokio::time::timeout(
-                        timeout,
+                        jit_timeout,
                         crate::runner::jit_configure_one_slot(
                             &exec,
                             &config_base,
@@ -610,9 +615,33 @@ async fn register_runners(
                     .await
                     {
                         Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!(
-                            "JIT registration timed out before controller remote budget expired"
-                        )),
+                        Err(_) => {
+                            let cleanup_timeout = remaining_remote_budget(remote_deadline);
+                            if !cleanup_timeout.is_zero() {
+                                match tokio::time::timeout(
+                                    cleanup_timeout,
+                                    crate::runner::cleanup_orphaned_jit_one_slot(
+                                        &exec,
+                                        &config_base,
+                                        index,
+                                        slot_count,
+                                    ),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => eprintln!(
+                                        "JIT timeout orphan cleanup for slot-{index} failed: {error:#}"
+                                    ),
+                                    Err(_) => eprintln!(
+                                        "JIT timeout orphan cleanup for slot-{index} timed out"
+                                    ),
+                                }
+                            }
+                            Err(anyhow::anyhow!(
+                                "JIT registration timed out before controller remote budget expired"
+                            ))
+                        }
                     }
                 };
                 (slot_id, generation, result)
