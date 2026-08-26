@@ -137,8 +137,11 @@ pub fn teardown_net_commands(resources: &IsolationResources) -> Vec<String> {
 pub fn teardown_is_exact(resources: &IsolationResources, sibling: &IsolationIdentity) -> bool {
     let own = resources.identity.as_jailer_id();
     let other = sibling.as_jailer_id();
-    let sibling_tap =
-        IsolationResources::for_identity(sibling.clone(), std::path::Path::new("/run")).tap;
+    let sibling_tap = IsolationResources::for_identity(
+        sibling.clone(),
+        std::path::Path::new(crate::execution::MICROVM_ISOLATION_ROOT),
+    )
+    .tap;
     teardown_net_commands(resources).into_iter().all(|command| {
         (command.contains(&own) || command.contains(&resources.tap))
             && !command.contains(&other)
@@ -153,8 +156,10 @@ mod tests {
 
     #[test]
     fn teardown_does_not_touch_sibling() {
-        let a =
-            IsolationResources::for_identity(IsolationIdentity::new("job-a", 1), Path::new("/run"));
+        let a = IsolationResources::for_identity(
+            IsolationIdentity::new("job-a", 1),
+            Path::new(crate::execution::MICROVM_ISOLATION_ROOT),
+        );
         let b = IsolationIdentity::new("job-b", 2);
         assert!(teardown_is_exact(&a, &b));
         assert!(nftables_commands(&a).iter().all(|command| command
@@ -163,8 +168,10 @@ mod tests {
         assert!(setup_net_invocations(&a).iter().any(
             |(program, args)| program == "ip" && args.windows(2).any(|w| w == ["netns", "add"])
         ));
-        let b =
-            IsolationResources::for_identity(IsolationIdentity::new("job-b", 2), Path::new("/run"));
+        let b = IsolationResources::for_identity(
+            IsolationIdentity::new("job-b", 2),
+            Path::new(crate::execution::MICROVM_ISOLATION_ROOT),
+        );
         assert_ne!(a.tap, b.tap);
         assert!(setup_net_invocations(&a)
             .iter()

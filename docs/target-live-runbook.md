@@ -6,11 +6,15 @@ The implementation checklist is tracked in [roadmap.md](roadmap.md).
 
 ## Prerequisites
 
-- macOS or Linux process environment where the Docker daemon can run Linux job
-  containers and see Velnor's bind-mounted work directory. Running Velnor inside
-  a Linux Docker container is valid, including from a macOS workstation, if
-  `/var/run/docker.sock` is mounted and `--docker-host-work-dir` points at the
-  host path visible to the Docker daemon.
+- Selected execution backend in `execution.toml` (`docker` or `microvm`, no
+  fallback). The `docker` backend needs a process environment where the Docker
+  daemon can run Linux job containers and see Velnor's bind-mounted work
+  directory. Running Velnor inside a Linux Docker container is valid for that
+  backend, including from a macOS workstation, if `/var/run/docker.sock` is
+  mounted and `--docker-host-work-dir` points at the host path visible to the
+  Docker daemon. The `microvm` backend needs Linux KVM (`/dev/kvm`) plus the
+  packaged Firecracker/jailer/kernel/rootfs/guest-agent identity; it does not
+  use the host Docker control plane.
 - A local Docker socket is preferred. Remote `DOCKER_HOST=tcp://...` daemons
   usually fail unless `--work-dir` points to a path mounted into that daemon,
   because Velnor mounts job scripts, workspace, temp files, artifacts, and cache
@@ -74,20 +78,19 @@ Set `VELNOR_RUN_TARGET_VERIFY=true` to include the target workflow verifier, and
 set `VELNOR_CHECK_TARGET_MVP_CONFIG=true` after JIT config creation to validate
 the stored target labels, V2 settings, ids, and credentials.
 
-`velnor-runner run` also performs Docker preflight by default before it polls
-GitHub for executable jobs. For target repository runs, pass
-`--require-docker-socket` too, because the current target workflows include
+`velnor-runner run` also performs selected-backend preflight by default before
+it polls GitHub for executable jobs. For `docker`-backend target repository
+runs, pass `--require-docker-socket` too, because those workflows include
 Docker/Buildx steps that need the host socket inside the job container. This is
-deliberate: a runner should not acquire a queued GitHub job until the local
-Docker environment can run the mounted job workspace. Use `--skip-preflight`
-only for `--complete-noop`, `--dry-run-jobs`, or a deliberately controlled
-diagnostic run.
+deliberate: a runner should not acquire a queued GitHub job until the selected
+backend can run the job. Use `--skip-preflight` only for `--complete-noop`,
+`--dry-run-jobs`, or a deliberately controlled diagnostic run.
 
 ## Docker From Job Containers
 
-Velnor runs each Linux job inside a Docker job container. For the target
-workflows, that job container must also be able to run Docker commands itself.
-The Phase 0 model is Docker-outside-of-Docker:
+The `docker` backend runs each Linux job inside a host Docker job container.
+For the target workflows, that job container must also be able to run Docker
+commands itself. That backend uses Docker-outside-of-Docker:
 
 - Velnor mounts the host Docker socket at `/var/run/docker.sock` inside the job
   container.
@@ -96,17 +99,13 @@ The Phase 0 model is Docker-outside-of-Docker:
 - Native Docker adapters and any shell steps that run `docker ...` or
   `docker buildx ...` talk to the host daemon through that socket.
 
-This intentionally prioritizes compatibility with GitHub Actions Docker/Buildx
-workflows over strict container isolation. A later phase can add a DinD or
-rootless/containerized daemon mode, but Phase 0 uses the host socket because the
-two target repositories need Buildx/Bake and direct Docker commands to work from
-inside the job container.
-
-This model is restricted to admitted trusted work. It is not Build L3 and must
-not receive public unmerged code. The accepted lower-trust target is one fresh
-microVM per job with guest-local Docker and no host socket, as defined by
-[Build L3 boundary v1](security/build-l3-boundary-v1.md). A privileged
-container-only DinD variant is not an accepted host boundary.
+This is the packaged default and the trusted-work compatibility path. It is not
+Build L3 and must not receive public unmerged code. The `microvm` backend is
+the selected alternative: one fresh Firecracker guest per job with guest-local
+Docker and no host socket, as defined by
+[Build L3 boundary v1](security/build-l3-boundary-v1.md). Operator selection is
+`[execution] backend = "docker" | "microvm"` with no automatic fallback. A
+privileged container-only DinD variant is not an accepted host boundary.
 
 ## Run Public Fixture First
 

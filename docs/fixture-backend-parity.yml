@@ -38,6 +38,19 @@ jobs:
             test -n "${VELNOR_EXECUTION_BACKEND:-}"
             test "${VELNOR_EXECUTION_BACKEND}" = "docker" -o "${VELNOR_EXECUTION_BACKEND}" = "microvm"
           fi
+      - name: Command files survive between steps
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "value=parity" >> "$GITHUB_OUTPUT"
+          echo "PARITY_ENV=1" >> "$GITHUB_ENV"
+      - name: Consume command files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.files.outputs.value }}" = "parity"
+          test "${PARITY_ENV}" = "1"
       - name: Guest docker is not the host control plane
         shell: bash
         run: |

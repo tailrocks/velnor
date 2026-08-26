@@ -219,7 +219,7 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub docker_host_work_dir: Option<PathBuf>,
 
-    /// Skip Docker preflight before polling GitHub for executable jobs.
+    /// Skip selected execution-backend preflight before polling GitHub for executable jobs.
     #[arg(long)]
     pub skip_preflight: bool,
 

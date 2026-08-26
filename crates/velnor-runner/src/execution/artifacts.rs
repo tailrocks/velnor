@@ -218,6 +218,10 @@ pub struct MicroVmGeneration {
     pub kernel: String,
     pub rootfs: String,
     pub guest_agent: String,
+    /// Set only after a jailed synthetic probe: guest agent + guest Docker
+    /// healthy, isolation-id teardown, no host Docker socket.
+    #[serde(default)]
+    pub probe_jailed_guest_docker: bool,
 }
 
 impl MicroVmGeneration {
@@ -233,7 +237,14 @@ impl MicroVmGeneration {
             kernel: set.kernel.sha256.clone(),
             rootfs: set.rootfs.sha256.clone(),
             guest_agent: set.guest_agent.sha256.clone(),
+            probe_jailed_guest_docker: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_jailed_guest_docker_probe(mut self) -> Self {
+        self.probe_jailed_guest_docker = true;
+        self
     }
 }
 
@@ -490,6 +501,7 @@ mod tests {
             kernel: "c".repeat(64),
             rootfs: "d".repeat(64),
             guest_agent: "e".repeat(64),
+            probe_jailed_guest_docker: false,
         };
         let right = left.clone();
         left.firecracker = "f".repeat(64);

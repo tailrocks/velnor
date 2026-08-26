@@ -93,6 +93,8 @@ impl HealthDocument {
         "state",
     ];
 
+    /// Empty vector before journal/config load. `execution_backend` is the
+    /// packaged default (`docker`), not a live selection or a fallback.
     #[must_use]
     pub fn empty() -> Self {
         Self {

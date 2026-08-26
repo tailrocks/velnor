@@ -103,6 +103,7 @@ impl Default for FleetState {
             canary: CanaryStatus::Unknown,
             package_generation: 0,
             package_apt_version: String::new(),
+            // Packaged default until journal load; not a live fallback.
             execution_backend: ExecutionBackendKind::Docker,
             slots: Vec::new(),
             jobs: Vec::new(),

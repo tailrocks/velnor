@@ -624,7 +624,7 @@ impl BackendSession {
         DockerBackend::preflight(world)?;
         Ok(Self {
             kind: ExecutionBackendKind::Docker,
-            resources: IsolationResources::for_identity(isolation.clone(), world.artifact_root),
+            resources: IsolationResources::for_identity(isolation.clone(), world.isolation_root),
             isolation,
             phase: BackendPhase::Preflighted,
             docker: Some(DockerBackend::default()),
@@ -651,7 +651,7 @@ impl BackendSession {
         FirecrackerBackend::preflight(world)?;
         Ok(Self {
             kind: ExecutionBackendKind::MicroVm,
-            resources: IsolationResources::for_identity(isolation.clone(), world.artifact_root),
+            resources: IsolationResources::for_identity(isolation.clone(), world.isolation_root),
             isolation,
             phase: BackendPhase::Preflighted,
             docker: None,
