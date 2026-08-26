@@ -89,7 +89,7 @@ isolation tradeoff is allowed.
 
 - [x] Journal no-op and batched-commit unit tests exist.
 - [x] Broker empty/401/403/404/409/timeout/malformed/rate-limit and JIT failure classification tests exist.
-- [ ] One registration loss produces exactly one coordinated recovery path.
+- [x] One registration loss produces exactly one coordinated recovery path.
 - [x] Stale generations cannot mutate newer sessions or registrations.
 - [x] Retry deadlines and quarantine are tested.
 - [x] Killing one slot leaves siblings alive.
@@ -184,6 +184,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - Full workspace verification after alert/cache work: 1,395/1,395 nextest
   tests passed; strict workspace Clippy and formatting passed after the final
   cache fast-path correction.
+- Recovery unit test proves one missing-session signal emits one recreate action;
+  same-cycle duplicate emits no second action or budget increment.
 - Readiness reconciliation: journal amplification, idle waiter removal,
   coordinated bounded recovery, and the 15-minute idle budget are now checked;
   production Sentry/fixture/APT gates and deeper active-job fault proofs remain

@@ -287,4 +287,26 @@ mod tests {
         assert_eq!(coordinator.retry_streak(), 1);
         assert_eq!(coordinator.state(), RecoveryState::Backoff);
     }
+
+    #[test]
+    fn one_missing_session_emits_one_coordinated_recreate() {
+        let mut coordinator = RecoveryCoordinator::default();
+        let now = Duration::from_secs(500);
+        assert_eq!(
+            coordinator.observe(
+                RecoverySignal::Error(BrokerPollErrorClass::MissingSession),
+                now,
+            ),
+            RecoveryAction::RecreateSession
+        );
+        assert_eq!(
+            coordinator.observe(
+                RecoverySignal::Error(BrokerPollErrorClass::MissingSession),
+                now,
+            ),
+            RecoveryAction::None
+        );
+        assert_eq!(coordinator.retry_budget_used(), 0);
+        assert_eq!(coordinator.state(), RecoveryState::MissingSession);
+    }
 }
