@@ -40,7 +40,7 @@ isolation tradeoff is allowed.
 - [x] Process-role metrics expose daemon/controller/slot/waiter/job counts.
 - [x] Health exposes jobs, idle slots, recovery state, and resource safety; status JSON and doctor now expose typed alerts plus controller churn metrics.
 - [ ] Deterministic zero-job/high-CPU reproduction harness is run and recorded.
-- [ ] Fixed-hardware baseline is recorded before final behavior comparison.
+- [x] Fixed-hardware baseline is recorded before final behavior comparison.
 
 ## Phase 1 — journal write amplification
 
@@ -231,6 +231,16 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   against independent GitHub API paths; the failing scope reports degraded
   reachability while the healthy scope continues cycles. Focused node tests
   pass.
+- Fixed local baseline recorded 2026-08-27 on Darwin arm64 `Mac17,6`, 18
+  logical CPUs, 128 GiB RAM. The idle-scaling harness passed on this fixed
+  host with 1/2/4/8/16 slot groups, zero idle job/waiter workers, seven
+  journal transactions per startup, and WAL ≤230,752 bytes; the current run
+  remains a performance sample, not production Sentry evidence.
+- Fixture readiness re-run: public run `32935294686` is failed and the
+  immutable fixture audit reports missing canonical paths-filter, mise, mold,
+  sccache, kache, provenance, artifact, Docker, Pages, Renovate,
+  merge-group, and environment-injection features. Fixture remains unchanged;
+  no dispatch or workflow mutation was performed.
 
 ## Non-goals
 
