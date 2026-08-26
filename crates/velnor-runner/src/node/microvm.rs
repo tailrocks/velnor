@@ -61,8 +61,6 @@ mod tests {
             live_job_executor(velnor_model::ExecutionBackendKind::MicroVm),
             JobExecutorKind::MicroVm
         );
-        assert!(JobExecutorKind::HostDocker.activate_live().is_ok());
-        assert!(JobExecutorKind::MicroVm.activate_live().is_ok());
         assert!(IsolationRejected::VirtioFs.activate_production().is_err());
     }
 }

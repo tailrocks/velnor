@@ -83,9 +83,19 @@ pub fn setup_net_invocations(resources: &IsolationResources) -> Vec<(String, Vec
 pub fn teardown_net_invocations(resources: &IsolationResources) -> Vec<(String, Vec<String>)> {
     let id = resources.identity.as_jailer_id();
     vec![
+        // Setup moved the TAP into the netns, so it must be deleted from
+        // inside that netns while it still exists.
         (
             "ip".into(),
-            vec!["link".into(), "delete".into(), resources.tap.clone()],
+            vec![
+                "netns".into(),
+                "exec".into(),
+                id.clone(),
+                "ip".into(),
+                "link".into(),
+                "delete".into(),
+                resources.tap.clone(),
+            ],
         ),
         (
             "ip".into(),

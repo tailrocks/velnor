@@ -48,12 +48,6 @@ impl ExecutionBackendKind {
     pub fn uses_host_docker_socket(self) -> bool {
         matches!(self, Self::Docker)
     }
-
-    /// Native ARM runner advertising is never implied by an amd64 host.
-    #[must_use]
-    pub fn advertises_native_arm_on_amd64_host(self) -> bool {
-        false
-    }
 }
 
 impl std::fmt::Display for ExecutionBackendKind {
@@ -250,8 +244,6 @@ mod tests {
     fn docker_uses_host_socket_microvm_does_not() {
         assert!(ExecutionBackendKind::Docker.uses_host_docker_socket());
         assert!(!ExecutionBackendKind::MicroVm.uses_host_docker_socket());
-        assert!(!ExecutionBackendKind::Docker.advertises_native_arm_on_amd64_host());
-        assert!(!ExecutionBackendKind::MicroVm.advertises_native_arm_on_amd64_host());
     }
 
     #[test]

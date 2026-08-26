@@ -272,11 +272,17 @@ impl ValidatedPlan {
     }
 }
 
+/// Whole-plan timeout: the sum of the per-step declared timeouts. A job can
+/// never legitimately exceed the sum of its step bounds, so this is the safe
+/// host-side deadline; the previous `min` cut multi-step jobs short to the
+/// smallest single step. Steps without a declared timeout contribute the
+/// 60 s default; 0 stays reserved as the plan-level "already timed out"
+/// sentry and is never produced here.
 fn plan_timeout_ms(minutes: impl Iterator<Item = u64>) -> u64 {
-    minutes
-        .map(|minutes| minutes.saturating_mul(60_000))
-        .min()
-        .unwrap_or(60_000)
+    let total: u64 = minutes
+        .map(|minutes| minutes.max(1).saturating_mul(60_000))
+        .sum();
+    total.max(60_000)
 }
 
 fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
@@ -455,6 +461,7 @@ pub enum ExecutionError {
         actual: BackendPhase,
     },
     HostDockerForbidden,
+    Isolation(String),
     DockerPreflight(String),
     DockerExecute(String),
     CollectBeforeStop,
@@ -473,6 +480,7 @@ impl std::fmt::Display for ExecutionError {
                 f,
                 "host Docker executor is forbidden while execution backend is microvm; the docker backend was not used"
             ),
+            Self::Isolation(detail) => write!(f, "isolation setup failed: {detail}"),
             Self::DockerPreflight(detail) => write!(f, "docker preflight failed: {detail}"),
             Self::DockerExecute(detail) => write!(f, "docker job execution failed: {detail}"),
             Self::CollectBeforeStop => {
@@ -594,7 +602,7 @@ impl BackendSession {
             .host_fs
             .create_dir_all(reserve_dir)
             .map_err(|detail| {
-                ExecutionError::DockerPreflight(format!("reserve isolation dir: {detail}"))
+                ExecutionError::Isolation(format!("reserve isolation dir: {detail}"))
             })?;
         self.phase = BackendPhase::Reserved;
         Ok(())
@@ -685,7 +693,7 @@ impl BackendSession {
             BackendPhase::Started | BackendPhase::Executing | BackendPhase::Prepared
         ) {
             return Err(ExecutionError::WrongPhase {
-                required: BackendPhase::Executing,
+                required: BackendPhase::Started,
                 actual: self.phase,
             });
         }
@@ -786,10 +794,9 @@ impl BackendSession {
             firecracker.teardown(&self.resources, world, &mut self.events)?;
         }
         for path in self.resources.teardown_paths() {
-            world
-                .host_fs
-                .remove_dir_all(path)
-                .map_err(ExecutionError::DockerPreflight)?;
+            world.host_fs.remove_dir_all(path).map_err(|detail| {
+                ExecutionError::Isolation(format!("teardown {}: {detail}", path.display()))
+            })?;
         }
         self.teardown_ran = true;
         self.phase = BackendPhase::TornDown;

@@ -58,6 +58,14 @@ impl UnixVsockChannel {
 }
 
 impl VsockChannel for UnixVsockChannel {
+    fn set_idle_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+        if let Some(stream) = self.stream.as_mut() {
+            // Best effort: a failure here surfaces on the next recv.
+            let _ = stream.set_read_timeout(Some(timeout));
+        }
+    }
+
     fn send(&mut self, message: VsockMessage) -> Result<(), String> {
         let stream = self.connected()?;
         message
@@ -197,7 +205,7 @@ pub fn execute_guest_plan(
     }
     let mut code = 0_i32;
     for step in &plan.steps {
-        events.push(log_line(&format!("*** {} ***", step.id)));
+        events.push(log_line(&format!("[velnor-step {}]", step.id)));
         let script = if step.script.is_empty() {
             format!("echo {}", step.id)
         } else {

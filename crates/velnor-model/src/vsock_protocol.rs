@@ -13,8 +13,10 @@ use crate::job_summary::JobConclusion;
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
-/// Maximum frame bytes including header and checksum.
-pub const MAX_FRAME_BYTES: usize = 8 + MAX_PAYLOAD_BYTES as usize + 32;
+/// stdout stream tag in [`VsockMessage::Stdio`].
+pub const STDOUT_STREAM: u8 = 1;
+/// stderr stream tag in [`VsockMessage::Stdio`].
+pub const STDERR_STREAM: u8 = 2;
 
 const HEADER_LEN: usize = 8;
 const CHECKSUM_LEN: usize = 32;
@@ -317,6 +319,9 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         }
         6 => {
             let stream = read_u8(&mut cur)?;
+            if stream != STDOUT_STREAM && stream != STDERR_STREAM {
+                return Err(VsockCodecError::InvalidStream { value: stream });
+            }
             let bytes = read_bytes(&mut cur)?;
             VsockMessage::Stdio { stream, bytes }
         }
@@ -454,6 +459,7 @@ pub enum VsockCodecError {
     TrailingBytes { len: usize },
     Io { detail: String },
     InvalidConclusion { value: String },
+    InvalidStream { value: u8 },
 }
 
 impl std::fmt::Display for VsockCodecError {
@@ -473,6 +479,12 @@ impl std::fmt::Display for VsockCodecError {
             Self::Io { detail } => write!(f, "vsock io: {detail}"),
             Self::InvalidConclusion { value } => {
                 write!(f, "vsock unknown job conclusion {value}")
+            }
+            Self::InvalidStream { value } => {
+                write!(
+                    f,
+                    "vsock unknown stdio stream {value}; expected {STDOUT_STREAM} or {STDERR_STREAM}"
+                )
             }
         }
     }

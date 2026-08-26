@@ -1,8 +1,9 @@
 //! Production microVM and job-executor selection.
 //!
-//! Live jobs stay on host Docker until Plans 012/017 prove Build L3. This
-//! module records the chosen VMM, control path, and isolation transports; it
-//! is not a live Firecracker client.
+//! Two explicit execution backends are live-selectable through
+//! `execution.toml`: host Docker (`docker`) and Firecracker/KVM (`microvm`).
+//! This module records the chosen VMM, control path, and isolation transports;
+//! preflight — not this enum — is the fail-closed gate for either backend.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,10 +29,10 @@ pub const JAILER_CONTROLS: [&str; 4] = ["cgroup", "namespace", "seccomp", "privi
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobExecutorKind {
-    /// Live transitional: Velnor → host Docker → job + service containers.
+    /// Host Docker backend: Velnor → host Docker → job + service containers.
     HostDocker,
-    /// Selected isolation (not live; Plans 012/017): Velnor → Firecracker/KVM →
-    /// guest Linux → guest-local Docker.
+    /// MicroVM backend: Velnor → Firecracker/KVM → guest Linux → guest-local
+    /// Docker.
     MicroVm,
 }
 
@@ -48,35 +49,7 @@ impl JobExecutorKind {
             Self::MicroVm => "micro_vm",
         }
     }
-
-    /// Both operator backends are selectable. Preflight, not this enum, is the
-    /// fail-closed gate.
-    ///
-    /// # Errors
-    /// Never: both variants are live-selectable.
-    pub fn activate_live(self) -> Result<(), MicroVmNotLive> {
-        let _ = self;
-        Ok(())
-    }
 }
-
-/// Why the MicroVM job executor cannot take live traffic yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MicroVmNotLive {
-    pub requested: JobExecutorKind,
-}
-
-impl std::fmt::Display for MicroVmNotLive {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "job executor {} is not live; host Docker remains the named transitional backend until Plans 012 and 017",
-            self.requested.as_str()
-        )
-    }
-}
-
-impl std::error::Error for MicroVmNotLive {}
 
 /// Which VMM a MicroVM backend may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -326,8 +299,6 @@ mod tests {
             JobExecutorKind::PACKAGED_DEFAULT,
             JobExecutorKind::HostDocker
         );
-        assert!(JobExecutorKind::HostDocker.activate_live().is_ok());
-        assert!(JobExecutorKind::MicroVm.activate_live().is_ok());
         assert_eq!(JobExecutorKind::ISOLATION, JobExecutorKind::MicroVm);
     }
 

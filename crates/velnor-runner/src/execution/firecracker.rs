@@ -1,6 +1,7 @@
 //! Jailed Firecracker backend. Guest-local Docker; no host docker.sock.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use velnor_model::{JobConclusion, MicroVmKind, MicroVmPreflightFailure, VsockMessage};
 
@@ -251,9 +252,12 @@ impl FirecrackerBackend {
             events.push(ExecutionEvent::FirecrackerApi("instance_start".into()));
         }
         self.started = true;
-        events.push(ExecutionEvent::GuestDocker("engine healthy".into()));
+        events.push(ExecutionEvent::GuestDocker("guest started".into()));
         if !self.restored {
-            let _ = create_golden_snapshot(
+            // Errors here leave the guest resumed (see create_golden_snapshot);
+            // the snapshot itself is an optimization, so its failure is an
+            // event, not a job failure.
+            create_golden_snapshot(
                 world,
                 GuestReady {
                     agent_listening: true,
@@ -261,7 +265,7 @@ impl FirecrackerBackend {
                     job_credentials_absent: true,
                 },
                 events,
-            );
+            )?;
         }
         Ok(())
     }
@@ -287,6 +291,7 @@ impl FirecrackerBackend {
                     plan_bytes: bytes,
                 },
                 events,
+                Duration::from_millis(plan.timeout_ms.max(1)),
             );
         }
         if !world.allow_inline_guest_plan {
@@ -436,8 +441,13 @@ fn snapshot_identity_matches(set: &MicroVmArtifactSet, world: &ExecutionWorld<'_
 
 /// Pause a credential-free ready guest and persist mem+vmstate+identity.
 ///
+/// Every path out of here leaves the guest resumed: a failed snapshot is an
+/// observability event, never a paused VM that a later execute would wait on
+/// until the vsock timeout. Only a failed resume (or a failure before the
+/// pause) is an error.
+///
 /// # Errors
-/// Credentials present, guest not ready, or Firecracker API failure.
+/// Credentials present, artifact load, or Firecracker API failure.
 pub fn create_golden_snapshot(
     world: &mut ExecutionWorld<'_>,
     ready: GuestReady,
@@ -452,20 +462,48 @@ pub fn create_golden_snapshot(
         .pause_vm()
         .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("pause_vm".into()));
-    world
-        .firecracker
-        .create_snapshot(&mem, &vmstate)
-        .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
-    events.push(ExecutionEvent::FirecrackerApi("create_snapshot".into()));
-    let generation = MicroVmGeneration::from_set(&set);
-    let identity =
-        SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
-    write_identity(world.host_fs, &mem, &identity)?;
+    let persisted = persist_snapshot(world, &set, &mem, &vmstate, events);
+    if let Err(failure) = persisted {
+        world
+            .firecracker
+            .resume_vm()
+            .map_err(|resume_detail| {
+                MicroVmPreflightFailure::new(
+                    "guest.snapshot",
+                    format!("{failure}; resume also failed: {resume_detail}"),
+                )
+            })
+            .map_err(ExecutionError::from)?;
+        events.push(ExecutionEvent::FirecrackerApi("resume_vm".into()));
+        events.push(ExecutionEvent::FirecrackerApi(format!(
+            "golden snapshot failed (guest resumed): {failure}"
+        )));
+        return Ok(());
+    }
     world
         .firecracker
         .resume_vm()
         .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("resume_vm".into()));
+    Ok(())
+}
+
+fn persist_snapshot(
+    world: &mut ExecutionWorld<'_>,
+    set: &MicroVmArtifactSet,
+    mem: &Path,
+    vmstate: &Path,
+    events: &mut Vec<ExecutionEvent>,
+) -> Result<(), ExecutionError> {
+    world
+        .firecracker
+        .create_snapshot(mem, vmstate)
+        .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
+    events.push(ExecutionEvent::FirecrackerApi("create_snapshot".into()));
+    let generation = MicroVmGeneration::from_set(set);
+    let identity =
+        SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    write_identity(world.host_fs, mem, &identity)?;
     Ok(())
 }
 
@@ -491,19 +529,51 @@ fn try_restore_snapshot(
     }
 }
 
+/// Drive the vsock session to its terminal message.
+///
+/// The plan's declared timeout bounds the whole session: a guest that hangs
+/// (or never answers) fails the job at the deadline instead of stalling the
+/// slot until the channel's idle timeout.
 fn drive_vsock(
     vsock: &mut dyn super::VsockChannel,
     message: VsockMessage,
     events: &mut Vec<ExecutionEvent>,
+    timeout: Duration,
 ) -> Result<(), ExecutionError> {
+    let deadline = std::time::Instant::now() + timeout;
     vsock
         .send(message)
         .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?;
     loop {
-        match vsock
-            .recv()
-            .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?
-        {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(MicroVmPreflightFailure::new(
+                "vsock.timeout",
+                format!(
+                    "job exceeded the plan timeout of {} ms",
+                    timeout.as_millis()
+                ),
+            )
+            .into());
+        }
+        vsock.set_idle_timeout(remaining);
+        let received = match vsock.recv() {
+            Ok(message) => message,
+            Err(detail) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.timeout",
+                        format!(
+                            "job exceeded the plan timeout of {} ms (last error: {detail})",
+                            timeout.as_millis()
+                        ),
+                    )
+                    .into());
+                }
+                return Err(MicroVmPreflightFailure::new("vsock", detail).into());
+            }
+        };
+        match received {
             VsockMessage::TeardownAck { .. } => return Ok(()),
             VsockMessage::JobCompleted {
                 conclusion,

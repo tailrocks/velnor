@@ -2172,7 +2172,7 @@ fn daemon_preflight_args(
                 Ok(None)
             } else {
                 let config_dir = run_args.config_dir.as_deref().unwrap_or(config_base);
-                Ok(Some(preflight_args_for_run(&run_args, config_dir)))
+                Ok(Some(preflight_args_for_run(&run_args, config_dir)?))
             }
         })
         .filter_map(Result::transpose)
@@ -2397,12 +2397,18 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
         return Ok(());
     }
 
-    crate::preflight::preflight(preflight_args_for_run(args, config_dir))
+    crate::preflight::preflight(preflight_args_for_run(args, config_dir)?)
         .context("Docker preflight failed before polling GitHub for jobs")
 }
 
-fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
-    PreflightArgs {
+fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> Result<PreflightArgs> {
+    // Fail closed: an unreadable execution.toml must not silently degrade the
+    // preflight to the docker branch (and only die at job time) — it stops
+    // the run here, exactly like the execute path.
+    let execution_backend = crate::execution::load_execution_file(config_dir, None)
+        .context("execution backend selection failed before preflight")
+        .map(|file| file.backend())?;
+    Ok(PreflightArgs {
         work_dir: Some(
             args.work_dir
                 .clone()
@@ -2412,11 +2418,9 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
         docker_image: args.docker_image.clone(),
         require_docker_socket: args.require_docker_socket,
         require_buildx: true,
-        execution_backend: crate::execution::load_execution_file(config_dir, None)
-            .ok()
-            .map(|file| file.backend()),
+        execution_backend: Some(execution_backend),
         config_dir: Some(config_dir.to_path_buf()),
-    }
+    })
 }
 
 fn job_resource_options(cpus: &str, memory: &str) -> Vec<String> {
@@ -5261,7 +5265,7 @@ fn microvm_step_logs(
     for line in &outcome.log_lines {
         if let Some(index) = script_steps
             .iter()
-            .position(|step| line.contains(&format!("*** {} ***", step.id)))
+            .position(|step| line.contains(&format!("[velnor-step {}]", step.id)))
         {
             current = index;
         }
@@ -9202,6 +9206,25 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    /// Temp config dir holding a docker `execution.toml` for preflight tests.
+    fn execution_config_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-preflight-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+        dir
+    }
+
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
             config_dir: None,
@@ -9922,7 +9945,8 @@ jobs:
         args.docker_image = "velnor/job-ubuntu:26.04".into();
         args.require_docker_socket = true;
 
-        let preflight = preflight_args_for_run(&args, Path::new("/config"));
+        let config_dir = execution_config_dir("run-preflight-targets");
+        let preflight = preflight_args_for_run(&args, &config_dir).unwrap();
 
         assert_eq!(
             preflight.work_dir,
@@ -9940,12 +9964,10 @@ jobs:
     #[test]
     fn run_preflight_args_default_work_dir_under_config() {
         let args = run_args(false, false, false);
-        let preflight = preflight_args_for_run(&args, Path::new("/config"));
+        let config_dir = execution_config_dir("run-preflight-defaults");
+        let preflight = preflight_args_for_run(&args, &config_dir).unwrap();
 
-        assert_eq!(
-            preflight.work_dir,
-            Some(Path::new("/config/_work").to_path_buf())
-        );
+        assert_eq!(preflight.work_dir, Some(config_dir.join("_work")));
         assert_eq!(preflight.docker_host_work_dir, None);
         assert!(!preflight.require_docker_socket);
         assert!(preflight.require_buildx);
@@ -10243,7 +10265,20 @@ jobs:
         args.docker_image = "velnor/job-ubuntu:26.04".into();
         args.require_docker_socket = true;
 
-        let preflight = daemon_preflight_args(&args, Path::new("/config"), 2).unwrap();
+        // Each slot selects its backend from its own config dir; the packaged
+        // /etc/velnor fallback answers when a slot file is absent.
+        let base = unique_temp_dir("daemon-preflight-args");
+        for slot in 1..=2 {
+            let slot_dir = daemon_slot_config_dir(&base, slot, 2);
+            fs::create_dir_all(&slot_dir).unwrap();
+            fs::write(
+                slot_dir.join("execution.toml"),
+                "[execution]\nbackend = \"docker\"\n",
+            )
+            .unwrap();
+        }
+
+        let preflight = daemon_preflight_args(&args, &base, 2).unwrap();
 
         assert_eq!(preflight.len(), 2);
         assert_eq!(

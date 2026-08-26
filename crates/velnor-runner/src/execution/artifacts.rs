@@ -383,7 +383,7 @@ pub fn verify_microvm_artifacts(
 }
 
 fn verify_one(artifact: &Artifact, fs: &dyn HostFs) -> Result<(), MicroVmPreflightFailure> {
-    let bytes = fs.read(&artifact.path).map_err(|detail| {
+    let digest = fs.digest_sha256(&artifact.path).map_err(|detail| {
         MicroVmPreflightFailure::new(
             match artifact.name {
                 "firecracker" => "firecracker",
@@ -397,7 +397,6 @@ fn verify_one(artifact: &Artifact, fs: &dyn HostFs) -> Result<(), MicroVmPreflig
             detail,
         )
     })?;
-    let digest = hex_sha256(&bytes);
     if digest != artifact.sha256 {
         return Err(MicroVmPreflightFailure::new(
             "artifacts.checksum",

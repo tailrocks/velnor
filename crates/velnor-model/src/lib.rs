@@ -44,8 +44,8 @@ pub use job_summary::{
 pub use lifecycle::{transition_target, EventReason, InvalidLifecycleToken, JobState};
 pub use microvm::{
     GuestIsolation, IsolationRejected, JobExecutorKind, MicroVmControl, MicroVmControlRejected,
-    MicroVmKind, MicroVmNotLive, MicroVmNotProven, FIRECRACKER_DEVICES, FIRECRACKER_REPO_URL,
-    FIRECRACKER_SPEC_URL, JAILER_CONTROLS,
+    MicroVmKind, MicroVmNotProven, FIRECRACKER_DEVICES, FIRECRACKER_REPO_URL, FIRECRACKER_SPEC_URL,
+    JAILER_CONTROLS,
 };
 pub use node::{
     ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthDocument, JobId,
@@ -66,7 +66,8 @@ pub use since::{InvalidSince, Since};
 pub use source::Source;
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};
 pub use vsock_protocol::{
-    VsockCodecError, VsockMessage, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
+    VsockCodecError, VsockMessage, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION, STDERR_STREAM,
+    STDOUT_STREAM,
 };
 
 /// Crate version reported by `velnorctl --version`.

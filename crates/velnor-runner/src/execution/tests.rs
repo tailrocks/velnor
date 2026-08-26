@@ -182,7 +182,9 @@ fn run_plan(kind: ExecutionBackendKind, cancel: bool) -> super::backend::Executi
     let mut runner = RecordingCommands {
         next: CommandResult {
             code: 0,
-            stdout: "ok".into(),
+            // The runner masks secrets as `***`; one such line proves the
+            // masked outcome flag without relying on step banners.
+            stdout: "*** ok ***".into(),
             stderr: String::new(),
         },
         ..RecordingCommands::default()
@@ -666,6 +668,10 @@ fn docker_backend_uses_production_engine_when_present() {
                 stream: 1,
                 line: "*** engine ***".into(),
             });
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: "[velnor-step engine]".into(),
+            });
             events.push(ExecutionEvent::JobCompleted {
                 conclusion: velnor_model::JobConclusion::Success,
                 exit_code: 0,
@@ -991,4 +997,46 @@ fn fixture_parity_yaml_keeps_lanes_choice() {
         !yaml.contains("\n      backend:"),
         "fixture must not add a repository-controlled backend input: {yaml}"
     );
+}
+
+#[test]
+fn packaged_conffile_is_the_last_execution_toml_fallback() {
+    let dir = std::env::temp_dir().join(format!(
+        "velnor-exec-fallback-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let primary = dir.join("execution.toml");
+    let packaged = dir.join("packaged").join("execution.toml");
+    std::fs::create_dir_all(packaged.parent().unwrap()).unwrap();
+    std::fs::write(&packaged, "[execution]\nbackend = \"microvm\"\n").unwrap();
+
+    // Primary missing: the packaged conffile answers.
+    let file = load_execution_file_from(&primary, &packaged).unwrap();
+    assert_eq!(file.backend(), ExecutionBackendKind::MicroVm);
+
+    // Primary valid: it wins over the packaged conffile.
+    std::fs::write(&primary, "[execution]\nbackend = \"docker\"\n").unwrap();
+    let file = load_execution_file_from(&primary, &packaged).unwrap();
+    assert_eq!(file.backend(), ExecutionBackendKind::Docker);
+
+    // Primary invalid: the parse error propagates instead of silently
+    // falling back to the packaged conffile.
+    std::fs::write(&primary, "[execution]\nbackend = \"kata\"\n").unwrap();
+    let err = load_execution_file_from(&primary, &packaged).unwrap_err();
+    assert_eq!(err.field, "[execution] backend");
+
+    // Both missing: fail closed naming both searched paths.
+    std::fs::remove_file(&primary).unwrap();
+    std::fs::remove_file(&packaged).unwrap();
+    let err = load_execution_file_from(&primary, &packaged).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains(primary.display().to_string().as_str()));
+
+    std::fs::remove_dir_all(&dir).ok();
 }

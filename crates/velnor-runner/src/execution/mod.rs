@@ -85,6 +85,9 @@ pub trait VsockChannel {
     /// # Errors
     /// Transport failure.
     fn recv(&mut self) -> Result<velnor_model::VsockMessage, String>;
+    /// Bound how long a single idle `recv` may block. No-op for channels
+    /// without an underlying socket timeout (test loopbacks).
+    fn set_idle_timeout(&mut self, _timeout: std::time::Duration) {}
 }
 
 use std::path::{Path, PathBuf};
@@ -97,8 +100,11 @@ use crate::executor::{CommandResult, CommandRunner, SpawnedProcess};
 
 /// Load `[execution] backend` from `execution.toml`. No env default.
 ///
-/// Search order: `explicit`, `<config_dir>/execution.toml`. Missing file fails
-/// closed naming `[execution] backend`.
+/// Search order: `explicit`, `<config_dir>/execution.toml`, then the packaged
+/// conffile `/etc/velnor/execution.toml` (the deb ships it there while the
+/// controller passes `--state-dir /var/lib/velnor` and daemon slots pass their
+/// slot config dirs, so neither of the first two locations holds it on a
+/// packaged install). Missing file fails closed naming `[execution] backend`.
 ///
 /// # Errors
 /// [`ExecutionConfigError`] when the file is missing or invalid.
@@ -106,11 +112,27 @@ pub fn load_execution_file(
     config_dir: &Path,
     explicit: Option<&Path>,
 ) -> Result<ExecutionFile, ExecutionConfigError> {
-    let path = explicit
+    let primary = explicit
         .map(Path::to_path_buf)
         .unwrap_or_else(|| config_dir.join(ExecutionFile::FILE_NAME));
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| ExecutionConfigError::missing_file(&path.display().to_string()))?;
+    let packaged = Path::new("/etc/velnor").join(ExecutionFile::FILE_NAME);
+    load_execution_file_from(&primary, &packaged)
+}
+
+fn load_execution_file_from(
+    primary: &Path,
+    packaged: &Path,
+) -> Result<ExecutionFile, ExecutionConfigError> {
+    let text = match std::fs::read_to_string(primary) {
+        Ok(text) => text,
+        Err(_) => std::fs::read_to_string(packaged).map_err(|_| {
+            ExecutionConfigError::missing_file(&format!(
+                "{} (also tried packaged {})",
+                primary.display(),
+                packaged.display()
+            ))
+        })?,
+    };
     ExecutionFile::parse_toml(&text)
 }
 
@@ -183,6 +205,12 @@ pub trait HostFs {
     fn write(&mut self, path: &Path, bytes: &[u8]) -> Result<(), String>;
     fn remove_dir_all(&mut self, path: &Path) -> Result<(), String>;
     fn create_dir_all(&mut self, path: &Path) -> Result<(), String>;
+    /// Hex sha256 of a file. The default buffers the whole file; real hosts
+    /// stream so multi-hundred-MB rootfs images never sit in RAM.
+    fn digest_sha256(&self, path: &Path) -> Result<String, String> {
+        let bytes = self.read(path)?;
+        Ok(super::execution::artifacts::hex_sha256(&bytes))
+    }
 }
 
 /// Real host filesystem.
@@ -214,6 +242,30 @@ impl HostFs for RealHostFs {
 
     fn create_dir_all(&mut self, path: &Path) -> Result<(), String> {
         std::fs::create_dir_all(path).map_err(|error| format!("create {}: {error}", path.display()))
+    }
+
+    fn digest_sha256(&self, path: &Path) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("open {}: {error}", path.display()))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 1024 * 1024];
+        loop {
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|error| format!("read {}: {error}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
     }
 }
 

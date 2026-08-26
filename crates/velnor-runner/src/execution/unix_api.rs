@@ -123,13 +123,41 @@ fn unix_json(socket: &Path, method: &str, path: &str, body: &str) -> Result<(), 
     stream
         .write_all(request.as_bytes())
         .map_err(|error| format!("write {path}: {error}"))?;
-    let mut buf = vec![0_u8; 8192];
-    let n = stream
-        .read(&mut buf)
-        .map_err(|error| format!("read {path}: {error}"))?;
-    let response = std::str::from_utf8(&buf[..n])
-        .map_err(|_| "firecracker response is not UTF-8".to_string())?;
-    parse_http_success(method, path, response)
+    let response =
+        read_http_response(&mut stream).map_err(|error| format!("read {path}: {error}"))?;
+    parse_http_success(method, path, &response)
+}
+
+/// Read one full HTTP response: headers plus exactly its Content-Length body.
+/// A single `read` can return a short slice of the response, which previously
+/// truncated the status-line parse.
+fn read_http_response(stream: &mut UnixStream) -> Result<String, String> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + content_length {
+                return Ok(String::from_utf8_lossy(&buf).into_owned());
+            }
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("firecracker response exceeds 64 KiB".into());
+        }
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|error| format!("{error}"))?;
+        if n == 0 {
+            return Ok(String::from_utf8_lossy(&buf).into_owned());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
 }
 
 fn parse_http_success(method: &str, path: &str, response: &str) -> Result<(), String> {
