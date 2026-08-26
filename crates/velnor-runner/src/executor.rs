@@ -4679,7 +4679,11 @@ fn normalize_cache_scope_paths(paths: &str) -> String {
 fn validate_cache_paths(state: &JobExecutionState, paths: &str) -> Result<()> {
     for path in cache_paths(paths) {
         if has_glob_pattern(&path) {
-            cache_glob_base_and_pattern(state, &path)?;
+            let Some((_, pattern)) = cache_glob_base_and_pattern(state, &path)? else {
+                bail!("cache glob '{path}' cannot resolve to Velnor-mapped job storage");
+            };
+            Glob::new(&normalize_glob_pattern(&pattern))
+                .with_context(|| format!("invalid cache glob syntax '{path}'"))?;
         }
     }
     Ok(())
@@ -5332,6 +5336,10 @@ fn save_cache_result(
     exact_hit: bool,
     version: &str,
 ) -> Result<StepExecutionResult> {
+    // Validate the complete declaration before resolving or mutating the
+    // shared cache entry. In particular, glob syntax must fail before the
+    // entry lock, staging directory, or metadata can be created.
+    validate_cache_paths(state, paths)?;
     let t0 = Instant::now();
     if key.is_empty() {
         return Ok(cache_save_step_result(
@@ -12316,6 +12324,66 @@ esac
         assert!(error
             .to_string()
             .contains("outside Velnor-mapped job storage"));
+        assert!(!root.join("_velnor_caches").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_actions_cache_save_glob_mutates_no_store() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(temp.join("work/cache")).unwrap();
+        fs::write(temp.join("work/cache/state.bin"), "state\n").unwrap();
+        let paths = "cache/[unterminated";
+        let step = native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", paths), ("key", "malformed-actions-cache")],
+        );
+
+        let error = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &[step],
+                &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+                &temp,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid cache glob syntax"));
+        assert!(!root.join("_velnor_caches").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_rust_cache_save_glob_mutates_no_store() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("cache")).unwrap();
+        fs::write(workspace.join("cache/state.bin"), "state\n").unwrap();
+        let state = JobExecutionState::new_with_workspace(
+            &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+            &[],
+            &workspace,
+            &temp,
+        );
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::RustCache,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("shared-key".into(), "malformed-rust-cache".into()),
+                ("cache-directories".into(), "cache/[unterminated".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+
+        let error = native_rust_cache_save("rust-cache", &action, &state).unwrap_err();
+
+        assert!(error.to_string().contains("invalid cache glob syntax"));
         assert!(!root.join("_velnor_caches").exists());
         fs::remove_dir_all(root).unwrap();
     }
