@@ -4,7 +4,7 @@ Velnor unified CI contract (2026-08-09):
 - Estate: exactly 28 repositories in the canonical class map in `VELNOR_PROJECTS_SETUP.md`.
 - Classes: exactly four generated templates—20 code, 5 tap, 2 apt, 1 fixture—byte-identical within each class; no concern-based omission or repository-local fork.
 - Selector: exactly the plural `lanes` choice input with values `velnor | github | both` (`lanes: type: choice, default: velnor, options: [velnor, github, both]`); every repository supports all three values. Callable reusable workflows keep their singular `lane` input; callers derive it from `inputs.lanes`.
-- Defaults: every listed repository defaults to `velnor`.
+- Defaults: every listed `jackin-project/*` repository defaults to `github`; every listed `tailrocks/*` and `ChainArgos/*` repository defaults to `velnor`.
 - Trust route: public unmerged contributor code uses GitHub-hosted until lower-trust Velnor isolation is live-proven. This explicit safety override does not change repository default, applicable checks, or permit silent failover.
 - Trusted admission: Velnor trusted access is limited to exact default-branch or release workflow paths and refs, never an entire public repository.
 - Merge gate: every repository requires exactly `ci-required` and `DCO`; migration preserves old gates until replacements are observed.
@@ -36,8 +36,6 @@ Velnor unified CI contract (2026-08-09):
 ## Direction & decisions
 
 Normative direction: [docs/mission.md](docs/mission.md), docs/vision.md, docs/roadmap.md; docs/prompt.md is the sole active execution prompt; docs/comparison.md is timestamped non-normative evidence. On conflict docs/ wins — fix the prompt. Change procedure: update docs/ first → record one dated decision line here → reconcile plans/README.md and docs/prompt.md.
-
-- 2026-08-26: **Every listed repository defaults to Velnor** (operator): the unified CI contract removes the per-organization GitHub-default split; all listed repositories now default to the `velnor` lane. The public-unmerged trust route remains GitHub-hosted until lower-trust Velnor isolation is proven and does not silently change repository defaults.
 
 Active decisions: two explicit backends `[execution] backend = "docker" | "microvm"` per daemon/pool, no fallback; Firecracker production microVM; Node Architecture v2 supervised processes; Build L3 final isolation target · velnorctl is the final CLI/package after Plan 079, zero aliases, Sentry apt-only from signed `velnor-apt` · sequential runs fully warm; persistent cargo targets job-local materializations; artifact fan-in Results Service authoritative · trust scopes runtime-enforced; warm-runner jobs get daemon resource caps · local-only compiler caches (sccache v0.16.0 / Kache v0.10.0, mutually exclusive, 20 GiB); storage budgets + disk-pressure controller P0 · log format contract is law ([docs/log-format-contract.md](docs/log-format-contract.md)); stability-first standing rules (dual health signals, forensic logs, tracing spans) · Parallax native Apple packaging is the sole measured macOS exception · correctness over ROI; root-cause fixes over symptom patches (docs/mission.md).
 
