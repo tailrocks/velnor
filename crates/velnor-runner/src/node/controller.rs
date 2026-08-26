@@ -264,6 +264,7 @@ struct ControllerMetrics {
     job_processes: u32,
     journal: JournalStats,
     broker: crate::runner::BrokerMetricsSnapshot,
+    jit: JitMetrics,
     #[serde(skip)]
     durations_ms: VecDeque<u64>,
     #[serde(skip)]
@@ -281,7 +282,16 @@ struct DurationQuantiles {
     p99: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+struct JitMetrics {
+    create_attempts: u64,
+    create_successes: u64,
+    create_failures: u64,
+    create_latency_ms: u64,
+}
+
 impl ControllerMetrics {
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &mut self,
         elapsed: Duration,
@@ -290,6 +300,7 @@ impl ControllerMetrics {
         jobs: usize,
         journal: &JournalStats,
         broker: &crate::runner::BrokerMetricsSnapshot,
+        jit: &JitMetrics,
     ) {
         self.schema_version = 1;
         self.sequence = self.sequence.saturating_add(1);
@@ -321,6 +332,7 @@ impl ControllerMetrics {
         self.job_processes = u32::try_from(jobs).unwrap_or(u32::MAX);
         self.journal = journal.clone();
         self.broker = broker.clone();
+        self.jit = jit.clone();
         let event_total = journal
             .events
             .values()
@@ -381,6 +393,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
     let mut pacing = GithubPacing::default();
     let mut metrics = ControllerMetrics::default();
+    let mut jit_metrics = JitMetrics::default();
     let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
     let recovery = Arc::new(Mutex::new(RecoveryCoordinator::default()));
     let broker_metrics = Arc::new(crate::runner::BrokerMetrics::default());
@@ -419,6 +432,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut last_registration_reconcile,
             &mut pacing,
             &recovery,
+            &mut jit_metrics,
         )
         .await?;
         let recovery = recovery.lock().await;
@@ -455,6 +469,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             jobs.len(),
             &journal.telemetry_stats(),
             &broker_metrics.snapshot(),
+            &jit_metrics,
         );
         if let Err(error) = metrics.publish(&args.state_dir) {
             eprintln!("Warning: controller metrics publication failed: {error:#}");
@@ -956,6 +971,7 @@ async fn reconcile_once(
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
     recovery: &Arc<Mutex<RecoveryCoordinator>>,
+    jit_metrics: &mut JitMetrics,
 ) -> anyhow::Result<(LocalCycle, velnor_model::HealthDocument)> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
     let existing = journal.materialized_state()?;
@@ -1056,7 +1072,7 @@ async fn reconcile_once(
             command => execute_effect(args, journal, slots, &mut *pacing, command).await?,
         }
     }
-    register_runners(args, journal, pacing, registrations).await?;
+    register_runners(args, journal, pacing, registrations, Some(jit_metrics)).await?;
 
     // Controller-owned broker managers own the idle session lifecycle. The
     // controller only starts a transient child after receiving an assignment.
@@ -1128,7 +1144,7 @@ async fn register_runner(
     slot_id: SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
-    register_runners(args, journal, pacing, vec![(slot_id, generation)]).await
+    register_runners(args, journal, pacing, vec![(slot_id, generation)], None).await
 }
 
 /// Configure independent, already-proven slots concurrently, then commit the
@@ -1140,6 +1156,7 @@ async fn register_runners(
     journal: &mut Journal,
     pacing: &mut GithubPacing,
     registrations: Vec<(SlotId, Generation)>,
+    mut jit_metrics: Option<&mut JitMetrics>,
 ) -> anyhow::Result<()> {
     if registrations.is_empty() {
         return Ok(());
@@ -1166,19 +1183,29 @@ async fn register_runners(
             let config_base = config_base.clone();
             async move {
                 let index = slot_index_from_id(&slot_id);
+                let started = Instant::now();
                 let result =
                     crate::runner::jit_configure_one_slot(&exec, &config_base, index, slot_count)
                         .await;
-                (slot_id, generation, result)
+                (slot_id, generation, result, started.elapsed())
             }
         })
         .buffer_unordered(concurrency)
         .collect::<Vec<_>>()
         .await;
-    outcomes.sort_by_key(|(slot_id, _, _)| slot_id.0.clone());
+    outcomes.sort_by_key(|(slot_id, _, _, _)| slot_id.0.clone());
 
-    for (slot_id, generation, result) in outcomes {
+    for (slot_id, generation, result, latency) in outcomes {
+        if let Some(metrics) = jit_metrics.as_deref_mut() {
+            metrics.create_attempts = metrics.create_attempts.saturating_add(1);
+            metrics.create_latency_ms = metrics
+                .create_latency_ms
+                .saturating_add(u64::try_from(latency.as_millis()).unwrap_or(u64::MAX));
+        }
         if let Err(error) = result {
+            if let Some(metrics) = jit_metrics.as_deref_mut() {
+                metrics.create_failures = metrics.create_failures.saturating_add(1);
+            }
             // Per-slot backoff always. Quota 403/429 also sets rest_hold_until
             // so other unregistered slots do not keep calling generate-jitconfig
             // against an exhausted PAT. Permission 403 with remaining>0 does not.
@@ -1204,6 +1231,9 @@ async fn register_runners(
                         .as_secs())
             );
             continue;
+        }
+        if let Some(metrics) = jit_metrics.as_deref_mut() {
+            metrics.create_successes = metrics.create_successes.saturating_add(1);
         }
         pacing.record_registration_success(&slot_id.0);
         let registered = journal.apply(Event::Registered {
@@ -1729,6 +1759,7 @@ mod tests {
             0,
             &JournalStats::default(),
             &crate::runner::BrokerMetricsSnapshot::default(),
+            &JitMetrics::default(),
         );
         let value = serde_json::to_value(metrics).unwrap();
         assert_eq!(value["slot_processes"], 16);
