@@ -1162,6 +1162,7 @@ fn docker_backend_uses_production_engine_when_present() {
         .unwrap()
     };
     assert_eq!(outcome.conclusion, "success");
+    assert!(outcome.step_summaries.is_empty());
     assert!(outcome.masked);
     assert!(runner
         .calls

@@ -544,6 +544,8 @@ pub struct ExecutionOutcome {
     pub masked: bool,
     pub command_file: Option<String>,
     pub command_file_bytes: Vec<(String, Vec<u8>)>,
+    /// Step summaries captured while the guest was executing that step.
+    pub step_summaries: Vec<(String, Vec<u8>)>,
     pub outputs: Vec<(String, String)>,
     pub environment_url: Option<String>,
     pub annotations: Vec<String>,
@@ -564,6 +566,13 @@ pub enum ExecutionEvent {
     Log {
         stream: u8,
         line: String,
+    },
+    StepStarted {
+        step_id: String,
+    },
+    StepCompleted {
+        step_id: String,
+        exit_code: i32,
     },
     CommandFile {
         path: String,
@@ -888,6 +897,20 @@ impl BackendSession {
                 _ => None,
             })
             .collect();
+        let mut active_step = None;
+        let mut step_summaries = Vec::new();
+        for event in &self.events {
+            match event {
+                ExecutionEvent::StepStarted { step_id } => active_step = Some(step_id.clone()),
+                ExecutionEvent::StepCompleted { .. } => active_step = None,
+                ExecutionEvent::CommandFile { path, bytes } if path == "GITHUB_STEP_SUMMARY" => {
+                    if let Some(step_id) = &active_step {
+                        step_summaries.push((step_id.clone(), bytes.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
         // Deterministic identity for the transported command files: prefer
         // the outputs file regardless of which lane emitted which file
         // first, so docker/microvm parity stays order-independent.
@@ -919,6 +942,7 @@ impl BackendSession {
             ),
             command_file,
             command_file_bytes,
+            step_summaries,
             outputs,
             environment_url,
             annotations: self.plan_annotations.clone(),
@@ -966,6 +990,7 @@ impl BackendSession {
             masked: false,
             command_file: self.plan_command_files.first().cloned(),
             command_file_bytes: Vec::new(),
+            step_summaries: Vec::new(),
             outputs: self.plan_outputs.clone(),
             environment_url: None,
             annotations: self.plan_annotations.clone(),

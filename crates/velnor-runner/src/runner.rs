@@ -5406,7 +5406,7 @@ fn execute_microvm_script_job(
     let outcome =
         crate::execution::run_validated_job(&execution_file, isolation, &validated, &mut world)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(script_job_result_from_outcome(job, outcome))
+    Ok(script_job_result_from_outcome(job, &validated, outcome))
 }
 
 fn microvm_executable_steps(
@@ -5494,6 +5494,7 @@ fn microvm_executable_steps(
 
 fn script_job_result_from_outcome(
     job: &AgentJobRequestMessage,
+    plan: &crate::execution::ValidatedPlan,
     outcome: crate::execution::ExecutionOutcome,
 ) -> ScriptJobResult {
     let result = if outcome.exit_code == 0 {
@@ -5501,37 +5502,59 @@ fn script_job_result_from_outcome(
     } else {
         crate::protocol::TaskResult::Failed
     };
-    // The result bridge transports the guest's GITHUB_STEP_SUMMARY bytes;
-    // publish them so they render in the Summary tab instead of discarding.
-    let summary = outcome
-        .command_file_bytes
-        .iter()
-        .filter(|(path, _)| path == "GITHUB_STEP_SUMMARY")
-        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let masks = job_secret_mask_values(job);
+    let mut step_logs = vec![StepLog {
+        step_id: "microvm".into(),
+        display_name: "microvm result bridge".into(),
+        order: 1,
+        started_at: unix_now_iso8601(),
+        completed_at: unix_now_iso8601(),
+        lines: outcome.log_lines,
+        masks: masks.clone(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: outcome.exit_code,
+        skipped: false,
+        failure_ignored: false,
+        error_count: i32::from(outcome.exit_code != 0),
+        warning_count: 0,
+        notice_count: 0,
+        // Keep the aggregate bridge log, but never attach step summaries to it.
+        summary: String::new(),
+    }];
+    for (step_id, bytes) in outcome.step_summaries {
+        let (order, display_name) = plan
+            .steps
+            .iter()
+            .enumerate()
+            .find(|(_, step)| step.id == step_id)
+            .map(|(index, step)| ((index + 1) as i32, step.id.clone()))
+            .unwrap_or_else(|| (step_logs.len() as i32 + 1, step_id.clone()));
+        let now = unix_now_iso8601();
+        step_logs.push(StepLog {
+            step_id,
+            display_name,
+            order,
+            started_at: now.clone(),
+            completed_at: now,
+            lines: Vec::new(),
+            masks: masks.clone(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::from_utf8_lossy(&bytes).into_owned(),
+        });
+    }
     ScriptJobResult {
         result,
         outputs: outcome.outputs.into_iter().collect(),
         environment_url: outcome.environment_url,
-        step_logs: vec![StepLog {
-            step_id: "microvm".into(),
-            display_name: "microvm result bridge".into(),
-            order: 1,
-            started_at: unix_now_iso8601(),
-            completed_at: unix_now_iso8601(),
-            lines: outcome.log_lines,
-            masks: job_secret_mask_values(job),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: outcome.exit_code,
-            skipped: false,
-            failure_ignored: false,
-            error_count: i32::from(outcome.exit_code != 0),
-            warning_count: 0,
-            notice_count: 0,
-            summary,
-        }],
+        step_logs,
         teardown: None,
         timings: ExecutionTimings {
             first_step_ms: 0,

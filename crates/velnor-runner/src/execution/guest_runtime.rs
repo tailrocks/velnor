@@ -393,6 +393,9 @@ pub fn execute_guest_plan(
     let mut state = JobExecutionState::new_with_context(&base_env, &plan.context_data);
     let mut code = 0_i32;
     for step in &plan.steps {
+        events.push(ExecutionEvent::StepStarted {
+            step_id: step.id.clone(),
+        });
         events.push(log_line(&format!("[velnor-step {}]", step.id)));
         let step_state = state.with_step_action(&step.id);
         if !step_state.evaluate_condition(step.condition.as_deref()) {
@@ -411,6 +414,10 @@ pub fn execute_guest_plan(
                 "Step skipped: condition evaluated to false ({})",
                 step.condition.as_deref().unwrap_or("success()")
             )));
+            events.push(ExecutionEvent::StepCompleted {
+                step_id: step.id.clone(),
+                exit_code: 0,
+            });
             continue;
         }
         let mut resolved_step = step.clone();
@@ -528,6 +535,10 @@ pub fn execute_guest_plan(
                 stderr: result.stderr,
             },
         );
+        events.push(ExecutionEvent::StepCompleted {
+            step_id: step.id.clone(),
+            exit_code: result.code,
+        });
         if failed && !failure_ignored {
             code = result.code;
             break;
