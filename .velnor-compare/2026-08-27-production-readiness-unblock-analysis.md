@@ -68,6 +68,13 @@ exclude Velnor lifecycle/routing contribution, but zero jobs/check-runs means
 there is no evidence of step/Docker/expression/Results Service execution
 failure in those three runs.
 
+### Ownership/state audit pointer
+
+The sole canonical ownership/state audit—including stale run/suite IDs,
+ownership-unresolved classification, protected runs, current runner IDs,
+Jackin omission, and the empty deletion set—is the reconciliation section
+[`Ownership/state audit`](2026-08-27-production-readiness-reconciliation.md#ownershipstate-audit--2026-08-26t233806z).
+
 ## Canonical admission finding
 
 The exact 2026-08-27 local read-only refresh is:
@@ -174,12 +181,12 @@ validation job.
    repair or re-admission is needed, defer it until drain safety for accepted
    jobs is proven.
 
-3. **GitHub backend cleanup for the three obsolete runs.** After GitHub-side
-   remediation, retry normal cancel, then force-cancel, and verify each run and
-   check suite is terminal. Provide GitHub Support the three run IDs, check
-   suite IDs, obsolete SHA, HTTP 409 bodies, and zero-job responses. No
-   repository-side change can safely manufacture a
-   terminal result for these objects.
+3. **GitHub backend ownership resolution for the three obsolete runs.** Do
+   not cancel or recommend cancelling these unowned objects. Provide GitHub
+   Support the three run IDs, check suite IDs, obsolete SHA, HTTP 409 bodies,
+   and zero-job responses; only explicit ownership resolution may authorize a
+   later targeted cancellation attempt. No repository-side change can safely
+   manufacture a terminal result for these objects.
 
 4. **Policy repair/re-admission after drain safety.** Only after the read-only
    capture and proof that accepted jobs are safe to drain may policy be repaired
@@ -199,7 +206,9 @@ validation job.
 - Do not delete workflow runs or check suites; the supported API does not
   authorize deletion of these active queue objects.
 - Do not disable workflows, alter concurrency, weaken fixture/workflow content,
-  delete active runner registrations, or cancel the current Rust Docker run.
+  delete active runner registrations, cancel unowned runs, or cancel the
+  current Rust Docker run. Protect run `33019314096` and active Velnor runs
+  `33023384527` and `33023384501`.
 - Do not treat the queued CI lane as a Velnor protocol defect or a workflow
   defect until group admission, readiness, and Velnor queue matching are
   investigated.
@@ -212,9 +221,11 @@ After Sentry access is restored, execute this sequence exactly; there is no
 circular requirement:
 
 1. Individually re-query every prior unresolved/non-completed run and check
-   suite, then request normal cancellation and force-cancellation where
-   applicable. Record each object as terminal with its conclusion, or record
-   GitHub Support-confirmed disappearance. Unresolved IDs remain a hard gate.
+   suite. Request normal cancellation and force-cancellation only for an
+   object with explicit current campaign ownership and where applicable.
+   Do not cancel the three unowned/ownership-unresolved stale candidates.
+   Record each object as terminal with its conclusion, or record GitHub
+   Support-confirmed disappearance. Unresolved IDs remain a hard gate.
 2. Remove only stale registrations owned by this validation. Do not delete
    active or unowned registrations.
 3. Prove clean state, health, and capacity: no prior non-completed runs;

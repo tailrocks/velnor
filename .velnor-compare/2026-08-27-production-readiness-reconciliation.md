@@ -120,3 +120,37 @@ therefore remains historical; no current-state inference is made from it.
 
 No mutation occurred in this refresh. The production-readiness gates remain
 blocked.
+
+## Ownership/state audit — 2026-08-26T23:38:06Z
+
+Supplied investigator facts, recorded without inference or mutation:
+
+- Velnor run `33023493172` completed with conclusion `cancelled`.
+- Velnor runs `33023384527` and `33023384501` are active release-adjacent
+  push runs on `v0.1.228`. They are not campaign-owned and are unsafe to
+  mutate.
+- Velnor run `33023383914` is terminal success.
+- ChainArgos `java-monorepo` run `33019314096` is a queued automatic PR run.
+  It is campaign-related but not provably campaign-owned and is unsafe to
+  mutate.
+- Stale candidate `32985134450` (check suite `89353010038`), stale candidate
+  `32984965998` (check suite `89352428140`), and stale candidate `32984867843`
+  (check suite `89352110318`) are explicitly enumerated. The evidence proves
+  only that these are old zero-job runs on obsolete SHA
+  `48f687259bed568409ac4a6308a2fc5f2d970b82` and that prior exact-target
+  normal/force cancellation attempts returned HTTP 409. It does not prove
+  current campaign ownership. Classification: `unowned/ownership unresolved`,
+  not campaign-owned. Do not recommend cancelling them without explicit
+  ownership.
+- Protect ChainArgos run `33019314096` and active Velnor runs
+  `33023384527` and `33023384501`; they are unsafe to mutate.
+- Current Velnor registrations total five: three online/idle microVM IDs
+  `15342`, `15339`, and `15341`, plus two offline IDs `15327` and `15330`.
+  No validation label or prefix was captured.
+- ChainArgos organization runners total zero.
+- The safe set for runner deletion is empty; no runner deletion is recommended.
+
+Jackin and the current repo-wide list were not captured in this partial audit;
+prior evidence is historical. No ownership, current state, or safety is
+inferred beyond the supplied facts. No mutation occurred. Cleanup remains
+open because active/queued runs remain and there is no current Sentry proof.
