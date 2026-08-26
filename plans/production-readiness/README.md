@@ -41,6 +41,12 @@ runs.
   `plans/production-readiness/README.md`. Identify the highest-priority
   unchecked item, confirm that the planned action advances it, and record any
   newly discovered evidence or changed priority before continuing.
+- [ ] Whenever working on any plan item and touching any file, verify that
+  every touched file is modern, internally consistent, and aligned with the
+  final implementation we intend to keep. Do not leave legacy, compatibility,
+  or transitional state in touched files. Prefer breaking changes; repair their
+  immediate fallout in the same iteration instead of adding long-lived legacy
+  support or compatibility periods.
 - [ ] Use fresh investigator, implementer, verifier, and reviewer subagents
   when available; independently verify their output.
 - [ ] Use `git commit -s` and add
