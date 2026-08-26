@@ -563,7 +563,10 @@ fn build_rootfs(
         for relative in ["tmp", "var/tmp"] {
             std::fs::set_permissions(tree.join(relative), std::fs::Permissions::from_mode(0o1777))
                 .map_err(|error| {
-                    MicroVmPreflightFailure::new("guest.rootfs", format!("chmod {relative}: {error}"))
+                    MicroVmPreflightFailure::new(
+                        "guest.rootfs",
+                        format!("chmod {relative}: {error}"),
+                    )
                 })?;
         }
     }
