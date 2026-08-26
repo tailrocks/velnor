@@ -193,13 +193,13 @@ pub fn consumer_template(class: RepositoryClass) -> String {
             ),
         );
         b.line(4, "with:");
-        // Fleet policy: post-merge push events are rejected on velnor-trusted
-        // (merged_push_occupancy), so generated callers route push to the
-        // GitHub lane. Velnor stays the default for every other event and for
-        // default workflow_dispatch; the lane input remains the escape hatch.
+        // Public unmerged code and post-merge pushes stay on GitHub-hosted
+        // runners until lower-trust Velnor isolation is live-proven. Scheduled
+        // runs and the default workflow_dispatch remain Velnor; dispatch keeps
+        // the explicit lane escape hatch.
         b.line(
             6,
-            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}",
+            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
         );
         for input in AUXILIARY_INPUTS {
             b.line(6, &format!("{input}: ${{{{ inputs.{input} || '' }}}}"));
@@ -215,13 +215,12 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(6, &format!("- {owner}"));
     }
     b.line(4, "if: ${{ always() }}");
-    // Default to the Velnor lane. Post-merge push events are rejected on
-    // velnor-trusted (merged_push_occupancy), so push — and an explicit
-    // lanes=github dispatch — routes to the GitHub lane, matching the lane
-    // pass-through above. actionlint v1.7.12 does not yet recognize the
-    // Ubuntu 26.04 hosted label when it is a literal, so both bindings stay
-    // behind expressions.
-    b.line(4, "runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}");
+    // Public unmerged pull requests, merge queues, post-merge pushes, and an
+    // explicit lanes=github dispatch use GitHub-hosted infrastructure. The
+    // default scheduled/manual path remains Velnor. Keep both bindings behind
+    // expressions because actionlint does not recognize the Ubuntu 26.04
+    // hosted label as a literal.
+    b.line(4, "runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}");
     b.line(4, "timeout-minutes: 10");
     b.line(4, "permissions:");
     b.line(6, "contents: read");

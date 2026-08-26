@@ -36,18 +36,19 @@ fn resolve_lanes_expands_both_independently() {
 }
 
 #[test]
-fn omitted_lane_defaults_to_velnor_for_every_owner() {
+fn unmerged_and_push_events_use_github_lane_for_every_owner() {
     let t = render::consumer_template(RepositoryClass::Code);
-    assert!(t.contains("github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor'"));
+    let lane = "github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor'";
+    assert!(t.contains(lane));
     assert!(t.contains("type: choice"));
     assert!(t.contains("default: velnor"));
     assert_eq!(
         t.matches(
-            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}"
+            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}"
         )
         .count(),
         3,
-        "every owner-local caller uses the same Velnor default",
+        "every owner-local caller uses the same public-unmerged GitHub route",
     );
 }
 

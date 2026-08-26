@@ -30,13 +30,12 @@ fn consumer_weekly_schedule_defaults_to_velnor() {
         let rendered = render::consumer_template(class);
         assert!(rendered.contains("  schedule:\n    - cron: \"23 3 * * 0\"\n"));
         assert!(rendered.contains(
-            "github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor'"
+            "github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor'"
         ));
         assert!(!rendered.contains("github.event_name == 'schedule' && 'both'"));
-        // ci-required defaults to the Velnor lane; post-merge push routes to
-        // the GitHub lane (fleet rejects it on velnor-trusted).
+        // ci-required follows the public-unmerged and post-merge GitHub route.
         assert!(rendered.contains(
-            "runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}"
+            "runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}"
         ));
         assert!(!rendered.contains("ubuntu-latest"));
     }
@@ -634,43 +633,43 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "616ae97804738e33b61426f95e7f2d07f16bb6680bedc3e0e1436cc9672cebda",
+            "9985949ffab8ba11f496531d5f0a5720ff7e0fe6db2416989c063a819bfe59ac",
         ),
         (
             "templates/native/ci.yml",
-            "5a1f6386ea19662242df3546e13cddc0899541a583379d947e8aa34c87e8d539",
+            "a535a04894935036ce3f5aacb511643e28e8fb878e3a34d375168d36e74f15f1",
         ),
         (
             "templates/tap/ci.yml",
-            "0e0547a209ecb0efefd3ef431ad94d4f0a60898c12cc70bff15a97ae08db596d",
+            "0c46efcc6ff6ab00ed18803b0307342b02ec0a5e79080a4a36652fbfff3fb2b9",
         ),
         (
             "templates/apt/ci.yml",
-            "f35bf7570f4d781f7399f8f1e4e5a6eeb572b16df641879ea9624cdd59f736fd",
+            "6ce72e47eb7768638442a643843806274e940bef18afac3e18fa82b4f316b21c",
         ),
         (
             "templates/fixture/ci.yml",
-            "645779da14d9cd3b5cc7710983b2cb3c0ec8694768cd5d7c7d3636c1900903da",
+            "70f093302ff6b4c9957a592db7456ca8b0c09a3c0518a5daf88742a2e6b8ad2e",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "9e43122b51e18c42e8b91098135d9585e16bc178b86d98f32c8719398fdfca3e",
+            "ca4fac77d6f16aec779c80d112c77f87dace482a60a771aed374c6ed11bd9b69",
         ),
         (
             ".github/workflows/ci-native.yml",
-            "f5c70d5e30b2e909c19c06d6c13a08f0ca9e8bbed0e80503377daf8fd89a4463",
+            "4d042b9fe8f95d12c91933a2f6459b8db04fbe7910366882f17fef56ac0e0c4e",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "9587183cecbecb3b9d3ba7cb8d8c021b0e43f38b10fe5f78df0b9eba2226d3e7",
+            "4400dea82645af4cf6dc51a31f666f4e857e4211b246deab4bda437562f66eb4",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "0e0971f95adf88179ffee8e156629d4b1da6ce672d30b2a561754589484dacf7",
+            "3ac2d6b6ff2a4457337c65e2fd1b0a53b12575f603256732dc778b7de00fded7",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "b3268fe17874d5f89fa2888fa2b22e806e12125e4e72be87f3f11f62de4e82ae",
+            "ab63653d949c0302a252eb1306d0bbcbeed69a03ffbc277c188dee57cbcb6d73",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();
