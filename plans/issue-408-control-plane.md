@@ -193,6 +193,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - Restart-handoff integration test passes: a controller restart consumes the
   durable assignment envelope and emits a generation-bound typed failure rather
   than stranding the assignment.
+- Fixture readiness re-run on the current branch still fails on the published
+  fixture run `32935294686` and missing canonical workflow features. The
+  fixture remains unchanged; this is an external fixture/product-surface gate,
+  not a permitted repository-local workaround.
 - Readiness reconciliation: journal amplification, idle waiter removal,
   coordinated bounded recovery, and the 15-minute idle budget are now checked;
   production Sentry/fixture/APT gates and deeper active-job fault proofs remain
