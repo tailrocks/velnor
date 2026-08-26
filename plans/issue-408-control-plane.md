@@ -94,7 +94,7 @@ isolation tradeoff is allowed.
 - [x] Retry deadlines and quarantine are tested.
 - [x] Killing one slot leaves siblings alive.
 - [ ] Restarting one controller proves unrelated scopes remain alive.
-- [ ] Killing/blocking one broker session proves other slots remain schedulable.
+- [x] Killing/blocking one broker session proves other slots remain schedulable.
 - [ ] One scope API failure proves another scope continues normally.
 - [ ] Controller restart during an active job proves preservation or explicit recovery.
 - [ ] Drain proves idle polling stops while active jobs finish within systemd bounds.
@@ -186,6 +186,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   cache fast-path correction.
 - Recovery unit test proves one missing-session signal emits one recreate action;
   same-cycle duplicate emits no second action or budget increment.
+- Concurrent wiremock fault test passes: a 300 ms/404 broker poll for one session
+  does not block a healthy sibling session’s 204 poll.
 - Readiness reconciliation: journal amplification, idle waiter removal,
   coordinated bounded recovery, and the 15-minute idle budget are now checked;
   production Sentry/fixture/APT gates and deeper active-job fault proofs remain

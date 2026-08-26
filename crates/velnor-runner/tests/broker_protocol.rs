@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use anyhow::Error;
@@ -189,6 +190,50 @@ async fn broker_poll_empty_non_success_body_is_error_not_idle() {
         .await
         .expect_err("empty 500 poll must be an error");
     assert_github_status(&error, 500, "get broker message");
+}
+
+#[tokio::test]
+async fn one_slow_broker_session_does_not_block_sibling_session() {
+    let server = MockServer::start().await;
+    let broker = BrokerClient::new(&format!("{}/broker", server.uri()), TOKEN).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/broker/message"))
+        .and(query_param("sessionId", "slow-session"))
+        .respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/broker/message"))
+        .and(query_param("sessionId", "healthy-session"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let slow_broker = broker.clone();
+    let slow = tokio::spawn(async move {
+        slow_broker
+            .get_runner_message("slow-session", RunnerStatus::Online, true)
+            .await
+    });
+    tokio::task::yield_now().await;
+    let healthy = tokio::time::timeout(
+        Duration::from_millis(150),
+        broker.get_runner_message("healthy-session", RunnerStatus::Online, true),
+    )
+    .await
+    .expect("a slow sibling poll must not block the healthy session")
+    .expect("healthy session poll");
+    assert_eq!(healthy.status, 204);
+    assert!(healthy.message.is_none());
+
+    let slow_error = slow
+        .await
+        .expect("slow poll task")
+        .expect_err("404 session must enter recovery path");
+    assert_github_status(&slow_error, 404, "get broker message");
 }
 
 #[tokio::test]
