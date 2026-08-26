@@ -4806,10 +4806,6 @@ fn workspace_target_cache_path(path: &str) -> bool {
         || path.starts_with("target/")
         || path.starts_with("./target/")
         || path.starts_with("/__w/target/")
-        // The generated code-class declaration includes this compatibility
-        // glob. Velnor's target materializer owns the complete declared target
-        // tree, so it must not be copied through the keyed cache path.
-        || path == "**/target"
 }
 
 fn path_or_child(path: &str, root: &str) -> bool {
@@ -11531,7 +11527,10 @@ esac
         assert!(workspace_target_cache_path("target"));
         assert!(workspace_target_cache_path("./target/debug"));
         assert!(workspace_target_cache_path("/__w/target/release"));
-        assert!(workspace_target_cache_path("**/target"));
+        // Persistent target materialization owns only the workspace-root
+        // target. A wildcard may include nested targets and must remain on the
+        // keyed path until its full glob archive/restore contract exists.
+        assert!(!workspace_target_cache_path("**/target"));
         assert!(!workspace_target_cache_path("nested/target"));
     }
 
