@@ -964,6 +964,7 @@ pub(crate) async fn run_broker_manager(
     generation: Generation,
     slot_index: usize,
     tx: mpsc::Sender<BrokerAssignment>,
+    recovery: std::sync::Arc<tokio::sync::Mutex<crate::node::recovery::RecoveryCoordinator>>,
 ) -> Result<()> {
     let config_dir = config::config_dir(args.config_dir.clone())?;
     let stored = config::load(&config_dir).map_err(local_identity_unavailable)?;
@@ -979,7 +980,6 @@ pub(crate) async fn run_broker_manager(
     let mut broker_token = token.token.clone();
     let mut current_broker_url = server_url_v2.to_owned();
     let mut broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-    let mut run_service = RunServiceClient::new(token.token)?;
     let session = TaskAgentSession::new(
         format!("{} (PID: {})", default_agent_name(), std::process::id()),
         agent_id,
@@ -996,9 +996,7 @@ pub(crate) async fn run_broker_manager(
         config_dir.join("logs"),
         format!("broker-manager slot={slot_id} generation={}", generation.0),
     );
-    let mut poll_state = BrokerPollState::default();
-    let mut health = IdleSlotHealth::new(Instant::now());
-    health.token_expires_in = token.expires_in;
+    let manager_started = Instant::now();
 
     let run_result: Result<()> = async {
         loop {
@@ -1017,21 +1015,19 @@ pub(crate) async fn run_broker_manager(
             {
                 return Ok(());
             }
-            let message = poll_broker_message(
+            let message = poll_broker_step(
                 &mut broker,
-                &mut run_service,
-                &current_broker_url,
-                &mut broker_token,
-                &stored,
                 &session_id,
                 RunnerStatus::Online,
                 stored.settings.disable_update,
-                &mut poll_state,
-                &mut health,
-                &forensics,
             )
             .await?;
+            recovery.lock().await.recovered(manager_started.elapsed());
             let Some(message) = message else {
+                // One request per control cycle. Recovery owns retry timing;
+                // this yield only prevents an empty broker response from
+                // turning the scope manager into a busy loop.
+                tokio::time::sleep(Duration::from_millis(250)).await;
                 continue;
             };
             if message
@@ -1049,7 +1045,6 @@ pub(crate) async fn run_broker_manager(
                 let refreshed = oauth_access_token(&stored).await?;
                 broker_token = refreshed.token.clone();
                 broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-                run_service = RunServiceClient::new(refreshed.token)?;
                 continue;
             }
             if !message
@@ -3525,6 +3520,21 @@ async fn poll_broker_message(
             }
         }
     }
+}
+
+/// Execute exactly one broker request. The supervised node manager uses this
+/// path so transport/auth failures reach the scope recovery coordinator
+/// immediately; retry policy must not be hidden inside the HTTP helper.
+async fn poll_broker_step(
+    broker: &mut BrokerClient,
+    session_id: &str,
+    status: RunnerStatus,
+    disable_update: bool,
+) -> Result<Option<crate::protocol::TaskAgentMessage>> {
+    Ok(broker
+        .get_runner_message(session_id, status, disable_update)
+        .await?
+        .message)
 }
 
 #[allow(clippy::too_many_arguments)]

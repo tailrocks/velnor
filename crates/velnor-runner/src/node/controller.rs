@@ -25,7 +25,7 @@ use super::cleanup;
 use super::exec::load_exec_config;
 use super::health::HealthServer;
 use super::prove;
-use super::recovery::{RecoveryCoordinator, RecoverySignal};
+use super::recovery::{RecoveryCoordinator, RecoverySignal, RecoveryState};
 use super::slot::{heartbeat_path, slot_id, SlotHeartbeat};
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
@@ -333,28 +333,21 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut pacing = GithubPacing::default();
     let mut metrics = ControllerMetrics::default();
     let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
-    let mut broker_managers: HashMap<String, (Generation, tokio::task::JoinHandle<()>)> =
-        HashMap::new();
     let recovery = Arc::new(Mutex::new(RecoveryCoordinator::default()));
+    let manager_task = tokio::spawn(run_scope_broker_manager(
+        args.clone(),
+        assignment_tx,
+        recovery.clone(),
+    ));
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
-            let managers = broker_managers.drain().map(|(_, (_, task))| task);
-            for manager in managers {
-                let _ = manager.await;
-            }
+            let _ = manager_task.await;
             drain_children(&args.state_dir, &mut slots, &mut jobs, &mut job_generations).await?;
             return Ok(());
         }
         let started = Instant::now();
         recover_pending_handoffs(&args, &journal, &mut jobs, &mut job_generations)?;
-        ensure_broker_managers(
-            &args,
-            &journal,
-            &mut broker_managers,
-            assignment_tx.clone(),
-            recovery.clone(),
-        )?;
         drain_broker_assignments(
             &args,
             &journal,
@@ -362,7 +355,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut job_generations,
             &mut assignment_rx,
         )?;
-        let (cycle, health) = reconcile_once(
+        let (cycle, mut health) = reconcile_once(
             &args,
             &mut journal,
             &server,
@@ -374,6 +367,14 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut pacing,
         )
         .await?;
+        if recovery.lock().await.state() == RecoveryState::Quarantined {
+            // Useful capacity is not schedulable while the scope's sole
+            // recovery authority is quarantined. Keep control liveness, but
+            // fail readiness instead of advertising a broker-dead slot.
+            health.github_reachable = false;
+            health = health.with_derived_state();
+            server.publish(&health)?;
+        }
         drain_broker_assignments(
             &args,
             &journal,
@@ -402,6 +403,41 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             return Ok(());
         }
         tokio::time::sleep(FULL_RECONCILE_INTERVAL).await;
+    }
+}
+
+/// One scope-owned authority for all broker sessions. Session records remain
+/// per slot for protocol isolation, but creation, retry budget, assignment
+/// delivery, and drain are coordinated by this single task.
+async fn run_scope_broker_manager(
+    args: ControllerArgs,
+    assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
+    recovery: Arc<Mutex<RecoveryCoordinator>>,
+) {
+    let mut sessions: HashMap<String, (Generation, tokio::task::JoinHandle<()>)> = HashMap::new();
+    loop {
+        if crate::runner::draining() {
+            for (_, (_, task)) in sessions.drain() {
+                let _ = task.await;
+            }
+            return;
+        }
+        sessions.retain(|_, (_, task)| !task.is_finished());
+        let journal_path = args.state_dir.join("journal.db");
+        let Ok(journal) = Journal::open(journal_path) else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        if let Err(error) = ensure_broker_managers(
+            &args,
+            &journal,
+            &mut sessions,
+            assignments.clone(),
+            recovery.clone(),
+        ) {
+            eprintln!("scope broker manager reconcile failed: {error:#}");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -485,6 +521,7 @@ async fn supervise_broker_manager(
             generation,
             slot_index,
             assignments.clone(),
+            recovery.clone(),
         )
         .await
         {
@@ -511,9 +548,6 @@ async fn supervise_broker_manager(
                     return;
                 }
                 tokio::time::sleep(wait).await;
-                if matches!(action, super::recovery::RecoveryAction::Quarantine) {
-                    recovery.lock().await.recovered(started.elapsed());
-                }
             }
         }
     }
