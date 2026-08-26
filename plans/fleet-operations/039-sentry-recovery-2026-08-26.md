@@ -148,5 +148,25 @@ proven, so it was force-cancelled before execution. Its `ci-required` could
 not be used. The canonical workflow source must provide the safe PR route;
 this repository's generated consumer file must not be edited as a local fork.
 
-No signed release tag, APT publication, Sentry install, GitHub policy apply,
-runner deletion, fixture smoke, or ChainArgos/jackin action has occurred.
+The canonical fix was merged in `tailrocks/velnor-actions` PR #67 at
+`c222e52030fee9ea6eae573a5769770be01d8438`, released as signed CalVer
+`2026.8.32`. Owner mirrors remain at `2026.8.31`; no mirror mutation was
+authorized or performed.
+
+## Iteration 5 — public-PR route proof (2026-08-26)
+
+The generated Velnor consumer was re-rendered from the canonical generator,
+preserving the existing immutable owner pins. It now routes `pull_request`,
+`merge_group`, and `push` execution to GitHub-hosted infrastructure; Velnor
+remains the default for dispatch `lanes=velnor`. The change is commit
+`13c2df2` on PR #407.
+
+Fresh run `32989111008` was dispatched at the PR head with `lanes=github`.
+It completed successfully: GitHub lane, contract, and `ci-required` passed;
+Velnor lane was skipped. No stale run was monitored.
+
+The run is workflow-dispatch, not PR-associated, so branch protection still
+reports `ci-required` missing. The PR cannot merge until GitHub binds a fresh
+pull-request check to this head. No signed Velnor release, APT publication,
+Sentry install, policy apply, runner deletion, fixture smoke, or
+ChainArgos/jackin action has occurred.
