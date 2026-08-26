@@ -35,6 +35,12 @@ runs.
 - [ ] Never weaken `velnor-actions-fixture`; fixture failures are Velnor bugs.
 - [ ] Preserve unrelated work and record the initial HEAD, branch, remotes,
   and dirty-worktree state before editing.
+- [ ] At the beginning of every iteration and immediately before every
+  investigation, edit, refactor, deployment, verification, merge, rollback,
+  or recovery action, re-read this file at
+  `plans/production-readiness/README.md`. Identify the highest-priority
+  unchecked item, confirm that the planned action advances it, and record any
+  newly discovered evidence or changed priority before continuing.
 - [ ] Use fresh investigator, implementer, verifier, and reviewer subagents
   when available; independently verify their output.
 - [ ] Use `git commit -s` and add
