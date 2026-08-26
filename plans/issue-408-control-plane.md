@@ -79,7 +79,7 @@ isolation tradeoff is allowed.
 
 - [x] Full reconciliation uses assignment-triggered wakeups plus a slow safety watchdog.
 - [x] The controller loop is single-owner; overlap metric is explicit and zero.
-- [ ] Immutable/configuration observations are cached sufficiently to prove bounded useful work.
+- [x] Immutable/configuration observations are cached sufficiently to prove bounded useful work.
 - [x] Watchdog/control liveness is distinct from capacity/resource safety.
 - [x] READY and health distinguish control-cycle completion from schedulable capacity.
 - [x] Sustained `jobs=0 + high CPU` alerting is implemented and exercised.
@@ -179,6 +179,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - Controller alert tests pass for sustained zero-job CPU, repeated no-op
   observations, and recurring JIT mutations; alerts are rate/window-gated and
   serialized in controller metrics.
+- Execution backend configuration is mtime-cached between reconciles and
+  reloaded on change; regression test verifies Docker → microVM invalidation.
+- Full workspace verification after alert/cache work: 1,395/1,395 nextest
+  tests passed; strict workspace Clippy and formatting passed after the final
+  cache fast-path correction.
 
 ## Non-goals
 

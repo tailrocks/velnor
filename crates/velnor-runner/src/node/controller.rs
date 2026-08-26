@@ -8,12 +8,12 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use clap::Args;
 use serde::Serialize;
 use velnor_control::journal::{Event, Journal, JournalStats, SideEffect};
-use velnor_model::{ActorPhase, Generation, JobId, SlotId};
+use velnor_model::{ActorPhase, ExecutionBackendKind, Generation, JobId, SlotId};
 
 use crate::config;
 use crate::protocol::{
@@ -297,6 +297,40 @@ struct DurationQuantiles {
     p99: u64,
 }
 
+#[derive(Debug, Default)]
+struct ExecutionObservationCache {
+    source: Option<PathBuf>,
+    modified: Option<SystemTime>,
+    backend: Option<ExecutionBackendKind>,
+}
+
+impl ExecutionObservationCache {
+    fn load(
+        &mut self,
+        config_dir: &std::path::Path,
+    ) -> Result<ExecutionBackendKind, velnor_model::ExecutionConfigError> {
+        let primary = config_dir.join(velnor_model::ExecutionFile::FILE_NAME);
+        let source = if primary.is_file() {
+            primary
+        } else {
+            std::path::Path::new("/etc/velnor").join(velnor_model::ExecutionFile::FILE_NAME)
+        };
+        let modified = std::fs::metadata(&source)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        if self.source.as_ref() == Some(&source) && self.modified == modified {
+            if let Some(backend) = self.backend {
+                return Ok(backend);
+            }
+        }
+        let backend = crate::execution::load_execution_file(config_dir, None)?.backend();
+        self.source = Some(source);
+        self.modified = modified;
+        self.backend = Some(backend);
+        Ok(backend)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 struct CpuPhase {
     user_us: u64,
@@ -570,6 +604,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut metrics = ControllerMetrics::default();
     let mut jit_metrics = JitMetrics::default();
     let mut cpu = CpuAttribution::default();
+    let mut execution_cache = ExecutionObservationCache::default();
     let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
     let recovery = Arc::new(Mutex::new(RecoveryCoordinator::default()));
     let broker_metrics = Arc::new(crate::runner::BrokerMetrics::default());
@@ -629,6 +664,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &recovery,
             &mut jit_metrics,
             &mut cpu,
+            &mut execution_cache,
         )
         .await?;
         let recovery = recovery.lock().await;
@@ -1243,6 +1279,7 @@ async fn reconcile_once(
     recovery: &Arc<Mutex<RecoveryCoordinator>>,
     jit_metrics: &mut JitMetrics,
     cpu: &mut CpuAttribution,
+    execution_cache: &mut ExecutionObservationCache,
 ) -> anyhow::Result<(LocalCycle, velnor_model::HealthDocument)> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
     let journal_cpu = controller_cpu_time();
@@ -1298,8 +1335,10 @@ async fn reconcile_once(
     }
 
     let journal_cpu = controller_cpu_time();
-    let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
-    let executor = prove::observe_executor(&args.state_dir, execution.backend());
+    let backend = execution_cache
+        .load(&args.state_dir)
+        .map_err(anyhow::Error::from)?;
+    let executor = prove::observe_executor(&args.state_dir, backend);
     let snapshot = journal.materialized_state()?;
     let now = tokio::time::Instant::now();
     let mut proof_events = Vec::new();
@@ -1375,7 +1414,7 @@ async fn reconcile_once(
     reap(slots);
     reap_jobs(&args.state_dir, jobs, job_generations);
     let mut health = journal.materialized_state()?.health();
-    health.execution_backend = execution.backend();
+    health.execution_backend = backend;
     server.publish(&health)?;
     Ok((LocalCycle::finished(), health))
 }
@@ -2029,6 +2068,31 @@ mod tests {
         assert_eq!(quantile(&[1, 100], 95), 100);
         assert_eq!(quantile(&[1, 2, 3, 4], 99), 4);
         assert_eq!(quantile(&[], 50), 0);
+    }
+
+    #[test]
+    fn execution_backend_observation_cache_reloads_only_after_config_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-execution-cache-{}-{}",
+            std::process::id(),
+            epoch_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+        let mut cache = ExecutionObservationCache::default();
+        assert_eq!(cache.load(&dir).unwrap(), ExecutionBackendKind::Docker);
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        assert_eq!(cache.load(&dir).unwrap(), ExecutionBackendKind::MicroVm);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
