@@ -255,6 +255,82 @@ fn run_cancel(kind: ExecutionBackendKind) -> super::backend::ExecutionOutcome {
 }
 
 #[test]
+fn session_lifecycle_inspect_and_wrong_phase_match_across_backends() {
+    for kind in [ExecutionBackendKind::Docker, ExecutionBackendKind::MicroVm] {
+        let toml = match kind {
+            ExecutionBackendKind::Docker => "[execution]\nbackend = \"docker\"\n",
+            ExecutionBackendKind::MicroVm => "[execution]\nbackend = \"microvm\"\n",
+        };
+        let file = ExecutionFile::parse_toml(toml).unwrap();
+        let mut fs = MemoryFs::default();
+        let docker = socket_for(kind);
+        if kind == ExecutionBackendKind::Docker {
+            fs.write(&docker, b"socket").unwrap();
+        }
+        let artifacts = PathBuf::from("/microvm");
+        if kind == ExecutionBackendKind::MicroVm {
+            seed_microvm_world(&mut fs, &artifacts);
+        }
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 0,
+                stdout: "ok".into(),
+                stderr: String::new(),
+            },
+            ..RecordingCommands::default()
+        };
+        let mut api = RecordingFirecracker::default();
+        let kvm = PathBuf::from("/dev/kvm");
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        let mut session = open_session(
+            &file,
+            IsolationIdentity::new("job-lifecycle", 1),
+            &mut world,
+        )
+        .unwrap();
+        assert_eq!(session.inspect(), BackendPhase::Preflighted, "{kind}");
+        let plan = ValidatedPlan::example_success("job-lifecycle");
+        let err = session.execute(&plan, &mut world).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExecutionError::WrongPhase {
+                    required: BackendPhase::Started,
+                    actual: BackendPhase::Preflighted
+                }
+            ),
+            "{kind}: {err}"
+        );
+        assert_eq!(session.inspect(), BackendPhase::Preflighted, "{kind}");
+        session.reserve(&mut world).unwrap();
+        assert_eq!(session.inspect(), BackendPhase::Reserved, "{kind}");
+        session.prepare(&plan, &mut world).unwrap();
+        assert_eq!(session.inspect(), BackendPhase::Prepared, "{kind}");
+        let err = session.collect().unwrap_err();
+        assert!(
+            matches!(err, ExecutionError::CollectBeforeStop),
+            "{kind}: {err}"
+        );
+        session.start(&mut world).unwrap();
+        assert_eq!(session.inspect(), BackendPhase::Started, "{kind}");
+        session.execute(&plan, &mut world).unwrap();
+        assert_eq!(session.inspect(), BackendPhase::Stopped, "{kind}");
+        let outcome = session.collect().unwrap();
+        assert!(!outcome.cleaned, "{kind}");
+        let torn = session.teardown(&mut world).unwrap();
+        assert!(torn.cleaned, "{kind}");
+        assert_eq!(session.inspect(), BackendPhase::TornDown, "{kind}");
+        match kind {
+            ExecutionBackendKind::Docker => assert!(session.used_host_docker(), "{kind}"),
+            ExecutionBackendKind::MicroVm => {
+                assert!(!session.used_host_docker(), "{kind}");
+                assert!(session.used_firecracker(), "{kind}");
+            }
+        }
+    }
+}
+
+#[test]
 fn collect_while_live_is_forbidden_and_snapshot_mismatch_fails_closed() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();

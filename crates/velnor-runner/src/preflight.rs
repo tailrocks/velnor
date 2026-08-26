@@ -18,7 +18,16 @@ pub fn preflight(args: PreflightArgs) -> Result<()> {
 
 fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) -> Result<()> {
     if args.execution_backend.is_none() {
-        bail!("execution backend selection failed before preflight");
+        let dir = args
+            .config_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/etc/velnor"));
+        match crate::execution::load_execution_file(dir, None) {
+            Err(error) => {
+                bail!("execution backend selection failed before preflight: {error}")
+            }
+            Ok(_) => bail!("execution backend selection failed before preflight"),
+        }
     }
     if args.execution_backend == Some(velnor_model::ExecutionBackendKind::MicroVm) {
         let mut fs = crate::execution::RealHostFs;
@@ -642,6 +651,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("execution backend selection failed before preflight"));
+        assert!(error.to_string().contains("[execution] backend"), "{error}");
         assert!(runner.calls.is_empty());
         fs::remove_dir_all(temp).unwrap();
     }
@@ -663,6 +673,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("execution backend selection failed before preflight"));
+        assert!(error.to_string().contains("[execution] backend"), "{error}");
         assert!(runner.calls.is_empty());
         fs::remove_dir_all(&temp).ok();
     }
