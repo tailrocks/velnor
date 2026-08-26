@@ -58,20 +58,25 @@ where
                 generation,
                 plan_bytes,
             }) => {
-                let decoded = GuestJobPlan::decode(&plan_bytes).ok();
-                if let Some(plan) = &decoded {
-                    validate_guest_plan(plan)?;
-                    if !plan.command_files.is_empty() {
-                        return Err(guest_capability_error(
-                            "guest.command_files",
-                            "non-empty",
-                            "empty until guest result-file transfer is implemented",
-                        ));
-                    }
+                let plan = GuestJobPlan::decode(&plan_bytes).map_err(|error| {
+                    format!(
+                        "{} ({error})",
+                        guest_capability_error(
+                            "guest.plan",
+                            "malformed",
+                            "valid serialized GuestJobPlan",
+                        )
+                    )
+                })?;
+                validate_guest_plan(&plan)?;
+                if !plan.command_files.is_empty() {
+                    return Err(guest_capability_error(
+                        "guest.command_files",
+                        "non-empty",
+                        "empty until guest result-file transfer is implemented",
+                    ));
                 }
-                let (conclusion, code) = if let Some(planned) =
-                    decoded.as_ref().and_then(GuestJobPlan::planned_conclusion)
-                {
+                let (conclusion, code) = if let Some(planned) = plan.planned_conclusion() {
                     planned
                 } else {
                     let code = run_plan(&plan_bytes)?;
@@ -84,16 +89,6 @@ where
                         code,
                     )
                 };
-                if let Some(plan) = &decoded {
-                    for path in &plan.command_files {
-                        VsockMessage::CommandFile {
-                            path: path.clone(),
-                            bytes: Vec::new(),
-                        }
-                        .write_to(stream)
-                        .map_err(|error| format!("write command file: {error}"))?;
-                    }
-                }
                 VsockMessage::JobCompleted {
                     conclusion,
                     exit_code: code,
@@ -259,5 +254,39 @@ mod tests {
         ));
         VsockMessage::Cancel.write_to(&mut host).unwrap();
         thread.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn malformed_plan_fails_closed_without_running_plan() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let env = GuestSessionEnv {
+            isolation_id: "job-malformed".into(),
+            generation: 1,
+            docker_healthy: true,
+        };
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_by_guest = called.clone();
+        let thread = std::thread::spawn(move || {
+            serve_guest_session(&mut guest, &env, move |_| {
+                called_by_guest.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(0)
+            })
+        });
+        assert!(matches!(
+            VsockMessage::read_from(&mut host).unwrap(),
+            VsockMessage::GuestReady { .. }
+        ));
+        VsockMessage::DeliverPlan {
+            isolation_id: "job-malformed".into(),
+            generation: 1,
+            plan_bytes: b"not a GuestJobPlan".to_vec(),
+        }
+        .write_to(&mut host)
+        .unwrap();
+        let error = thread.join().unwrap().unwrap_err();
+        assert!(error.contains("guest.plan"), "{error}");
+        assert!(error.contains("received 'malformed'"), "{error}");
+        assert!(error.contains("manifest version"), "{error}");
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
