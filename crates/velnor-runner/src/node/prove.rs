@@ -796,4 +796,50 @@ mod tests {
         assert_eq!(on_disk, evidence);
         std::fs::remove_dir_all(dir).ok();
     }
+
+    /// Secondary-limit 403 carrying `Retry-After` but no
+    /// `x-ratelimit-reset`: the probe must surface a deadline derived from
+    /// `Retry-After` so the controller paces to the requested delay instead
+    /// of the fixed 600s fallback (end-to-end over the native transport).
+    #[tokio::test]
+    async fn rate_limited_probe_derives_reset_from_retry_after() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("retry-after", "30")
+                    .insert_header("x-ratelimit-remaining", "4999"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/tailrocks", server.uri());
+        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        let probe = probe_github(GitHubProbeRequest {
+            url: &url,
+            token: "ghs_test",
+            policy: None,
+            pool_id: None,
+            configured_labels: &["velnor".into()],
+            configured_trust: "trusted",
+        })
+        .await;
+        assert!(!probe.reachable);
+        assert!(probe.rate_limited, "probe={probe:?}");
+        let reset = probe
+            .rate_limit_reset_epoch
+            .expect("retry-after must become a reset deadline");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            reset >= now + 30 && reset <= now + 31,
+            "reset={reset} now={now}"
+        );
+    }
 }
