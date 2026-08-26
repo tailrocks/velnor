@@ -308,6 +308,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `mke2fs -T 0` was incorrectly treated as a usage type and `LC_ALL=C` could
   not decode UTF-8 tar headers. Both issues are corrected; candidate advances
   to `0.1.228` because `v0.1.227` is immutable.
+- Release run `33023384501` passed both guest image jobs but package jobs
+  correctly rejected stale rootfs pins from earlier builds. The package-stage
+  rebuilds produced stable candidate hashes (`x86_64=a55ccd09ded94fac658639291a493745c7350125613c379dcb74cd5aefb78d8a`,
+  `aarch64=8a2730c7e360350a4f7edc78d4d28141488f1ad4e444c873d6d3bcba9e32d24d`).
+  Candidate advances to `0.1.229`; the immutable manifest is updated and a
+  fresh signed release is required.
 
 ## Non-goals
 
