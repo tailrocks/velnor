@@ -320,3 +320,33 @@ Runner registrations, validation labels, and runner-group `4` membership were
 not captured in this partial recheck. No inference is made from their absence.
 No cleanup action is safe on this evidence. No mutation or dispatch occurred;
 the no-dispatch gate and production-readiness gate remain open.
+
+## Earlier queue-correlation snapshot
+
+This separate 2026-08-27 snapshot predates the later read-only refreshes above.
+It is retained as historical evidence, not current state.
+
+The three obsolete ChainArgos zero-job queue objects were correlated with
+GitHub's 2026-08-26 Actions incident report, which reported 3.7% of
+larger-runner jobs stuck waiting for runner assignment and subject to
+server-side cancellation. The correlation is only a matching hypothesis, not
+proof of the causal backend component. A GitHub community incident thread was
+also reported to describe the same zero-job/queued/contradictory-cancellation
+behavior and a cancellation fix dependent on backend mitigation.
+
+At that snapshot, replacement PR-head activity showed Rust Docker run
+`33012335308` executing successfully after `Detect changes (Velnor)`, while CI
+run `33012336003` had admitted validation and skipped jobs but its
+`ChainArgos / velnor lane` remained queued. Sentry was observed with one
+online/busy runner `velnor-sentry-slot-4-next-384305-71` (runner `14725`) and
+four older slot registrations offline. Logs were reported to show broker
+messages, JIT creation, Docker-job renewal, completion, and successor
+prewarming, proving only that one admission path was live.
+
+That snapshot also reported degraded fleet indicators:
+`github_reachable=false`, `routing_valid=false`,
+`runner_group_valid=false`, zero desired/actual/registered slots, failed
+doctor units, defunct runner processes, and registry/process disagreement.
+Those observations did not prove a workflow failure or establish the deeper
+backend cause; later evidence in this file supersedes their current-state
+meaning.
