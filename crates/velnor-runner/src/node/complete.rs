@@ -91,7 +91,7 @@ pub async fn guarded_complete_async<T>(
 /// # Errors
 /// Job is missing from the journal.
 pub fn ensure_owned(journal: &mut Journal, job_id: &JobId) -> anyhow::Result<Generation> {
-    let state = journal.load_state()?;
+    let state = journal.materialized_state()?;
     state
         .jobs
         .iter()
@@ -115,7 +115,7 @@ pub fn accept_job(
     job_id: &JobId,
     slot_id: &SlotId,
 ) -> anyhow::Result<Generation> {
-    let state = journal.load_state()?;
+    let state = journal.materialized_state()?;
     if let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id) {
         if job.slot_id != *slot_id {
             anyhow::bail!(
@@ -162,7 +162,7 @@ pub fn accept_job(
 /// Slot this runner config belongs to. `None` when the journal has no slots.
 #[must_use]
 pub fn infer_slot_id(journal: &Journal, config_dir: &Path) -> Option<SlotId> {
-    let state = journal.load_state().ok()?;
+    let state = journal.materialized_state().ok()?;
     if state.slots.is_empty() {
         return None;
     }

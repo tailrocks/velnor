@@ -4,6 +4,7 @@
 //! Completions are at-least-once: an outbox row survives until a remote
 //! acknowledgement (or observed terminal) is itself committed.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -23,7 +24,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 
 /// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
 /// must not apply events (N-1 must not clobber an N writer's log).
-pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -54,7 +55,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     generation INTEGER NOT NULL,
     attempt INTEGER NOT NULL,
     worker TEXT NOT NULL,
-    phase TEXT NOT NULL
+    phase TEXT NOT NULL,
+    accepted_unix INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS outbox (
     job_id TEXT PRIMARY KEY,
@@ -845,7 +847,7 @@ impl Journal {
                 )));
             }
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         if !wal.eq_ignore_ascii_case("wal") {
@@ -861,14 +863,38 @@ impl Journal {
         let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let stored = u32::try_from(stored).unwrap_or(0);
         let write_blocked = stored > JOURNAL_SCHEMA_VERSION;
+        let refresh_materialized_jobs = stored == 1;
         if stored == 0 {
             conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+        } else if stored == 1 {
+            let transaction =
+                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            transaction.execute(
+                "ALTER TABLE jobs ADD COLUMN accepted_unix INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+            transaction.commit()?;
         }
-        Ok(Self {
+        let mut journal = Self {
             conn,
             path: path.to_path_buf(),
             write_blocked,
-        })
+        };
+        // Verify all existing event checksums once. The controller's steady
+        // state must not replay an ever-growing log every two seconds.
+        let verified_state = journal.load_state()?;
+        if refresh_materialized_jobs {
+            // The v1 materialization did not retain JobOwned's timestamp.
+            // Rebuild it once during the schema transition so the hot path
+            // preserves queue-age semantics exactly.
+            let transaction = journal
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            persist_state(&transaction, &verified_state)?;
+            transaction.commit()?;
+        }
+        Ok(journal)
     }
 
     /// Whether apply is refused because a newer writer owns the schema.
@@ -880,6 +906,18 @@ impl Journal {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Read the current materialized state without replaying the event log.
+    ///
+    /// The materialized tables are committed in the same SQLite transaction
+    /// as their corresponding events. This is the bounded hot path used by
+    /// controllers and other processes that need fresh cross-process state.
+    ///
+    /// # Errors
+    /// SQLite reads or invalid materialized values.
+    pub fn materialized_state(&self) -> StoreResult<FleetState> {
+        load_materialized_state(&self.conn)
     }
 
     /// Persist `event` then return the commands. Crash after this returns
@@ -913,7 +951,13 @@ impl Journal {
                 "N-1 must not write a journal whose PRAGMA user_version is newer than this binary",
             ));
         }
-        let mut state = self.load_state()?;
+        // Lock before reading materialized state. Controller, job, guardian,
+        // and completion processes can overlap; a snapshot taken before the
+        // write lock could otherwise clobber a concurrent committed event.
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut state = load_materialized_state(&transaction)?;
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
         for mut event in events {
@@ -933,7 +977,7 @@ impl Journal {
             return Ok(outcomes);
         }
 
-        let tx = self.conn.transaction()?;
+        let tx = transaction;
         for (generation, kind, payload) in pending {
             let checksum = sha256_hex(payload.as_bytes());
             tx.execute(
@@ -992,12 +1036,232 @@ impl Journal {
     /// SQLite read failures.
     pub fn pending_outbox(&self) -> StoreResult<Vec<OutboxRecord>> {
         Ok(self
-            .load_state()?
+            .materialized_state()?
             .outbox
             .into_iter()
             .filter(|row| row.intended && !row.remote_acked)
             .collect())
     }
+}
+
+fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
+    let mut state = FleetState {
+        // An opened journal has passed SQLite/schema checks. Keep this field
+        // consistent with the replay path; write blocking is exposed by the
+        // Journal itself, not by the reducer state.
+        journal_writable: true,
+        ..FleetState::default()
+    };
+
+    let mut meta = HashMap::new();
+    let mut statement = conn.prepare("SELECT key, value FROM meta")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (key, value) = row?;
+        meta.insert(key, value);
+    }
+    state.control_live = meta_bool(&meta, "control_live")?;
+    state.github_reachable = meta_bool(&meta, "github_reachable")?;
+    state.routing_valid = meta_bool(&meta, "routing_valid")?;
+    state.runner_group_valid = meta_bool(&meta, "runner_group_valid")?;
+    state.desired_ready = meta_u32(&meta, "desired_ready")?;
+    state.surge = meta_u32(&meta, "surge")?;
+    state.canary = meta_canary(&meta)?;
+    state.package_generation = meta_u64(&meta, "package_generation")?;
+    state.package_apt_version = meta.get("package_apt_version").cloned().unwrap_or_default();
+
+    let mut statement = conn.prepare(
+        "SELECT slot_id, generation, phase, permit_held, routing_valid,
+                session_live, executor_proven, registered, pid, heartbeat_unix, surge
+         FROM slots ORDER BY rowid",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, i64>(9)?,
+            row.get::<_, i64>(10)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            slot_id,
+            generation,
+            phase,
+            permit_held,
+            routing_valid,
+            session_live,
+            executor_proven,
+            registered,
+            pid,
+            heartbeat_unix,
+            surge,
+        ) = row?;
+        state.slots.push(SlotRecord {
+            slot_id: SlotId(slot_id),
+            generation: Generation(i64_u64(generation, "slot generation")?),
+            phase: parse_actor_phase(&phase)?,
+            permit_held: sqlite_bool(permit_held, "slot permit_held")?,
+            routing_valid: sqlite_bool(routing_valid, "slot routing_valid")?,
+            session_live: sqlite_bool(session_live, "slot session_live")?,
+            executor_proven: sqlite_bool(executor_proven, "slot executor_proven")?,
+            registered: sqlite_bool(registered, "slot registered")?,
+            pid: pid.map(|value| i64_u32(value, "slot pid")).transpose()?,
+            heartbeat_unix: i64_u64(heartbeat_unix, "slot heartbeat_unix")?,
+            surge: sqlite_bool(surge, "slot surge")?,
+        });
+    }
+
+    let mut statement = conn.prepare(
+        "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix
+         FROM jobs ORDER BY rowid",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (job_id, slot_id, generation, attempt, worker, phase, accepted_unix) = row?;
+        state.jobs.push(JobRecord {
+            job_id: JobId(job_id),
+            slot_id: SlotId(slot_id),
+            generation: Generation(i64_u64(generation, "job generation")?),
+            attempt: i64_u32(attempt, "job attempt")?,
+            worker,
+            phase: parse_actor_phase(&phase)?,
+            accepted_unix: i64_u64(accepted_unix, "job accepted_unix")?,
+        });
+    }
+
+    let mut statement = conn.prepare(
+        "SELECT job_id, generation, payload_sha256, intended, send_started,
+                remote_acked, created_unix
+         FROM outbox ORDER BY rowid",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            job_id,
+            generation,
+            payload_sha256,
+            intended,
+            send_started,
+            remote_acked,
+            created_unix,
+        ) = row?;
+        state.outbox.push(OutboxRecord {
+            job_id: JobId(job_id),
+            generation: Generation(i64_u64(generation, "outbox generation")?),
+            payload_sha256,
+            intended: sqlite_bool(intended, "outbox intended")?,
+            send_started: sqlite_bool(send_started, "outbox send_started")?,
+            remote_acked: sqlite_bool(remote_acked, "outbox remote_acked")?,
+            created_unix: i64_u64(created_unix, "outbox created_unix")?,
+        });
+    }
+    Ok(state)
+}
+
+fn meta_bool(meta: &HashMap<String, String>, key: &str) -> StoreResult<bool> {
+    meta.get(key)
+        .map(|value| match value.as_str() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err(invalid_materialized(key, value)),
+        })
+        .unwrap_or(Ok(false))
+}
+
+fn meta_u32(meta: &HashMap<String, String>, key: &str) -> StoreResult<u32> {
+    meta.get(key)
+        .map(|value| value.parse().map_err(|_| invalid_materialized(key, value)))
+        .unwrap_or(Ok(0))
+}
+
+fn meta_u64(meta: &HashMap<String, String>, key: &str) -> StoreResult<u64> {
+    meta.get(key)
+        .map(|value| value.parse().map_err(|_| invalid_materialized(key, value)))
+        .unwrap_or(Ok(0))
+}
+
+fn meta_canary(meta: &HashMap<String, String>) -> StoreResult<CanaryStatus> {
+    match meta.get("canary").map(String::as_str) {
+        None | Some("unknown") => Ok(CanaryStatus::Unknown),
+        Some("passing") => Ok(CanaryStatus::Passing),
+        Some("failing") => Ok(CanaryStatus::Failing),
+        Some("timeout") => Ok(CanaryStatus::Timeout),
+        Some(value) => Err(invalid_materialized("canary", value)),
+    }
+}
+
+fn parse_actor_phase(value: &str) -> StoreResult<ActorPhase> {
+    match value {
+        "absent" => Ok(ActorPhase::Absent),
+        "provisioning" => Ok(ActorPhase::Provisioning),
+        "registered" => Ok(ActorPhase::Registered),
+        "ready" => Ok(ActorPhase::Ready),
+        "assigned" => Ok(ActorPhase::Assigned),
+        "starting" => Ok(ActorPhase::Starting),
+        "running" => Ok(ActorPhase::Running),
+        "completing" => Ok(ActorPhase::Completing),
+        "retiring" => Ok(ActorPhase::Retiring),
+        "degraded" => Ok(ActorPhase::Degraded),
+        "fenced" => Ok(ActorPhase::Fenced),
+        "quarantined" => Ok(ActorPhase::Quarantined),
+        _ => Err(invalid_materialized("actor phase", value)),
+    }
+}
+
+fn sqlite_bool(value: i64, field: &str) -> StoreResult<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(invalid_materialized(field, &value.to_string())),
+    }
+}
+
+fn i64_u32(value: i64, field: &str) -> StoreResult<u32> {
+    u32::try_from(value).map_err(|_| invalid_materialized(field, &value.to_string()))
+}
+
+fn i64_u64(value: i64, field: &str) -> StoreResult<u64> {
+    u64::try_from(value).map_err(|_| invalid_materialized(field, &value.to_string()))
+}
+
+fn invalid_materialized(field: &str, value: &str) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.materialized.invalid",
+    )
+    .with_remediation(format!(
+        "materialized field {field} has invalid value {value}"
+    ))
 }
 
 fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreResult<()> {
@@ -1028,8 +1292,9 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
     }
     for job in &state.jobs {
         tx.execute(
-            "INSERT INTO jobs (job_id, slot_id, generation, attempt, worker, phase)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO jobs (
+                job_id, slot_id, generation, attempt, worker, phase, accepted_unix
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 job.job_id.0,
                 job.slot_id.0,
@@ -1037,6 +1302,7 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 job.attempt as i64,
                 job.worker,
                 job.phase.as_str(),
+                job.accepted_unix as i64,
             ],
         )?;
     }
@@ -1287,6 +1553,111 @@ mod tests {
                 .and_then(|slot| slot.pid),
             Some(456)
         );
+    }
+
+    #[test]
+    fn materialized_state_matches_replayed_state_including_queue_age() {
+        let (_dir, mut journal) = open_tmp("materialized-state");
+        let slot_id = slot("scope-1");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot_id.clone(),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let job_id = job("job-1");
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot_id.clone(),
+                    job_id: job_id.clone(),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id,
+                    slot_id,
+                    attempt: 1,
+                    generation: gen(),
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 123,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        assert_eq!(
+            journal.materialized_state().unwrap(),
+            journal.load_state().unwrap()
+        );
+        assert_eq!(
+            journal.materialized_state().unwrap().jobs[0].accepted_unix,
+            123
+        );
+    }
+
+    #[test]
+    fn materialized_state_is_fresh_across_journal_connections() {
+        let (dir, mut writer) = open_tmp("materialized-cross-process");
+        writer.apply(Event::ControlLive).unwrap();
+        let reader = Journal::open(dir.join("journal.db")).unwrap();
+        writer
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap();
+        assert!(reader.materialized_state().unwrap().github_reachable);
+    }
+
+    #[test]
+    fn v1_journal_migration_adds_materialized_queue_timestamp_column() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-journal-v1-migration-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    job_id TEXT PRIMARY KEY,
+                    slot_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    worker TEXT NOT NULL,
+                    phase TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        let journal = Journal::open(&path).unwrap();
+        let version: u32 = journal
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION);
+        let has_timestamp: bool = journal
+            .conn
+            .prepare("PRAGMA table_info(jobs)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|name| name.unwrap())
+            .any(|name| name == "accepted_unix");
+        assert!(has_timestamp);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

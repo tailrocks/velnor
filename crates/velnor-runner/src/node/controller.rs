@@ -368,7 +368,7 @@ async fn reconcile_once(
     let mut proof_effects = Vec::new();
     let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
     let executor = prove::observe_executor(&args.state_dir, execution.backend());
-    let snapshot = journal.load_state()?;
+    let snapshot = journal.materialized_state()?;
     let now = tokio::time::Instant::now();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
@@ -397,7 +397,7 @@ async fn reconcile_once(
                     .commands,
             );
         }
-        let state = journal.load_state()?;
+        let state = journal.materialized_state()?;
         if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) {
             if slot.ready_proof().is_ok() && !slot.registered && pacing.registration_due(&id.0, now)
             {
@@ -439,7 +439,7 @@ async fn reconcile_once(
 
     reap(slots);
     reap(jobs);
-    let mut health = journal.load_state()?.health();
+    let mut health = journal.materialized_state()?.health();
     health.execution_backend = execution.backend();
     server.publish(&health)?;
     Ok(LocalCycle::finished())
@@ -615,7 +615,7 @@ async fn reconcile_remote_registrations(
             return Ok(());
         }
     };
-    let state = journal.load_state()?;
+    let state = journal.materialized_state()?;
     let config_base = exec
         .config_dir
         .clone()
@@ -811,7 +811,7 @@ fn spawn_ready_waiters(
     if load_exec_config(&args.state_dir).is_err() {
         return Ok(());
     }
-    let state = journal.load_state()?;
+    let state = journal.materialized_state()?;
     for slot in &state.slots {
         if slot.phase != ActorPhase::Ready {
             continue;
@@ -847,7 +847,7 @@ fn spawn_ready_waiters(
 /// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
 /// slot stays `Assigned` forever and advertised capacity never recovers.
 fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow::Result<()> {
-    let state = journal.load_state()?;
+    let state = journal.materialized_state()?;
     for job in &state.jobs {
         if !matches!(
             job.phase,
@@ -924,7 +924,7 @@ fn ingest_slot_heartbeats(
     total: usize,
     seen: &mut HashMap<String, (u32, u64)>,
 ) -> anyhow::Result<()> {
-    let state = journal.load_state()?;
+    let state = journal.materialized_state()?;
     let mut pending = Vec::new();
     for index in 1..=total {
         let path = heartbeat_path(&args.state_dir, index);
@@ -975,7 +975,7 @@ fn maybe_spawn_slot(
     if children.contains_key(&slot_id.0) {
         return Ok(());
     }
-    if let Ok(state) = journal.load_state() {
+    if let Ok(state) = journal.materialized_state() {
         if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == *slot_id) {
             if slot.pid.is_some_and(prove::pid_is_alive) {
                 return Ok(());
@@ -1010,7 +1010,7 @@ fn maybe_spawn_job(
     let key = slot_key
         .map(ToOwned::to_owned)
         .or_else(|| {
-            journal.load_state().ok().and_then(|state| {
+            journal.materialized_state().ok().and_then(|state| {
                 state
                     .jobs
                     .into_iter()
