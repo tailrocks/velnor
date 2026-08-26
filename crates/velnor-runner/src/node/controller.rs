@@ -28,10 +28,10 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
-/// Keep remote reconciliation below the daemon's 180s systemd watchdog. A
-/// stalled GitHub request must skip this observation pass, not starve the
-/// completed-cycle heartbeat and kill active job children.
-const REGISTRATION_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Keep remote reconciliation well below the controller's 30s systemd
+/// watchdog. A stalled GitHub request must skip this observation pass, not
+/// starve the completed-cycle heartbeat and kill active job children.
+const REGISTRATION_RECONCILE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
