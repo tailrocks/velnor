@@ -533,9 +533,11 @@ fn drain_broker_assignments(
         let exe = std::env::current_exe()?;
         let key = assignment.handoff.nonce.clone();
         if jobs.contains_key(&key) {
+            let _ = std::fs::remove_file(&assignment.handoff_path);
+            let _ = std::fs::write(&assignment.done_path, b"duplicate");
             continue;
         }
-        let child = Command::new(exe)
+        let child = match Command::new(exe)
             .arg("job")
             .arg("--state-dir")
             .arg(&args.state_dir)
@@ -551,7 +553,19 @@ fn drain_broker_assignments(
             .arg(&assignment.handoff_path)
             .arg("--done")
             .arg(&assignment.done_path)
-            .spawn()?;
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_file(&assignment.handoff_path);
+                let _ = std::fs::write(&assignment.done_path, b"spawn-failed");
+                eprintln!(
+                    "broker assignment {} worker spawn failed; manager released: {error}",
+                    assignment.handoff.nonce
+                );
+                continue;
+            }
+        };
         jobs.insert(key, child);
     }
     Ok(())
@@ -1237,7 +1251,15 @@ fn maybe_spawn_slot(
     if !args.spawn_slots {
         return Ok(());
     }
-    if children.contains_key(&slot_id.0) {
+    if let Some(child) = children.get(&slot_id.0) {
+        let heartbeat = heartbeat_path(&args.state_dir, slot_index_from_id(slot_id));
+        let stale = std::fs::read(&heartbeat)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SlotHeartbeat>(&bytes).ok())
+            .is_some_and(|heartbeat| heartbeat.generation != generation.0);
+        if stale {
+            request_child_shutdown(child)?;
+        }
         return Ok(());
     }
     if let Ok(state) = journal.materialized_state() {
