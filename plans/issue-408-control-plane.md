@@ -246,6 +246,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   or waiter path and did not reproduce historical high CPU. The temporary
   worktree and state were removed. The high-CPU reproduction checkbox remains
   open rather than claiming a synthetic reproduction.
+- GitHub release run `33009178017` reached all guest builds and the GHCR image,
+  but both package jobs failed closed because the checked-in microVM kernel
+  hashes were stale. Uploaded guest artifacts were independently hashed and
+  `microvm/manifest.json` was updated; candidate version advanced to `0.1.218`
+  because `v0.1.217` is immutable. Focused guest-image tests, strict Clippy,
+  formatting, and diff checks pass; release rerun pending.
 
 ## Non-goals
 
