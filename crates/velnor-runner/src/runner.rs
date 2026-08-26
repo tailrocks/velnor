@@ -246,8 +246,7 @@ fn clear_in_flight_job_if_matches(config_dir: &Path, job_id: &str) -> Result<boo
 }
 
 fn recorded_job_journal_state(journal_dir: &Path, job_id: &str) -> RunServiceJobJournalState {
-    let Ok(journal) = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
-    else {
+    let Ok(journal) = velnor_control::journal::Journal::open(journal_dir.join("journal.db")) else {
         return RunServiceJobJournalState::Accepted;
     };
     let Ok(state) = journal.load_state() else {
