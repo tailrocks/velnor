@@ -775,6 +775,12 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Serializes tests that mutate `GITHUB_TOKEN` (process-global env):
+    /// `load_exec_config` resolves the PAT from the environment at call time,
+    /// so a parallel test's cleanup `remove_var` must not land mid-test.
+    static GITHUB_TOKEN_ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     fn dummy_exec(url: &str) -> DaemonArgs {
         serde_json::from_value(json!({
             "url": url,
@@ -819,6 +825,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
+        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
@@ -924,6 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn org_url_probe_sets_github_reachable_without_inferred_policy() {
+        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
