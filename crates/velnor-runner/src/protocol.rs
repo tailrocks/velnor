@@ -5841,6 +5841,51 @@ mod tests {
         assert!(!is_non_retriable_acquire_status(StatusCode::UNAUTHORIZED));
     }
 
+    #[tokio::test]
+    async fn acquire_job_retries_transient_failure_before_parsing_job() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use wiremock::{matchers::method, Mock, MockServer, Request, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/run/jobs/123/acquirejob"))
+            .respond_with(move |_request: &Request| {
+                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(500).set_body_string("retry later")
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_string(r#"{"plan":{"planId":"plan-1"},"jobId":"job-1"}"#)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let outcome = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let AcquireJobOutcome::Acquired(job) = outcome else {
+            panic!("transient acquire failure must be retried");
+        };
+        assert_eq!(job["jobId"], "job-1");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn acquire_failure_classifies_local_faults_separately_from_transport() {
         let permission = anyhow::Error::new(std::io::Error::new(
