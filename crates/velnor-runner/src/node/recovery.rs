@@ -224,4 +224,39 @@ mod tests {
         );
         assert_eq!(coordinator.state(), RecoveryState::Quarantined);
     }
+
+    #[test]
+    fn every_broker_failure_class_is_bounded_and_scheduled() {
+        let classes = [
+            BrokerPollErrorClass::Authentication,
+            BrokerPollErrorClass::Forbidden,
+            BrokerPollErrorClass::MissingSession,
+            BrokerPollErrorClass::Conflict,
+            BrokerPollErrorClass::RateLimited,
+            BrokerPollErrorClass::Client,
+            BrokerPollErrorClass::Server,
+            BrokerPollErrorClass::Transport,
+        ];
+        for class in classes {
+            let mut coordinator = RecoveryCoordinator::default();
+            let now = Duration::from_secs(500);
+            let action = coordinator.observe(RecoverySignal::Error(class), now);
+            assert!(
+                matches!(
+                    (class, action),
+                    (
+                        BrokerPollErrorClass::Authentication,
+                        RecoveryAction::RefreshCredentials
+                    ) | (
+                        BrokerPollErrorClass::MissingSession,
+                        RecoveryAction::RecreateSession
+                    ) | (_, RecoveryAction::None)
+                ),
+                "unexpected action for {class:?}: {action:?}"
+            );
+            assert!(coordinator.retry_at() > now);
+            assert!(coordinator.retry_at() <= now + MAX_BACKOFF);
+            assert!(coordinator.retry_streak() <= MAX_RETRY_STREAK);
+        }
+    }
 }
