@@ -27,6 +27,12 @@ Current product work (not a velnorctl-migration leaf): `[execution] backend
 = "docker" | "microvm"` in `execution.toml`, no fallback, Firecracker+jailer
 microVM backend. See `docs/adr/0001-firecracker-production-microvm.md`.
 
+## Track C - production readiness
+
+- [ ] **PRD-001** - Velnor/ChainArgos/Jackin production-readiness campaign;
+  execute [`production-readiness/README.md`](production-readiness/README.md)
+  and check every item with evidence before completion.
+
 ## Track A - fleet policy (P0, independent)
 
 - [~] **039** - Reconcile restricted organization JIT fleets (P0) - [fleet-operations/039-org-jit-multi-repo-fleet.md](fleet-operations/039-org-jit-multi-repo-fleet.md)

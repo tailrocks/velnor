@@ -199,6 +199,11 @@ fn restore_slot_after_terminal_job(
     if state.slots[index].generation != job.generation {
         return;
     }
+    // Fencing is a recovery barrier. Terminal job reconciliation must clear
+    // the job/outbox state, but only controller recovery may reopen the slot.
+    if state.slots[index].phase == ActorPhase::Fenced {
+        return;
+    }
     if state.slots[index].ready_proof().is_ok() && state.slots[index].registered {
         state.slots[index].phase = ActorPhase::Ready;
         commands.push(SideEffect::AdvertiseCapacity {
@@ -502,8 +507,15 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             surge,
         } => {
             let routing = state.routing_valid && state.runner_group_valid;
+            let active_job = state
+                .jobs
+                .iter()
+                .any(|job| job.slot_id == slot_id && job_occupies_slot(job.phase));
             let slot = state.slot_mut(&slot_id);
-            if generation < slot.generation {
+            if generation < slot.generation
+                || (generation > slot.generation && active_job)
+                || (generation == slot.generation && slot.phase == ActorPhase::Fenced)
+            {
                 rejected = true;
             } else {
                 if generation > slot.generation {
@@ -535,7 +547,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation {
+            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
                 rejected = true;
             } else {
                 slot.executor_proven = true;
@@ -546,7 +558,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation {
+            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
                 rejected = true;
             } else {
                 slot.session_live = true;
@@ -557,7 +569,10 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.ready_proof().is_err() {
+            if generation != slot.generation
+                || slot.phase == ActorPhase::Fenced
+                || slot.ready_proof().is_err()
+            {
                 rejected = true;
             } else {
                 commands.push(SideEffect::RegisterRunner {
@@ -571,7 +586,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation {
+            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
                 rejected = true;
             } else {
                 slot.registered = true;
@@ -583,7 +598,8 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || !slot.registered {
+            if generation != slot.generation || slot.phase == ActorPhase::Fenced || !slot.registered
+            {
                 rejected = true;
             } else {
                 slot.registered = false;
@@ -596,7 +612,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         } => {
             {
                 let slot = state.slot_mut(&slot_id);
-                if generation != slot.generation {
+                if generation != slot.generation || slot.phase == ActorPhase::Fenced {
                     rejected = true;
                 } else if slot.ready_proof().is_ok() && slot.registered {
                     slot.phase = ActorPhase::Ready;
@@ -780,7 +796,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             pid,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation {
+            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
                 rejected = true;
             } else {
                 slot.pid = Some(pid);
@@ -1706,6 +1722,17 @@ mod tests {
                 .rejected
         );
 
+        let same_generation = journal
+            .apply(Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation,
+                surge: true,
+            })
+            .unwrap();
+        assert!(same_generation.rejected);
+        assert!(same_generation.commands.is_empty());
+        assert_eq!(same_generation.state.slots[0].phase, ActorPhase::Fenced);
+
         let outcome = journal
             .apply(Event::PermitReserved {
                 slot_id: slot_id.clone(),
@@ -1739,6 +1766,117 @@ mod tests {
         assert!(!slot.registered);
         assert_eq!(slot.pid, None);
         assert_eq!(slot.heartbeat_unix, 0);
+    }
+
+    #[test]
+    fn fenced_slot_rejects_readiness_resurrection_events() {
+        let (_dir, mut journal) = open_tmp("fenced-resurrection");
+        let slot_id = slot("scope-1");
+        let generation = gen();
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::SlotStale {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        for event in [
+            Event::ExecutorProven {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::RegistrationLost {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+        ] {
+            let outcome = journal.apply(event).unwrap();
+            assert!(outcome.rejected);
+            assert!(outcome.commands.is_empty());
+            assert_eq!(outcome.state.slots[0].phase, ActorPhase::Fenced);
+        }
+    }
+
+    #[test]
+    fn permit_rotation_rejects_active_job_on_slot() {
+        let (_dir, mut journal) = open_tmp("fenced-active-job");
+        let slot_id = slot("scope-1");
+        let generation = gen();
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot_id.clone(),
+                    job_id: job("job-1"),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("job-1"),
+                    slot_id: slot_id.clone(),
+                    attempt: 1,
+                    generation,
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 1,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobStarted {
+                    job_id: job("job-1"),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let outcome = journal
+            .apply(Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation: generation.next(),
+                surge: true,
+            })
+            .unwrap();
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+        assert_eq!(outcome.state.slots[0].generation, generation);
+        assert_eq!(outcome.state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(outcome.state.jobs[0].generation, generation);
     }
 
     #[test]
@@ -2198,6 +2336,12 @@ mod tests {
                 generation: gen(),
                 worker: "w".to_owned(),
                 accepted_unix: 0,
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobWorkerLost {
+                job_id: job("job-1"),
+                generation: gen(),
             })
             .unwrap();
         let newer = Generation(2);
