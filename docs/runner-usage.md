@@ -13,7 +13,10 @@ version:
 ```sh
 sudo apt-get update
 apt-cache policy velnor-runner
-sudo apt-get install velnor-runner=X.Y.Z
+sudo install -d -m 0750 /run/velnor
+sudo env VELNOR_PACKAGE_TRANSACTION_LOCK_HELD=1 \
+  /usr/bin/flock --exclusive --nonblock /run/velnor/package-transaction.lock \
+  apt-get install velnor-runner=X.Y.Z
 ```
 
 For first-install repository/keyring setup and the maintainer's complete
@@ -33,14 +36,15 @@ build. A verified release record is activation metadata, not an installation
 path.
 
 Before the exact apt install, stop the exact Velnor services and doctor timers
-after the fleet is drained. The package preinst takes the exclusive
-`/run/velnor/package-transaction.lock` with util-linux `flock`, then rechecks
-all active Velnor services/timers and guardian state; it refuses the transaction
-if the lock or any process is still present. Every shipped Velnor service takes
-the same lock shared with `--no-fork`, so the lock remains held by the actual
-Velnor process across `exec` and preserves systemd signals and `Type=notify`.
-The upgrade preinst/postinst never stop, mask, restart, or enable units; removal
-cleanup remains a separate operator-state teardown path.
+after the fleet is drained. The command above holds the exclusive
+`/run/velnor/package-transaction.lock` for the full apt/dpkg transaction.
+Maintainer scripts verify that outer lock and recheck every Velnor service/timer
+state plus guardian state; they refuse direct unwrapped package configuration.
+Every shipped Velnor service takes the same lock shared with `--no-fork`, so the
+lock remains held by the actual Velnor process across `exec` and preserves
+systemd signals and `Type=notify`. Package scripts never stop, mask, restart,
+or enable units; removal cleanup remains a separate operator-state teardown
+path.
 
 The package ships the canonical job-image Dockerfile and acyclic build identity.
 During configuration, `postinst` verifies the installed binary and compiled

@@ -21,9 +21,17 @@ gate on both daemon units. The design below documents the pieces.
 Goal: install and upgrade the Velnor runner daemon with native apt:
 
 ```bash
-sudo apt update && sudo apt install velnor-runner   # install
-sudo apt upgrade                                     # upgrade later
+sudo apt update
+sudo install -d -m 0750 /run/velnor
+sudo env VELNOR_PACKAGE_TRANSACTION_LOCK_HELD=1 \
+  /usr/bin/flock --exclusive --nonblock /run/velnor/package-transaction.lock \
+  apt-get install velnor-runner=X.Y.Z
 ```
+
+The `flock` parent must wrap the complete exact-version apt transaction. It
+holds the exclusive package lock while `dpkg` unpacks and configures the
+package; direct `apt-get install`, `apt upgrade`, or `dpkg` invocation is
+refused by the maintainer scripts. First install uses the same wrapper.
 
 Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 
@@ -131,7 +139,10 @@ curl -fsSL https://velnor-apt.tailrocks.com/velnor.gpg \
 echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://velnor-apt.tailrocks.com stable main" \
   | sudo tee /etc/apt/sources.list.d/velnor.list
 sudo apt update
-sudo apt install velnor-runner
+sudo install -d -m 0750 /run/velnor
+sudo env VELNOR_PACKAGE_TRANSACTION_LOCK_HELD=1 \
+  /usr/bin/flock --exclusive --nonblock /run/velnor/package-transaction.lock \
+  apt-get install velnor-runner=X.Y.Z
 # then set non-secret config and the operator-owned token separately:
 sudo nano /etc/velnor/velnor.env      # URL=..., NAME=..., LABELS=..., SLOTS=...
 sudo install -m 0600 /dev/null /etc/velnor/secrets.env
@@ -178,7 +189,10 @@ recovery.
    runner idle and no Velnor job container remains. Then install the verified
    exact version, never an unpinned candidate:
    ```bash
-   sudo apt-get install velnor-runner=X.Y.Z
+   sudo install -d -m 0750 /run/velnor
+   sudo env VELNOR_PACKAGE_TRANSACTION_LOCK_HELD=1 \
+     /usr/bin/flock --exclusive --nonblock /run/velnor/package-transaction.lock \
+     apt-get install velnor-runner=X.Y.Z
    dpkg-query -W velnor-runner
    ```
 5. Activate the immutable release record, verify the installed package and
@@ -187,6 +201,7 @@ recovery.
    units. Run doctor and the fixture smoke before restoring traffic.
 6. Rollback uses only the exact signed predecessor already retained in the
    repository: drain, verify its signed identity, `apt-get update`, and
+   `install -d -m 0750 /run/velnor` plus the exclusive flock wrapper around
    `apt-get install velnor-runner=<exact-predecessor>`. Prove rollback, then use
    the same exact signed-APT procedure to move forward. Never republish an old
    release merely to roll back.

@@ -33,29 +33,31 @@ guardian_inactive() {
   [ "$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null || true)" = inactive ]
 }
 
-acquire_package_transaction_lock() {
-  # Keep this lock in the runner-owned runtime namespace. Creating the
-  # directory is the only filesystem setup here; this script never changes
-  # systemd unit state.
-  if [ ! -d /run/velnor ]; then
-    install -d -m 0750 /run/velnor || fail "cannot create /run/velnor for package transaction lock"
-  fi
-  if exec 9>>"$PACKAGE_TRANSACTION_LOCK"; then
-    :
-  else
-    fail "cannot open package transaction lock $PACKAGE_TRANSACTION_LOCK"
-  fi
-  /usr/bin/flock --exclusive --nonblock 9 \
-    || fail "refusing package transaction: $PACKAGE_TRANSACTION_LOCK is held by another Velnor process"
+require_package_transaction_lock() {
+  # The deployment wrapper holds the exclusive lock for the full apt/dpkg
+  # transaction. A maintainer script cannot hold a descriptor past its own
+  # exit, so accepting a script-local lock would leave a replacement race.
+  [ "${VELNOR_PACKAGE_TRANSACTION_LOCK_HELD:-}" = 1 ] \
+    || fail "refusing package transaction: run apt through the exclusive Velnor transaction-lock wrapper"
+
+  # Prove that another process currently owns the lock. The wrapper uses the
+  # non-forking parent only for service units; package deployment deliberately
+  # uses flock's waiting parent so it retains the lock until apt exits.
+  lock_status=0
+  /usr/bin/flock --exclusive --nonblock --conflict-exit-code 75 \
+    "$PACKAGE_TRANSACTION_LOCK" -c ':' || lock_status=$?
+  [ "$lock_status" -eq 75 ] \
+    || fail "refusing package transaction: $PACKAGE_TRANSACTION_LOCK is not held by the apt wrapper"
 }
 
 all_velnor_units_drained() {
   # Every packaged service executes a Velnor binary, including the v2
   # controller/slot/job processes and the oneshot doctor. Timers are included
   # because an active timer can start an old doctor during package unpack.
-  active_services_raw=$(systemctl list-units --type=service --state=active --no-legend --plain 'velnor*.service' 2>/dev/null) || return 1
-  active_timers_raw=$(systemctl list-units --type=timer --state=active --no-legend --plain 'velnor*.timer' 2>/dev/null) || return 1
-  active_units=$(printf '%s\n%s\n' "$active_services_raw" "$active_timers_raw" | awk '{print $1}')
+  active_services_raw=$(systemctl list-units --type=service --all --no-legend --plain 'velnor*.service' 2>/dev/null) || return 1
+  active_timers_raw=$(systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer' 2>/dev/null) || return 1
+  active_units=$(printf '%s\n%s\n' "$active_services_raw" "$active_timers_raw" \
+    | awk '$3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
   [ -z "$active_units" ]
 }
 
@@ -65,7 +67,7 @@ rollback_tuple_present() {
 
 case "$1" in
   upgrade)
-    acquire_package_transaction_lock
+    require_package_transaction_lock
     if [ -d /run/systemd/system ]; then
       active_units=
       all_velnor_units_drained || fail "refusing upgrade: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
@@ -74,7 +76,7 @@ case "$1" in
     rollback_tuple_present || fail "refusing upgrade: no exact prior rollback tuple ($ACTIVE_DIR/{record,deployed}.json) and no $LEGACY_MARKER bootstrap. Stage one before upgrading."
     ;;
   install)
-    acquire_package_transaction_lock
+    require_package_transaction_lock
     if [ -d /run/systemd/system ]; then
       active_units=
       all_velnor_units_drained || fail "refusing install: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."

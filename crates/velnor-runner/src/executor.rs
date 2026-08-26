@@ -4397,6 +4397,7 @@ fn native_cache_restore_main(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
+    validate_cache_paths(&action_state, &path)?;
     let restore_keys = native_input(action, &action_state, "restore-keys");
     let fail_on_cache_miss =
         input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
@@ -4511,6 +4512,7 @@ fn native_cache_save_main(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
+    validate_cache_paths(&action_state, &path)?;
     let version = cache_scope_version_for(action, &action_state, &path);
     save_cache_result(&action_state, &key, &path, false, &version)
 }
@@ -4522,6 +4524,7 @@ fn native_rust_cache(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let shared_key = native_cache_key(action, &action_state, "shared-key");
     let cache_directories = native_input(action, &action_state, "cache-directories");
+    validate_cache_paths(&action_state, &cache_directories)?;
     let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
     let version = cache_scope_version_for(action, &action_state, &cache_directories);
     let t0 = Instant::now();
@@ -4673,6 +4676,15 @@ fn normalize_cache_scope_paths(paths: &str) -> String {
     items.join("\n")
 }
 
+fn validate_cache_paths(state: &JobExecutionState, paths: &str) -> Result<()> {
+    for path in cache_paths(paths) {
+        if has_glob_pattern(&path) {
+            cache_glob_base_and_pattern(state, &path)?;
+        }
+    }
+    Ok(())
+}
+
 fn find_cache_match(
     state: &JobExecutionState,
     key: &str,
@@ -4818,6 +4830,9 @@ enum CacheGlobEntryKind {
     File,
 }
 
+type CacheGlobSource = (PathBuf, PathBuf, CacheGlobEntryKind);
+type CacheGlobSources = Vec<CacheGlobSource>;
+
 fn cache_entry_complete_for_paths(path: &Path, paths: &str) -> bool {
     if !cache_entry_complete(path) {
         return false;
@@ -4826,7 +4841,7 @@ fn cache_entry_complete_for_paths(path: &Path, paths: &str) -> bool {
         .into_iter()
         .enumerate()
         .all(|(index, declared)| {
-            !has_glob_pattern(&declared) || cache_glob_manifest_path(path, index).is_file()
+            !has_glob_pattern(&declared) || cache_glob_manifest_is_valid(path, index)
         })
 }
 
@@ -4836,14 +4851,87 @@ fn cache_glob_manifest_path(cache_entry: &Path, index: usize) -> PathBuf {
         .join(CACHE_GLOB_MANIFEST_FILE)
 }
 
+fn cache_glob_manifest_is_valid(cache_entry: &Path, index: usize) -> bool {
+    let manifest_path = cache_glob_manifest_path(cache_entry, index);
+    let Ok(bytes) = fs::read(manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<CacheGlobManifest>(&bytes) else {
+        return false;
+    };
+    if manifest.version != 1 {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    manifest.entries.iter().all(|entry| {
+        validate_cache_glob_relative(&entry.relative).is_ok() && seen.insert(entry.relative.clone())
+    })
+}
+
+fn canonicalize_cache_path_with_missing_tail(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!("cache glob root must be absolute: {}", path.display());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!(
+            "cache glob root contains a parent traversal: {}",
+            path.display()
+        );
+    }
+
+    let mut cursor = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    bail!("cache glob root contains a symlink: {}", cursor.display());
+                }
+                let mut canonical = fs::canonicalize(&cursor).with_context(|| {
+                    format!("canonicalize cache glob root {}", cursor.display())
+                })?;
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = cursor.file_name() else {
+                    bail!(
+                        "cache glob root has no existing ancestor: {}",
+                        path.display()
+                    );
+                };
+                missing.push(name.to_owned());
+                if !cursor.pop() {
+                    bail!(
+                        "cache glob root has no existing ancestor: {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect cache glob root {}", cursor.display()));
+            }
+        }
+    }
+}
+
 fn cache_glob_base_and_pattern(
     state: &JobExecutionState,
     path: &str,
 ) -> Result<Option<(PathBuf, String)>> {
     let Some((base, pattern)) = artifact_glob_base_and_pattern(state, path) else {
-        return Ok(None);
+        bail!("cache glob '{path}' cannot resolve to Velnor-mapped job storage");
     };
-    let mapped = [
+
+    let canonical_base = canonicalize_cache_path_with_missing_tail(&base)?;
+    let mut mapped = false;
+    for root in [
         state.workspace_host.as_deref(),
         state.temp_host.as_deref(),
         state.cargo_target_host.as_deref(),
@@ -4851,14 +4939,20 @@ fn cache_glob_base_and_pattern(
     ]
     .into_iter()
     .flatten()
-    .any(|root| base == root || base.starts_with(root));
+    {
+        let canonical_root = canonicalize_cache_path_with_missing_tail(root)?;
+        if canonical_base == canonical_root || canonical_base.starts_with(&canonical_root) {
+            mapped = true;
+            break;
+        }
+    }
     if !mapped {
         bail!(
             "cache glob '{path}' resolves outside Velnor-mapped job storage: {}",
-            base.display()
+            canonical_base.display()
         );
     }
-    Ok(Some((base, pattern)))
+    Ok(Some((canonical_base, pattern)))
 }
 
 fn validate_cache_glob_relative(relative: &str) -> Result<PathBuf> {
@@ -4878,10 +4972,36 @@ fn validate_cache_glob_relative(relative: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+fn safe_cache_glob_join(root: &Path, relative: &str) -> Result<PathBuf> {
+    let relative = validate_cache_glob_relative(relative)?;
+    if let Ok(metadata) = fs::symlink_metadata(root) {
+        if metadata.file_type().is_symlink() {
+            bail!("cache glob root is a symlink: {}", root.display());
+        }
+    }
+    let mut current = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() {
+                bail!("cache glob path contains a symlink: {}", current.display());
+            }
+            if components.peek().is_some() && !metadata.file_type().is_dir() {
+                bail!(
+                    "cache glob path contains a non-directory parent: {}",
+                    current.display()
+                );
+            }
+        }
+    }
+    Ok(current)
+}
+
 fn cache_glob_sources(
     state: &JobExecutionState,
     path: &str,
-) -> Result<Option<(PathBuf, Vec<(PathBuf, PathBuf, CacheGlobEntryKind)>)>> {
+) -> Result<Option<(PathBuf, CacheGlobSources)>> {
     let Some((base, pattern)) = cache_glob_base_and_pattern(state, path)? else {
         return Ok(None);
     };
@@ -4960,6 +5080,11 @@ fn collect_cache_glob_matches(
             .with_context(|| format!("strip cache glob root from {}", source.display()))?
             .to_path_buf();
         let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            // Repository symlinks are not needed for a cache optimization and
+            // must never be recreated from untrusted cache content.
+            continue;
+        }
         let kind = if file_type.is_dir() {
             CacheGlobEntryKind::Directory
         } else if file_type.is_file() {
@@ -5022,11 +5147,11 @@ fn restore_cache_glob_path(
                 entry.relative
             );
         }
-        let source = index_dir.join("payload").join(&relative);
-        let destination = base.join(&relative);
+        let source = safe_cache_glob_join(&index_dir.join("payload"), &entry.relative)?;
+        let destination = safe_cache_glob_join(&base, &entry.relative)?;
         if cache_glob_source_overlaps_persistent_exact(
             state,
-            &declared_paths,
+            declared_paths,
             &destination,
             &relative,
         ) {
@@ -5060,7 +5185,7 @@ fn restore_cache_glob_path(
                 fs::create_dir_all(&destination).with_context(|| {
                     format!("create cache glob restore path {}", destination.display())
                 })?;
-                copy_dir_contents(&source, &destination)?;
+                copy_cache_glob_dir_contents(&source, &destination)?;
             }
             CacheGlobEntryKind::File => {
                 let parent = destination.parent().ok_or_else(|| {
@@ -5226,7 +5351,7 @@ fn save_cache_result(
     let lock_start = Instant::now();
     let _lock = CacheEntryLock::exclusive(&cache_dir)?;
     let lock_wait_ms = lock_start.elapsed().as_millis();
-    if cache_entry_complete(&cache_dir) {
+    if cache_entry_complete_for_paths(&cache_dir, paths) {
         return Ok(cache_save_step_result(
             key,
             SaveOutcome::AlreadyExists,
@@ -5283,13 +5408,13 @@ fn save_cache_result(
                     anyhow::anyhow!("cache glob path is not valid UTF-8: {}", relative.display())
                 })?;
                 validate_cache_glob_relative(relative_string)?;
-                let destination = target.join("payload").join(&relative);
+                let destination = safe_cache_glob_join(&target.join("payload"), relative_string)?;
                 match kind {
                     CacheGlobEntryKind::Directory => {
                         fs::create_dir_all(&destination).with_context(|| {
                             format!("create cache glob entry {}", destination.display())
                         })?;
-                        if let Err(error) = copy_dir_contents(&source, &destination) {
+                        if let Err(error) = copy_cache_glob_dir_contents(&source, &destination) {
                             fs::remove_dir_all(&staging_dir).ok();
                             return Ok(cache_save_step_result(
                                 key,
@@ -7486,6 +7611,36 @@ fn copy_cache_source(source: &Path, destination: &Path) -> Result<()> {
             .with_context(|| format!("copy cache file {}", source.display()))?;
         Ok(())
     }
+}
+
+fn copy_cache_glob_dir_contents(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path)
+                .with_context(|| format!("create {}", destination_path.display()))?;
+            copy_cache_glob_dir_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
+                .with_context(|| format!("copy {}", source_path.display()))?;
+        } else {
+            bail!(
+                "cache glob contains unsupported file type at {}",
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Copy a cache tree in one traversal.
@@ -11938,6 +12093,12 @@ esac
             "nested modules\n",
         )
         .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            "nested.js",
+            save_workspace.join("packages/app/node_modules/link.js"),
+        )
+        .unwrap();
         fs::create_dir_all(&restore_workspace).unwrap();
 
         let env = [("GITHUB_REPOSITORY", "Test/Repo")];
@@ -12021,6 +12182,9 @@ esac
                 .unwrap(),
             "nested modules\n"
         );
+        assert!(!restore_workspace
+            .join("packages/app/node_modules/link.js")
+            .exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -12128,6 +12292,31 @@ esac
         fs::create_dir_all(&workspace).unwrap();
         let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
         assert!(cache_glob_base_and_pattern(&state, "/etc/**").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_cache_glob_is_rejected_before_store_creation() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let step = native_cache_step(
+            None,
+            Some("invalid"),
+            &[("path", "/etc/**"), ("key", "invalid-glob")],
+        );
+        let error = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &[step],
+                &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+                &temp,
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("outside Velnor-mapped job storage"));
+        assert!(!root.join("_velnor_caches").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -12394,6 +12583,32 @@ esac
     }
 
     #[test]
+    fn invalid_legacy_glob_entry_is_replaced_on_save() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        fs::write(workspace.join("target/app"), "v1\n").unwrap();
+        let state = JobExecutionState::new_with_workspace(
+            &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+            &[],
+            &workspace,
+            &temp,
+        );
+        let paths = "**/target";
+        let version = cache_scope_version("", "", "", paths);
+        save_cache_result(&state, "legacy-glob", paths, false, &version).unwrap();
+
+        let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("legacy-glob");
+        fs::remove_file(entry.join("0").join(CACHE_GLOB_MANIFEST_FILE)).unwrap();
+        fs::write(workspace.join("target/app"), "v2\n").unwrap();
+        save_cache_result(&state, "legacy-glob", paths, false, &version).unwrap();
+        assert!(cache_entry_complete_for_paths(&entry, paths));
+        assert!(entry.join("0").join(CACHE_GLOB_MANIFEST_FILE).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cache_glob_manifest_rejects_traversal_before_restore() {
         assert!(validate_cache_glob_relative("../escape").is_err());
         assert!(validate_cache_glob_relative("/absolute").is_err());
@@ -12434,10 +12649,10 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "glob-traversal")],
         )];
-        let error = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
-            .unwrap_err();
-        assert!(error.to_string().contains("escapes its root"));
+            .unwrap();
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert!(!root.join("restore-job/escape").exists());
         fs::remove_dir_all(root).unwrap();
     }

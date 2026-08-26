@@ -19,10 +19,21 @@ BIN=/usr/bin/velnor-runner
 SHARE=/usr/share/velnor
 RELEASE_DIR=/var/lib/velnor/release
 ACTIVE_DIR=$RELEASE_DIR/active
+PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
 
 fail() {
   echo "velnor-runner postinst: $1" >&2
   exit 1
+}
+
+require_package_transaction_lock() {
+  [ "${VELNOR_PACKAGE_TRANSACTION_LOCK_HELD:-}" = 1 ] \
+    || fail "refusing package configuration: run apt through the exclusive Velnor transaction-lock wrapper"
+  lock_status=0
+  /usr/bin/flock --exclusive --nonblock --conflict-exit-code 75 \
+    "$PACKAGE_TRANSACTION_LOCK" -c ':' || lock_status=$?
+  [ "$lock_status" -eq 75 ] \
+    || fail "refusing package configuration: $PACKAGE_TRANSACTION_LOCK is not held by the apt wrapper"
 }
 
 microvm_verify_sha256() {
@@ -38,6 +49,7 @@ microvm_verify_sha256() {
 
 case "$1" in
   configure)
+    require_package_transaction_lock
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
     install -d -m 0750 "$RELEASE_DIR" "$RELEASE_DIR/records"
     # Pre-010 packages may have left an empty concrete active directory. The
