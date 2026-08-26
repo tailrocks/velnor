@@ -41,11 +41,6 @@ all_velnor_units_drained() {
   [ -z "$active_units" ]
 }
 
-guardian_inactive() {
-  # Require an explicit inactive state. Empty/error/unknown output fails closed.
-  [ "$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null)" = inactive ]
-}
-
 rollback_tuple_present() {
   { [ -f "$ACTIVE_DIR/record.json" ] && [ -f "$ACTIVE_DIR/deployed.json" ]; } || [ -f "$LEGACY_MARKER" ]
 }
@@ -53,7 +48,8 @@ rollback_tuple_present() {
 case "$1" in
   upgrade)
     if [ -d /run/systemd/system ]; then
-      all_velnor_units_drained || fail "refusing upgrade: active Velnor service unit(s) remain (${active_units}). Stop the exact units first."
+      active_units=
+      all_velnor_units_drained || fail "refusing upgrade: active Velnor service unit(s) remain (${active_units:-unknown}). Stop the exact units first."
       guardian_inactive || fail "refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service."
     fi
     rollback_tuple_present || fail "refusing upgrade: no exact prior rollback tuple ($ACTIVE_DIR/{record,deployed}.json) and no $LEGACY_MARKER bootstrap. Stage one before upgrading."

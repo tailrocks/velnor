@@ -11554,7 +11554,11 @@ esac
         }
         // Matching is component-aware: similarly named workspace paths must
         // remain eligible for ordinary keyed cache storage.
-        for path in [".cargo/registry-old", ".cache/mise-old", ".cargo/config.toml"] {
+        for path in [
+            ".cargo/registry-old",
+            ".cache/mise-old",
+            ".cargo/config.toml",
+        ] {
             assert!(
                 !velnor_static_persistent_cache_path(path),
                 "non-canonical path was incorrectly treated as persistent: {path}"
