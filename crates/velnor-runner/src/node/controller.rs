@@ -284,16 +284,14 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Stop idle controller-owned slot processes when the daemon receives SIGTERM.
-/// Job workers are deliberately left alone so systemd's stop timeout remains
-/// the outer bound for an in-flight job rather than turning an upgrade into a
-/// lost job. The daemon's drain flag lives in the supervisor process, so this
-/// explicit handoff is the process boundary that makes graceful drain real.
+/// Stop controller-owned slot and job-worker processes when the daemon
+/// receives SIGTERM. Each worker has its own drain listener, so it can cancel
+/// an in-flight acquire or finish an active job through the normal boundary.
 async fn drain_children(
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
-    for child in slots.values() {
+    for child in slots.values().chain(jobs.values()) {
         request_child_shutdown(child)?;
     }
 

@@ -1202,6 +1202,12 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // must never give up — every failure is retried with backoff forever.
     let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
 
+    if supervised {
+        if let Ok(config_base) = daemon_config_dir(&args) {
+            start_drain_listener(config_base);
+        }
+    }
+
     // Plan 066 step 4: open/migration failure of the operational store is a
     // daemon readiness failure. Supervised mode surfaces it through the
     // never-exit retry loop below; one-shot modes already fail fast.
@@ -1583,6 +1589,13 @@ pub(crate) async fn run_daemon_slot(
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         return run(slot_args).await;
+    }
+
+    // The controller launches this loop in a separate job-worker process. A
+    // signal listener in the controller alone cannot cancel that process's
+    // acquire retry; install one at the actual runner boundary.
+    if !args.once {
+        start_drain_listener(config_base.clone());
     }
 
     let mut cycle = 1_u64;

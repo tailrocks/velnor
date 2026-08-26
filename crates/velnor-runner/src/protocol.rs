@@ -2116,9 +2116,32 @@ fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
     else {
-        // Native transport failures and curl failures do not have an HTTP
-        // status; they are transient by definition.
-        return true;
+        // Native request failures expose a reqwest error; curl failures that
+        // cannot produce an HTTP status expose an I/O error. Filesystem and
+        // executable errors are local faults and must not retain a session
+        // forever as if GitHub were temporarily unavailable.
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.is_timeout() || error.is_connect())
+        }) {
+            return true;
+        }
+        return error.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::Interrupted
+                )
+            })
+        });
     };
 
     matches!(api_error.status, 0 | 408 | 429 | 500..=599)
@@ -5562,6 +5585,31 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         ));
         assert!(!is_non_retriable_acquire_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn acquire_failure_classifies_local_faults_separately_from_transport() {
+        let permission = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private curl directory",
+        ));
+        assert!(!acquire_failure_is_transient(&permission));
+
+        let timeout = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "request timed out",
+        ));
+        assert!(acquire_failure_is_transient(&timeout));
+
+        let unauthorized = anyhow::Error::from(GitHubApiError {
+            status: StatusCode::UNAUTHORIZED.as_u16(),
+            action: "acquire".into(),
+            body: "invalid token".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+            remaining: Some(4999),
+        });
+        assert!(!acquire_failure_is_transient(&unauthorized));
     }
 
     #[tokio::test]
