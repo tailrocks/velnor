@@ -176,7 +176,7 @@ fn accept_run_service_job_in_journal(
     let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let state = journal
-        .load_state()
+        .materialized_state()
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     if state.slots.is_empty() {
         return Ok(());
@@ -249,7 +249,7 @@ fn recorded_job_journal_state(journal_dir: &Path, job_id: &str) -> RunServiceJob
     let Ok(journal) = velnor_control::journal::Journal::open(journal_dir.join("journal.db")) else {
         return RunServiceJobJournalState::Accepted;
     };
-    let Ok(state) = journal.load_state() else {
+    let Ok(state) = journal.materialized_state() else {
         return RunServiceJobJournalState::Accepted;
     };
     if state.jobs.iter().any(|job| job.job_id.0 == job_id) {

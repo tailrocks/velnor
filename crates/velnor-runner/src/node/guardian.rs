@@ -57,7 +57,7 @@ fn supervise_once(
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
-    let state = journal.load_state()?;
+    let state = journal.materialized_state()?;
     for slot in &state.slots {
         if matches!(slot.phase, ActorPhase::Fenced | ActorPhase::Quarantined) {
             continue;
@@ -72,7 +72,7 @@ fn supervise_once(
             })?;
         }
     }
-    let health = journal.load_state()?.health();
+    let health = journal.materialized_state()?.health();
     server.publish(&health)?;
     Ok(LocalCycle::finished())
 }
