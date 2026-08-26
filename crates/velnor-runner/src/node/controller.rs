@@ -263,6 +263,7 @@ struct ControllerMetrics {
     waiter_processes: u32,
     job_processes: u32,
     journal: JournalStats,
+    broker: crate::runner::BrokerMetricsSnapshot,
     #[serde(skip)]
     durations_ms: VecDeque<u64>,
     #[serde(skip)]
@@ -288,6 +289,7 @@ impl ControllerMetrics {
         slots: usize,
         jobs: usize,
         journal: &JournalStats,
+        broker: &crate::runner::BrokerMetricsSnapshot,
     ) {
         self.schema_version = 1;
         self.sequence = self.sequence.saturating_add(1);
@@ -318,6 +320,7 @@ impl ControllerMetrics {
         self.waiter_processes = 0;
         self.job_processes = u32::try_from(jobs).unwrap_or(u32::MAX);
         self.journal = journal.clone();
+        self.broker = broker.clone();
         let event_total = journal
             .events
             .values()
@@ -380,12 +383,14 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut metrics = ControllerMetrics::default();
     let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
     let recovery = Arc::new(Mutex::new(RecoveryCoordinator::default()));
+    let broker_metrics = Arc::new(crate::runner::BrokerMetrics::default());
     let reconcile_notify = Arc::new(Notify::new());
     let manager_task = tokio::spawn(run_scope_broker_manager(
         args.clone(),
         assignment_tx,
         recovery.clone(),
         reconcile_notify.clone(),
+        broker_metrics.clone(),
     ));
     let mut ready_announced = false;
     loop {
@@ -449,6 +454,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             slots.len(),
             jobs.len(),
             &journal.telemetry_stats(),
+            &broker_metrics.snapshot(),
         );
         if let Err(error) = metrics.publish(&args.state_dir) {
             eprintln!("Warning: controller metrics publication failed: {error:#}");
@@ -490,6 +496,7 @@ impl ScopeBrokerManager {
         assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
         recovery: Arc<Mutex<RecoveryCoordinator>>,
         reconcile_notify: Arc<Notify>,
+        broker_metrics: Arc<crate::runner::BrokerMetrics>,
     ) {
         loop {
             if crate::runner::draining() {
@@ -511,6 +518,7 @@ impl ScopeBrokerManager {
                 assignments.clone(),
                 recovery.clone(),
                 reconcile_notify.clone(),
+                broker_metrics.clone(),
             ) {
                 eprintln!("scope broker manager reconcile failed: {error:#}");
             }
@@ -524,9 +532,16 @@ async fn run_scope_broker_manager(
     assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
     recovery: Arc<Mutex<RecoveryCoordinator>>,
     reconcile_notify: Arc<Notify>,
+    broker_metrics: Arc<crate::runner::BrokerMetrics>,
 ) {
     ScopeBrokerManager::new()
-        .run(args, assignments, recovery, reconcile_notify)
+        .run(
+            args,
+            assignments,
+            recovery,
+            reconcile_notify,
+            broker_metrics,
+        )
         .await;
 }
 
@@ -537,6 +552,7 @@ fn ensure_broker_managers(
     tx: mpsc::Sender<crate::runner::BrokerAssignment>,
     recovery: Arc<Mutex<RecoveryCoordinator>>,
     reconcile_notify: Arc<Notify>,
+    broker_metrics: Arc<crate::runner::BrokerMetrics>,
 ) -> anyhow::Result<()> {
     let daemon = match load_exec_config(&args.state_dir) {
         Ok(daemon) => daemon,
@@ -575,6 +591,7 @@ fn ensure_broker_managers(
         let manager_signals = crate::runner::BrokerManagerSignals {
             recovery: recovery.clone(),
             reconcile_notify: reconcile_notify.clone(),
+            broker_metrics: broker_metrics.clone(),
         };
         let task = tokio::spawn(async move {
             supervise_broker_manager(
@@ -1711,6 +1728,7 @@ mod tests {
             16,
             0,
             &JournalStats::default(),
+            &crate::runner::BrokerMetricsSnapshot::default(),
         );
         let value = serde_json::to_value(metrics).unwrap();
         assert_eq!(value["slot_processes"], 16);

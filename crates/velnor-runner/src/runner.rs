@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant, SystemTime},
@@ -952,10 +952,73 @@ pub(crate) struct BrokerAssignment {
     pub done_path: PathBuf,
 }
 
+#[derive(Default)]
+pub(crate) struct BrokerMetrics {
+    pub requests: AtomicU64,
+    pub empty: AtomicU64,
+    pub messages: AtomicU64,
+    pub errors: AtomicU64,
+    pub error_statuses: std::sync::Mutex<std::collections::BTreeMap<u16, u64>>,
+    pub latency_ms: AtomicU64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct BrokerMetricsSnapshot {
+    pub requests: u64,
+    pub empty: u64,
+    pub messages: u64,
+    pub errors: u64,
+    pub error_statuses: std::collections::BTreeMap<u16, u64>,
+    pub latency_ms: u64,
+}
+
+impl BrokerMetrics {
+    fn record(&self, result: &Result<crate::protocol::BrokerPoll>, elapsed: Duration) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.latency_ms.fetch_add(
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        match result {
+            Ok(poll) if poll.message.is_some() => {
+                self.messages.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(_) => {
+                self.empty.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                self.errors.fetch_add(1, Ordering::Relaxed);
+                let status = error
+                    .downcast_ref::<crate::protocol::GitHubApiError>()
+                    .map_or(0, |api| api.status);
+                if let Ok(mut statuses) = self.error_statuses.lock() {
+                    *statuses.entry(status).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> BrokerMetricsSnapshot {
+        BrokerMetricsSnapshot {
+            requests: self.requests.load(Ordering::Relaxed),
+            empty: self.empty.load(Ordering::Relaxed),
+            messages: self.messages.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            error_statuses: self.error_statuses.lock().map_or_else(
+                |_| std::collections::BTreeMap::new(),
+                |statuses| statuses.clone(),
+            ),
+            latency_ms: self.latency_ms.load(Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct BrokerManagerSignals {
     pub recovery: std::sync::Arc<tokio::sync::Mutex<crate::node::recovery::RecoveryCoordinator>>,
     pub reconcile_notify: std::sync::Arc<tokio::sync::Notify>,
+    pub broker_metrics: std::sync::Arc<BrokerMetrics>,
 }
 
 pub(crate) async fn run_broker_manager(
@@ -1020,6 +1083,7 @@ pub(crate) async fn run_broker_manager(
                 &session_id,
                 RunnerStatus::Online,
                 stored.settings.disable_update,
+                &signals.broker_metrics,
             )
             .await?;
             signals
@@ -3548,11 +3612,14 @@ async fn poll_broker_step(
     session_id: &str,
     status: RunnerStatus,
     disable_update: bool,
+    metrics: &BrokerMetrics,
 ) -> Result<Option<crate::protocol::TaskAgentMessage>> {
-    Ok(broker
+    let started = Instant::now();
+    let result = broker
         .get_runner_message(session_id, status, disable_update)
-        .await?
-        .message)
+        .await;
+    metrics.record(&result, started.elapsed());
+    Ok(result?.message)
 }
 
 #[allow(clippy::too_many_arguments)]
