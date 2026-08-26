@@ -8,16 +8,19 @@ date is known, but its exact UTC capture time is unavailable and is not
 inferred. Current PR head attribution: `tailrocks/velnor`,
 `7489b6b07edfa75e589a2a35f108ffe3bd24e7f9`.
 
-API scope: read-only GitHub API inspection of the listed repositories, workflow
-runs, jobs, and check suites, plus ChainArgos organization runner-group policy,
-repository-selection, and runner-list endpoints for runner group `4`. During
-the 2026-08-27 read-only recheck, no GitHub, Sentry, or SSH mutation occurred.
-Prior cleanup-attempt evidence records earlier cancellation requests and the
-removal of eight stale validation-owned registrations; those historical actions
-are not actions of this recheck and do not establish current state.
+API scope: GitHub API inspection of the listed repositories, workflow runs,
+jobs, and check suites, plus ChainArgos organization runner-group policy,
+repository-selection, and runner-list endpoints for runner group `4`. The
+2026-08-27 exact-target remediation attempt below targeted only the three
+listed ChainArgos run/suite pairs. No other runs, suites, runners, files,
+workflows, or policies changed. Prior cleanup-attempt evidence records earlier
+cancellation requests and the removal of eight stale validation-owned
+registrations; those historical actions are not actions of this remediation
+attempt and do not establish current state.
 
-This is a sanitized, read-only reconciliation of the supplied production-readiness
-evidence. It does not establish production readiness or complete any plan gate.
+This is a sanitized reconciliation of the supplied production-readiness evidence
+plus exact-target remediation evidence; it is not wholly read-only. It does not
+establish production readiness or complete any plan gate.
 The older P0 inventories and cleanup attempt referenced by the supplied
 evidence are historical snapshots; they are not current state.
 
@@ -37,6 +40,26 @@ suites `89353010038`, `89352428140`, and `89352110318` respectively, remain
 queued with null/zero check-run state unchanged since
 `2026-08-26T15:22–15:26Z`. No fresh Sentry probe was performed; prior runner
 registration state remains historical only.
+
+## Exact-target remediation attempt — 2026-08-27
+
+Capture date: `2026-08-27`; exact time unavailable. Only the following
+ChainArgos run/suite pairs were targeted. For each pair, the initial run and
+suite reads returned HTTP 200 with `queued` status, null conclusion, and zero
+jobs/check runs. Normal cancellation returned HTTP 409 with the exact message
+`Cannot cancel a workflow run that has not been queued yet.` Force-cancellation
+returned HTTP 409 with the same message. Final reads still showed queued/null/
+zero state, with no timestamp change.
+
+| run | suite | created | initial HTTP 200 | normal cancel | force-cancel | final state |
+|---:|---:|---|---|---|---|---|
+| `32985134450` | `89353010038` | `2026-08-26T15:26:20Z` | queued / null / zero | HTTP 409, exact message above | HTTP 409, same message | queued / null / zero; timestamp unchanged |
+| `32984965998` | `89352428140` | `2026-08-26T15:23:45Z` | queued / null / zero | HTTP 409, exact message above | HTTP 409, same message | queued / null / zero; timestamp unchanged |
+| `32984867843` | `89352110318` | `2026-08-26T15:22:25Z` | queued / null / zero | HTTP 409, exact message above | HTTP 409, same message | queued / null / zero; timestamp unchanged |
+
+This attempt establishes neither terminality nor GitHub Support confirmation.
+No other runs, suites, runners, files, workflows, or policies changed. The
+cleanup gate remains open.
 
 ## Run state
 
@@ -65,15 +88,16 @@ The following IDs remain unresolved and remain hard gates:
 The current Velnor run and suite returned HTTP 404, with current status
 unknown; the prior/indexed state recorded the run as queued. That is not
 treated as resolution without GitHub Support confirmation. The three ChainArgos runs and
-suites retain the queued/null/zero-check-run state above. During the
-2026-08-27 read-only recheck, no GitHub, Sentry, or SSH mutation occurred.
-Prior cleanup-attempt evidence records earlier cancellation requests and the
-removal of eight stale validation-owned registrations; the unresolved objects
-and all related hard gates remain unchanged.
+suites retain the queued/null/zero-check-run state above. The exact-target
+remediation attempt changed no other runs, suites, runners, files, workflows,
+or policies. Prior cleanup-attempt evidence records earlier cancellation
+requests and the removal of eight stale validation-owned registrations; the
+unresolved objects and all related hard gates remain unchanged.
 
 ## Plan disposition
 
 The production-readiness plan remains incomplete. The reconciliation does not
 clear the terminal-run, runner-registration, admission/readiness, dispatch, or
-verification gates. No workflow dispatch, rerun, cancellation, runner
-registration change, policy repair, or production mutation is claimed here.
+verification gates. No further mutation occurred after the exact-target
+normal/force cancellation attempts, and no dispatch/rerun/rerequest/deletion/
+runner/workflow/policy mutation occurred.

@@ -26,6 +26,26 @@ or terminal state. ChainArgos runs `32985134450`, `32984965998`, and
 remain queued with null/zero check-run state unchanged since
 `2026-08-26T15:22–15:26Z`.
 
+## Exact-target remediation attempt — 2026-08-27
+
+Capture date: `2026-08-27`; exact time unavailable. Only these ChainArgos
+run/suite pairs were targeted. Each initial run and suite read returned HTTP
+200 with `queued` status, null conclusion, and zero jobs/check runs. Normal
+cancellation returned HTTP 409 with the exact message `Cannot cancel a
+workflow run that has not been queued yet.` Force-cancellation returned HTTP
+409 with the same message. Each final read remained queued/null/zero, with no
+timestamp change.
+
+| run | suite | created | initial HTTP 200 | normal cancel | force-cancel | final state |
+|---:|---:|---|---|---|---|---|
+| `32985134450` | `89353010038` | `2026-08-26T15:26:20Z` | queued / null / zero | HTTP 409, exact message above | HTTP 409, same message | queued / null / zero; timestamp unchanged |
+| `32984965998` | `89352428140` | `2026-08-26T15:23:45Z` | queued / null / zero | HTTP 409, exact message above | HTTP 409, same message | queued / null / zero; timestamp unchanged |
+| `32984867843` | `89352110318` | `2026-08-26T15:22:25Z` | queued / null / zero | HTTP 409, exact message above | HTTP 409, same message | queued / null / zero; timestamp unchanged |
+
+No terminality or GitHub Support confirmation is claimed. No other runs,
+suites, runners, files, workflows, or policies changed. The cleanup gate
+remains open.
+
 No fresh Sentry probe was performed in this recheck. Prior Sentry runner
 registration observations remain historical and cannot establish current
 registration, readiness, or capacity.
