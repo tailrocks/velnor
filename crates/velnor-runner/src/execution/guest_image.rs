@@ -481,22 +481,11 @@ fn build_rootfs(
                 format!("mmdebstrap exited {}: {}", result.code, result.stderr),
             ));
         }
-        Err(_) => {
-            run(
-                runner,
-                "env",
-                &[
-                    "SOURCE_DATE_EPOCH=0".into(),
-                    "debootstrap".into(),
-                    "--variant=minbase".into(),
-                    format!("--include={includes}"),
-                    format!("--arch={deb_arch}"),
-                    "noble".into(),
-                    tree.display().to_string(),
-                    UBUNTU_SNAPSHOT.into(),
-                ],
+        Err(error) => {
+            return Err(MicroVmPreflightFailure::new(
                 "guest.rootfs",
-            )?;
+                format!("mmdebstrap unavailable: {error}"),
+            ));
         }
     }
     if tree.join("usr/sbin/sshd").is_file() {
@@ -600,15 +589,44 @@ fn build_rootfs(
         ],
         "guest.rootfs",
     )?;
+    let tarball = work_dir.join("rootfs.tar");
+    run(
+        runner,
+        "tar",
+        &[
+            "--create".into(),
+            format!("--file={}", tarball.display()),
+            "--directory".into(),
+            tree.display().to_string(),
+            "--sort=name".into(),
+            "--numeric-owner".into(),
+            "--owner=0".into(),
+            "--group=0".into(),
+            "--mtime=@0".into(),
+            "--format=posix".into(),
+            "--pax-option=delete=atime,delete=ctime".into(),
+            "--no-xattrs".into(),
+            ".".into(),
+        ],
+        "guest.rootfs",
+    )?;
     run(
         runner,
         "env",
         &[
+            "LC_ALL=C".into(),
+            "TZ=UTC".into(),
             "SOURCE_DATE_EPOCH=0".into(),
             "E2FSPROGS_FAKE_TIME=0".into(),
             "mke2fs".into(),
             "-t".into(),
             "ext4".into(),
+            "-b".into(),
+            "4096".into(),
+            "-I".into(),
+            "256".into(),
+            "-m".into(),
+            "0".into(),
             "-T".into(),
             "0".into(),
             "-U".into(),
@@ -616,9 +634,9 @@ fn build_rootfs(
             "-L".into(),
             "velnor-guest".into(),
             "-E".into(),
-            "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,root_perms=0755,lazy_itable_init=0,lazy_journal_init=0".into(),
+            "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,root_perms=0755,lazy_itable_init=0,lazy_journal_init=0,nodiscard,no_copy_xattrs".into(),
             "-d".into(),
-            tree.display().to_string(),
+            tarball.display().to_string(),
             output.display().to_string(),
             "1024m".into(),
         ],

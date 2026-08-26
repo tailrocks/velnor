@@ -298,6 +298,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   ownership/perms and disables lazy inode/journal initialization; candidate
   advances to `0.1.226` because `v0.1.225` is immutable. APT and Sentry remain
   gated on a successful signed release.
+- Rootfs review identified mutable mke2fs defaults, host xattrs, locale order,
+  and the debootstrap fallback as remaining uncontrolled inputs. The builder
+  now fails closed without debootstrap, creates a canonical sorted numeric-owner
+  epoch tar stream with xattrs excluded, and uses explicit ext4 layout/defaults
+  plus UTC locale settings. Candidate advances to `0.1.227` because
+  `v0.1.226` is immutable.
 
 ## Non-goals
 
