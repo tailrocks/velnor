@@ -273,6 +273,9 @@ pub fn read_policy(state_dir: &Path) -> Option<RoutingFields> {
 }
 
 /// Write desired policy only when the operator has not already done so.
+/// Repo-scoped fleets use this so an operator override wins. Org fleets
+/// must call [`write_policy`]: a live-membership snapshot must not remain
+/// the desired baseline.
 ///
 /// # Errors
 /// Filesystem or JSON failures.
@@ -282,6 +285,16 @@ pub fn write_policy_if_absent(state_dir: &Path, policy: &RoutingFields) -> anyho
         return Ok(());
     }
     write_fields(&path, policy)
+}
+
+/// Replace desired policy. Org fleets rewrite this from the generated
+/// allowlist every cycle so a stale live-membership snapshot cannot stay
+/// the desired baseline.
+///
+/// # Errors
+/// Filesystem or JSON failures.
+pub fn write_policy(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
+    write_fields(&state_dir.join(ROUTING_POLICY_FILE), policy)
 }
 
 /// Persist live GitHub routing evidence. Never a boolean Ready stamp.
@@ -801,6 +814,21 @@ mod tests {
             &tmp("missing-policy"),
         )
         .is_none());
+
+        let snapshot = matching_fields();
+        write_policy(&dir, &snapshot).unwrap();
+        write_policy_if_absent(&dir, &policy).unwrap();
+        assert_eq!(
+            read_policy(&dir).unwrap().selected_repositories,
+            snapshot.selected_repositories,
+            "if-absent must not clobber an existing file"
+        );
+        write_policy(&dir, &policy).unwrap();
+        assert_eq!(
+            read_policy(&dir).unwrap().selected_repositories,
+            policy.selected_repositories,
+            "org fleets must replace a live-membership snapshot"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

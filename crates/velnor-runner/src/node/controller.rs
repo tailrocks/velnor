@@ -571,30 +571,40 @@ async fn observe_github_and_routing(
             .or_else(|| exec.name.clone())
             .unwrap_or_else(|| "default".to_owned());
         let trust = prove::runtime_trust_scope(&exec.trust_scope);
-        // Repo-scoped fleets derive policy from the URL. Org-scoped fleets
-        // load the generated `<org>-desired-policy.json` allowlist. Never
-        // snapshot live group membership: a truncated GitHub group would
-        // become the desired baseline and hide drift.
+        // Repo-scoped fleets derive policy from the URL (operator override
+        // on disk wins). Org-scoped fleets load the generated
+        // `<org>-desired-policy.json` allowlist every cycle and replace
+        // `routing-policy.json`. Never snapshot live group membership: a
+        // truncated GitHub group would become the desired baseline and hide
+        // drift.
         let repo_policy = exec.url.as_deref().and_then(|url| {
             prove::policy_from_github_url(url, group.clone(), exec.labels.clone(), trust.clone())
         });
-        if let Some(policy) = &repo_policy {
-            prove::write_policy_if_absent(&args.state_dir, policy)?;
+        let policy = if let Some(policy) = repo_policy {
+            prove::write_policy_if_absent(&args.state_dir, &policy)?;
+            Some(policy)
         } else if let Some(url) = exec.url.as_deref() {
             if let Ok(scope) = crate::protocol::GitHubScope::parse(url) {
                 if let Some(org) = scope.org_login() {
-                    if let Some(policy) = prove::org_policy_from_generated(
+                    let generated = prove::org_policy_from_generated(
                         org,
                         exec.labels.clone(),
                         trust.clone(),
                         &prove::generated_policy_dir(),
-                    ) {
-                        prove::write_policy_if_absent(&args.state_dir, &policy)?;
+                    );
+                    if let Some(policy) = &generated {
+                        prove::write_policy(&args.state_dir, policy)?;
                     }
+                    generated
+                } else {
+                    prove::read_policy(&args.state_dir)
                 }
+            } else {
+                prove::read_policy(&args.state_dir)
             }
-        }
-        let policy = prove::read_policy(&args.state_dir);
+        } else {
+            prove::read_policy(&args.state_dir)
+        };
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
             let now = tokio::time::Instant::now();
             if pacing.probe_due(now) {
@@ -980,6 +990,18 @@ mod tests {
         std::env::set_var("VELNOR_FLEET_POLICY_DIR", policy_dir.as_os_str());
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        // Stale live-membership snapshot must not win over generated JSON.
+        std::fs::write(
+            dir.join(prove::ROUTING_POLICY_FILE),
+            serde_json::to_vec_pretty(&json!({
+                "group": "velnor",
+                "selected_repositories": ["tailrocks/velnor"],
+                "labels": ["velnor"],
+                "trust_scope": "trusted"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         std::env::set_var("GITHUB_TOKEN", "ghs_test");
         std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
@@ -1008,7 +1030,7 @@ mod tests {
         assert_eq!(
             policy.selected_repositories,
             vec!["tailrocks/velnor", "tailrocks/velnor-apt"],
-            "truncated live membership must not become desired policy"
+            "generated allowlist must replace a stale live-membership snapshot"
         );
         assert!(
             !state.routing_valid,
