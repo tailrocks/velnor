@@ -38,6 +38,10 @@ pub struct JournalEventStats {
 pub struct JournalStats {
     pub transactions: u64,
     pub transaction_time_ms: u64,
+    /// Wall time includes SQLite lock acquisition and commit/fsync.
+    pub lock_and_commit_time_ms: u64,
+    pub journal_bytes: u64,
+    pub wal_bytes: u64,
     pub events: HashMap<String, JournalEventStats>,
 }
 
@@ -1006,6 +1010,17 @@ impl Journal {
         &self.stats
     }
 
+    /// Return operation counters plus current on-disk journal sizes. File
+    /// sizes are sampled only when metrics are published, never per event.
+    #[must_use]
+    pub fn telemetry_stats(&self) -> JournalStats {
+        let mut stats = self.stats.clone();
+        stats.journal_bytes = std::fs::metadata(&self.path).map_or(0, |m| m.len());
+        let wal = PathBuf::from(format!("{}-wal", self.path.display()));
+        stats.wal_bytes = std::fs::metadata(wal).map_or(0, |m| m.len());
+        stats
+    }
+
     /// Read the current materialized state without replaying the event log.
     ///
     /// The materialized tables are committed in the same SQLite transaction
@@ -1095,9 +1110,14 @@ impl Journal {
             outcomes.push(outcome);
         }
         if pending.is_empty() {
-            self.stats.transaction_time_ms = self.stats.transaction_time_ms.saturating_add(
-                u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            );
+            let elapsed_ms =
+                u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.stats.transaction_time_ms =
+                self.stats.transaction_time_ms.saturating_add(elapsed_ms);
+            self.stats.lock_and_commit_time_ms = self
+                .stats
+                .lock_and_commit_time_ms
+                .saturating_add(elapsed_ms);
             return Ok(outcomes);
         }
 
@@ -1111,9 +1131,13 @@ impl Journal {
         }
         persist_state(&tx, &state)?;
         tx.commit()?;
-        self.stats.transaction_time_ms = self.stats.transaction_time_ms.saturating_add(
-            u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        );
+        let elapsed_ms =
+            u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.stats.transaction_time_ms = self.stats.transaction_time_ms.saturating_add(elapsed_ms);
+        self.stats.lock_and_commit_time_ms = self
+            .stats
+            .lock_and_commit_time_ms
+            .saturating_add(elapsed_ms);
         Ok(outcomes)
     }
 

@@ -403,7 +403,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &health,
             slots.len(),
             jobs.len(),
-            journal.stats(),
+            &journal.telemetry_stats(),
         );
         if let Err(error) = metrics.publish(&args.state_dir) {
             eprintln!("Warning: controller metrics publication failed: {error:#}");
