@@ -215,6 +215,8 @@ pub struct DaemonArgs {
     pub replace: bool,
     pub pool_id: Option<i64>,
     pub pool_name: Option<String>,
+    #[serde(default)]
+    pub routing_policy_file: Option<PathBuf>,
     pub dry_run_registration: bool,
     pub slots: usize,
     pub max_idle_slot_age_seconds: Option<u64>,

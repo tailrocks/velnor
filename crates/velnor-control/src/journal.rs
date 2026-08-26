@@ -341,6 +341,13 @@ pub enum Event {
         slot_id: SlotId,
         generation: Generation,
     },
+    /// GitHub no longer has the runner identity recorded for this slot.
+    /// Clear the local registration claim so reconciliation can issue a fresh
+    /// JIT request instead of trusting split-brain state forever.
+    RegistrationLost {
+        slot_id: SlotId,
+        generation: Generation,
+    },
     ReadyAttempt {
         slot_id: SlotId,
         generation: Generation,
@@ -552,6 +559,18 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             } else {
                 slot.registered = true;
                 slot.phase = ActorPhase::Registered;
+            }
+        }
+        Event::RegistrationLost {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation || !slot.registered {
+                rejected = true;
+            } else {
+                slot.registered = false;
+                slot.phase = ActorPhase::Provisioning;
             }
         }
         Event::ReadyAttempt {
@@ -865,7 +884,23 @@ impl Journal {
     ///
     /// # Errors
     /// SQLite write failures.
-    pub fn apply(&mut self, mut event: Event) -> StoreResult<ReduceOutcome> {
+    pub fn apply(&mut self, event: Event) -> StoreResult<ReduceOutcome> {
+        let mut outcomes = self.apply_many(std::iter::once(event))?;
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Persist several events atomically after reducing them in order. This
+    /// keeps controller-owned heartbeat ingestion to one replay and one
+    /// materialization transaction per reconciliation cycle.
+    ///
+    /// # Errors
+    /// SQLite or payload encode failures.
+    pub fn apply_many<I>(&mut self, events: I) -> StoreResult<Vec<ReduceOutcome>>
+    where
+        I: IntoIterator<Item = Event>,
+    {
         if self.write_blocked {
             return Err(StoreError::new(
                 velnor_model::ExitClass::Conflict,
@@ -875,26 +910,37 @@ impl Journal {
                 "N-1 must not write a journal whose PRAGMA user_version is newer than this binary",
             ));
         }
-        stamp_event(&mut event);
-        let state = self.load_state()?;
-        let outcome = reduce(state, event.clone());
-        if outcome.rejected {
-            return Ok(outcome);
+        let mut state = self.load_state()?;
+        let mut outcomes = Vec::new();
+        let mut pending = Vec::new();
+        for mut event in events {
+            stamp_event(&mut event);
+            let outcome = reduce(state.clone(), event.clone());
+            if !outcome.rejected {
+                state = outcome.state.clone();
+                let payload = serde_json::to_string(&event).map_err(|error| {
+                    StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
+                        .with_remediation(error.to_string())
+                })?;
+                pending.push((event_generation(&event), event_kind(&event), payload));
+            }
+            outcomes.push(outcome);
         }
-        let payload = serde_json::to_string(&event).map_err(|error| {
-            StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
-                .with_remediation(error.to_string())
-        })?;
-        let checksum = sha256_hex(payload.as_bytes());
-        let generation = event_generation(&event);
+        if pending.is_empty() {
+            return Ok(outcomes);
+        }
+
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO events (generation, kind, payload, checksum) VALUES (?1, ?2, ?3, ?4)",
-            params![generation.0 as i64, event_kind(&event), payload, checksum],
-        )?;
-        persist_state(&tx, &outcome.state)?;
+        for (generation, kind, payload) in pending {
+            let checksum = sha256_hex(payload.as_bytes());
+            tx.execute(
+                "INSERT INTO events (generation, kind, payload, checksum) VALUES (?1, ?2, ?3, ?4)",
+                params![generation.0 as i64, kind, payload, checksum],
+            )?;
+        }
+        persist_state(&tx, &state)?;
         tx.commit()?;
-        Ok(outcome)
+        Ok(outcomes)
     }
 
     /// Rebuild materialization from the event log (crash recovery).
@@ -1043,6 +1089,7 @@ fn event_generation(event: &Event) -> Generation {
         | Event::SessionLive { generation, .. }
         | Event::RegistrationIntended { generation, .. }
         | Event::Registered { generation, .. }
+        | Event::RegistrationLost { generation, .. }
         | Event::ReadyAttempt { generation, .. }
         | Event::Assigned { generation, .. }
         | Event::JobOwned { generation, .. }
@@ -1073,6 +1120,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::SessionLive { .. } => "session_live",
         Event::RegistrationIntended { .. } => "registration_intended",
         Event::Registered { .. } => "registered",
+        Event::RegistrationLost { .. } => "registration_lost",
         Event::ReadyAttempt { .. } => "ready_attempt",
         Event::Assigned { .. } => "assigned",
         Event::JobOwned { .. } => "job_owned",
@@ -1203,6 +1251,61 @@ mod tests {
             let outcome = journal.apply(event).unwrap();
             assert!(!outcome.rejected);
         }
+    }
+
+    #[test]
+    fn apply_many_commits_accepted_events_without_poisoning_after_rejection() {
+        let (_dir, mut journal) = open_tmp("batch-heartbeat");
+        prime_ready(&mut journal, "scope-1");
+        let outcomes = journal
+            .apply_many([
+                Event::SlotHeartbeat {
+                    slot_id: slot("scope-1"),
+                    generation: Generation(2),
+                    pid: 123,
+                },
+                Event::SlotHeartbeat {
+                    slot_id: slot("scope-1"),
+                    generation: gen(),
+                    pid: 456,
+                },
+            ])
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes[0].rejected);
+        assert!(!outcomes[1].rejected);
+        assert_eq!(
+            journal
+                .load_state()
+                .unwrap()
+                .slots
+                .iter()
+                .find(|row| row.slot_id == slot("scope-1"))
+                .and_then(|slot| slot.pid),
+            Some(456)
+        );
+    }
+
+    #[test]
+    fn registration_lost_clears_stale_local_identity() {
+        let (_dir, mut journal) = open_tmp("registration-lost");
+        prime_ready(&mut journal, "scope-1");
+        let outcome = journal
+            .apply(Event::RegistrationLost {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(!outcome.rejected);
+        let slot = journal
+            .load_state()
+            .unwrap()
+            .slots
+            .into_iter()
+            .find(|row| row.slot_id == slot("scope-1"))
+            .unwrap();
+        assert!(!slot.registered);
+        assert_eq!(slot.phase, ActorPhase::Provisioning);
     }
 
     #[test]

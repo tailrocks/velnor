@@ -53,7 +53,11 @@ where
     if started.rejected {
         anyhow::bail!("completion send-started rejected for job {}", job_id.0);
     }
-    send().map_err(Into::into)
+    let result = send().map_err(Into::into);
+    if result.is_ok() {
+        record_remote_ack(journal, job_id, generation)?;
+    }
+    result
 }
 
 /// Async GitHub complete path used by `complete_run_service_job`.
@@ -78,7 +82,29 @@ pub async fn guarded_complete_async<T>(
     if started.rejected {
         anyhow::bail!("completion send-started rejected for job {}", job_id.0);
     }
-    send.await
+    let result = send.await;
+    if result.is_ok() {
+        record_remote_ack(journal, job_id, generation)?;
+    }
+    result
+}
+
+fn record_remote_ack(
+    journal: &mut Journal,
+    job_id: &JobId,
+    generation: Generation,
+) -> anyhow::Result<()> {
+    let acked = journal.apply(Event::RemoteAcked {
+        job_id: job_id.clone(),
+        generation,
+    })?;
+    if acked.rejected {
+        anyhow::bail!(
+            "remote completion acknowledged but journal transition rejected for job {}",
+            job_id.0
+        );
+    }
+    Ok(())
 }
 
 /// Return the generation that already owns `job_id`. Never creates ownership.
@@ -319,6 +345,10 @@ mod tests {
         )
         .unwrap();
         assert!(sent);
+        let state = journal.load_state().unwrap();
+        assert!(state.jobs.is_empty(), "remote ack must release the job");
+        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert!(journal.pending_outbox().unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 

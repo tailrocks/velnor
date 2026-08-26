@@ -2350,7 +2350,11 @@ fn validate_daemon_slot_index(slot_index: usize, slot_count: usize) -> Result<()
     Ok(())
 }
 
-fn daemon_slot_config_dir(config_base: &Path, slot_index: usize, slot_count: usize) -> PathBuf {
+pub(crate) fn daemon_slot_config_dir(
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> PathBuf {
     if slot_count == 1 {
         return config_base.to_path_buf();
     }
@@ -9732,6 +9736,7 @@ jobs:
             replace: false,
             pool_id: None,
             pool_name: None,
+            routing_policy_file: None,
             dry_run_registration: false,
             slots,
             once: false,

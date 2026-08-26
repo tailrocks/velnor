@@ -856,6 +856,8 @@ pub struct DockerLeaseGuard {
     accept_thread: Option<JoinHandle<()>>,
     #[cfg(unix)]
     conns: Arc<LeaseConnSet>,
+    #[cfg(unix)]
+    shutdown_wake: Option<std::os::unix::net::UnixStream>,
 }
 
 /// Live guest/host unix streams for one job lease. Drop aborts them so an
@@ -972,17 +974,15 @@ impl Drop for DockerLeaseGuard {
             // `ContainerStart`; that lock is what made Created BuildKit
             // `docker rm --force` hang until dockerd was SIGKILL'd.
             self.conns.abort();
-            // Wake `accept()` twice: the first connect can be handed to
-            // `handle_client` if it races the shutdown load; the second
-            // unblocks the loop so Drop can finish. EOF the wakeup so a
-            // raced `read_http_request` does not wait for headers.
-            for _ in 0..2 {
-                if let Ok(stream) = std::os::unix::net::UnixStream::connect(&self.listen_path) {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
-                }
-            }
         }
         if let Some(thread) = self.accept_thread.take() {
+            #[cfg(unix)]
+            if let Some(mut wake) = self.shutdown_wake.take() {
+                // Wake the poll set directly. Synthetic listener connects
+                // raced shutdown and could still leave the accept thread
+                // inside a blocking accept on busy hosts.
+                let _ = wake.write_all(&[1]);
+            }
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let _ = thread.join();
@@ -1019,8 +1019,10 @@ fn bind_unix_lease(
     let listener = UnixListener::bind(&listen_path)
         .with_context(|| format!("bind job Docker lease socket {}", listen_path.display()))?;
     listener
-        .set_nonblocking(false)
+        .set_nonblocking(true)
         .context("configure job Docker lease socket")?;
+    let (wake_reader, wake_writer) =
+        std::os::unix::net::UnixStream::pair().context("create job Docker lease shutdown wake")?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let conns = LeaseConnSet::new(Arc::clone(&shutdown));
     let conns_thread = Arc::clone(&conns);
@@ -1035,6 +1037,7 @@ fn bind_unix_lease(
                 daemon_id,
                 conns_thread,
                 listen_path_thread,
+                wake_reader,
             );
         })
         .context("start job Docker lease proxy thread")?;
@@ -1043,6 +1046,7 @@ fn bind_unix_lease(
         shutdown,
         accept_thread: Some(accept_thread),
         conns,
+        shutdown_wake: Some(wake_writer),
     })
 }
 
@@ -1054,11 +1058,65 @@ fn accept_loop(
     daemon_id: String,
     conns: Arc<LeaseConnSet>,
     listen_path: PathBuf,
+    wake_reader: std::os::unix::net::UnixStream,
 ) {
+    use std::os::fd::AsRawFd;
+
+    let mut poll_fds = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake_reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
     while !conns.is_shutdown() {
+        poll_fds[0].revents = 0;
+        poll_fds[1].revents = 0;
+        let polled = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, -1) };
+        if polled < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+        if poll_fds[1].revents != 0 {
+            break;
+        }
+        if poll_fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) == 0 {
+            continue;
+        }
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
-            Err(_) => continue,
+            // Transient accept failures (a client aborts between connect and
+            // accept, or the kernel refuses a peer) must not kill the lease
+            // proxy mid-job: a dropped accept loop hangs every later Docker
+            // call for this job. Keep the pre-poll behavior of tolerating
+            // them and only exit on errors that leave the listener unusable.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) {
+                    eprintln!(
+                        "Warning: job Docker lease accept retry after transient error: {error}"
+                    );
+                }
+                continue;
+            }
+            Err(_) => break,
         };
         if conns.is_shutdown() {
             break;
@@ -1975,6 +2033,30 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
             "lease Drop must shut down host Engine HTTP, not leave ContainerStart held after the job ends"
         );
         engine_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_stops_idle_accept_thread_promptly() {
+        let dir = unique_unix_dir("velnor-lease-drop-idle");
+        let listen_path = dir.join("lease.sock");
+        let guard = DockerLeaseGuard::bind_to(
+            listen_path.clone(),
+            dir.join("missing-engine.sock"),
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        drop(guard);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "idle lease accept thread shutdown took {:?}",
+            started.elapsed()
+        );
+        assert!(!listen_path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
