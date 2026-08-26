@@ -8,6 +8,7 @@ use super::*;
 
 #[test]
 fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
+    let preinst = include_str!("../../debian/preinst");
     let postinst = include_str!("../../debian/postinst");
     let prerm = include_str!("../../debian/prerm");
     let postrm = include_str!("../../debian/postrm");
@@ -20,6 +21,10 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
         "docker build",
         "docker pull",
     ] {
+        assert!(
+            !preinst.contains(forbidden),
+            "preinst must not restart or start operator units: {forbidden}"
+        );
         assert!(
             !postinst.contains(forbidden),
             "postinst must not contain operator-state/network mutation: {forbidden}"
@@ -37,6 +42,23 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
     assert!(prerm.contains("systemctl stop \"$unit\""));
     assert!(postrm.contains("'velnor-daemon@*.service'"));
     assert!(postrm.contains("systemctl disable \"$unit\""));
+}
+
+#[test]
+fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
+    let preinst = include_str!("../../debian/preinst");
+
+    assert!(preinst.contains("systemctl show --property=LoadState --value velnor-guardian.service"));
+    assert!(preinst.contains("not-found) return 0"));
+    assert!(preinst.contains(
+        "[ \"$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null || true)\" = inactive ]"
+    ));
+    assert!(preinst.contains(
+        "systemctl list-units --type=service --state=active --no-legend --plain 'velnor*.service'"
+    ));
+    assert!(preinst.contains(
+        "guardian_inactive || fail \"refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service.\""
+    ));
 }
 
 #[test]

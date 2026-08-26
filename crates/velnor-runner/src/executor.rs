@@ -4429,7 +4429,8 @@ fn native_cache_restore_main(
         state_values.insert("matchedKey".to_string(), matched_key.clone());
     }
 
-    let persistent_paths = cache_paths(&path)
+    let declared_paths = cache_paths(&path);
+    let persistent_paths = declared_paths
         .iter()
         .filter(|path| velnor_persistent_cache_path(&action_state, path))
         .count();
@@ -4444,9 +4445,14 @@ fn native_cache_restore_main(
                 "{ANSI_GREEN}Cache restored from key: {matched_key}{ANSI_RESET} ({restore_ms}ms)\n"
             ));
         }
-    } else if persistent_paths > 0 && persistent_paths == cache_paths(&path).len() {
+    } else if persistent_paths > 0 && persistent_paths == declared_paths.len() {
         stdout.push_str(&format!(
             "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm){ANSI_RESET}\n"
+        ));
+    } else if persistent_paths > 0 {
+        stdout.push_str(&format!(
+            "{ANSI_GREEN}{persistent_paths}/{} cache path(s) live on Velnor host-persistent storage (always warm){ANSI_RESET}; keyed lookup missed\n",
+            declared_paths.len()
         ));
     } else {
         stdout.push_str(&format!("{ANSI_YELLOW}Cache not found for input keys: "));
@@ -4456,8 +4462,13 @@ fn native_cache_restore_main(
     if !path.is_empty() {
         stdout.push_str(&format!("{ANSI_CYAN}Cache path: {path}{ANSI_RESET}\n"));
     }
-    let summary = if persistent_paths > 0 && persistent_paths == cache_paths(&path).len() {
+    let summary = if persistent_paths > 0 && persistent_paths == declared_paths.len() {
         "## Velnor cache report\n- Backend: actions/cache (native)\n- Store: host-persistent cache class\n- Result: host-persistent store — restore/save skipped\n".to_string()
+    } else if persistent_paths > 0 {
+        format!(
+            "## Velnor cache report\n- Backend: actions/cache (native)\n- Key: `{key}`\n- Result: keyed miss; {persistent_paths}/{} paths host-persistent\n- Restore: {restore_ms} ms\n",
+            declared_paths.len()
+        )
     } else {
         format!(
             "## Velnor cache report\n- Backend: actions/cache (native)\n- Key: `{key}`\n- Result: {}\n- Restore: {restore_ms} ms\n",
@@ -4795,28 +4806,46 @@ fn workspace_target_cache_path(path: &str) -> bool {
         || path.starts_with("target/")
         || path.starts_with("./target/")
         || path.starts_with("/__w/target/")
+        // The generated code-class declaration includes this compatibility
+        // glob. Velnor's target materializer owns the complete declared target
+        // tree, so it must not be copied through the keyed cache path.
+        || path == "**/target"
+}
+
+fn path_or_child(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn velnor_static_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
+    // These are the relative aliases emitted by the canonical fleet cache
+    // declarations. They resolve to Velnor's mounted Cargo/mise stores even
+    // though Actions treats them as workspace-relative paths on GitHub.
+    if path_or_child(path, ".cargo/registry")
+        || path_or_child(path, ".cargo/git")
+        || path_or_child(path, ".cache/mise")
+        || path_or_child(path, ".local/share/mise/installs")
+    {
+        return true;
+    }
     let home_relative = path
         .strip_prefix("~/")
         .or_else(|| path.strip_prefix("/github/home/"));
     if let Some(rest) = home_relative {
-        return rest.starts_with(".cargo/registry")
-            || rest.starts_with(".cargo/git")
+        return path_or_child(rest, ".cargo/registry")
+            || path_or_child(rest, ".cargo/git")
             // Workflows usually cache ~/.rustup on GitHub-hosted runners. Velnor
             // points RUSTUP_HOME at the image-baked /root/.rustup store instead,
             // so a ~/.rustup cache restore is pure hosted-runner compatibility
             // noise on the Velnor lane.
-            || rest.starts_with(".rustup");
+            || path_or_child(rest, ".rustup");
     }
-    path == "/opt/mise"
-        || path.starts_with("/opt/mise/")
-        || path == "/root/.rustup"
-        || path.starts_with("/root/.rustup/")
-        || path == "/var/cache/sccache"
-        || path.starts_with("/var/cache/sccache/")
+    path_or_child(path, "/opt/mise")
+        || path_or_child(path, "/root/.rustup")
+        || path_or_child(path, "/var/cache/sccache")
 }
 
 fn rust_cache_covered_by_persistent_storage(
@@ -11502,7 +11531,74 @@ esac
         assert!(workspace_target_cache_path("target"));
         assert!(workspace_target_cache_path("./target/debug"));
         assert!(workspace_target_cache_path("/__w/target/release"));
+        assert!(workspace_target_cache_path("**/target"));
         assert!(!workspace_target_cache_path("nested/target"));
+    }
+
+    #[test]
+    fn canonical_fleet_cache_aliases_are_host_persistent() {
+        for path in [
+            ".cache/mise",
+            ".cache/mise/downloads",
+            ".local/share/mise/installs",
+            ".local/share/mise/installs/rust/1.85.0",
+            ".cargo/registry",
+            ".cargo/registry/cache",
+            ".cargo/git",
+            ".cargo/git/db",
+        ] {
+            assert!(
+                velnor_static_persistent_cache_path(path),
+                "canonical cache alias was not recognized: {path}"
+            );
+        }
+        // Matching is component-aware: similarly named workspace paths must
+        // remain eligible for ordinary keyed cache storage.
+        for path in [".cargo/registry-old", ".cache/mise-old", ".cargo/config.toml"] {
+            assert!(
+                !velnor_static_persistent_cache_path(path),
+                "non-canonical path was incorrectly treated as persistent: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_cache_paths_report_host_persistent_subset() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("path".into(), ".cargo/git\n.gradle/caches\n".into()),
+                    ("key".into(), "dependencies-Linux-X64-lock".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert!(results[0]
+            .stdout
+            .contains("1/2 cache path(s) live on Velnor host-persistent storage"));
+        assert!(!results[0].stdout.contains("Cache not found for input keys"));
+        assert!(results[0]
+            .state
+            .summary
+            .contains("keyed miss; 1/2 paths host-persistent"));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

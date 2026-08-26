@@ -19,17 +19,31 @@ fail() {
   exit 1
 }
 
-daemons_drained() {
-  # No velnor-daemon unit (base or template instance) may be active.
-  if systemctl is-active --quiet velnor-daemon.service 2>/dev/null; then
-    return 1
-  fi
-  for unit in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}'); do
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then
-      return 1
-    fi
-  done
-  return 0
+guardian_inactive() {
+  # A package older than the guardian may legitimately have no loaded unit.
+  # Any other missing/error/unknown state fails closed rather than allowing an
+  # unobserved old guardian process to survive package replacement.
+  load_state=$(systemctl show --property=LoadState --value velnor-guardian.service 2>/dev/null || true)
+  case "$load_state" in
+    not-found) return 0 ;;
+    loaded|masked|stub|indirect|generated|transient) ;;
+    *) return 1 ;;
+  esac
+  [ "$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null || true)" = inactive ]
+}
+
+all_velnor_units_drained() {
+  # Every packaged service executes a Velnor binary, including the v2
+  # controller/slot/job processes and the oneshot doctor. Checking only daemon
+  # units leaves another old process alive across /usr/bin replacement.
+  active_units_raw=$(systemctl list-units --type=service --state=active --no-legend --plain 'velnor*.service' 2>/dev/null) || return 1
+  active_units=$(printf '%s\n' "$active_units_raw" | awk '{print $1}')
+  [ -z "$active_units" ]
+}
+
+guardian_inactive() {
+  # Require an explicit inactive state. Empty/error/unknown output fails closed.
+  [ "$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null)" = inactive ]
 }
 
 rollback_tuple_present() {
@@ -39,7 +53,8 @@ rollback_tuple_present() {
 case "$1" in
   upgrade)
     if [ -d /run/systemd/system ]; then
-      daemons_drained || fail "refusing upgrade: velnor daemon(s) still running. Drain first: systemctl stop velnor-daemon.service (+ any velnor-daemon@<name>)."
+      all_velnor_units_drained || fail "refusing upgrade: active Velnor service unit(s) remain (${active_units}). Stop the exact units first."
+      guardian_inactive || fail "refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service."
     fi
     rollback_tuple_present || fail "refusing upgrade: no exact prior rollback tuple ($ACTIVE_DIR/{record,deployed}.json) and no $LEGACY_MARKER bootstrap. Stage one before upgrading."
     ;;
