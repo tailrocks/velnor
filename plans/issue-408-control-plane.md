@@ -188,6 +188,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   same-cycle duplicate emits no second action or budget increment.
 - Concurrent wiremock fault test passes: a 300 ms/404 broker poll for one session
   does not block a healthy sibling session’s 204 poll.
+- Final tranche validation: `cargo nextest run --workspace` passed 1,397/1,397;
+  strict workspace Clippy, formatting, and diff checks passed.
 - Readiness reconciliation: journal amplification, idle waiter removal,
   coordinated bounded recovery, and the 15-minute idle budget are now checked;
   production Sentry/fixture/APT gates and deeper active-job fault proofs remain
