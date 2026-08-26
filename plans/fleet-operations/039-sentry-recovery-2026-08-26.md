@@ -127,3 +127,26 @@ Remaining gate: commit/push this package-path fix through the signed release
 workflow, verify signed APT publication and exact candidate on Sentry, then
 install via the documented locked apt transaction. Only after that may the
 Tailrocks policy plan/audit/apply and fixture verification proceed.
+
+## Iteration 4 — PR gate evidence (2026-08-26)
+
+The package fix was committed as `e199a78` with DCO signoff and pushed through
+PR #407 because direct `main` push is prohibited by the repository ruleset.
+At 16:02 UTC, the local commit passed the full `mise run check` gate.
+
+Verification run `32987231818` was dispatched with `lanes=github` after all
+older CI verification runs were force-cancelled and confirmed absent. It ran
+on GitHub-hosted infrastructure and completed `success` at 16:16 UTC,
+including `ci-required=success`, `tailrocks / contract=success`, and the
+GitHub lane. Its check suite is not associated with PR #407 because it was a
+`workflow_dispatch` run.
+
+The automatic PR run `32987349382` selected `pull_request -> velnor` from the
+generated `.github/workflows/ci.yml` lane expression. That violates the
+marked public-unmerged trust route while lower-trust Velnor isolation is not
+proven, so it was force-cancelled before execution. Its `ci-required` could
+not be used. The canonical workflow source must provide the safe PR route;
+this repository's generated consumer file must not be edited as a local fork.
+
+No signed release tag, APT publication, Sentry install, GitHub policy apply,
+runner deletion, fixture smoke, or ChainArgos/jackin action has occurred.
