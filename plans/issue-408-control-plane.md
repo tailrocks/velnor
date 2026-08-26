@@ -287,6 +287,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   The builder now removes volatile apt/log/run/temp state and machine identity
   before image population. Candidate advances to `0.1.224` because
   `v0.1.223` is immutable.
+- Release run `33020743790` passed both snapshot-backed guest jobs and GHCR,
+  but package jobs still produced different rootfs bytes
+  (`x86_64=c8c86588cd49e087f1596e725e3246a349aba5e79e89bb2f640321eb36698827`,
+  `aarch64=45b868f628b3a1725d8f38df59ddaf07c047014d73511943a149202269cb373f`).
+  Explicit ext4 filesystem time `-T 0` is now supplied to `mke2fs`; candidate
+  advances to `0.1.225` because `v0.1.224` is immutable.
 
 ## Non-goals
 

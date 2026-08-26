@@ -609,6 +609,8 @@ fn build_rootfs(
             "mke2fs".into(),
             "-t".into(),
             "ext4".into(),
+            "-T".into(),
+            "0".into(),
             "-U".into(),
             "00000000-0000-0000-0000-000000000001".into(),
             "-L".into(),
