@@ -25,6 +25,9 @@ pub struct GuestJobPlan {
     pub outputs: Vec<GuestOutput>,
     pub env: Vec<GuestEnvVar>,
     pub workspace: String,
+    /// GitHub expression context needed for runtime step resolution. Secrets
+    /// are already admitted job inputs and remain inside the isolated guest.
+    pub context_data: Vec<(String, serde_json::Value)>,
     pub cache: Vec<GuestCacheOp>,
     pub artifacts: Vec<GuestArtifactOp>,
     pub annotations: Vec<String>,
@@ -94,6 +97,15 @@ pub struct GuestStep {
     /// Step `working-directory`. Applied on `docker exec -w`.
     #[serde(default)]
     pub working_directory: String,
+    /// Runtime `if:` expression. Evaluated against prior guest step state.
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// GitHub `continue-on-error` behavior.
+    #[serde(default)]
+    pub continue_on_error: bool,
+    /// Per-step timeout in milliseconds. `None` uses the runner default.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Declared job output name and admitted value/expression.
@@ -138,6 +150,7 @@ impl GuestJobPlan {
             "outputs",
             "env",
             "workspace",
+            "context_data",
             "cache",
             "artifacts",
             "annotations",
@@ -201,6 +214,9 @@ mod tests {
                 inputs: Vec::new(),
                 env: Vec::new(),
                 working_directory: String::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_ms: None,
             }],
             timeout_ms: 1000,
             cancel_requested: false,
@@ -216,6 +232,7 @@ mod tests {
                 value: "true".into(),
             }],
             workspace: "/__w".into(),
+            context_data: Vec::new(),
             cache: vec![GuestCacheOp {
                 digest: "abc".into(),
                 bytes: Vec::new(),
@@ -254,6 +271,7 @@ mod tests {
             "outputs": [],
             "env": [],
             "workspace": "/__w",
+            "context_data": [],
             "cache": [],
             "artifacts": [],
             "annotations": [],

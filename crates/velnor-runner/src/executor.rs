@@ -833,7 +833,7 @@ impl ExecutableStep {
         }
     }
 
-    fn condition(&self) -> Option<&str> {
+    pub(crate) fn condition(&self) -> Option<&str> {
         match self {
             ExecutableStep::CompositeStart { condition, .. } => condition.as_deref(),
             ExecutableStep::CompositeEnd { .. } => None,
@@ -846,7 +846,7 @@ impl ExecutableStep {
         }
     }
 
-    fn continue_on_error(&self) -> bool {
+    pub(crate) fn continue_on_error(&self) -> bool {
         match self {
             ExecutableStep::CompositeStart { .. } => false,
             ExecutableStep::CompositeEnd { .. } => false,
@@ -8210,7 +8210,7 @@ fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
 }
 
 #[derive(Debug, Default)]
-struct JobExecutionState {
+pub(crate) struct JobExecutionState {
     env: BTreeMap<String, String>,
     /// Workflow-level env (display: first lines of each `env:` block).
     workflow_env: Vec<(String, String)>,
@@ -8262,7 +8262,10 @@ impl JobExecutionState {
         Self::new_with_context(base_env, &[])
     }
 
-    fn new_with_context(base_env: &[(String, String)], context_data: &[(String, Value)]) -> Self {
+    pub(crate) fn new_with_context(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+    ) -> Self {
         Self::new_internal(base_env, context_data, None, None)
     }
 
@@ -8312,7 +8315,7 @@ impl JobExecutionState {
         state
     }
 
-    fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
+    pub(crate) fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
         let mut env: Vec<_> = self
             .env
             .iter()
@@ -8322,13 +8325,17 @@ impl JobExecutionState {
         env
     }
 
+    pub(crate) fn path_prepend(&self) -> &[String] {
+        &self.path
+    }
+
     fn secret_masks(&self, initial_masks: &[String]) -> Vec<String> {
         let mut masks = initial_masks.to_vec();
         masks.extend(self.masks.iter().cloned());
         masks
     }
 
-    fn with_step_action(&self, step_id: &str) -> Self {
+    pub(crate) fn with_step_action(&self, step_id: &str) -> Self {
         let mut state = Self {
             env: self.env.clone(),
             workflow_env: self.workflow_env.clone(),
@@ -8404,7 +8411,7 @@ impl JobExecutionState {
         }
     }
 
-    fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
+    pub(crate) fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
         let outcome = if result.skipped {
             StepOutcome::Skipped
         } else if result.exit_code == 0 {
@@ -8463,7 +8470,7 @@ impl JobExecutionState {
             .collect()
     }
 
-    fn resolve_script_step(&self, step: &ScriptStep) -> ScriptStep {
+    pub(crate) fn resolve_script_step(&self, step: &ScriptStep) -> ScriptStep {
         ScriptStep {
             id: step.id.clone(),
             display_name: step.display_name.clone(),
@@ -8502,7 +8509,7 @@ impl JobExecutionState {
         self.resolve_env(&ordered)
     }
 
-    fn resolve_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
+    pub(crate) fn resolve_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
         env.iter()
             .map(|(name, value)| (name.clone(), self.resolve_expressions(value)))
             .collect()
@@ -8521,7 +8528,7 @@ impl JobExecutionState {
             .collect()
     }
 
-    fn resolve_expressions(&self, value: &str) -> String {
+    pub(crate) fn resolve_expressions(&self, value: &str) -> String {
         let mut rendered = String::with_capacity(value.len());
         let mut rest = value;
         while let Some(start) = rest.find("${{") {
@@ -8754,7 +8761,7 @@ impl JobExecutionState {
         }
     }
 
-    fn evaluate_condition(&self, condition: Option<&str>) -> bool {
+    pub(crate) fn evaluate_condition(&self, condition: Option<&str>) -> bool {
         let Some(condition) = condition
             .map(str::trim)
             .filter(|condition| !condition.is_empty())

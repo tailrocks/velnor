@@ -32,6 +32,9 @@ pub struct ValidatedStep {
     pub inputs: Vec<(String, String)>,
     pub env: Vec<(String, String)>,
     pub working_directory: String,
+    pub condition: Option<String>,
+    pub continue_on_error: bool,
+    pub timeout_ms: Option<u64>,
 }
 
 /// Admitted service container. Alias/ports stay GitHub-visible; no host socket.
@@ -59,6 +62,7 @@ pub struct ValidatedPlan {
     pub outputs: Vec<(String, String)>,
     pub env: Vec<(String, String)>,
     pub workspace: String,
+    pub context_data: Vec<(String, serde_json::Value)>,
     pub cache: Vec<String>,
     pub artifacts: Vec<(String, String)>,
     pub annotations: Vec<String>,
@@ -97,6 +101,9 @@ impl ValidatedPlan {
                     inputs: guest_env(&step.inputs),
                     env: guest_env(&step.env),
                     working_directory: step.working_directory.clone(),
+                    condition: step.condition.clone(),
+                    continue_on_error: step.continue_on_error,
+                    timeout_ms: step.timeout_ms,
                 })
                 .collect(),
             timeout_ms: self.timeout_ms,
@@ -114,10 +121,10 @@ impl ValidatedPlan {
                 .collect(),
             env: guest_env(&self.env),
             workspace: self.workspace.clone(),
+            context_data: self.context_data.clone(),
             cache: self
                 .cache
                 .iter()
-                .filter(|digest| digest.starts_with("sha256:") || digest.len() == 64)
                 .map(|digest| velnor_model::GuestCacheOp {
                     digest: digest.clone(),
                     bytes: Vec::new(),
@@ -152,6 +159,9 @@ impl ValidatedPlan {
                 inputs: Vec::new(),
                 env: Vec::new(),
                 working_directory: String::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_ms: None,
             }],
             job_container_image: "velnor/job-ubuntu:26.04".into(),
             services: vec![ValidatedService {
@@ -180,6 +190,7 @@ impl ValidatedPlan {
             summary: String::new(),
             buildx: false,
             testcontainers: false,
+            context_data: Vec::new(),
         }
     }
 
@@ -199,7 +210,7 @@ impl ValidatedPlan {
             timeout_ms: plan_timeout_ms(
                 plan.steps
                     .iter()
-                    .filter_map(crate::executor::ExecutableStep::timeout_minutes),
+                    .map(crate::executor::ExecutableStep::timeout_minutes),
             ),
             cancel_requested: false,
             fail: false,
@@ -217,6 +228,7 @@ impl ValidatedPlan {
                 .collect(),
             env: sanitized_pairs(&plan.execution.env),
             workspace: plan.execution.workspace_container.clone(),
+            context_data: plan.execution.context_data.clone(),
             cache: plan_cache(&plan.steps),
             artifacts: plan_artifacts(&plan.steps),
             annotations: Vec::new(),
@@ -248,6 +260,9 @@ impl ValidatedPlan {
                     inputs: Vec::new(),
                     env: step.env.clone(),
                     working_directory: step.working_directory_container.clone(),
+                    condition: step.condition.clone(),
+                    continue_on_error: step.continue_on_error,
+                    timeout_ms: step.timeout_minutes.map(minutes_to_ms),
                 })
                 .collect(),
             job_container_image: docker_image.into(),
@@ -262,9 +277,7 @@ impl ValidatedPlan {
                     env: Vec::new(),
                 })
                 .collect(),
-            timeout_ms: plan_timeout_ms(
-                script_steps.iter().filter_map(|step| step.timeout_minutes),
-            ),
+            timeout_ms: plan_timeout_ms(script_steps.iter().map(|step| step.timeout_minutes)),
             cancel_requested: false,
             fail: false,
             cache_digest: None,
@@ -283,21 +296,27 @@ impl ValidatedPlan {
             summary: String::new(),
             buildx: false,
             testcontainers: false,
+            context_data: Vec::new(),
         }
     }
 }
 
-/// Whole-plan timeout: the sum of the per-step declared timeouts. A job can
+/// Whole-plan timeout: the sum of each step's effective timeout. A job can
 /// never legitimately exceed the sum of its step bounds, so this is the safe
-/// host-side deadline; the previous `min` cut multi-step jobs short to the
-/// smallest single step. Steps without a declared timeout contribute the
-/// 60 s default; 0 stays reserved as the plan-level "already timed out"
-/// sentry and is never produced here.
-fn plan_timeout_ms(minutes: impl Iterator<Item = u64>) -> u64 {
-    let total: u64 = minutes
-        .map(|minutes| minutes.max(1).saturating_mul(60_000))
-        .sum();
+/// host-side deadline. Steps without a declaration use GitHub's 360-minute
+/// default; 0 stays reserved as the plan-level "already timed out" sentry.
+fn plan_timeout_ms(timeouts: impl Iterator<Item = Option<u64>>) -> u64 {
+    const DEFAULT_STEP_TIMEOUT_MINUTES: u64 = 360;
+    let total = timeouts.fold(0_u64, |total, timeout| {
+        total.saturating_add(minutes_to_ms(
+            timeout.unwrap_or(DEFAULT_STEP_TIMEOUT_MINUTES),
+        ))
+    });
     total.max(60_000)
+}
+
+fn minutes_to_ms(minutes: u64) -> u64 {
+    minutes.max(1).saturating_mul(60_000)
 }
 
 fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
@@ -311,6 +330,9 @@ fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
         inputs: executable_inputs(step),
         env: executable_env(step),
         working_directory: executable_working_directory(step),
+        condition: step.condition().map(ToOwned::to_owned),
+        continue_on_error: step.continue_on_error(),
+        timeout_ms: step.timeout_minutes().map(minutes_to_ms),
     }
 }
 

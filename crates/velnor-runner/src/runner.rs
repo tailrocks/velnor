@@ -5584,6 +5584,33 @@ fn reject_incomplete_microvm_plan(
             "complete GitHub context data",
         ));
     }
+    if let Some((index, name)) = job.steps.iter().enumerate().find_map(|(index, step)| {
+        let name = step.reference.as_ref()?.name.as_deref()?;
+        matches!(name, "actions/cache" | "swatinem/rust-cache").then_some((index, name.to_string()))
+    }) {
+        return Err(microvm_capability_error(
+            &format!("jobs.steps[{index}].reference.name"),
+            &name,
+            "no cache action until key-to-blob transport is admitted",
+        ));
+    }
+    if let Some((index, step)) = plan.steps.iter().enumerate().find_map(|(index, step)| {
+        let crate::executor::ExecutableStep::Native { invocation, .. } = step else {
+            return None;
+        };
+        matches!(
+            invocation.adapter,
+            crate::action::NativeActionAdapter::Cache
+                | crate::action::NativeActionAdapter::RustCache
+        )
+        .then_some((index, invocation))
+    }) {
+        return Err(microvm_capability_error(
+            &format!("jobs.steps[{index}].reference.name"),
+            &format!("{:?}", step.adapter),
+            "no cache action until key-to-blob transport is admitted",
+        ));
+    }
     Ok(())
 }
 
