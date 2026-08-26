@@ -1,6 +1,17 @@
 # Production-readiness unblock analysis
 
-Captured 2026-08-27 from live GitHub API and read-only Sentry inspection.
+Captured on `2026-08-27` from live GitHub API and read-only Sentry inspection.
+The exact UTC capture time is unavailable for this artifact. The exact UTC
+time known for the indexed run-state snapshot is recorded in the
+reconciliation index; the admission refresh has no recorded exact UTC time.
+
+Run state is indexed in
+.velnor-compare/2026-08-27-production-readiness-reconciliation.md. That file is
+the authoritative timestamped index for run IDs and unresolved objects; this
+document records the analysis and the single canonical admission finding.
+
+Older P0 inventory and cleanup artifacts referenced by this campaign are
+historical snapshots, not current host or run state.
 
 ## Finding: two separate conditions
 
@@ -15,16 +26,17 @@ time of capture, but does not establish the cause or a permanent state. The
 deeper cause remains unproven.
 
 Classification: observed GitHub Actions workflow admission/scheduling anomaly;
-external backend state is the leading hypothesis. The evidence does not
+external backend state is a plausible hypothesis. The evidence does not
 exclude Velnor lifecycle/routing contribution, but zero jobs/check-runs means
-there is no Velnor step, Docker, workflow expression, or Results Service
-failure to debug in those three runs.
+there is no evidence of step/Docker/expression/Results Service execution
+failure in those three runs.
 
-### B. Current CI lane queue
+## Canonical admission finding
 
 The exact 2026-08-27 local read-only refresh is:
 
-- Current PR head is `7489b6b07edfa75e589a2a35f108ffe3bd24e7f9`.
+- Current PR head for `tailrocks/velnor` is
+  `7489b6b07edfa75e589a2a35f108ffe3bd24e7f9`.
 - Run `33012336003` remains `queued`; check suite `89435047597`.
 - Job `98321609613` remains `queued`, has labels `[velnor-trusted]`,
   `runner_group_id=0`, an empty `runner_group_name`, and `runner_id=0`.
@@ -50,7 +62,16 @@ Classification: runner-group admission/readiness remains unproven. Do not label
 this a workflow failure or claim idle matching capacity until group membership,
 JIT group assignment, runner readiness, and Velnor queue matching are captured.
 
-### Read-only org group API capture
+The successful validation job `98321562308` proves validation success only; it
+does not prove runner admission or execution. The remaining blocker is group
+membership/admission/readiness. Do not add a label or introduce a fallback.
+Keep run `33012336003` pending as evidence of the unresolved admission state.
+The next safe step is read-only capture of group policy and membership, JIT
+request/group assignment, and per-slot registration, broker-renewal,
+watchdog, and daemon lifecycle state. Perform policy repair and re-admission
+only after drain safety for accepted jobs is proven.
+
+The read-only org group API capture used for this finding was:
 
 Exact commands used for org group `4` at capture time:
 
@@ -69,46 +90,48 @@ the group’s /runners endpoint returned total_count=0 and runners=[].
 The watchdog label-only concern is source evidence requiring a focused test; it
 is not proven live behavior unless separately documented by that test.
 
-### C. Runner-group admission remains unproven
+## Provenance and API scope
 
-The active ChainArgos queued workflow run `33012336003`, job `98321609613`,
-remains queued with labels `[velnor-trusted]`, `runner_group_id=0`, an empty
-`runner_group_name`, and `runner_id=0`. This is a label/group-admission
-mismatch or unresolved interpretation, not a proven request for the
-`velnor-trusted` runner group. The group policy snapshot above is exact,
-including group ID 4, six selected repositories, and the group’s /runners endpoint returned total_count=0 and runners=[].
-The successful validation job `98321562308` proves validation success only; it
-does not prove runner admission or execution.
-
-The remaining blocker is group membership/admission/readiness. Do not add a
-label or introduce a fallback. Keep run `33012336003` pending as evidence of
-the unresolved admission state. The next safe step is read-only capture of
-group policy and membership, JIT request/group assignment, and per-slot
-registration, broker-renewal, watchdog, and daemon lifecycle state. Perform
-policy repair and re-admission only after drain safety for accepted jobs is
-proven.
+- The reconciliation index snapshot has exact UTC provenance
+  `2026-08-26T22:51:21Z`.
+- The 2026-08-27 admission refresh and Sentry observations have only the date
+  `2026-08-27`; their exact UTC capture times are unavailable and are not
+  inferred here.
+- GitHub evidence was read-only and scoped to the attributed repositories,
+  workflow runs, jobs, check suites, and the ChainArgos organization runner
+  group policy, repository-selection, and runner-list endpoints. The group
+  endpoint scope was organization `ChainArgos`, runner group ID `4`.
+- No GitHub mutation, Sentry mutation, dispatch, rerun, or rerequest was
+  performed.
 
 ## Ranked unblock options
 
-1. **Perform the read-only admission/lifecycle capture.** Capture group policy
-   and membership, JIT request/group assignment, and daemon/per-slot lifecycle
-   state. Do not infer idle matching capacity from historical Sentry evidence or
-   the successful validation request. If policy repair or re-admission is needed,
-   defer it until drain safety for accepted jobs is proven.
+1. **Restore Sentry access through the external provider, console, or network
+   owner.** This is the sole prerequisite before read-only lifecycle/admission
+   capture. It advances the cleanup gate by restoring the only missing path for
+   authoritative per-slot, registration, health, and capacity evidence; it does
+   not authorize mutation.
 
-2. **GitHub backend cleanup for the three obsolete runs.** After GitHub-side
+2. **Perform the read-only admission/lifecycle capture after access is restored.**
+   Capture group policy and membership, JIT request/group assignment, and
+   daemon/per-slot lifecycle state. Do not infer idle matching capacity from
+   historical Sentry evidence or the successful validation request. If policy
+   repair or re-admission is needed, defer it until drain safety for accepted
+   jobs is proven.
+
+3. **GitHub backend cleanup for the three obsolete runs.** After GitHub-side
    remediation, retry normal cancel, then force-cancel, and verify each run and
    check suite is terminal. Provide GitHub Support the three run IDs, check
    suite IDs, obsolete SHA, HTTP 409 bodies, and zero-job responses. No
    repository-side change can safely manufacture a
    terminal result for these objects.
 
-3. **Policy repair/re-admission after drain safety.** Only after the read-only
+4. **Policy repair/re-admission after drain safety.** Only after the read-only
    capture and proof that accepted jobs are safe to drain may policy be repaired
    or capacity re-admitted. Do not restart, drain, delete registrations, or
    otherwise mutate Sentry before that proof.
 
-4. **Re-run the current PR only after the campaign gate clears.** No dispatch,
+5. **Re-run the current PR only after the campaign gate clears.** No dispatch,
    workflow rerun, or check-suite rerequest is permitted now. Only after all
    prior non-completed runs are terminal, stale validation-owned registrations
    are removed, and healthy matching capacity is proven may verification dispatch
@@ -130,11 +153,42 @@ proven.
 
 ## Resume gate
 
-Resume campaign verification only when each obsolete run and check suite is
-`status=completed` with a non-null conclusion, unless GitHub Support confirms
-server-side disappearance; no prior verification run remains non-completed;
-the targeted stale-registration query is empty; Sentry health reports
-`github_reachable=true`, `routing_valid=true`, `runner_group_valid=true`, and
-positive desired/actual/registered/executor-ready capacity; and at least one
-matching runner is online and idle. Then run the required cancel/runner-clean
-proof, dispatch exactly once, and monitor only the new run ID.
+After Sentry access is restored, execute this sequence exactly; there is no
+circular requirement:
+
+1. Individually re-query every prior unresolved/non-completed run and check
+   suite, then request normal cancellation and force-cancellation where
+   applicable. Record each object as terminal with its conclusion, or record
+   GitHub Support-confirmed disappearance. Unresolved IDs remain a hard gate.
+2. Remove only stale registrations owned by this validation. Do not delete
+   active or unowned registrations.
+3. Prove clean state, health, and capacity: no prior non-completed runs;
+   targeted validation-owned registrations are clean; Sentry reports
+   `github_reachable=true`, `routing_valid=true`, `runner_group_valid=true`,
+   positive desired/actual/registered/executor-ready capacity; and one matching
+   runner is online and idle.
+4. Dispatch exactly once and monitor only that new run ID.
+
+No dispatch, rerun, or rerequest is authorized before the sequence passes.
+
+## Current access — 2026-08-27
+
+The following are historical observations only:
+
+- `ssh -G sentry` resolved the `sentry` alias to port `22` with no proxy.
+- DNS resolved `sentry` to one record.
+- An SSH attempt remained running for approximately 28 seconds with no
+  diagnostics before it was interrupted.
+
+Local state cannot distinguish a route, TCP, authentication, or remote-shell
+failure. No machine classification is claimed from these observations. No
+further SSH probe is authorized from this campaign: remote shell startup,
+`~/.ssh/rc`, `ForceCommand`, and hooks may have side effects, and raw debug
+output may leak sensitive data.
+
+The next action is an external provider, console, or network-owner decision to
+restore or inspect Sentry access. After that decision, an operator-authorized,
+separately captured, sanitized diagnostic may be performed. No dispatch,
+restart, drain, policy mutation, or further mutation is authorized.
+
+Behavioral verifier artifact is static-only; no live probe was executed.
