@@ -222,6 +222,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   (1/1). The test uses real Unix child processes and SIGTERM, verifies the
   idle slot is reaped, verifies the short-lived job is allowed to finish, and
   verifies its `Exited` completion record; no production or fixture changes.
+- Latest full validation after drain proof: 1,400/1,400 workspace nextest tests,
+  strict Clippy, formatting, and diff checks passed.
 
 ## Non-goals
 
