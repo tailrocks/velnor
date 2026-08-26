@@ -170,6 +170,9 @@ Implemented in this refresh:
   repeated empty polls trigger a 15s backoff
 - run-service acquire 404/409/422 is recognized as non-retriable, logged, and
   skipped with a short backoff
+- transient run-service acquire failures retry five times with an upstream-sized
+  5–15 second spread; exhausted failures keep the broker session and JIT
+  registration alive before polling again
 - `ForceTokenRefresh` rebuilds broker/run-service clients with a freshly minted
   OAuth access token
 - runner refresh messages are recognized as self-update control messages and

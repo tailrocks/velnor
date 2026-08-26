@@ -39,6 +39,9 @@ const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
 const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
 const PRIVATE_CURL_STALE_AFTER: Duration = Duration::from_secs(600);
+const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
+const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
+const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
 
 /// Private curl inputs are removed even when an async caller is cancelled.
 /// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
@@ -1896,6 +1899,8 @@ impl BrokerClient {
 pub struct RunServiceClient {
     http: Client,
     bearer_token: String,
+    #[cfg(test)]
+    acquire_retry_delay_override: Option<Duration>,
 }
 
 pub enum AcquireJobOutcome {
@@ -1916,7 +1921,15 @@ impl RunServiceClient {
         Ok(Self {
             http,
             bearer_token: bearer_token.into(),
+            #[cfg(test)]
+            acquire_retry_delay_override: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_acquire_retry_delay_for_test(mut self, delay: Duration) -> Self {
+        self.acquire_retry_delay_override = Some(delay);
+        self
     }
 
     pub async fn acquire_job(
@@ -1933,22 +1946,69 @@ impl RunServiceClient {
             billing_owner_id,
         })
         .context("serialize acquire job request")?;
-        let (status, text) =
-            github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
-        let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        if is_non_retriable_acquire_status(status_code) {
-            return Ok(AcquireJobOutcome::Skipped {
-                status: status_code,
-                request_id: None,
-                body: text,
-            });
+        let mut attempt = 1;
+        loop {
+            let outcome = github_json_request(
+                "POST",
+                url.as_str(),
+                &self.bearer_token,
+                Some(body.clone()),
+                30,
+            )
+            .await;
+
+            let retry_error = match outcome {
+                Ok((status, text)) => {
+                    let status_code =
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    if is_non_retriable_acquire_status(status_code) {
+                        return Ok(AcquireJobOutcome::Skipped {
+                            status: status_code,
+                            request_id: None,
+                            body: text,
+                        });
+                    }
+                    if !(200..300).contains(&status) {
+                        Some(github_api_error("acquire run-service job", status, text))
+                    } else {
+                        match serde_json::from_str::<Value>(&text) {
+                            Ok(value) => return Ok(AcquireJobOutcome::Acquired(value)),
+                            Err(error) => Some(
+                                anyhow::Error::new(error)
+                                    .context("parse acquire run-service job response"),
+                            ),
+                        }
+                    }
+                }
+                Err(error) => Some(error.context("acquire run-service job request")),
+            };
+
+            let Some(error) = retry_error else {
+                unreachable!("successful acquire returns before retry handling");
+            };
+            if attempt >= RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS {
+                return Err(error);
+            }
+
+            let delay = self.acquire_retry_delay(attempt);
+            eprintln!(
+                "acquire run-service job attempt {attempt}/{RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS} failed ({error:#}); retrying in {}s",
+                delay.as_secs()
+            );
+            tokio::time::sleep(delay).await;
+            attempt += 1;
         }
-        if !(200..300).contains(&status) {
-            return Err(github_api_error("acquire run-service job", status, text));
+    }
+
+    fn acquire_retry_delay(&self, attempt: u32) -> Duration {
+        #[cfg(test)]
+        if let Some(delay) = self.acquire_retry_delay_override {
+            return delay;
         }
-        serde_json::from_str::<Value>(&text)
-            .map(AcquireJobOutcome::Acquired)
-            .context("parse acquire run-service job response")
+
+        let span = RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS - RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS;
+        let jitter = (std::process::id() as u64 + u64::from(attempt) * 7) % (span + 1);
+        Duration::from_secs(RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS + jitter)
     }
 
     pub async fn renew_job(
@@ -5459,6 +5519,51 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         ));
         assert!(!is_non_retriable_acquire_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn acquire_job_retries_transient_failure_before_parsing_job() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use wiremock::{matchers::method, Mock, MockServer, Request, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/run/jobs/123/acquirejob"))
+            .respond_with(move |_request: &Request| {
+                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(500).set_body_string("retry later")
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_string(r#"{"plan":{"planId":"plan-1"},"jobId":"job-1"}"#)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let outcome = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let AcquireJobOutcome::Acquired(job) = outcome else {
+            panic!("transient acquire failure must be retried");
+        };
+        assert_eq!(job["jobId"], "job-1");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
     #[test]

@@ -3570,7 +3570,7 @@ async fn handle_v2_message(
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
     let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
-    let job_value = run_service
+    let job_value = match run_service
         .acquire_job(
             run_service_url,
             &reference.runner_request_id,
@@ -3578,7 +3578,26 @@ async fn handle_v2_message(
             reference.billing_owner_id.as_deref(),
         )
         .instrument(pickup_span)
-        .await?;
+        .await
+    {
+        Ok(job_value) => job_value,
+        Err(error) => {
+            // Match actions/runner: after transient acquire retries are
+            // exhausted, keep the broker session and runner registration.
+            // The request may have committed before the failed response;
+            // recycling the JIT identity here amplifies GitHub outages and
+            // can strand the assigned job as runner-lost.
+            forensics.broker(&format!(
+                "acquire ERROR request={} session retained: {error:#}",
+                reference.runner_request_id
+            ));
+            eprintln!(
+                "Run-service acquire failed for request {}; retaining broker session and runner registration: {error:#}",
+                reference.runner_request_id
+            );
+            return Ok(V2MessageAction::None);
+        }
+    };
     let job_value = match job_value {
         AcquireJobOutcome::Acquired(value) => value,
         AcquireJobOutcome::Skipped {
@@ -12333,6 +12352,56 @@ jobs:
             message_id: 10,
             message_type: "JobCancellation".into(),
             body: serde_json::json!({ "jobId": "job-123" }).to_string(),
+            iv_base64: None,
+        };
+
+        let action = handle_v2_message(
+            &broker,
+            &run_service,
+            "session",
+            &stored,
+            Path::new("/config"),
+            &run_args(false, false, false),
+            true,
+            "velnor",
+            &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
+            &mut prewarm_trigger,
+            message,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(action, V2MessageAction::None);
+    }
+
+    #[tokio::test]
+    async fn transient_acquire_failure_keeps_broker_session_alive() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Actions outage"))
+            .expect(5)
+            .mount(&server)
+            .await;
+
+        let broker =
+            BrokerClient::new("https://broker.actions.githubusercontent.com/", "token").unwrap();
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let stored = stored_config();
+        let mut prewarm_trigger = None;
+        let message = TaskAgentMessage {
+            message_id: 11,
+            message_type: RUNNER_JOB_REQUEST.into(),
+            body: serde_json::json!({
+                "runnerRequestId": "request-1",
+                "shouldAcknowledge": false,
+                "runServiceUrl": format!("{}/run/jobs/123", server.uri())
+            })
+            .to_string(),
             iv_base64: None,
         };
 
