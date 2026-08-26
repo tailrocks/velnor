@@ -56,7 +56,7 @@ runs.
 
 ## P0 — Establish truth before changing production
 
-- [ ] Inventory all open Velnor PRs and all remote branches; record unique
+- [x] Inventory all open Velnor PRs and all remote branches; record unique
   commits relative to `main`.
 - [ ] Inventory recent failed, cancelled, stuck, and flaky runs for all three
   repositories, including repository, SHA, lane, job, step, run ID, symptom,
