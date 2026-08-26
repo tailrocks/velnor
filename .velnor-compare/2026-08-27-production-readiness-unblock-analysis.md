@@ -13,6 +13,23 @@ document records the analysis and the single canonical admission finding.
 Older P0 inventory and cleanup artifacts referenced by this campaign are
 historical snapshots, not current host or run state.
 
+## Dated read-only recheck — 2026-08-27
+
+Exact capture time unavailable. Runs `33010150644`, `32987670118`,
+`32962658148`, and `32940470688` are completed with cancelled conclusions and
+are no longer unresolved queue objects.
+
+Run `33012336003` and check suite `89435047597` returned API HTTP 404. Both
+remain unresolved absent GitHub Support confirmation of authoritative removal
+or terminal state. ChainArgos runs `32985134450`, `32984965998`, and
+`32984867843`, with suites `89353010038`, `89352428140`, and `89352110318`,
+remain queued with null/zero check-run state unchanged since
+`2026-08-26T15:22–15:26Z`.
+
+No fresh Sentry probe was performed in this recheck. Prior Sentry runner
+registration observations remain historical and cannot establish current
+registration, readiness, or capacity.
+
 ## Finding: two separate conditions
 
 ### A. Obsolete zero-job queue objects
@@ -37,7 +54,10 @@ The exact 2026-08-27 local read-only refresh is:
 
 - Current PR head for `tailrocks/velnor` is
   `7489b6b07edfa75e589a2a35f108ffe3bd24e7f9`.
-- Run `33012336003` remains `queued`; check suite `89435047597`.
+- Prior/indexed state recorded run `33012336003` as `queued`; the current
+  recheck returned API HTTP 404 for that run and check suite `89435047597`.
+  Current status is unknown and remains unresolved absent GitHub Support
+  confirmation of authoritative removal or terminal state.
 - Job `98321609613` remains `queued`, has labels `[velnor-trusted]`,
   `runner_group_id=0`, an empty `runner_group_name`, and `runner_id=0`.
   This is a label/group-admission mismatch or unresolved interpretation, not a
@@ -65,7 +85,9 @@ JIT group assignment, runner readiness, and Velnor queue matching are captured.
 The successful validation job `98321562308` proves validation success only; it
 does not prove runner admission or execution. The remaining blocker is group
 membership/admission/readiness. Do not add a label or introduce a fallback.
-Keep run `33012336003` pending as evidence of the unresolved admission state.
+Keep run `33012336003` unresolved as evidence of the unresolved admission
+state; its prior/indexed state was `queued`, while the current recheck is API
+HTTP 404 and remains unresolved absent GitHub Support confirmation.
 The next safe step is read-only capture of group policy and membership, JIT
 request/group assignment, and per-slot registration, broker-renewal,
 watchdog, and daemon lifecycle state. Perform policy repair and re-admission
@@ -101,8 +123,21 @@ is not proven live behavior unless separately documented by that test.
   workflow runs, jobs, check suites, and the ChainArgos organization runner
   group policy, repository-selection, and runner-list endpoints. The group
   endpoint scope was organization `ChainArgos`, runner group ID `4`.
-- No GitHub mutation, Sentry mutation, dispatch, rerun, or rerequest was
-  performed.
+- During the 2026-08-27 read-only recheck, no GitHub, Sentry, or SSH mutation
+  occurred; no dispatch, rerun, or rerequest occurred either. Prior
+  cleanup-attempt evidence records earlier cancellation requests and the
+  removal of eight stale validation-owned registrations; those historical
+  actions are not actions of this recheck and do not establish current state.
+
+## Safe next action
+
+Keep the no-dispatch and no-mutation gate in force. First obtain GitHub Support
+confirmation for the 404 Velnor run/suite and the three unchanged ChainArgos
+queue objects, while separately restoring Sentry access through the external
+provider, console, or network owner. After access is restored, perform only
+the read-only admission/lifecycle capture described below. Do not infer
+resolution from HTTP 404, historical Sentry registration, or the successful
+validation job.
 
 ## Ranked unblock options
 
