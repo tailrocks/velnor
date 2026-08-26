@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fmt,
+    path::PathBuf,
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -37,6 +38,77 @@ pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
 const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
+
+/// Private curl inputs are removed even when an async caller is cancelled.
+/// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
+/// running with secrets or mutate GitHub after its owning operation ended.
+#[derive(Default)]
+struct PrivateTempFiles {
+    paths: Vec<PathBuf>,
+}
+
+impl PrivateTempFiles {
+    fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = std::env::temp_dir().join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
+        self.paths.push(path.clone());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("create private curl file {}", path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("write private curl file {}", path.display()))?;
+        Ok(path)
+    }
+}
+
+impl Drop for PrivateTempFiles {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn run_private_curl(
+    prefix: &str,
+    config: &str,
+    body: Option<&[u8]>,
+    url: &str,
+    capture_headers: bool,
+) -> Result<(std::process::Output, Vec<u8>)> {
+    let mut files = PrivateTempFiles::default();
+    let config_path = files.write(prefix, "cfg", config.as_bytes())?;
+    let body_path = body
+        .map(|body| files.write(prefix, "body", body))
+        .transpose()?;
+    let headers_path = capture_headers
+        // Header output is not secret, but keep it mode-0600 and clean it via
+        // the same guard so cancellation cannot leave request metadata behind.
+        .then(|| files.write(prefix, "headers", &[]))
+        .transpose()?;
+
+    let mut command = tokio::process::Command::new("curl");
+    command.kill_on_drop(true).arg("--config").arg(&config_path);
+    if let Some(path) = &headers_path {
+        command.arg("--dump-header").arg(path);
+    }
+    if let Some(path) = &body_path {
+        command.arg("--data").arg(format!("@{}", path.display()));
+    }
+    let output = command.arg(url).output().await.context("run curl")?;
+    let headers = headers_path
+        .as_deref()
+        .map(std::fs::read)
+        .transpose()
+        .context("read curl response headers")?
+        .unwrap_or_default();
+    Ok((output, headers))
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
@@ -746,50 +818,18 @@ impl OAuthClient {
         let url = credentials.authorization_url.clone();
         let ua = RUNNER_USER_AGENT.to_string();
 
-        let output = tokio::task::spawn_blocking(move || {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let tmp = std::env::temp_dir();
-            let cfg_path = tmp.join(format!("velnor-oauth-{}.cfg", uuid::Uuid::new_v4()));
-            let body_path = tmp.join(format!("velnor-oauth-{}.body", uuid::Uuid::new_v4()));
-            let cfg = format!(
-                "header = \"User-Agent: {ua}\"\n\
-                 header = \"Accept: application/json\"\n\
-                 header = \"Content-Type: application/x-www-form-urlencoded\"\n\
-                 request = POST\n\
-                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-                 silent\n\
-                 write-out = \"\\n%{{http_code}}\"\n"
-            );
-            let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(p)?;
-                f.write_all(c)
-            };
-            write_0600(&cfg_path, cfg.as_bytes())?;
-            if let Err(e) = write_0600(&body_path, body.as_bytes()) {
-                let _ = std::fs::remove_file(&cfg_path);
-                return Err(e);
-            }
-            let out = std::process::Command::new("curl")
-                .arg("--config")
-                .arg(&cfg_path)
-                .arg("--data")
-                .arg(format!("@{}", body_path.display()))
-                .arg(&url)
-                .output();
-            let _ = std::fs::remove_file(&cfg_path);
-            let _ = std::fs::remove_file(&body_path);
-            out
-        })
-        .await
-        .context("spawn_blocking curl oauth")?
-        .context("run curl oauth")?;
+        let cfg = format!(
+            "header = \"User-Agent: {ua}\"\n\
+             header = \"Accept: application/json\"\n\
+             header = \"Content-Type: application/x-www-form-urlencoded\"\n\
+             request = POST\n\
+             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let (output, _) =
+            run_private_curl("velnor-oauth", &cfg, Some(body.as_bytes()), &url, false).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (text, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
@@ -925,65 +965,25 @@ impl RegistrationClient {
                 );
                 tokio::time::sleep(backoff).await;
             }
-            let url2 = url.clone();
-            let body2 = body.clone();
-            let pat2 = pat.clone();
-            let ua2 = ua.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                use std::os::unix::fs::OpenOptionsExt;
-                let tmp = std::env::temp_dir();
-                let cfg_path = tmp.join(format!("velnor-jit-{}.cfg", uuid::Uuid::new_v4()));
-                let body_path = tmp.join(format!("velnor-jit-{}.body", uuid::Uuid::new_v4()));
-                let headers_path = tmp.join(format!("velnor-jit-{}.headers", uuid::Uuid::new_v4()));
-                let cfg = format!(
-                    "header = \"User-Agent: {ua2}\"\n\
-                     header = \"Authorization: Bearer {pat2}\"\n\
-                     header = \"Accept: application/vnd.github+json\"\n\
-                     header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-                     header = \"Content-Type: application/json\"\n\
-                     request = POST\n\
-                     connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-                     max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-                     location\n\
-                     silent\n\
-                     write-out = \"\\n%{{http_code}}\"\n"
-                );
-                let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
-                    use std::io::Write;
-                    let mut f = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .mode(0o600)
-                        .open(p)?;
-                    f.write_all(c)
-                };
-                write_0600(&cfg_path, cfg.as_bytes())?;
-                if let Err(e) = write_0600(&body_path, body2.as_bytes()) {
-                    let _ = std::fs::remove_file(&cfg_path);
-                    return Err(e);
-                }
-                let out = std::process::Command::new("curl")
-                    .arg("--config")
-                    .arg(&cfg_path)
-                    .arg("--dump-header")
-                    .arg(&headers_path)
-                    .arg("--data")
-                    .arg(format!("@{}", body_path.display()))
-                    .arg(&url2)
-                    .output();
-                let _ = std::fs::remove_file(&cfg_path);
-                let _ = std::fs::remove_file(&body_path);
-                let headers = std::fs::read(&headers_path).unwrap_or_default();
-                let _ = std::fs::remove_file(&headers_path);
-                out.map(|output| (output, headers))
-            })
-            .await
-            .context("spawn_blocking curl")?;
+            let cfg = format!(
+                "header = \"User-Agent: {ua}\"\n\
+                 header = \"Authorization: Bearer {pat}\"\n\
+                 header = \"Accept: application/vnd.github+json\"\n\
+                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+                 header = \"Content-Type: application/json\"\n\
+                 request = POST\n\
+                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
+                 location\n\
+                 silent\n\
+                 write-out = \"\\n%{{http_code}}\"\n"
+            );
+            let result =
+                run_private_curl("velnor-jit", &cfg, Some(body.as_bytes()), &url, true).await;
 
             match result {
                 Err(e) => {
-                    last_err = anyhow::Error::from(e).context("send JIT runner config request");
+                    last_err = e.context("send JIT runner config request");
                 }
                 Ok((output, headers)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1323,49 +1323,18 @@ impl RegistrationClient {
         runner_id: i64,
     ) -> Result<()> {
         let url = scope.runner_url(runner_id)?.to_string();
-        let pat = pat.to_string();
-        let ua = RUNNER_USER_AGENT.to_string();
-
-        let (output, headers) = tokio::task::spawn_blocking(move || {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let tmp = std::env::temp_dir();
-            let cfg_path = tmp.join(format!("velnor-del-{}.cfg", uuid::Uuid::new_v4()));
-            let headers_path = tmp.join(format!("velnor-del-{}.headers", uuid::Uuid::new_v4()));
-            let cfg = format!(
-                "header = \"User-Agent: {ua}\"\n\
-                 header = \"Authorization: Bearer {pat}\"\n\
-                 header = \"Accept: application/vnd.github+json\"\n\
-                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-                 request = DELETE\n\
-                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-                 silent\n\
-                 write-out = \"\\n%{{http_code}}\"\n"
-            );
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&cfg_path)?;
-            f.write_all(cfg.as_bytes())?;
-            drop(f);
-            let out = std::process::Command::new("curl")
-                .arg("--config")
-                .arg(&cfg_path)
-                .arg("--dump-header")
-                .arg(&headers_path)
-                .arg(&url)
-                .output();
-            let _ = std::fs::remove_file(&cfg_path);
-            let headers = std::fs::read(&headers_path).unwrap_or_default();
-            let _ = std::fs::remove_file(&headers_path);
-            out.map(|output| (output, headers))
-        })
-        .await
-        .context("spawn_blocking curl delete")?
-        .context("run curl delete")?;
+        let cfg = format!(
+            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+             header = \"Authorization: Bearer {pat}\"\n\
+             header = \"Accept: application/vnd.github+json\"\n\
+             header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+             request = DELETE\n\
+             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let (output, headers) = run_private_curl("velnor-del", &cfg, None, &url, true).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
@@ -1568,92 +1537,34 @@ async fn curl_json_request_impl(
     max_time_secs: u64,
     capture_headers: bool,
 ) -> Result<(u16, String, Option<GitHubRetryHint>)> {
-    let url = url.to_string();
-    let token = bearer_token.to_string();
-    let ua = RUNNER_USER_AGENT.to_string();
-    let method = method.to_string();
-    let max_time = max_time_secs.to_string();
-    let output = tokio::task::spawn_blocking(move || {
-        // Write secrets to a mode-0600 curl config file so they stay off argv.
-        let tmp_dir = std::env::temp_dir();
-        let cfg_path = tmp_dir.join(format!("velnor-curl-{}.cfg", uuid::Uuid::new_v4()));
-        let body_path = tmp_dir.join(format!("velnor-curl-{}.body", uuid::Uuid::new_v4()));
-        let headers_path = tmp_dir.join(format!("velnor-curl-{}.hdrs", uuid::Uuid::new_v4()));
+    let cfg = format!(
+        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+         header = \"Authorization: Bearer {bearer_token}\"\n\
+         header = \"Accept: application/json\"\n\
+         max-time = {max_time_secs}\n\
+         connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+         request = {method}\n\
+         location\n\
+         silent\n\
+         write-out = \"\\n%{{http_code}}\"\n"
+    );
+    let (output, headers) = run_private_curl(
+        "velnor-curl",
+        &cfg,
+        json_body.as_deref().map(str::as_bytes),
+        url,
+        capture_headers,
+    )
+    .await?;
 
-        let mut cfg = format!(
-            "header = \"User-Agent: {ua}\"\n\
-             header = \"Authorization: Bearer {token}\"\n\
-             header = \"Accept: application/json\"\n\
-             max-time = {max_time}\n\
-             request = {method}\n\
-             location\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        if capture_headers {
-            // Raw response headers land in a private temp file; only the
-            // rate-limit fields are ever parsed out of it.
-            cfg.push_str(&format!("dump-header = \"{}\"\n", headers_path.display()));
-        }
-        let has_body = json_body.is_some();
-        if has_body {
-            cfg.push_str("header = \"Content-Type: application/json\"\n");
-        }
-
-        // Write config file with restricted permissions.
-        use std::os::unix::fs::OpenOptionsExt;
-        let write_secret = |path: &std::path::Path, content: &[u8]| -> std::io::Result<()> {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)?;
-            use std::io::Write;
-            f.write_all(content)
-        };
-
-        write_secret(&cfg_path, cfg.as_bytes())?;
-
-        if has_body {
-            if let Some(body) = json_body {
-                if let Err(e) = write_secret(&body_path, body.as_bytes()) {
-                    let _ = std::fs::remove_file(&cfg_path);
-                    return Err(e);
-                }
-            }
-        }
-
-        let mut cmd = std::process::Command::new("curl");
-        cmd.arg("--config").arg(&cfg_path);
-        if has_body {
-            cmd.arg("--data").arg(format!("@{}", body_path.display()));
-        }
-        cmd.arg(&url);
-        let result = cmd.output();
-
-        let _ = std::fs::remove_file(&cfg_path);
-        if has_body {
-            let _ = std::fs::remove_file(&body_path);
-        }
-        let headers = if capture_headers {
-            let bytes = std::fs::read(&headers_path).unwrap_or_default();
-            let hint = parse_github_retry_headers(&bytes);
-            let _ = std::fs::remove_file(&headers_path);
-            Some(hint)
-        } else {
-            None
-        };
-        result.map(|output| (output, headers))
-    })
-    .await
-    .context("spawn_blocking curl")?
-    .context("run curl")?;
-
-    let stdout = String::from_utf8_lossy(&output.0.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
     let status: u16 = status_str.trim().parse().unwrap_or(0);
-    Ok((status, body.to_string(), output.1))
+    Ok((
+        status,
+        body.to_string(),
+        capture_headers.then(|| parse_github_retry_headers(&headers)),
+    ))
 }
 
 pub fn decode_jit_config(encoded_jit_config: &str) -> Result<DecodedJitConfig> {
