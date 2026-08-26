@@ -333,6 +333,9 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
+            for (_, manager) in broker_managers.drain() {
+                manager.1.abort();
+            }
             drain_children(&args.state_dir, &mut slots, &mut jobs).await?;
             return Ok(());
         }
