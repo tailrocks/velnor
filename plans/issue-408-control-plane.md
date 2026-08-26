@@ -252,6 +252,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `microvm/manifest.json` was updated; candidate version advanced to `0.1.218`
   because `v0.1.217` is immutable. Focused guest-image tests, strict Clippy,
   formatting, and diff checks pass; release rerun pending.
+- Release review found the checked-in guest-agent hashes were also stale after
+  the microVM guest-agent source changes. The exact bytes in the published
+  `v0.1.215` package match the current unchanged guest-agent source; those
+  hashes were pinned, and the candidate advanced to `0.1.219` because
+  `v0.1.218` was canceled before publication. The rootfs source still uses
+  moving `noble` package indexes; reproducible rebuild proof remains open.
 
 ## Non-goals
 
