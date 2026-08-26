@@ -186,8 +186,8 @@ impl FirecrackerBackend {
             )
             .into());
         }
-        if world.host_fs.exists(world.host_docker_socket) {
-            // Presence is allowed on the host; the backend must not use it.
+        if super::isolation::is_host_docker_control_socket(world.host_docker_socket) {
+            return Err(ExecutionError::HostDockerForbidden);
         }
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
         verify_microvm_artifacts(&set, world.host_fs)?;

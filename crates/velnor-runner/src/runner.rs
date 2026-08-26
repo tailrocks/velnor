@@ -1157,20 +1157,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         let backend = crate::execution::load_execution_file(&config_base, None)
             .ok()
             .map(|file| file.backend());
-        if backend != Some(velnor_model::ExecutionBackendKind::MicroVm) {
-            prune_stale_velnor_docker_resources(&daemon_id);
-            // Reclaim job-id-labelled objects (precreated job environments and
-            // their guest siblings) orphaned by the previous drain/restart. Runs
-            // before any slot accepts a job, so nothing this boot created can be
-            // matched; scoped to THIS daemon id so co-located daemons are
-            // untouched. Best-effort — never blocks startup (velnor#311).
-            if let Err(error) = crate::docker_lease::reclaim_daemon_orphan_jobs(
-                &daemon_id,
-                crate::docker_lease::run_host_docker,
-            ) {
-                eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
-            }
-        }
+        maybe_startup_host_docker_reclaim(backend, &daemon_id);
         if let Some(sink) = crate::ops::global() {
             sink.emit(
                 velnor_model::EventReason::GcCompleted,
@@ -2288,6 +2275,46 @@ fn validate_daemon_slots(slots: usize) -> Result<usize> {
     Ok(slots)
 }
 
+fn maybe_startup_host_docker_reclaim(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    daemon_id: &str,
+) {
+    maybe_startup_host_docker_reclaim_with(
+        backend,
+        daemon_id,
+        prune_stale_velnor_docker_resources,
+        |id| {
+            crate::docker_lease::reclaim_daemon_orphan_jobs(
+                id,
+                crate::docker_lease::run_host_docker,
+            )
+        },
+    );
+}
+
+fn maybe_startup_host_docker_reclaim_with(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    daemon_id: &str,
+    mut prune: impl FnMut(&str),
+    mut reclaim: impl FnMut(&str) -> anyhow::Result<()>,
+) {
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("startup host Docker reclaim skipped: {reason}");
+        return;
+    }
+    prune(daemon_id);
+    // Reclaim job-id-labelled objects (precreated job environments and
+    // their guest siblings) orphaned by the previous drain/restart. Runs
+    // before any slot accepts a job, so nothing this boot created can be
+    // matched; scoped to THIS daemon id so co-located daemons are
+    // untouched. Best-effort — never blocks startup (velnor#311).
+    if let Err(error) = reclaim(daemon_id) {
+        eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
+    }
+}
+
 /// Remove leftover Velnor Docker resources from previous (possibly crashed)
 /// daemon runs. A daemon killed mid-job cannot run its per-job cleanup, so the
 /// job network + container leak; enough leaked `velnor-net-*` networks exhaust
@@ -2527,7 +2554,7 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> Result<Preflight
         docker_host_work_dir: args.docker_host_work_dir.clone(),
         docker_image: args.docker_image.clone(),
         require_docker_socket: execution_backend.uses_host_docker_socket(),
-        require_buildx: true,
+        require_buildx: execution_backend.uses_host_docker_socket(),
         execution_backend: Some(execution_backend),
         config_dir: Some(config_dir.to_path_buf()),
     })
@@ -5358,7 +5385,7 @@ fn execute_microvm_script_job(
     let mut fs = crate::execution::RealHostFs;
     let mut runner = crate::executor::ProcessCommandRunner;
     let kvm = std::path::PathBuf::from("/dev/kvm");
-    let docker_sock = std::path::PathBuf::from("/var/run/docker.sock");
+    let docker_sock = std::path::PathBuf::from(crate::execution::MICROVM_NO_HOST_DOCKER_SOCKET);
     let execution_file = velnor_model::ExecutionFile {
         execution: velnor_model::ExecutionSection {
             backend: velnor_model::ExecutionBackendKind::MicroVm,
@@ -9125,6 +9152,27 @@ fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
 /// Fleet health probe: list this daemon's registered runners on GitHub and
 /// fail (non-zero exit) when none are healthy, so a systemd timer surfaces a
 /// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
+fn doctor_host_docker_reclaim(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    mut docker: impl FnMut(&[String]) -> Result<String>,
+) {
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("doctor host Docker reclaim skipped: {reason}");
+        return;
+    }
+    if let Err(error) = crate::docker_lease::reclaim_orphan_jobs(&mut docker) {
+        eprintln!("Warning: leftover job Docker reclaim failed: {error:#}");
+    }
+    if let Err(error) = crate::docker_lease::reclaim_unlabeled_testcontainers(&mut docker) {
+        eprintln!("Warning: leftover guest Docker reclaim failed: {error:#}");
+    }
+    if let Err(error) = crate::docker_lease::reclaim_unlabeled_job_image_siblings(&mut docker) {
+        eprintln!("Warning: leftover job-image Docker reclaim failed: {error:#}");
+    }
+}
+
 pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let Some(pat) = args.pat.as_deref().filter(|p| !p.trim().is_empty()) else {
         if let Some(problem) = diagnose_github_token(args.pat.as_deref()) {
@@ -9202,24 +9250,13 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
         free, reserved_bytes, reservation_count, active_leases, cache_logical, cache_physical
     );
-    if let Err(error) =
-        crate::docker_lease::reclaim_orphan_jobs(crate::docker_lease::run_host_docker)
-    {
-        eprintln!("Warning: leftover job Docker reclaim failed: {error:#}");
-    }
-    if let Err(error) =
-        crate::docker_lease::reclaim_unlabeled_testcontainers(crate::docker_lease::run_host_docker)
-    {
-        eprintln!("Warning: leftover guest Docker reclaim failed: {error:#}");
-    }
-    if let Err(error) = crate::docker_lease::reclaim_unlabeled_job_image_siblings(
-        crate::docker_lease::run_host_docker,
-    ) {
-        eprintln!("Warning: leftover job-image Docker reclaim failed: {error:#}");
-    }
     let config_base = config::config_dir(None)?
         .join("daemons")
         .join(sanitize_daemon_config_component(&args.name));
+    let backend = crate::execution::load_execution_file(&config_base, None)
+        .ok()
+        .map(|file| file.backend());
+    doctor_host_docker_reclaim(backend, crate::docker_lease::run_host_docker);
     let sample_size = usize::try_from(env_u64(
         "VELNOR_SLO_SAMPLE_SIZE",
         DEFAULT_SLO_SAMPLE_SIZE as u64,
@@ -10461,11 +10498,70 @@ jobs:
         .unwrap();
         let preflight = preflight_args_for_run(&args, &dir).unwrap();
         assert!(!preflight.require_docker_socket);
+        assert!(!preflight.require_buildx);
         assert_eq!(
             preflight.execution_backend,
             Some(velnor_model::ExecutionBackendKind::MicroVm)
         );
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn startup_host_docker_reclaim_skips_when_microvm_or_unselected() {
+        for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
+            let mut pruned = false;
+            let mut reclaimed = false;
+            maybe_startup_host_docker_reclaim_with(
+                backend,
+                "daemon-x",
+                |_| pruned = true,
+                |_| {
+                    reclaimed = true;
+                    Ok(())
+                },
+            );
+            assert!(!pruned, "{backend:?}");
+            assert!(!reclaimed, "{backend:?}");
+        }
+    }
+
+    #[test]
+    fn startup_host_docker_reclaim_runs_when_docker_selected() {
+        let mut pruned = None;
+        let mut reclaimed = None;
+        maybe_startup_host_docker_reclaim_with(
+            Some(velnor_model::ExecutionBackendKind::Docker),
+            "daemon-x",
+            |id| pruned = Some(id.to_string()),
+            |id| {
+                reclaimed = Some(id.to_string());
+                Ok(())
+            },
+        );
+        assert_eq!(pruned.as_deref(), Some("daemon-x"));
+        assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn doctor_host_docker_reclaim_skips_socket_when_microvm_or_unselected() {
+        for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
+            doctor_host_docker_reclaim(backend, |_| {
+                panic!("doctor must not use host docker for {backend:?}")
+            });
+        }
+    }
+
+    #[test]
+    fn doctor_host_docker_reclaim_docker_backend_lists_jobs() {
+        let mut calls = Vec::new();
+        doctor_host_docker_reclaim(Some(velnor_model::ExecutionBackendKind::Docker), |args| {
+            calls.push(args.to_vec());
+            Ok(String::new())
+        });
+        assert!(
+            !calls.is_empty(),
+            "docker doctor reclaim must invoke host docker"
+        );
     }
 
     #[test]

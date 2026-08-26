@@ -53,7 +53,8 @@ pub use guest_runtime::{
     UnixVsockChannel, GUEST_AGENT_PORT,
 };
 pub use isolation::{
-    microvm_isolation_root, IsolationIdentity, IsolationResources, MICROVM_ISOLATION_ROOT,
+    is_host_docker_control_socket, microvm_isolation_root, IsolationIdentity, IsolationResources,
+    MICROVM_ISOLATION_ROOT, MICROVM_NO_HOST_DOCKER_SOCKET,
 };
 pub use net::{
     nftables_commands, setup_net_invocations, teardown_is_exact, teardown_net_commands,
