@@ -107,7 +107,7 @@ isolation tradeoff is allowed.
 - [x] Multi-scope zero-job idle soak runs for at least 15 minutes.
 - [x] Idle CPU and broker/JIT request budgets pass.
 - [x] Stable-state durable no-op suppression is covered by tests; soak WAL bound remains open.
-- [ ] Idle resource cost scaling from 1 to 16 slots is measured and ≤2×.
+- [x] Idle resource cost scaling from 1 to 16 slots is measured and ≤2×.
 - [ ] Fixture readiness and smoke tests pass.
 - [ ] GitHub-hosted/Velnor lane parity passes.
 - [ ] Steps, logs, outputs, artifacts, caches, timings, and resource evidence are compared.
@@ -201,6 +201,16 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   coordinated bounded recovery, and the 15-minute idle budget are now checked;
   production Sentry/fixture/APT gates and deeper active-job fault proofs remain
   explicitly open.
+- `cargo nextest run -p velnor-runner --test idle_scaling --no-capture`: the
+  deterministic local 1/2/4/8/16-slot process-group measurement passed. Exact
+  samples were: 1 slot `slot_processes=1`, `job_processes=0`,
+  `waiter_processes=0`, `reconcile_p95_ms=8`, `controller_cpu_us=4500`,
+  `journal_transactions=7`, `wal_bytes=230752`; 2 slots `2/0/0/6/3138/7/230752`;
+  4 slots `4/0/0/6/3342/7/230752`; 8 slots `8/0/0/7/4162/7/230752`; 16
+  slots `16/0/0/25/6153/7/243112` (fields in the same order). Controller CPU
+  scaling was `6153 / 4500 = 1.367x`, under the ≤2× gate; the test reports
+  startup reconcile duration separately because its first cycle includes slot
+  process creation. Fixture was not changed.
 
 ## Non-goals
 
