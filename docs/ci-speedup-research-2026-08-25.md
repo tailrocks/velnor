@@ -242,3 +242,41 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
    mutations; stale-resource cleanup remains gated. This preserves the
    cross-job mutation bound while removing readiness from the critical section.
 5. This document + adoption roadmap (P1 next implementation target).
+
+### 2026-08-26 teardown root cause
+
+Sentry's lifecycle corpus contained 271 completed `job-timing` records. The
+runner-side percentiles were: pickup p95 **1.1 s**, container boot p95 **9.5
+s**, checkout p95 **5.4 s**, and teardown p95 **8.6 s** (maximum **45.1 s**).
+
+The node-v2 journal is a second measured bottleneck. Sentry's Tailrocks
+journal contained **59,606** events, including **23,606** slot-heartbeat
+events; the controller and every slot process opened the same WAL database and
+each heartbeat replayed the full event log before deleting and rebuilding all
+materialized tables. Since 2026-08-25 15:00, that scope recorded **11**
+heartbeat journal errors and **13** `store.locked` timeout failures. The
+structural fix removes slot SQLite writers: each slot atomically publishes a
+scoped heartbeat file, and the controller validates the PID/generation then
+commits the durable heartbeat event. Guardian and job ownership semantics stay
+unchanged.
+
+The same Sentry inspection found `routing-evidence.json` but no desired
+`routing-policy.json`. Org URLs cannot safely infer an allowlist from live
+evidence, so routing correctly stayed fail-closed. The recovery surface is now
+explicit `VELNOR_ROUTING_POLICY_FILE`, which accepts only a complete
+operator-declared policy and never treats observed GitHub membership as
+desired state.
+
+The journal recorded **65** instances on 2026-08-25 where the Docker lease
+accept thread failed to stop within its 2 s bound. The old lease used a
+blocking UnixListener and synthetic wakeup connections; under host load the
+wakeup race left the accept thread behind while teardown held the lifecycle
+permit.
+
+The structural fix makes the listener nonblocking and waits with `poll()` on
+both listener readiness and a dedicated shutdown socket. Guard drop writes the
+shutdown byte; no timer polling or synthetic client connection is needed.
+Connection abortion and Docker ownership cleanup remain unchanged. The new
+regression test requires idle lease shutdown below 500 ms. Post-deploy proof
+must show zero new accept-thread warnings and reduced teardown tail on the same
+workload mix.

@@ -120,6 +120,11 @@ that temporary mismatch until the operator activates the new signed record.
   The daemon validates that name/id pair once per daemon pass; all slots and
   later JIT recycles reuse the resolved id so fleet width and retry storms do
   not multiply GitHub REST quota consumption.
+  Organization routing also requires an operator-owned desired policy file:
+  set `VELNOR_ROUTING_POLICY_FILE=/etc/velnor/<name>-routing-policy.json`.
+  Its JSON fields are `group`, `selected_repositories`, `labels`, and
+  `trust_scope`. Missing or incomplete policy fails closed; live GitHub group
+  membership is evidence, never desired policy.
   Follow the drain, trust-lane, label-continuity, and rollback procedure in
   [org-fleet-migration.md](org-fleet-migration.md).
 

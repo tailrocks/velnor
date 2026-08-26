@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use velnor_control::journal::{Event, Journal};
 use velnor_model::{FleetHealthState, Generation, HealthDocument, SlotId};
 
+use velnor_runner::node::slot::heartbeat_path;
+
 fn scratch(label: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -125,25 +127,45 @@ fn slot_kill_drops_one_unit_of_capacity() {
             .expect("spawn slot");
         children.push(child);
     }
-    let mut pids = 0;
     for _ in 0..400 {
-        if let Ok(journal) = Journal::open(dir.join("journal.db")) {
-            if let Ok(state) = journal.load_state() {
-                pids = state
-                    .slots
-                    .iter()
-                    .filter(|slot| {
-                        (slot.slot_id.0 == "iso-1" || slot.slot_id.0 == "iso-2")
-                            && slot.pid.is_some()
-                    })
-                    .count();
-                if pids == 2 {
-                    break;
-                }
-            }
+        if (1..=2).all(|index| heartbeat_path(&dir, index).is_file()) {
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    let controller = Command::new(runner())
+        .args([
+            "controller",
+            "--state-dir",
+            dir.to_str().unwrap(),
+            "--scope",
+            "iso",
+            "--desired-ready",
+            "2",
+            "--surge",
+            "1",
+            "--once",
+            "--spawn-slots",
+            "false",
+        ])
+        .env_remove("GITHUB_TOKEN")
+        .output()
+        .unwrap();
+    assert!(
+        controller.status.success(),
+        "controller stderr: {}",
+        String::from_utf8_lossy(&controller.stderr)
+    );
+    let pids = Journal::open(dir.join("journal.db"))
+        .unwrap()
+        .load_state()
+        .unwrap()
+        .slots
+        .iter()
+        .filter(|slot| {
+            (slot.slot_id.0 == "iso-1" || slot.slot_id.0 == "iso-2") && slot.pid.is_some()
+        })
+        .count();
     let live: Vec<bool> = children
         .iter_mut()
         .map(|child| child.try_wait().ok().flatten().is_none())
@@ -504,19 +526,15 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let mut saw_pid = false;
+    let mut saw_heartbeat = false;
     for _ in 0..40 {
-        if let Ok(journal) = Journal::open(dir.join("journal.db")) {
-            if let Ok(state) = journal.load_state() {
-                if state.slots.iter().any(|item| item.pid.is_some()) {
-                    saw_pid = true;
-                    break;
-                }
-            }
+        if heartbeat_path(&dir, 1).is_file() {
+            saw_heartbeat = true;
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(saw_pid, "slot heartbeat never landed");
+    assert!(saw_heartbeat, "slot heartbeat never landed");
 
     let fields = matching_routing();
     velnor_runner::node::prove::write_routing_document(&dir, fields.clone(), fields).unwrap();

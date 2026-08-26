@@ -132,6 +132,11 @@ pub struct DaemonArgs {
     #[arg(long, env = "VELNOR_POOL_NAME")]
     pub pool_name: Option<String>,
 
+    /// Explicit desired routing policy JSON for organization/enterprise scopes.
+    /// Missing or invalid policy keeps routing fail-closed.
+    #[arg(long, env = "VELNOR_ROUTING_POLICY_FILE")]
+    pub routing_policy_file: Option<PathBuf>,
+
     /// Validate daemon slot JIT payloads without calling GitHub.
     #[arg(long = "dry-run-jit-config")]
     pub dry_run_registration: bool,
@@ -400,6 +405,7 @@ impl From<DaemonArgs> for crate::args::DaemonArgs {
             replace: a.replace,
             pool_id: a.pool_id,
             pool_name: a.pool_name,
+            routing_policy_file: a.routing_policy_file,
             dry_run_registration: a.dry_run_registration,
             slots: a.slots,
             max_idle_slot_age_seconds: a.max_idle_slot_age_seconds,
