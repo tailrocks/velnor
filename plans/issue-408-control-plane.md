@@ -211,6 +211,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   scaling was `6153 / 4500 = 1.367x`, under the ≤2× gate; the test reports
   startup reconcile duration separately because its first cycle includes slot
   process creation. Fixture was not changed.
+- Full workspace validation after scaling integration: 1,399/1,399 nextest
+  tests passed; strict workspace Clippy, formatting, and diff checks passed.
 
 ## Non-goals
 
