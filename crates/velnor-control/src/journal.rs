@@ -1732,7 +1732,6 @@ mod tests {
         assert!(same_generation.rejected);
         assert!(same_generation.commands.is_empty());
         assert_eq!(same_generation.state.slots[0].phase, ActorPhase::Fenced);
-
         let outcome = journal
             .apply(Event::PermitReserved {
                 slot_id: slot_id.clone(),
