@@ -510,7 +510,7 @@ jobs:
           [ "$fc_sha" = "$expected_fc" ] || { echo "::error::firecracker sha $fc_sha != pin $expected_fc" >&2; exit 1; }
           [ "$jailer_sha" = "$expected_jailer" ] || { echo "::error::jailer sha $jailer_sha != pin $expected_jailer" >&2; exit 1; }
           cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
-            stage --root crates/velnor-runner/release/microvm
+            stage --root crates/velnor-runner/release/microvm --arch "$pin_arch"
           kernel="$(jq -er '.kernel' crates/velnor-runner/release/microvm/manifest.json)"
           rootfs="$(jq -er '.rootfs' crates/velnor-runner/release/microvm/manifest.json)"
           case "$kernel$rootfs" in

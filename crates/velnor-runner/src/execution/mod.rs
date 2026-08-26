@@ -20,9 +20,9 @@ mod snapshot;
 mod unix_api;
 
 pub use artifacts::{
-    hex_sha256, packaged_generation, require_coherent_generation, verify_microvm_artifacts,
-    ArtifactChecksums, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION, JAILER_VERSION,
-    PACKAGED_MICROVM_ROOT,
+    expected_checksums_for_arch, hex_sha256, packaged_generation, require_coherent_generation,
+    verify_microvm_artifacts, ArtifactChecksums, MicroVmArtifactSet, MicroVmGeneration,
+    FIRECRACKER_VERSION, JAILER_VERSION, PACKAGED_MICROVM_ROOT,
 };
 pub use backend::{
     BackendPhase, BackendSession, ExecutionError, ExecutionEvent, ExecutionOutcome, ValidatedPlan,
