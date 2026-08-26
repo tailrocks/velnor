@@ -53,9 +53,9 @@ use crate::{
     },
     platform,
     protocol::{
-        decode_jit_config, github_api_retry_delay, AcquireJobOutcome, BrokerClient,
-        DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope, ListedRunner,
-        OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
+        decode_jit_config, github_api_retry_delay, is_transient_acquire_error, AcquireJobOutcome,
+        BrokerClient, DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope,
+        ListedRunner, OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
         RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
         RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict,
         RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
@@ -1128,6 +1128,12 @@ fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
         (false, _) => SlotAction::Continue,
         (true, false) => SlotAction::DeregisterAndExit,
         (true, true) => SlotAction::FinishJobThenExit,
+    }
+}
+
+async fn wait_for_drain_signal() {
+    while !draining() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -3570,18 +3576,33 @@ async fn handle_v2_message(
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
     let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
-    let job_value = match run_service
+    let acquire_result = tokio::select! {
+        result = run_service
         .acquire_job(
             run_service_url,
             &reference.runner_request_id,
             std::env::consts::OS,
             reference.billing_owner_id.as_deref(),
         )
-        .instrument(pickup_span)
-        .await
-    {
+        .instrument(pickup_span) => result,
+        _ = wait_for_drain_signal() => {
+            forensics.lifecycle(&format!(
+                "acquire canceled by daemon drain request={}",
+                reference.runner_request_id
+            ));
+            return Ok(V2MessageAction::Shutdown);
+        }
+    };
+    let job_value = match acquire_result {
         Ok(job_value) => job_value,
         Err(error) => {
+            if !is_transient_acquire_error(&error) {
+                forensics.broker(&format!(
+                    "acquire ERROR request={} permanent; closing session: {error:#}",
+                    reference.runner_request_id
+                ));
+                return Err(error).context("permanent run-service acquire failure");
+            }
             // Match actions/runner: after transient acquire retries are
             // exhausted, keep the broker session and runner registration.
             // The request may have committed before the failed response;

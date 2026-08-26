@@ -347,18 +347,24 @@ async fn reconcile_once(
 ) -> anyhow::Result<LocalCycle> {
     let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
     let total = args.desired_ready.saturating_add(args.surge).max(1);
-    let generation = Generation::INITIAL;
     let mut effects = Vec::new();
     reap(slots);
+    // Ingest a surviving slot's heartbeat before deciding whether its permit
+    // needs repair. On controller restart the child handle is gone, so the
+    // heartbeat is the only fresh local proof that prevents a double spawn.
+    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
     let state = journal.materialized_state()?;
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
         let surge = index > args.desired_ready;
         let slot = state.slots.iter().find(|slot| slot.slot_id == id);
+        let generation = slot
+            .map(|slot| slot.generation)
+            .unwrap_or(Generation::INITIAL);
         let process_alive = slots.contains_key(&id.0)
-            || slot
-                .and_then(|slot| slot.pid)
-                .is_some_and(prove::pid_is_alive);
+            || slot.and_then(|slot| slot.pid).is_some_and(|pid| {
+                prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
+            });
         if !permit_needs_reconciliation(slot, generation, surge, args.spawn_slots, process_alive) {
             continue;
         }
@@ -385,8 +391,6 @@ async fn reconcile_once(
         .await?;
     }
 
-    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
-
     observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
@@ -405,6 +409,12 @@ async fn reconcile_once(
     let now = tokio::time::Instant::now();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
+        let generation = snapshot
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == id)
+            .map(|slot| slot.generation)
+            .unwrap_or(Generation::INITIAL);
         if executor {
             proof_effects.extend(
                 journal
@@ -420,7 +430,13 @@ async fn reconcile_once(
             .iter()
             .find(|slot| slot.slot_id == id)
             .and_then(|slot| slot.pid);
-        if prove::observe_session(slots.get_mut(&id.0), journal_pid) {
+        if prove::observe_slot_session(
+            slots.get_mut(&id.0),
+            journal_pid,
+            &args.state_dir,
+            &id,
+            generation,
+        ) {
             proof_effects.extend(
                 journal
                     .apply(Event::SessionLive {
@@ -1084,7 +1100,12 @@ fn ingest_slot_heartbeats(
             continue;
         };
         if slot.generation.0 != heartbeat.generation
-            || !prove::pid_is_alive(heartbeat.pid)
+            || !prove::slot_process_is_alive(
+                heartbeat.pid,
+                &args.state_dir,
+                &id,
+                Generation(heartbeat.generation),
+            )
             || seen.get(&id.0).is_some_and(|(pid, sequence)| {
                 *pid == heartbeat.pid && *sequence >= heartbeat.sequence
             })
@@ -1122,7 +1143,9 @@ fn maybe_spawn_slot(
     }
     if let Ok(state) = journal.materialized_state() {
         if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == *slot_id) {
-            if slot.pid.is_some_and(prove::pid_is_alive) {
+            if slot.pid.is_some_and(|pid| {
+                prove::slot_process_is_alive(pid, &args.state_dir, slot_id, generation)
+            }) {
                 return Ok(());
             }
         }

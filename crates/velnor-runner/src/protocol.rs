@@ -1903,6 +1903,7 @@ pub struct RunServiceClient {
     acquire_retry_delay_override: Option<Duration>,
 }
 
+#[derive(Debug)]
 pub enum AcquireJobOutcome {
     Acquired(Value),
     Skipped {
@@ -1910,6 +1911,25 @@ pub enum AcquireJobOutcome {
         request_id: Option<String>,
         body: String,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AcquireJobError {
+    #[error("permanent run-service acquire failure: {0:#}")]
+    Permanent(#[source] anyhow::Error),
+    #[error("transient run-service acquire failure after retries: {0:#}")]
+    Transient(#[source] anyhow::Error),
+}
+
+/// Whether an acquire failure is safe to absorb while the broker session
+/// remains alive. Permanent protocol/configuration failures must tear down the
+/// session so credentials or malformed payloads cannot spin forever.
+pub(crate) fn is_transient_acquire_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<AcquireJobError>()
+            .is_some_and(|error| matches!(error, AcquireJobError::Transient(_)))
+    })
 }
 
 impl RunServiceClient {
@@ -1939,13 +1959,15 @@ impl RunServiceClient {
         runner_os: &str,
         billing_owner_id: Option<&str>,
     ) -> Result<AcquireJobOutcome> {
-        let url = run_service_acquire_job_url(run_service_url)?;
+        let url = run_service_acquire_job_url(run_service_url)
+            .map_err(|error| anyhow::Error::from(AcquireJobError::Permanent(error)))?;
         let body = serde_json::to_string(&AcquireJobRequest {
             job_message_id,
             runner_os,
             billing_owner_id,
         })
-        .context("serialize acquire job request")?;
+        .context("serialize acquire job request")
+        .map_err(|error| anyhow::Error::from(AcquireJobError::Permanent(error)))?;
         let mut attempt = 1;
         loop {
             let outcome = github_json_request(
@@ -1973,10 +1995,13 @@ impl RunServiceClient {
                     } else {
                         match serde_json::from_str::<Value>(&text) {
                             Ok(value) => return Ok(AcquireJobOutcome::Acquired(value)),
-                            Err(error) => Some(
-                                anyhow::Error::new(error)
-                                    .context("parse acquire run-service job response"),
-                            ),
+                            Err(error) => {
+                                return Err(AcquireJobError::Permanent(
+                                    anyhow::Error::new(error)
+                                        .context("parse acquire run-service job response"),
+                                )
+                                .into());
+                            }
                         }
                     }
                 }
@@ -1987,7 +2012,12 @@ impl RunServiceClient {
                 unreachable!("successful acquire returns before retry handling");
             };
             if attempt >= RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS {
-                return Err(error);
+                let error = if acquire_failure_is_transient(&error) {
+                    AcquireJobError::Transient(error)
+                } else {
+                    AcquireJobError::Permanent(error)
+                };
+                return Err(error.into());
             }
 
             let delay = self.acquire_retry_delay(attempt);
@@ -2079,6 +2109,19 @@ impl RunServiceClient {
             attempt += 1;
         }
     }
+}
+
+fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
+    let Some(api_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+    else {
+        // Native transport failures and curl failures do not have an HTTP
+        // status; they are transient by definition.
+        return true;
+    };
+
+    matches!(api_error.status, 0 | 408 | 429 | 500..=599)
 }
 
 impl DistributedTaskClient {
@@ -5564,6 +5607,35 @@ mod tests {
         };
         assert_eq!(job["jobId"], "job-1");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn acquire_job_rejects_malformed_success_without_retrying_or_swallowing() {
+        use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let error = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect_err("malformed success must be a permanent acquire error");
+
+        assert!(!is_transient_acquire_error(&error));
+        assert!(error.to_string().contains("parse acquire run-service job"));
     }
 
     #[test]

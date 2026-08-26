@@ -973,12 +973,16 @@ impl Journal {
             stamp_event(&mut event);
             let outcome = reduce(state.clone(), event.clone());
             if !outcome.rejected {
+                let unchanged_without_commands =
+                    outcome.commands.is_empty() && outcome.state == state;
                 state = outcome.state.clone();
-                let payload = serde_json::to_string(&event).map_err(|error| {
-                    StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
-                        .with_remediation(error.to_string())
-                })?;
-                pending.push((event_generation(&event), event_kind(&event), payload));
+                if !unchanged_without_commands {
+                    let payload = serde_json::to_string(&event).map_err(|error| {
+                        StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
+                            .with_remediation(error.to_string())
+                    })?;
+                    pending.push((event_generation(&event), event_kind(&event), payload));
+                }
             }
             outcomes.push(outcome);
         }
@@ -1492,6 +1496,13 @@ mod tests {
         Generation::INITIAL
     }
 
+    fn event_count(journal: &Journal) -> i64 {
+        journal
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap()
+    }
+
     fn prime_ready(journal: &mut Journal, id: &str) {
         let s = slot(id);
         let g = gen();
@@ -1564,6 +1575,98 @@ mod tests {
                 .and_then(|slot| slot.pid),
             Some(456)
         );
+    }
+
+    #[test]
+    fn apply_many_elides_repeated_proof_and_routing_events() {
+        let (_dir, mut journal) = open_tmp("batch-no-op");
+        prime_ready(&mut journal, "scope-1");
+        let before = event_count(&journal);
+        let outcomes = journal
+            .apply_many([
+                Event::ExecutorProven {
+                    slot_id: slot("scope-1"),
+                    generation: gen(),
+                },
+                Event::SessionLive {
+                    slot_id: slot("scope-1"),
+                    generation: gen(),
+                },
+                Event::Routing {
+                    valid: true,
+                    group_valid: true,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(|outcome| !outcome.rejected));
+        assert!(outcomes.iter().all(|outcome| outcome.commands.is_empty()));
+        assert_eq!(event_count(&journal), before);
+    }
+
+    #[test]
+    fn apply_many_persists_command_bearing_registration_intent() {
+        let (dir, mut journal) = open_tmp("batch-command-bearing");
+        let s = slot("scope-1");
+        let g = gen();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::PermitReserved {
+                slot_id: s.clone(),
+                generation: g,
+                surge: false,
+            },
+            Event::ExecutorProven {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: s.clone(),
+                generation: g,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let before = event_count(&journal);
+
+        let outcomes = journal
+            .apply_many([Event::RegistrationIntended {
+                slot_id: s.clone(),
+                generation: g,
+            }])
+            .unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].commands,
+            vec![SideEffect::RegisterRunner {
+                slot_id: s,
+                generation: g,
+            }]
+        );
+        assert_eq!(event_count(&journal), before + 1);
+        drop(journal);
+
+        let recovered = Journal::open(dir.join("journal.db")).unwrap();
+        assert_eq!(event_count(&recovered), before + 1);
+        let registration_events: i64 = recovered
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'registration_intended'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(registration_events, 1);
     }
 
     #[test]
