@@ -132,12 +132,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 ## Ready definition
 
 - [ ] CPU attribution and regression reproduction are evidenced.
-- [ ] Idle journal/reconciliation amplification is removed.
-- [ ] Idle waiters are gone; workers spawn only after assignment.
-- [ ] Broker/session recovery is coordinated, generation-fenced, bounded, and observable.
+- [x] Idle journal/reconciliation amplification is removed.
+- [x] Idle waiters are gone; workers spawn only after assignment.
+- [x] Broker/session recovery is coordinated, generation-fenced, bounded, and observable.
 - [x] Health/doctor expose useful capacity, resource safety, and churn through health alerts and controller-metrics summaries.
 - [ ] Process-isolation guarantees remain intact or have stronger proof.
-- [ ] Zero-job idle budgets pass for 15+ minutes.
+- [x] Zero-job idle budgets pass for 15+ minutes.
 - [ ] Broker/JIT fault tests pass without retry storms.
 - [ ] Fixture parity and smoke pass without fixture changes.
 - [ ] Sentry canary and full-fleet soak pass.
@@ -184,6 +184,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - Full workspace verification after alert/cache work: 1,395/1,395 nextest
   tests passed; strict workspace Clippy and formatting passed after the final
   cache fast-path correction.
+- Readiness reconciliation: journal amplification, idle waiter removal,
+  coordinated bounded recovery, and the 15-minute idle budget are now checked;
+  production Sentry/fixture/APT gates and deeper active-job fault proofs remain
+  explicitly open.
 
 ## Non-goals
 
