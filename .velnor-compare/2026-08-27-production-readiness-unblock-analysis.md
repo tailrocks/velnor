@@ -185,7 +185,7 @@ validation job.
    Support the three run IDs, check suite IDs, obsolete SHA, HTTP 409 bodies,
    and zero-job responses; only explicit ownership resolution may authorize a
    later targeted cancellation attempt. No repository-side change can safely
-manufacture a terminal result for these objects.
+   manufacture a terminal result for these objects.
 4. **Policy repair/re-admission after drain safety.** Only after the read-only
    capture and proof that accepted jobs are safe to drain may policy be repaired
    or capacity re-admitted. Do not restart, drain, delete registrations, or
