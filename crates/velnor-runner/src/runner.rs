@@ -54,13 +54,13 @@ use crate::{
     },
     platform,
     protocol::{
-        decode_jit_config, github_api_retry_delay, AcquireJobOutcome, BrokerClient,
-        DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope, ListedRunner,
-        OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
-        RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
-        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict,
-        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
-        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
+        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthAccessToken, OAuthClient,
+        OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel,
+        RunServiceClient, RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry,
+        RunServiceVariableValue, RunnerBusyConflict, RunnerJobRequestRef, RunnerStatus,
+        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, TimelineRecordState,
+        RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -93,7 +93,6 @@ const REGISTRY_CHECK_INTERVAL_SECONDS: u64 = 180;
 const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
-const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
@@ -953,6 +952,12 @@ pub(crate) struct BrokerAssignment {
     pub done_path: PathBuf,
 }
 
+#[derive(Clone)]
+pub(crate) struct BrokerManagerSignals {
+    pub recovery: std::sync::Arc<tokio::sync::Mutex<crate::node::recovery::RecoveryCoordinator>>,
+    pub reconcile_notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
 pub(crate) async fn run_broker_manager(
     args: RunArgs,
     state_dir: PathBuf,
@@ -960,8 +965,7 @@ pub(crate) async fn run_broker_manager(
     generation: Generation,
     slot_index: usize,
     tx: mpsc::Sender<BrokerAssignment>,
-    recovery: std::sync::Arc<tokio::sync::Mutex<crate::node::recovery::RecoveryCoordinator>>,
-    reconcile_notify: std::sync::Arc<tokio::sync::Notify>,
+    signals: BrokerManagerSignals,
 ) -> Result<()> {
     let config_dir = config::config_dir(args.config_dir.clone())?;
     let stored = config::load(&config_dir).map_err(local_identity_unavailable)?;
@@ -1019,7 +1023,11 @@ pub(crate) async fn run_broker_manager(
                 stored.settings.disable_update,
             )
             .await?;
-            recovery.lock().await.recovered(manager_started.elapsed());
+            signals
+                .recovery
+                .lock()
+                .await
+                .recovered(manager_started.elapsed());
             let Some(message) = message else {
                 // One request per control cycle. Recovery owns retry timing;
                 // this yield only prevents an empty broker response from
@@ -1076,7 +1084,7 @@ pub(crate) async fn run_broker_manager(
             })
             .await
             .context("deliver broker assignment to controller")?;
-            reconcile_notify.notify_one();
+            signals.reconcile_notify.notify_one();
             let completion_nonce = nonce;
             while crate::node::handoff::read_completion(&done_path, &completion_nonce, generation)
                 .is_err()
@@ -1493,6 +1501,7 @@ fn supervised_retry_delay(attempt: u32) -> Duration {
 
 /// Per-slot retry backoff: 5s doubling to 10 minutes, with slot-index salt so
 /// the slots of one daemon (same PID!) never retry or reconnect in lockstep.
+#[cfg(any())]
 fn slot_retry_delay(attempt: u32, slot_index: usize) -> Duration {
     let base = 5u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(7));
     let capped = base.min(600);
@@ -1500,6 +1509,7 @@ fn slot_retry_delay(attempt: u32, slot_index: usize) -> Duration {
     Duration::from_secs(capped + jitter)
 }
 
+#[cfg(any())]
 fn slot_retry_delay_for_error(attempt: u32, slot_index: usize, error: &anyhow::Error) -> Duration {
     let backoff = slot_retry_delay(attempt, slot_index);
     github_api_retry_delay(error)
@@ -1509,6 +1519,7 @@ fn slot_retry_delay_for_error(attempt: u32, slot_index: usize, error: &anyhow::E
 
 /// Wait for a slot retry without making SIGTERM drain wait behind a long
 /// capacity/JIT backoff. Returns true as soon as drain is requested.
+#[cfg(any())]
 async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + delay;
     loop {
@@ -1530,6 +1541,7 @@ pub(crate) const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Returns a problem description when any of the slot's writable roots is
 /// low on space. Best-effort (`df` failures are treated as healthy — a
 /// broken probe must not park the fleet).
+#[cfg(any())]
 fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<String> {
     let mut roots: Vec<&Path> = vec![config_base];
     if let Some(work_dir) = work_dir {
@@ -1638,6 +1650,7 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
     None
 }
 
+#[cfg(any())]
 pub(crate) async fn run_daemon_slot(
     args: DaemonArgs,
     config_base: PathBuf,
@@ -1820,6 +1833,7 @@ pub(crate) async fn run_daemon_slot(
 /// A slot must never die because GitHub or the network is temporarily
 /// unhappy — it parks here until configuration succeeds (logging the precise
 /// error, including token diagnosis, every attempt).
+#[cfg(any())]
 async fn reconfigure_daemon_slot_forever(
     args: &DaemonArgs,
     config_base: &Path,
@@ -1854,6 +1868,7 @@ async fn reconfigure_daemon_slot_forever(
 /// the post-job handoff for normal-length jobs. A cancelled receiver means the
 /// slot ended idle or failed before accepting work; no JIT registration is
 /// created in that case.
+#[cfg(any())]
 async fn prewarm_successor_after_job(
     receiver: oneshot::Receiver<()>,
     args: &DaemonArgs,
@@ -1880,6 +1895,7 @@ async fn prewarm_successor_after_job(
     Ok(())
 }
 
+#[cfg(any())]
 async fn prewarm_daemon_slot_successor(
     args: &DaemonArgs,
     config_base: &Path,
@@ -1920,6 +1936,7 @@ async fn prewarm_daemon_slot_successor(
     Ok(())
 }
 
+#[cfg(any())]
 async fn recycle_daemon_slot(
     args: &DaemonArgs,
     config_base: &Path,
@@ -1974,6 +1991,7 @@ async fn recycle_daemon_slot(
     Ok(())
 }
 
+#[cfg(any())]
 fn remove_completed_daemon_slot_jit_config(slot_dir: &Path) -> Result<()> {
     if config::remove(slot_dir)? {
         println!(
@@ -1992,6 +2010,7 @@ fn daemon_slot_successor_config_dir(
     daemon_slot_config_dir(config_base, slot_index, slot_count).join("next")
 }
 
+#[cfg(any())]
 fn daemon_slot_successor_agent_name(
     base_name: Option<&str>,
     slot_index: usize,
@@ -2003,6 +2022,7 @@ fn daemon_slot_successor_agent_name(
     format!("{current}-next-{}-{cycle}", std::process::id())
 }
 
+#[cfg(any())]
 async fn cleanup_failed_daemon_slot(
     args: &DaemonArgs,
     config_base: &Path,
@@ -2051,6 +2071,7 @@ async fn cleanup_daemon_slot_successor_jit_config(
     Ok(())
 }
 
+#[cfg(any())]
 async fn retry_daemon_slot_jit_config(
     args: &DaemonArgs,
     config_base: &Path,
@@ -10464,15 +10485,6 @@ mod tests {
     }
 
     #[test]
-    fn slot_retry_delay_diverges_across_slots_and_caps() {
-        let slot1 = slot_retry_delay(3, 1);
-        let slot2 = slot_retry_delay(3, 2);
-        assert_ne!(slot1, slot2, "same-PID slots must not retry in lockstep");
-        assert!(slot_retry_delay(30, 1) <= Duration::from_secs(600 + 16));
-        assert!(slot_retry_delay(1, 1) >= Duration::from_secs(5));
-    }
-
-    #[test]
     fn cancellation_poll_backoff_grows_and_caps() {
         assert_eq!(cancellation_poll_error_delay(1), Duration::from_secs(2));
         assert_eq!(cancellation_poll_error_delay(2), Duration::from_secs(4));
@@ -11117,18 +11129,6 @@ jobs:
         assert_eq!(config::load(&slot_dir).unwrap().settings.agent_id, Some(2));
         assert!(base.join("slots").exists());
 
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn daemon_completed_slot_cleanup_needs_no_pat_or_rest_delete() {
-        let base = unique_temp_dir("daemon-completed-slot-cleanup");
-        let slot_dir = daemon_slot_config_dir(&base, 1, 1);
-        config::save(&slot_dir, &stored_config()).unwrap();
-
-        remove_completed_daemon_slot_jit_config(&slot_dir).unwrap();
-
-        assert!(config::load(&slot_dir).is_err());
         fs::remove_dir_all(base).unwrap();
     }
 
