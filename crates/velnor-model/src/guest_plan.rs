@@ -60,6 +60,12 @@ pub struct GuestService {
 #[serde(deny_unknown_fields)]
 pub struct GuestCacheOp {
     pub digest: String,
+    /// Blob bytes when already in the plan (tests) or after vsock `ImportBlob`.
+    #[serde(default)]
+    pub bytes: Vec<u8>,
+    /// Guest path to materialize or export.
+    #[serde(default)]
+    pub path: String,
 }
 
 /// Artifact name and guest path for bounded export.
@@ -82,6 +88,12 @@ pub struct GuestStep {
     /// Admitted action inputs (clone URL, cache key, paths). Never host sockets.
     #[serde(default)]
     pub inputs: Vec<GuestEnvVar>,
+    /// Step `env:` pairs. Applied on `docker exec -e`.
+    #[serde(default)]
+    pub env: Vec<GuestEnvVar>,
+    /// Step `working-directory`. Applied on `docker exec -w`.
+    #[serde(default)]
+    pub working_directory: String,
 }
 
 /// Declared job output name and admitted value/expression.
@@ -187,6 +199,8 @@ mod tests {
                 script: "echo hi".into(),
                 action: None,
                 inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
             }],
             timeout_ms: 1000,
             cancel_requested: false,
@@ -204,6 +218,8 @@ mod tests {
             workspace: "/__w".into(),
             cache: vec![GuestCacheOp {
                 digest: "abc".into(),
+                bytes: Vec::new(),
+                path: String::new(),
             }],
             artifacts: vec![GuestArtifactOp {
                 name: "logs".into(),

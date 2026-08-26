@@ -30,6 +30,8 @@ pub struct ValidatedStep {
     pub script: String,
     pub action: Option<String>,
     pub inputs: Vec<(String, String)>,
+    pub env: Vec<(String, String)>,
+    pub working_directory: String,
 }
 
 /// Admitted service container. Alias/ports stay GitHub-visible; no host socket.
@@ -93,6 +95,8 @@ impl ValidatedPlan {
                     script: step.script.clone(),
                     action: step.action.clone(),
                     inputs: guest_env(&step.inputs),
+                    env: guest_env(&step.env),
+                    working_directory: step.working_directory.clone(),
                 })
                 .collect(),
             timeout_ms: self.timeout_ms,
@@ -116,6 +120,8 @@ impl ValidatedPlan {
                 .filter(|digest| digest.starts_with("sha256:") || digest.len() == 64)
                 .map(|digest| velnor_model::GuestCacheOp {
                     digest: digest.clone(),
+                    bytes: Vec::new(),
+                    path: String::new(),
                 })
                 .collect(),
             artifacts: self
@@ -144,6 +150,8 @@ impl ValidatedPlan {
                 script: "echo run".into(),
                 action: None,
                 inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
             }],
             job_container_image: "velnor/job-ubuntu:26.04".into(),
             services: vec![ValidatedService {
@@ -238,6 +246,8 @@ impl ValidatedPlan {
                     script: step.script.clone(),
                     action: None,
                     inputs: Vec::new(),
+                    env: step.env.clone(),
+                    working_directory: step.working_directory_container.clone(),
                 })
                 .collect(),
             job_container_image: docker_image.into(),
@@ -299,6 +309,27 @@ fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
         },
         action: executable_action(step),
         inputs: executable_inputs(step),
+        env: executable_env(step),
+        working_directory: executable_working_directory(step),
+    }
+}
+
+fn executable_env(step: &crate::executor::ExecutableStep) -> Vec<(String, String)> {
+    match step {
+        crate::executor::ExecutableStep::Script(script) => sanitized_pairs(&script.env),
+        crate::executor::ExecutableStep::Native { invocation, .. } => {
+            sanitized_pairs(&invocation.env)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn executable_working_directory(step: &crate::executor::ExecutableStep) -> String {
+    match step {
+        crate::executor::ExecutableStep::Script(script) => {
+            script.working_directory_container.clone()
+        }
+        _ => String::new(),
     }
 }
 

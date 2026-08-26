@@ -158,117 +158,152 @@ where
     }
     .write_to(stream)
     .map_err(|error| format!("write ready: {error}"))?;
-    match VsockMessage::read_from(&mut *stream) {
-        Ok(VsockMessage::Cancel) => {
-            state.session_active = false;
-            Ok(())
-        }
-        Ok(VsockMessage::TeardownAck { .. }) => Err(guest_capability_error(
-            "guest.teardown_ack",
-            "host-to-guest",
-            "guest-to-host acknowledgement",
-        )),
-        Ok(VsockMessage::PrepareSnapshot) => {
-            VsockMessage::SnapshotReady
-                .write_to(stream)
-                .map_err(|error| format!("write snapshot readiness: {error}"))?;
-            state.session_active = false;
-            Ok(())
-        }
-        Ok(VsockMessage::DeliverPlan {
-            job_id,
-            isolation_id,
-            generation,
-            execution_nonce,
-            plan_sha256,
-            plan_bytes,
-        }) => {
-            if execution_nonce.is_empty() {
+    let mut imported: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    loop {
+        match VsockMessage::read_from(&mut *stream) {
+            Ok(VsockMessage::Cancel) => {
+                state.session_active = false;
+                return Ok(());
+            }
+            Ok(VsockMessage::TeardownAck { .. }) => {
                 return Err(guest_capability_error(
-                    "guest.execution_nonce",
-                    "<empty>",
-                    "a fresh non-empty nonce per execution",
+                    "guest.teardown_ack",
+                    "host-to-guest",
+                    "guest-to-host acknowledgement",
                 ));
             }
-            let expected_execution_nonce = derive_execution_nonce(
-                &session_challenge,
-                &job_id,
-                &isolation_id,
-                generation,
-                &plan_sha256,
-            );
-            if execution_nonce != expected_execution_nonce {
-                return Err(guest_capability_error(
-                        "guest.execution_nonce",
-                        &execution_nonce,
-                        &format!("the nonce derived from the current session challenge and plan ({expected_execution_nonce})"),
-                    ));
+            Ok(VsockMessage::PrepareSnapshot) => {
+                VsockMessage::SnapshotReady
+                    .write_to(stream)
+                    .map_err(|error| format!("write snapshot readiness: {error}"))?;
+                state.session_active = false;
+                return Ok(());
             }
-            let actual_plan_sha256 = hex_sha256(&plan_bytes);
-            if plan_sha256 != actual_plan_sha256 {
-                return Err(guest_capability_error(
-                    "guest.plan_sha256",
-                    &plan_sha256,
-                    &format!("the SHA-256 digest of plan_bytes ({actual_plan_sha256})"),
-                ));
+            Ok(VsockMessage::ImportBlob {
+                digest_sha256,
+                bytes,
+            }) => {
+                let blob = super::cache_transport::CacheBlob {
+                    digest_sha256: digest_sha256.clone(),
+                    bytes: bytes.clone(),
+                };
+                blob.import().map_err(|error| {
+                    guest_capability_error(
+                        "guest.import_blob",
+                        &error.detail,
+                        "bytes whose sha256 matches the declared digest",
+                    )
+                })?;
+                imported.insert(digest_sha256, bytes);
+                continue;
             }
-            require_identity(
-                "guest.plan.isolation_id",
-                &isolation_id,
-                &session_isolation_id,
-            )?;
-            require_generation(generation, session_generation)?;
-            let plan = decode_guest_plan(&plan_bytes)?;
-            require_identity("guest.plan.job_id", &plan.job_id, &job_id)?;
-            require_identity("guest.plan.isolation_id", &plan.isolation_id, &isolation_id)?;
-            require_generation(plan.generation, generation)?;
-            validate_guest_plan(&plan)?;
-            let (conclusion, code, events) = if let Some(planned) = plan.planned_conclusion() {
-                let (conclusion, code) = planned;
-                let mut events = Vec::new();
-                super::guest_runtime::record_planned_result_bridge(&plan, &mut events);
-                (conclusion, code, events)
-            } else {
-                let (code, events) = run_plan(&plan_bytes)?;
-                (
-                    if code == 0 {
-                        JobConclusion::Success
-                    } else {
-                        JobConclusion::Failure
-                    },
-                    code,
-                    events,
-                )
-            };
-            write_result_bridge(stream, &events)?;
-            VsockMessage::JobCompleted {
-                conclusion,
-                exit_code: code,
-            }
-            .write_to(stream)
-            .map_err(|error| format!("write conclusion: {error}"))?;
-            VsockMessage::TeardownAck {
+            Ok(VsockMessage::DeliverPlan {
                 job_id,
                 isolation_id,
                 generation,
                 execution_nonce,
                 plan_sha256,
+                plan_bytes,
+            }) => {
+                if execution_nonce.is_empty() {
+                    return Err(guest_capability_error(
+                        "guest.execution_nonce",
+                        "<empty>",
+                        "a fresh non-empty nonce per execution",
+                    ));
+                }
+                let expected_execution_nonce = derive_execution_nonce(
+                    &session_challenge,
+                    &job_id,
+                    &isolation_id,
+                    generation,
+                    &plan_sha256,
+                );
+                if execution_nonce != expected_execution_nonce {
+                    return Err(guest_capability_error(
+                        "guest.execution_nonce",
+                        &execution_nonce,
+                        &format!("the nonce derived from the current session challenge and plan ({expected_execution_nonce})"),
+                    ));
+                }
+                let actual_plan_sha256 = hex_sha256(&plan_bytes);
+                if plan_sha256 != actual_plan_sha256 {
+                    return Err(guest_capability_error(
+                        "guest.plan_sha256",
+                        &plan_sha256,
+                        &format!("the SHA-256 digest of plan_bytes ({actual_plan_sha256})"),
+                    ));
+                }
+                require_identity(
+                    "guest.plan.isolation_id",
+                    &isolation_id,
+                    &session_isolation_id,
+                )?;
+                require_generation(generation, session_generation)?;
+                let mut plan = decode_guest_plan(&plan_bytes)?;
+                require_identity("guest.plan.job_id", &plan.job_id, &job_id)?;
+                require_identity("guest.plan.isolation_id", &plan.isolation_id, &isolation_id)?;
+                require_generation(plan.generation, generation)?;
+                for cache in &mut plan.cache {
+                    if cache.bytes.is_empty() {
+                        if let Some(bytes) = imported.get(&cache.digest) {
+                            cache.bytes = bytes.clone();
+                        }
+                    }
+                }
+                validate_guest_plan(&plan)?;
+                let (conclusion, code, events) = if let Some(planned) = plan.planned_conclusion() {
+                    let (conclusion, code) = planned;
+                    let mut events = Vec::new();
+                    super::guest_runtime::record_planned_result_bridge(&plan, &mut events);
+                    (conclusion, code, events)
+                } else {
+                    let merged = plan
+                        .encode()
+                        .map_err(|error| format!("guest plan encode after import: {error}"))?;
+                    let (code, events) = run_plan(&merged)?;
+                    (
+                        if code == 0 {
+                            JobConclusion::Success
+                        } else {
+                            JobConclusion::Failure
+                        },
+                        code,
+                        events,
+                    )
+                };
+                write_result_bridge(stream, &events)?;
+                VsockMessage::JobCompleted {
+                    conclusion,
+                    exit_code: code,
+                }
+                .write_to(stream)
+                .map_err(|error| format!("write conclusion: {error}"))?;
+                VsockMessage::TeardownAck {
+                    job_id,
+                    isolation_id,
+                    generation,
+                    execution_nonce,
+                    plan_sha256,
+                }
+                .write_to(stream)
+                .map_err(|error| format!("write ack: {error}"))?;
+                state.session_active = false;
+                return Ok(());
             }
-            .write_to(stream)
-            .map_err(|error| format!("write ack: {error}"))?;
-            state.session_active = false;
-            Ok(())
+            Ok(message) => {
+                return Err(guest_capability_error(
+                    "guest.protocol",
+                    &format!("unexpected message {message:?}"),
+                    "ImportBlob*, then Cancel, PrepareSnapshot, or exactly one DeliverPlan",
+                ));
+            }
+            Err(VsockCodecError::Io { .. }) => {
+                state.session_active = false;
+                return Ok(());
+            }
+            Err(error) => return Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
         }
-        Ok(message) => Err(guest_capability_error(
-            "guest.protocol",
-            &format!("unexpected message {message:?}"),
-            "Cancel, PrepareSnapshot, or exactly one DeliverPlan",
-        )),
-        Err(VsockCodecError::Io { .. }) => {
-            state.session_active = false;
-            Ok(())
-        }
-        Err(error) => Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
     }
 }
 
