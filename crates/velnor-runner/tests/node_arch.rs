@@ -917,3 +917,103 @@ fn controller_sends_pending_completion_outbox() {
     }
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn controller_restart_reclaims_active_handoff_with_explicit_completion() {
+    let dir = scratch("restart-handoff");
+    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    prime_named_ready(&mut journal, "restart");
+    drop(journal);
+
+    // The worker needs the same execution envelope as a controller restart.
+    // Its config directory is deliberately absent: the test exercises the
+    // restart/recovery contract, not broker or Docker execution.
+    std::fs::write(
+        dir.join("daemon-exec.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "url": "https://broker.example",
+            "name": "restart",
+            "labels": ["velnor"],
+            "target_mvp_labels": false,
+            "target_mvp_arm_label": false,
+            "replace": false,
+            "dry_run_registration": false,
+            "slots": 1,
+            "once": false,
+            "complete_noop": false,
+            "execute_scripts": false,
+            "dry_run_jobs": false,
+            "docker_image": "img",
+            "job_cpus": "",
+            "job_memory": "",
+            "trust_scope": "trusted",
+            "emergency_reserve_bytes": 0,
+            "job_peak_bytes": 0,
+            "node_action_image": "img",
+            "skip_preflight": false,
+            "require_docker_socket": false
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let nonce = "restart-assignment";
+    let handoff_path = velnor_runner::node::handoff::path(&dir, nonce);
+    let handoff = velnor_runner::node::handoff::AssignmentHandoff::new(
+        "restart-1".into(),
+        Generation::INITIAL,
+        nonce.into(),
+        "session-before-restart".into(),
+        "https://broker.example".into(),
+        1,
+        dir.join("missing-runner-config"),
+        velnor_runner::protocol::TaskAgentMessage {
+            message_id: 1,
+            message_type: velnor_runner::protocol::RUNNER_JOB_REQUEST.into(),
+            body: "{\"runner_request_id\":\"restart-request\"}".into(),
+            iv_base64: None,
+        },
+    );
+    velnor_runner::node::handoff::write_atomic(&handoff_path, &handoff).unwrap();
+
+    let status = run_runner(
+        &dir,
+        &[
+            "controller",
+            "--state-dir",
+            dir.to_str().unwrap(),
+            "--scope",
+            "restart",
+            "--desired-ready",
+            "1",
+            "--surge",
+            "0",
+            "--once",
+            "--spawn-slots",
+            "false",
+        ],
+    );
+    assert!(status.success(), "{}", cmd_err(&dir));
+
+    let done_path = velnor_runner::node::handoff::completion_path(&dir, nonce);
+    let mut completion = None;
+    for _ in 0..200 {
+        if let Ok(record) =
+            velnor_runner::node::handoff::read_completion(&done_path, nonce, Generation::INITIAL)
+        {
+            completion = Some(record);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let completion = completion.expect("restarted controller did not resolve handoff");
+    assert_eq!(
+        completion.status,
+        velnor_runner::node::handoff::CompletionStatus::Failed
+    );
+    assert!(
+        !handoff_path.exists(),
+        "restart must consume the durable handoff envelope"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}

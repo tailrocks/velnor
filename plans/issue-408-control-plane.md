@@ -96,7 +96,7 @@ isolation tradeoff is allowed.
 - [ ] Restarting one controller proves unrelated scopes remain alive.
 - [x] Killing/blocking one broker session proves other slots remain schedulable.
 - [ ] One scope API failure proves another scope continues normally.
-- [ ] Controller restart during an active job proves preservation or explicit recovery.
+- [x] Controller restart during an active job proves preservation or explicit recovery.
 - [ ] Drain proves idle polling stops while active jobs finish within systemd bounds.
 - [x] Rust verification uses `cargo nextest run`.
 
@@ -190,6 +190,9 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   does not block a healthy sibling session’s 204 poll.
 - Final tranche validation: `cargo nextest run --workspace` passed 1,397/1,397;
   strict workspace Clippy, formatting, and diff checks passed.
+- Restart-handoff integration test passes: a controller restart consumes the
+  durable assignment envelope and emits a generation-bound typed failure rather
+  than stranding the assignment.
 - Readiness reconciliation: journal amplification, idle waiter removal,
   coordinated bounded recovery, and the 15-minute idle budget are now checked;
   production Sentry/fixture/APT gates and deeper active-job fault proofs remain
