@@ -254,7 +254,7 @@ impl FirecrackerBackend {
             .map_err(|detail| MicroVmPreflightFailure::new("guest.plan", detail))?;
         let _ = guest_boot_args(&resources.identity)?;
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
-        let identity_ok = snapshot_identity_matches(&set, world);
+        let identity_ok = snapshot_identity_matches(&set, world, &resources.identity);
         setup_guest_net(resources, world, events)?;
         self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
         if identity_ok && try_restore_snapshot(&set, world, events)? {
@@ -311,7 +311,7 @@ impl FirecrackerBackend {
             // Errors here leave the guest resumed (see create_golden_snapshot);
             // the snapshot itself is an optimization, so its failure is an
             // event, not a job failure.
-            create_golden_snapshot(world, handshake.ready, events)?;
+            create_golden_snapshot(world, isolation, handshake.ready, events)?;
             let rebootstrap = establish_guest_session(world, isolation, false)?;
             self.session_challenge = Some(rebootstrap.session_challenge);
         }
@@ -720,13 +720,22 @@ fn snapshot_mem_path(set: &MicroVmArtifactSet, root: &Path) -> PathBuf {
         .unwrap_or_else(|| root.join("snapshot.mem"))
 }
 
-fn snapshot_identity_matches(set: &MicroVmArtifactSet, world: &ExecutionWorld<'_>) -> bool {
+fn snapshot_identity_matches(
+    set: &MicroVmArtifactSet,
+    world: &ExecutionWorld<'_>,
+    isolation: &IsolationIdentity,
+) -> bool {
     let mem = snapshot_mem_path(set, world.artifact_root);
     if !world.host_fs.exists(&mem) || !world.host_fs.exists(&vmstate_path(&mem)) {
         return false;
     }
     let generation = MicroVmGeneration::from_set(set);
-    let want = SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    let want = SnapshotIdentity::from_generation(
+        &generation,
+        std::env::consts::ARCH,
+        "linux-6.1",
+        isolation,
+    );
     let Ok(have) = read_identity(world.host_fs, &mem) else {
         return false;
     };
@@ -744,6 +753,7 @@ fn snapshot_identity_matches(set: &MicroVmArtifactSet, world: &ExecutionWorld<'_
 /// Credentials present, artifact load, or Firecracker API failure.
 pub fn create_golden_snapshot(
     world: &mut ExecutionWorld<'_>,
+    isolation: &IsolationIdentity,
     ready: GuestReady,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<(), ExecutionError> {
@@ -756,7 +766,7 @@ pub fn create_golden_snapshot(
         .pause_vm()
         .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("pause_vm".into()));
-    let persisted = persist_snapshot(world, &set, &mem, &vmstate, events);
+    let persisted = persist_snapshot(world, &set, &mem, &vmstate, isolation, events);
     if let Err(failure) = persisted {
         world
             .firecracker
@@ -787,6 +797,7 @@ fn persist_snapshot(
     set: &MicroVmArtifactSet,
     mem: &Path,
     vmstate: &Path,
+    isolation: &IsolationIdentity,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<(), ExecutionError> {
     world
@@ -795,8 +806,12 @@ fn persist_snapshot(
         .map_err(|detail| MicroVmPreflightFailure::new("guest.snapshot", detail))?;
     events.push(ExecutionEvent::FirecrackerApi("create_snapshot".into()));
     let generation = MicroVmGeneration::from_set(set);
-    let identity =
-        SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    let identity = SnapshotIdentity::from_generation(
+        &generation,
+        std::env::consts::ARCH,
+        "linux-6.1",
+        isolation,
+    );
     write_identity(world.host_fs, mem, &identity)?;
     Ok(())
 }

@@ -347,7 +347,8 @@ fn faults_fail_closed_without_host_docker_or_sibling_teardown() {
     let sibling = IsolationIdentity::new("job-sibling", 2);
     assert!(crate::execution::teardown_is_exact(&victim, &sibling));
 
-    let snap = SnapshotIdentity::production_template("x86_64", "linux-6.1");
+    let isolation = IsolationIdentity::new("job-fault", 1);
+    let snap = SnapshotIdentity::production_template("x86_64", "linux-6.1", &isolation);
     let mut other = snap.clone();
     other.firecracker_version = "0.0.0".into();
     assert!(snap.restore_or_cold_boot(&other).is_err());
@@ -365,7 +366,9 @@ fn snapshot_checksum_mismatch_cold_boots() {
     seed_microvm_world(&mut fs, &artifacts);
     let generation =
         MicroVmGeneration::from_set(&MicroVmArtifactSet::load(&artifacts, &fs).unwrap());
-    let mut identity = SnapshotIdentity::from_generation(&generation, "x86_64", "linux-6.1");
+    let isolation = IsolationIdentity::new("job-snap", 1);
+    let mut identity =
+        SnapshotIdentity::from_generation(&generation, "x86_64", "linux-6.1", &isolation);
     identity.rootfs = "0".repeat(64);
     fs.write(
         &artifacts.join("snapshot.identity.json"),
@@ -404,8 +407,7 @@ fn snapshot_checksum_mismatch_cold_boots() {
     {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         world.vsock = Some(&mut vsock);
-        let mut session =
-            open_session(&file, IsolationIdentity::new("job-snap", 1), &mut world).unwrap();
+        let mut session = open_session(&file, isolation, &mut world).unwrap();
         session.reserve(&mut world).unwrap();
         session
             .prepare(&microvm_plan("job-snap"), &mut world)
@@ -443,8 +445,13 @@ fn matching_snapshot_loads_only_after_jailer() {
         .unwrap();
     let generation =
         MicroVmGeneration::from_set(&MicroVmArtifactSet::load(&artifacts, &fs).unwrap());
-    let identity =
-        SnapshotIdentity::from_generation(&generation, std::env::consts::ARCH, "linux-6.1");
+    let isolation = IsolationIdentity::new("job-restore", 1);
+    let identity = SnapshotIdentity::from_generation(
+        &generation,
+        std::env::consts::ARCH,
+        "linux-6.1",
+        &isolation,
+    );
     fs.write(
         &artifacts.join("snapshot.identity.json"),
         &serde_json::to_vec(&identity).unwrap(),
@@ -482,8 +489,7 @@ fn matching_snapshot_loads_only_after_jailer() {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         world.allow_inline_guest_plan = false;
         world.vsock = Some(&mut vsock);
-        let mut session =
-            open_session(&file, IsolationIdentity::new("job-restore", 1), &mut world).unwrap();
+        let mut session = open_session(&file, isolation, &mut world).unwrap();
         session.reserve(&mut world).unwrap();
         session
             .prepare(&microvm_plan("job-restore"), &mut world)
@@ -511,6 +517,77 @@ fn matching_snapshot_loads_only_after_jailer() {
         velnor_model::VsockMessage::GuestIdentity { restored: true, .. }
     )));
     let _ = jailer_at;
+}
+
+#[test]
+fn wrong_job_snapshot_identity_cold_boots_without_load() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    fs.write(&artifacts.join("snapshot.mem"), b"snap").unwrap();
+    fs.write(&artifacts.join("snapshot.vmstate"), b"vmstate")
+        .unwrap();
+    let generation =
+        MicroVmGeneration::from_set(&MicroVmArtifactSet::load(&artifacts, &fs).unwrap());
+    let foreign = IsolationIdentity::new("job-foreign", 1);
+    let identity = SnapshotIdentity::from_generation(
+        &generation,
+        std::env::consts::ARCH,
+        "linux-6.1",
+        &foreign,
+    );
+    fs.write(
+        &artifacts.join("snapshot.identity.json"),
+        &serde_json::to_vec(&identity).unwrap(),
+    )
+    .unwrap();
+    let checksums = ArtifactChecksums {
+        firecracker_version: FIRECRACKER_VERSION.to_string(),
+        jailer_version: JAILER_VERSION.to_string(),
+        firecracker: hex_sha256(b"fc"),
+        jailer: hex_sha256(b"jailer"),
+        kernel: hex_sha256(b"kernel"),
+        rootfs: hex_sha256(b"rootfs"),
+        guest_agent: hex_sha256(b"agent"),
+        snapshot: Some(hex_sha256(b"snap")),
+    };
+    fs.write(
+        &artifacts.join("manifest.json"),
+        &serde_json::to_vec(&checksums).unwrap(),
+    )
+    .unwrap();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let current = IsolationIdentity::new("job-current", 1);
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    let mut session = open_session(&file, current, &mut world).unwrap();
+    session.reserve(&mut world).unwrap();
+    session
+        .prepare(&microvm_plan("job-current"), &mut world)
+        .unwrap();
+
+    assert!(
+        api.calls
+            .iter()
+            .any(|call| call.starts_with("put_boot_source")),
+        "wrong-job snapshot must cold boot: {:?}",
+        api.calls
+    );
+    assert!(!api
+        .calls
+        .iter()
+        .any(|call| call.starts_with("load_snapshot")));
 }
 
 #[test]
@@ -590,6 +667,8 @@ fn golden_snapshot_create_pauses_then_writes_sidecar() {
         .expect("golden sidecar");
     let identity: SnapshotIdentity = serde_json::from_slice(&sidecar).unwrap();
     assert!(identity.credential_free);
+    assert_eq!(identity.isolation_id, "job-gold");
+    assert_eq!(identity.generation, 1);
 }
 
 #[test]
@@ -606,6 +685,7 @@ fn golden_snapshot_create_refuses_job_credentials() {
     let mut events = Vec::new();
     let err = create_golden_snapshot(
         &mut world,
+        &IsolationIdentity::new("job-gold", 1),
         GuestReady {
             agent_listening: true,
             docker_healthy: true,
