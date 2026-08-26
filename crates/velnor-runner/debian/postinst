@@ -162,7 +162,7 @@ case "$1" in
     echo "velnorctl (velnor-runner package) installed. NOTE: this package never restarts the fleet."
     echo "Configure /etc/velnor/secrets.env (0600) + /etc/velnor/velnor.env, then"
     echo "activate a coherent release and start:"
-    echo "  sudo velnorctl release activate --record <release-record.json>"
+    echo "  sudo velnor-runner release activate --record <release-record.json>"
     echo "  sudo systemctl enable --now velnor-daemon@<name>  # operator-selected instance"
     ;;
 esac
