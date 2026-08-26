@@ -150,6 +150,77 @@ async fn run_private_curl(
     Ok((output, headers))
 }
 
+/// Private curl inputs are removed even when an async caller is cancelled.
+/// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
+/// running with secrets or mutate GitHub after its owning operation ended.
+#[derive(Default)]
+struct PrivateTempFiles {
+    paths: Vec<PathBuf>,
+}
+
+impl PrivateTempFiles {
+    fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = std::env::temp_dir().join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
+        self.paths.push(path.clone());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("create private curl file {}", path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("write private curl file {}", path.display()))?;
+        Ok(path)
+    }
+}
+
+impl Drop for PrivateTempFiles {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn run_private_curl(
+    prefix: &str,
+    config: &str,
+    body: Option<&[u8]>,
+    url: &str,
+    capture_headers: bool,
+) -> Result<(std::process::Output, Vec<u8>)> {
+    let mut files = PrivateTempFiles::default();
+    let config_path = files.write(prefix, "cfg", config.as_bytes())?;
+    let body_path = body
+        .map(|body| files.write(prefix, "body", body))
+        .transpose()?;
+    let headers_path = capture_headers
+        // Header output is not secret, but keep it mode-0600 and clean it via
+        // the same guard so cancellation cannot leave request metadata behind.
+        .then(|| files.write(prefix, "headers", &[]))
+        .transpose()?;
+
+    let mut command = tokio::process::Command::new("curl");
+    command.kill_on_drop(true).arg("--config").arg(&config_path);
+    if let Some(path) = &headers_path {
+        command.arg("--dump-header").arg(path);
+    }
+    if let Some(path) = &body_path {
+        command.arg("--data").arg(format!("@{}", path.display()));
+    }
+    let output = command.arg(url).output().await.context("run curl")?;
+    let headers = headers_path
+        .as_deref()
+        .map(std::fs::read)
+        .transpose()
+        .context("read curl response headers")?
+        .unwrap_or_default();
+    Ok((output, headers))
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
