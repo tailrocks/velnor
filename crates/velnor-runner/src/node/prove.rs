@@ -226,22 +226,40 @@ pub fn policy_from_github_url(
     fields_complete(&fields).then_some(fields)
 }
 
-/// Desired policy for org-scoped fleets: the runner group's live membership.
-///
-/// An org URL names no repository, so the operator's declared intent is the
-/// runner group itself (plus configured labels/trust). The desired repository
-/// set is therefore snapshotted from the observed group membership; later
-/// drift between the live group and that snapshot invalidates routing and
-/// stops new registrations exactly like an operator-written policy.
+/// Directory of generated `<org>-desired-policy.json` files.
 #[must_use]
-pub fn org_policy_from_evidence(
-    evidence: &RoutingFields,
+pub fn generated_policy_dir() -> PathBuf {
+    std::env::var_os("VELNOR_FLEET_POLICY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/velnor/fleet-policy"))
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedDesiredPolicy {
+    organization: String,
+    group_name: String,
+    selected_repositories: Vec<String>,
+}
+
+/// Desired policy for org-scoped fleets: the generated allowlist, never live
+/// group membership. Copying the first observed membership would bless a
+/// truncated GitHub group (August 2026 drift class).
+#[must_use]
+pub fn org_policy_from_generated(
+    org: &str,
     labels: Vec<String>,
     trust_scope: String,
+    policy_dir: &Path,
 ) -> Option<RoutingFields> {
+    let path = policy_dir.join(format!("{org}-desired-policy.json"));
+    let generated: GeneratedDesiredPolicy =
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if generated.organization != org {
+        return None;
+    }
     let fields = RoutingFields {
-        group: evidence.group.clone(),
-        selected_repositories: evidence.selected_repositories.clone(),
+        group: generated.group_name,
+        selected_repositories: generated.selected_repositories,
         labels,
         trust_scope,
     };
@@ -753,6 +771,37 @@ mod tests {
             "trusted".into(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn org_policy_comes_from_generated_allowlist_not_live_membership() {
+        let dir = tmp("generated-policy");
+        let generated = serde_json::json!({
+            "organization": "tailrocks",
+            "group_name": "velnor-trusted",
+            "selected_repositories": ["tailrocks/velnor", "tailrocks/velnor-apt"]
+        });
+        std::fs::write(
+            dir.join("tailrocks-desired-policy.json"),
+            serde_json::to_vec(&generated).unwrap(),
+        )
+        .unwrap();
+        let policy =
+            org_policy_from_generated("tailrocks", vec!["velnor".into()], "trusted".into(), &dir)
+                .unwrap();
+        assert_eq!(
+            policy.selected_repositories,
+            vec!["tailrocks/velnor", "tailrocks/velnor-apt"]
+        );
+        assert_eq!(policy.group, "velnor-trusted");
+        assert!(org_policy_from_generated(
+            "tailrocks",
+            vec!["velnor".into()],
+            "trusted".into(),
+            &tmp("missing-policy"),
+        )
+        .is_none());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]
