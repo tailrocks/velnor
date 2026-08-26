@@ -1152,7 +1152,6 @@ fn send_pid_signal(pid: u32, signal: libc::c_int) -> anyhow::Result<()> {
 fn send_pid_signal(_pid: u32, _signal: i32) -> anyhow::Result<()> {
     anyhow::bail!("fenced slot recovery requires Unix process signaling")
 }
-
 fn permit_needs_reconciliation(
     slot: Option<&SlotRecord>,
     generation: Generation,
@@ -1454,7 +1453,6 @@ mod tests {
         );
         assert_eq!(fenced_slot_recovery_generation(None), None);
     }
-
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
