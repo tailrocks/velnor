@@ -12,7 +12,6 @@ document records the analysis and the single canonical admission finding.
 
 Older P0 inventory and cleanup artifacts referenced by this campaign are
 historical snapshots, not current host or run state.
-
 ## Dated read-only recheck — 2026-08-27
 
 Exact capture time unavailable. Runs `33010150644`, `32987670118`,
@@ -186,8 +185,7 @@ validation job.
    Support the three run IDs, check suite IDs, obsolete SHA, HTTP 409 bodies,
    and zero-job responses; only explicit ownership resolution may authorize a
    later targeted cancellation attempt. No repository-side change can safely
-   manufacture a terminal result for these objects.
-
+manufacture a terminal result for these objects.
 4. **Policy repair/re-admission after drain safety.** Only after the read-only
    capture and proof that accepted jobs are safe to drain may policy be repaired
    or capacity re-admitted. Do not restart, drain, delete registrations, or

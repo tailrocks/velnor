@@ -77,6 +77,7 @@ cleanup gate remains open.
 | `Velnor` | `32989529327` | completed | cancelled | `20:37:17` | 15 |
 | `Velnor` | `32987778460` | completed | cancelled | `20:37:18` | 15 |
 | `tailrocks/velnor` | `33012336003` | 404 / unknown (prior/indexed: queued) | unknown | not recorded | not recorded; check suite `89435047597` |
+| `tailrocks/velnor` | `33012336003` | 404 / unknown (prior/indexed: queued) | unknown | not recorded | not recorded; check suite `89435047597` |
 
 ## Unresolved queue objects
 
