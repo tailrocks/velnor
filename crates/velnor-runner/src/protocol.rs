@@ -5886,6 +5886,35 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn acquire_job_rejects_malformed_success_without_retrying_or_swallowing() {
+        use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let error = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect_err("malformed success must be a permanent acquire error");
+
+        assert!(!is_transient_acquire_error(&error));
+        assert!(error.to_string().contains("parse acquire run-service job"));
+    }
+
     #[test]
     fn acquire_failure_classifies_local_faults_separately_from_transport() {
         let permission = anyhow::Error::new(std::io::Error::new(
