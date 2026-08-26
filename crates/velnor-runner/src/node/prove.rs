@@ -226,6 +226,46 @@ pub fn policy_from_github_url(
     fields_complete(&fields).then_some(fields)
 }
 
+/// Directory of generated `<org>-desired-policy.json` files.
+#[must_use]
+pub fn generated_policy_dir() -> PathBuf {
+    std::env::var_os("VELNOR_FLEET_POLICY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/velnor/fleet-policy"))
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedDesiredPolicy {
+    organization: String,
+    group_name: String,
+    selected_repositories: Vec<String>,
+}
+
+/// Desired policy for org-scoped fleets: the generated allowlist, never live
+/// group membership. Copying the first observed membership would bless a
+/// truncated GitHub group (August 2026 drift class).
+#[must_use]
+pub fn org_policy_from_generated(
+    org: &str,
+    labels: Vec<String>,
+    trust_scope: String,
+    policy_dir: &Path,
+) -> Option<RoutingFields> {
+    let path = policy_dir.join(format!("{org}-desired-policy.json"));
+    let generated: GeneratedDesiredPolicy =
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if generated.organization != org {
+        return None;
+    }
+    let fields = RoutingFields {
+        group: generated.group_name,
+        selected_repositories: generated.selected_repositories,
+        labels,
+        trust_scope,
+    };
+    fields_complete(&fields).then_some(fields)
+}
+
 /// Read `routing-policy.json` when present.
 #[must_use]
 pub fn read_policy(state_dir: &Path) -> Option<RoutingFields> {
@@ -248,14 +288,10 @@ pub fn read_policy_file(path: &Path) -> anyhow::Result<RoutingFields> {
     Ok(fields)
 }
 
-/// Persist an explicit desired policy into the controller state directory.
-/// The source remains operator-owned; this copy lets the existing routing
-/// observation path compare evidence and policy without a second authority.
-pub fn write_policy(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
-    write_fields(&state_dir.join(ROUTING_POLICY_FILE), policy)
-}
-
 /// Write desired policy only when the operator has not already done so.
+/// Repo-scoped fleets use this so an operator override wins. Org fleets
+/// must call [`write_policy`]: a live-membership snapshot must not remain
+/// the desired baseline.
 ///
 /// # Errors
 /// Filesystem or JSON failures.
@@ -265,6 +301,16 @@ pub fn write_policy_if_absent(state_dir: &Path, policy: &RoutingFields) -> anyho
         return Ok(());
     }
     write_fields(&path, policy)
+}
+
+/// Replace desired policy. Org fleets rewrite this from the generated
+/// allowlist every cycle so a stale live-membership snapshot cannot stay
+/// the desired baseline.
+///
+/// # Errors
+/// Filesystem or JSON failures.
+pub fn write_policy(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
+    write_fields(&state_dir.join(ROUTING_POLICY_FILE), policy)
 }
 
 /// Persist live GitHub routing evidence. Never a boolean Ready stamp.
@@ -765,6 +811,52 @@ mod tests {
         assert_eq!(read_policy_file(&path).unwrap(), fields);
         std::fs::write(&path, br#"{"group":"velnor"}"#).unwrap();
         assert!(read_policy_file(&path).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn org_policy_comes_from_generated_allowlist_not_live_membership() {
+        let dir = tmp("generated-policy");
+        let generated = serde_json::json!({
+            "organization": "tailrocks",
+            "group_name": "velnor-trusted",
+            "selected_repositories": ["tailrocks/velnor", "tailrocks/velnor-apt"]
+        });
+        std::fs::write(
+            dir.join("tailrocks-desired-policy.json"),
+            serde_json::to_vec(&generated).unwrap(),
+        )
+        .unwrap();
+        let policy =
+            org_policy_from_generated("tailrocks", vec!["velnor".into()], "trusted".into(), &dir)
+                .unwrap();
+        assert_eq!(
+            policy.selected_repositories,
+            vec!["tailrocks/velnor", "tailrocks/velnor-apt"]
+        );
+        assert_eq!(policy.group, "velnor-trusted");
+        assert!(org_policy_from_generated(
+            "tailrocks",
+            vec!["velnor".into()],
+            "trusted".into(),
+            &tmp("missing-policy"),
+        )
+        .is_none());
+
+        let snapshot = matching_fields();
+        write_policy(&dir, &snapshot).unwrap();
+        write_policy_if_absent(&dir, &policy).unwrap();
+        assert_eq!(
+            read_policy(&dir).unwrap().selected_repositories,
+            snapshot.selected_repositories,
+            "if-absent must not clobber an existing file"
+        );
+        write_policy(&dir, &policy).unwrap();
+        assert_eq!(
+            read_policy(&dir).unwrap().selected_repositories,
+            policy.selected_repositories,
+            "org fleets must replace a live-membership snapshot"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

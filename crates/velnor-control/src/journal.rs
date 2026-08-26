@@ -387,6 +387,13 @@ pub enum Event {
         job_id: JobId,
         generation: Generation,
     },
+    /// A live job worker disappeared without a terminal completion (for
+    /// example killed by a daemon drain or an OS reboot). The job cannot
+    /// finish; the slot must return to Ready so capacity is not lost forever.
+    JobWorkerLost {
+        job_id: JobId,
+        generation: Generation,
+    },
     CleanupIntended {
         slot_id: SlotId,
         isolation_id: String,
@@ -717,6 +724,18 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 }
             } else {
                 rejected = true;
+            }
+        }
+        Event::JobWorkerLost { job_id, generation } => {
+            let job = state.jobs.iter().find(|job| job.job_id == job_id);
+            match job {
+                Some(job) if job.generation == generation => {
+                    // A completing job may still have an outbox payload to
+                    // send; the outbox row survives so the send path can
+                    // retry — only the lost worker is dropped.
+                    restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                }
+                _ => rejected = true,
             }
         }
         Event::CleanupIntended {
@@ -1078,6 +1097,7 @@ fn event_generation(event: &Event) -> Generation {
         | Event::CompletionIntended { generation, .. }
         | Event::CompletionSendStarted { generation, .. }
         | Event::RemoteAcked { generation, .. }
+        | Event::JobWorkerLost { generation, .. }
         | Event::RemoteObservedTerminal { generation, .. }
         | Event::CleanupIntended { generation, .. }
         | Event::SlotHeartbeat { generation, .. }
@@ -1109,6 +1129,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::CompletionSendStarted { .. } => "completion_send_started",
         Event::RemoteAcked { .. } => "remote_acked",
         Event::RemoteObservedTerminal { .. } => "remote_observed_terminal",
+        Event::JobWorkerLost { .. } => "job_worker_lost",
         Event::CleanupIntended { .. } => "cleanup_intended",
         Event::SlotHeartbeat { .. } => "slot_heartbeat",
         Event::SlotStale { .. } => "slot_stale",
@@ -1528,6 +1549,68 @@ mod tests {
         drop(recovered);
         let again = Journal::open(dir.join("journal.db")).unwrap();
         assert!(again.pending_outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lost_worker_restores_the_slot_to_ready() {
+        let (_dir, mut journal) = open_tmp("worker-lost");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w".to_owned(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        // Worker killed mid-run: no completion intent, no outbox — the only
+        // terminal path is JobWorkerLost.
+        let outcome = journal
+            .apply(Event::JobWorkerLost {
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(!outcome.rejected);
+        assert!(
+            outcome
+                .commands
+                .iter()
+                .any(|command| matches!(command, SideEffect::AdvertiseCapacity { .. })),
+            "lost worker must restore advertised Ready capacity: {:?}",
+            outcome.commands
+        );
+        let state = journal.load_state().unwrap();
+        assert!(state.jobs.is_empty());
+        assert!(
+            state.slots.iter().any(
+                |record| record.slot_id == slot("scope-1") && record.phase == ActorPhase::Ready
+            ),
+            "{state:?}"
+        );
+        // Losing the same worker twice is rejected, not duplicated.
+        let repeat = journal
+            .apply(Event::JobWorkerLost {
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(repeat.rejected);
     }
 
     #[test]
