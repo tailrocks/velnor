@@ -24,6 +24,188 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 
+/// Steady-state floor between live GitHub probes. The reconcile loop ticks
+/// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
+/// unbounded probing alone (~1800 req/hr/fleet) can exhaust it. One probe
+/// per minute per fleet keeps observation cost bounded well under budget.
+const GITHUB_PROBE_MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// Probe backoff ceiling after repeated unreachable results.
+const GITHUB_PROBE_MAX_BACKOFF: Duration = Duration::from_secs(600);
+/// Stop probing (and hold JIT retries) while the shared token has fewer
+/// requests remaining than this, so registration/DELETE traffic never hits
+/// the hard 403 wall.
+const RATE_LIMIT_HEADROOM_REMAINING: u64 = 100;
+/// Per-slot JIT registration retry backoff ceiling. The first retries are
+/// deliberately short (5s doubling) — only sustained failures grow long.
+const REGISTRATION_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
+
+/// Fleet-wide REST pacing for the shared PAT, owned by the controller.
+/// Read-only probes and JIT registration retries draw from the same budget:
+/// when GitHub reports exhaustion (403/429 with rate-limit headers), every
+/// paced call holds until the reset epoch, so a quota storm cannot feed on
+/// its own retries. Health degrades visibly (`github_reachable: false`)
+/// instead of silently burning budget.
+#[derive(Debug)]
+struct GithubPacing {
+    next_probe: tokio::time::Instant,
+    probe_failures: u32,
+    /// Fleet-wide hold on JIT registration while the shared PAT is exhausted.
+    /// Independent of per-slot retry: a quota 403/429 must not let proven
+    /// unregistered slots keep calling `jit_configure_one_slot`.
+    rest_hold_until: Option<tokio::time::Instant>,
+    /// slot_id -> (next allowed attempt, failure streak)
+    registration_retry: HashMap<String, (tokio::time::Instant, u32)>,
+}
+
+impl Default for GithubPacing {
+    fn default() -> Self {
+        Self {
+            next_probe: tokio::time::Instant::now(),
+            probe_failures: 0,
+            rest_hold_until: None,
+            registration_retry: HashMap::new(),
+        }
+    }
+}
+
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Duration until the epoch deadline, with deterministic per-scope jitter so
+/// fleets sharing a token do not resume in lockstep.
+fn until_epoch_with_jitter(reset_epoch: u64, salt: u64) -> Option<Duration> {
+    let until = reset_epoch.saturating_sub(epoch_now());
+    if until == 0 {
+        return None;
+    }
+    let jitter = 1 + salt % 15;
+    Some(Duration::from_secs(until + jitter))
+}
+
+impl GithubPacing {
+    fn probe_due(&self, now: tokio::time::Instant) -> bool {
+        now >= self.next_probe
+    }
+
+    /// Record a probe outcome and schedule the next probe. Rate-limited
+    /// probes hold the whole fleet until the reported reset epoch.
+    fn record_probe(
+        &mut self,
+        now: tokio::time::Instant,
+        rate_limited: bool,
+        remaining: Option<u64>,
+        reset_epoch: Option<u64>,
+    ) {
+        let salt = std::process::id() as u64;
+        if rate_limited {
+            self.probe_failures += 1;
+            self.hold_rest_until(now, reset_epoch);
+            return;
+        }
+        if let (Some(remaining), Some(reset_epoch)) = (remaining, reset_epoch) {
+            if remaining < RATE_LIMIT_HEADROOM_REMAINING {
+                // Nearly exhausted: keep the remaining budget for
+                // DELETE traffic until the window resets. Do not spend it
+                // on new JIT registrations.
+                if let Some(hold) = until_epoch_with_jitter(reset_epoch, salt) {
+                    let hold = hold.max(GITHUB_PROBE_MIN_INTERVAL);
+                    self.next_probe = now + hold;
+                    self.rest_hold_until = Some(now + hold);
+                    return;
+                }
+            }
+        }
+        self.probe_failures = 0;
+        self.rest_hold_until = None;
+        self.next_probe = now + GITHUB_PROBE_MIN_INTERVAL;
+    }
+
+    /// Record an unreachable (but not rate-limited) probe: exponential
+    /// backoff, capped, so a GitHub outage does not cost 30 probes/minute.
+    fn record_probe_unreachable(&mut self, now: tokio::time::Instant) {
+        let exp = 1u32
+            .checked_shl(self.probe_failures.min(4))
+            .unwrap_or(u32::MAX);
+        let backoff = GITHUB_PROBE_MIN_INTERVAL
+            .saturating_mul(exp)
+            .min(GITHUB_PROBE_MAX_BACKOFF);
+        self.probe_failures += 1;
+        self.next_probe = now + backoff;
+    }
+
+    fn registration_due(&self, slot_id: &str, now: tokio::time::Instant) -> bool {
+        if self.rest_hold_until.is_some_and(|deadline| now < deadline) {
+            return false;
+        }
+        self.registration_retry
+            .get(slot_id)
+            .is_none_or(|(deadline, _)| now >= *deadline)
+    }
+
+    fn record_registration_success(&mut self, slot_id: &str) {
+        self.registration_retry.remove(slot_id);
+    }
+
+    /// Fleet-wide REST hold until the GitHub reset epoch. Same duration
+    /// formula as a rate-limited probe: jittered remaining window, or the
+    /// probe backoff ceiling when GitHub omitted the reset header (429).
+    fn hold_rest_until(&mut self, now: tokio::time::Instant, reset_epoch: Option<u64>) {
+        let salt = std::process::id() as u64;
+        let hold = reset_epoch
+            .and_then(|epoch| until_epoch_with_jitter(epoch, salt))
+            .unwrap_or(GITHUB_PROBE_MAX_BACKOFF)
+            .max(GITHUB_PROBE_MIN_INTERVAL);
+        self.next_probe = now + hold;
+        self.rest_hold_until = Some(now + hold);
+    }
+
+    /// Failed JIT: per-slot backoff always. Quota 403/429 also parks every
+    /// other unregistered slot until reset. Permission 403 with remaining > 0
+    /// must not set `rest_hold_until`.
+    fn record_registration_error(
+        &mut self,
+        slot_id: &str,
+        now: tokio::time::Instant,
+        error: &anyhow::Error,
+    ) {
+        if let Some(quota) = crate::protocol::github_api_quota_status(error) {
+            self.hold_rest_until(now, quota.reset_epoch_or_retry_after(epoch_now()));
+        }
+        self.record_registration_failure(
+            slot_id,
+            now,
+            crate::protocol::github_api_retry_delay(error),
+        );
+    }
+
+    /// Failed JIT registration: back off this slot (5s doubling, capped), or
+    /// until the GitHub-reported reset when headers carry a delay. Per-slot
+    /// only — a Duration hint is not quota evidence (permission 403s also
+    /// carry `x-ratelimit-reset`).
+    fn record_registration_failure(
+        &mut self,
+        slot_id: &str,
+        now: tokio::time::Instant,
+        rate_limit_hint: Option<Duration>,
+    ) {
+        let streak = self
+            .registration_retry
+            .get(slot_id)
+            .map_or(0, |(_, streak)| streak + 1);
+        let backoff = Duration::from_secs(
+            5u64.saturating_mul(1u64 << (streak.saturating_sub(1).min(7)))
+                .min(REGISTRATION_RETRY_MAX_BACKOFF.as_secs()),
+        );
+        let hold = rate_limit_hint.map_or(backoff, |hint| hint.max(backoff));
+        self.registration_retry
+            .insert(slot_id.to_owned(), (now + hold, streak));
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct ControllerArgs {
     #[arg(long)]
@@ -55,13 +237,22 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     })?;
     let mut slots: HashMap<String, Child> = HashMap::new();
     let mut jobs: HashMap<String, Child> = HashMap::new();
+    let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
             drain_children(&mut slots, &mut jobs).await?;
             return Ok(());
         }
-        let cycle = reconcile_once(&args, &mut journal, &server, &mut slots, &mut jobs).await?;
+        let cycle = reconcile_once(
+            &args,
+            &mut journal,
+            &server,
+            &mut slots,
+            &mut jobs,
+            &mut pacing,
+        )
+        .await?;
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
         if args.once {
@@ -132,6 +323,7 @@ async fn reconcile_once(
     server: &HealthServer,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
+    pacing: &mut GithubPacing,
 ) -> anyhow::Result<LocalCycle> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
     let generation = Generation::INITIAL;
@@ -150,14 +342,15 @@ async fn reconcile_once(
         );
     }
     for command in effects {
-        execute_effect(args, journal, slots, jobs, command).await?;
+        execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?;
     }
 
-    observe_github_and_routing(args, journal).await?;
+    observe_github_and_routing(args, journal, pacing).await?;
 
     let mut proof_effects = Vec::new();
     let executor = prove::observe_executor(&args.state_dir);
     let snapshot = journal.load_state()?;
+    let now = tokio::time::Instant::now();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
         if executor {
@@ -187,7 +380,8 @@ async fn reconcile_once(
         }
         let state = journal.load_state()?;
         if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) {
-            if slot.ready_proof().is_ok() && !slot.registered {
+            if slot.ready_proof().is_ok() && !slot.registered && pacing.registration_due(&id.0, now)
+            {
                 proof_effects.extend(
                     journal
                         .apply(Event::RegistrationIntended {
@@ -206,10 +400,10 @@ async fn reconcile_once(
                 slot_id,
                 generation,
             } => registrations.push((slot_id, generation)),
-            command => execute_effect(args, journal, slots, jobs, command).await?,
+            command => execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?,
         }
     }
-    register_runners(args, journal, registrations).await?;
+    register_runners(args, journal, pacing, registrations).await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
 
@@ -235,6 +429,7 @@ async fn execute_effect(
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
+    pacing: &mut GithubPacing,
     command: SideEffect,
 ) -> anyhow::Result<()> {
     match command {
@@ -242,7 +437,7 @@ async fn execute_effect(
         SideEffect::RegisterRunner {
             slot_id,
             generation,
-        } => register_runner(args, journal, slot_id, generation).await,
+        } => register_runner(args, journal, pacing, slot_id, generation).await,
         SideEffect::StartJob { job_id, generation } => {
             maybe_spawn_job(args, journal, jobs, &job_id.0, generation.0, None)
         }
@@ -269,10 +464,11 @@ async fn execute_effect(
 async fn register_runner(
     args: &ControllerArgs,
     journal: &mut Journal,
+    pacing: &mut GithubPacing,
     slot_id: SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
-    register_runners(args, journal, vec![(slot_id, generation)]).await
+    register_runners(args, journal, pacing, vec![(slot_id, generation)]).await
 }
 
 /// Configure independent, already-proven slots concurrently, then commit the
@@ -282,6 +478,7 @@ async fn register_runner(
 async fn register_runners(
     args: &ControllerArgs,
     journal: &mut Journal,
+    pacing: &mut GithubPacing,
     registrations: Vec<(SlotId, Generation)>,
 ) -> anyhow::Result<()> {
     if registrations.is_empty() {
@@ -318,12 +515,24 @@ async fn register_runners(
 
     for (slot_id, generation, result) in outcomes {
         if let Err(error) = result {
+            // Per-slot backoff always. Quota 403/429 also sets rest_hold_until
+            // so other unregistered slots do not keep calling generate-jitconfig
+            // against an exhausted PAT. Permission 403 with remaining>0 does not.
+            let now = tokio::time::Instant::now();
+            pacing.record_registration_error(&slot_id.0, now, &error);
             eprintln!(
-                "Warning: JIT register {} failed (slot stays unregistered): {error:#}",
-                slot_id.0
+                "Warning: JIT register {} failed (slot stays unregistered; backing off {}s): {error:#}",
+                slot_id.0,
+                pacing
+                    .registration_retry
+                    .get(&slot_id.0)
+                    .map_or(0, |(deadline, _)| deadline
+                        .duration_since(now)
+                        .as_secs())
             );
             continue;
         }
+        pacing.record_registration_success(&slot_id.0);
         let registered = journal.apply(Event::Registered {
             slot_id: slot_id.clone(),
             generation,
@@ -350,8 +559,10 @@ async fn register_runners(
 async fn observe_github_and_routing(
     args: &ControllerArgs,
     journal: &mut Journal,
+    pacing: &mut GithubPacing,
 ) -> anyhow::Result<()> {
     let mut reachable = false;
+    let mut dependency_observed = false;
     if let Ok(exec) = load_exec_config(&args.state_dir) {
         let group = exec
             .pool_name
@@ -368,24 +579,57 @@ async fn observe_github_and_routing(
         }
         let policy = prove::read_policy(&args.state_dir);
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
-            let probe = prove::probe_github(prove::GitHubProbeRequest {
-                url,
-                token,
-                policy: policy.as_ref(),
-                pool_id: exec.pool_id,
-                configured_labels: &exec.labels,
-                configured_trust: &exec.trust_scope,
-            })
-            .await;
-            reachable = probe.reachable;
-            if let Some(evidence) = probe.evidence {
-                prove::write_evidence(&args.state_dir, &evidence)?;
+            let now = tokio::time::Instant::now();
+            if pacing.probe_due(now) {
+                let probe = prove::probe_github(prove::GitHubProbeRequest {
+                    url,
+                    token,
+                    policy: policy.as_ref(),
+                    pool_id: exec.pool_id,
+                    configured_labels: &exec.labels,
+                    configured_trust: &exec.trust_scope,
+                })
+                .await;
+                if probe.rate_limited {
+                    let reset = probe
+                        .rate_limit_reset_epoch
+                        .map_or_else(|| "unknown".to_owned(), |epoch| epoch.to_string());
+                    eprintln!(
+                        "Warning: GitHub rate limit hit on probe (remaining={:?}, reset epoch {reset}); \
+                         holding fleet REST traffic until the window resets",
+                        probe.rate_limit_remaining
+                    );
+                    pacing.record_probe(
+                        now,
+                        true,
+                        probe.rate_limit_remaining,
+                        probe.rate_limit_reset_epoch,
+                    );
+                } else if probe.reachable {
+                    pacing.record_probe(
+                        now,
+                        false,
+                        probe.rate_limit_remaining,
+                        probe.rate_limit_reset_epoch,
+                    );
+                } else {
+                    pacing.record_probe_unreachable(now);
+                }
+                reachable = probe.reachable;
+                dependency_observed = true;
+                if let Some(evidence) = probe.evidence {
+                    prove::write_evidence(&args.state_dir, &evidence)?;
+                }
             }
+            // Probe skipped for pacing: keep the last observed dependency
+            // state rather than stamping a false observation.
         }
     }
-    journal.apply(Event::Dependency {
-        github_reachable: reachable,
-    })?;
+    if dependency_observed || !probe_configured(args) {
+        journal.apply(Event::Dependency {
+            github_reachable: reachable,
+        })?;
+    }
     let _ = prove::reconcile_from_dir(&args.state_dir)?;
     let routing = prove::observe_routing(&args.state_dir);
     journal.apply(Event::Routing {
@@ -393,6 +637,15 @@ async fn observe_github_and_routing(
         group_valid: routing.group_valid,
     })?;
     Ok(())
+}
+
+/// False when no live probe can run (no exec config, URL, or token): the old
+/// behavior of stamping `github_reachable: false` every cycle is preserved.
+fn probe_configured(args: &ControllerArgs) -> bool {
+    let Ok(exec) = load_exec_config(&args.state_dir) else {
+        return false;
+    };
+    exec.url.is_some() && exec.pat.is_some()
 }
 
 /// GitHub session waiters for Ready slots. Do not apply Assigned: REST
@@ -670,7 +923,8 @@ mod tests {
             once: true,
             spawn_slots: false,
         };
-        observe_github_and_routing(&args, &mut journal)
+        let mut pacing = GithubPacing::default();
+        observe_github_and_routing(&args, &mut journal, &mut pacing)
             .await
             .unwrap();
         let state = journal.load_state().unwrap();
@@ -680,6 +934,220 @@ mod tests {
                 .unwrap();
         assert_eq!(evidence.group, "velnor");
         assert_eq!(evidence.selected_repositories, vec!["tailrocks/velnor"]);
+        std::env::remove_var("GITHUB_TOKEN");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pacing_holds_probe_to_cadence_after_success() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        assert!(pacing.probe_due(now));
+        pacing.record_probe(now, false, Some(4999), Some(epoch_now() + 3600));
+        assert!(!pacing.probe_due(now + Duration::from_secs(59)));
+        assert!(pacing.probe_due(now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn pacing_probe_backoff_grows_on_unreachable() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        pacing.record_probe_unreachable(now);
+        assert!(!pacing.probe_due(now + Duration::from_secs(59)));
+        pacing.record_probe_unreachable(now + Duration::from_secs(60));
+        assert!(!pacing.probe_due(now + Duration::from_secs(60 + 119)));
+        assert!(pacing.probe_due(now + Duration::from_secs(60 + 120)));
+        // Third failure is 240s, not linear 180s.
+        pacing.record_probe_unreachable(now + Duration::from_secs(180));
+        assert!(!pacing.probe_due(now + Duration::from_secs(180 + 239)));
+        assert!(pacing.probe_due(now + Duration::from_secs(180 + 240)));
+    }
+
+    #[test]
+    fn pacing_rate_limited_probe_holds_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        let reset = epoch_now() + 3500;
+        pacing.record_probe(now, true, Some(0), Some(reset));
+        // No retry before the reset window, even after the normal 60s floor.
+        assert!(!pacing.probe_due(now + GITHUB_PROBE_MAX_BACKOFF));
+        assert!(pacing.probe_due(now + Duration::from_secs(3700)));
+    }
+
+    #[test]
+    fn pacing_low_remaining_reserves_headroom_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        pacing.record_probe(now, false, Some(40), Some(epoch_now() + 120));
+        assert!(!pacing.probe_due(now + Duration::from_secs(119)));
+        assert!(pacing.probe_due(now + Duration::from_secs(140)));
+    }
+
+    #[test]
+    fn pacing_registration_retries_at_most_once_per_window() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        assert!(pacing.registration_due("velnor-1", now));
+        pacing.record_registration_failure("velnor-1", now, None);
+        assert!(!pacing.registration_due("velnor-1", now + Duration::from_secs(4)));
+        assert!(pacing.registration_due("velnor-1", now + Duration::from_secs(5)));
+
+        // A rate-limit hint (x-ratelimit-reset) holds the slot until reset.
+        pacing.record_registration_failure("velnor-2", now, Some(Duration::from_secs(3500)));
+        assert!(!pacing.registration_due("velnor-2", now + Duration::from_secs(600)));
+        assert!(pacing.registration_due("velnor-2", now + Duration::from_secs(3500)));
+
+        // Success clears the backoff entirely.
+        pacing.record_registration_success("velnor-1");
+        assert!(pacing.registration_due("velnor-1", now));
+    }
+
+    #[test]
+    fn pacing_quota_holds_all_registrations_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        let reset = epoch_now() + 3500;
+        assert!(pacing.registration_due("proven-unregistered", now));
+        pacing.record_probe(now, true, Some(0), Some(reset));
+        assert!(
+            !pacing.registration_due("proven-unregistered", now + Duration::from_secs(600)),
+            "quota 403 must not let proven slots keep issuing JIT"
+        );
+        assert!(pacing.registration_due("proven-unregistered", now + Duration::from_secs(3700)));
+        pacing.record_probe(
+            now + Duration::from_secs(3700),
+            false,
+            Some(4999),
+            Some(epoch_now() + 7200),
+        );
+        assert!(pacing.registration_due("proven-unregistered", now + Duration::from_secs(3700)));
+    }
+
+    #[test]
+    fn pacing_jit_quota_holds_all_registrations_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        let reset = epoch_now() + 3500;
+        let quota = anyhow::Error::from(crate::protocol::GitHubApiError {
+            status: 403,
+            action: "JIT runner config request".into(),
+            body: "API rate limit exceeded".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(reset),
+            remaining: Some(0),
+        });
+        assert!(pacing.registration_due("velnor-1", now));
+        assert!(pacing.registration_due("velnor-2", now));
+        pacing.record_registration_error("velnor-1", now, &quota);
+        assert!(
+            !pacing.registration_due("velnor-1", now + Duration::from_secs(600)),
+            "failing slot stays backed off"
+        );
+        assert!(
+            !pacing.registration_due("velnor-2", now + Duration::from_secs(600)),
+            "quota 403/429 must hold ALL unregistered slots via rest_hold_until"
+        );
+        assert!(pacing.registration_due("velnor-2", now + Duration::from_secs(3700)));
+
+        let throttled = anyhow::Error::from(crate::protocol::GitHubApiError {
+            status: 429,
+            action: "JIT runner config request".into(),
+            body: "too many requests".into(),
+            retry_after_seconds: Some(30),
+            rate_limit_reset_epoch: None,
+            remaining: None,
+        });
+        let mut pacing = GithubPacing::default();
+        pacing.record_registration_error("velnor-1", now, &throttled);
+        assert!(
+            !pacing.registration_due("velnor-2", now + Duration::from_secs(59)),
+            "429 Retry-After must fleet-hold (floor is the 60s probe interval)"
+        );
+        assert!(pacing.registration_due("velnor-2", now + Duration::from_secs(76)));
+    }
+
+    #[test]
+    fn pacing_permission_403_does_not_hold_other_slots() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        let permission = anyhow::Error::from(crate::protocol::GitHubApiError {
+            status: 403,
+            action: "JIT runner config request".into(),
+            body: "Resource not accessible by integration".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(epoch_now() + 3500),
+            remaining: Some(4200),
+        });
+        pacing.record_registration_error("velnor-1", now, &permission);
+        assert!(
+            !pacing.registration_due("velnor-1", now + Duration::from_secs(4)),
+            "failing slot still backs off"
+        );
+        assert!(
+            pacing.registration_due("velnor-2", now),
+            "permission 403 with remaining>0 must not fleet-hold"
+        );
+    }
+
+    /// Regression oracle for the August 2026 quota-exhaustion class: a 403
+    /// with `x-ratelimit-remaining: 0` must park the fleet (visible degraded
+    /// health) and issue at most ONE probe per rate-limit window instead of
+    /// one per 2s reconcile tick.
+    #[tokio::test]
+    async fn rate_limited_probe_parks_instead_of_retrying_per_tick() {
+        let server = MockServer::start().await;
+        let reset_epoch = epoch_now() + 3600;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-reset", &reset_epoch.to_string()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-ctrl-rl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("{}/tailrocks", server.uri());
+        write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".into(),
+            desired_ready: 1,
+            surge: 0,
+            once: true,
+            spawn_slots: false,
+        };
+        let mut pacing = GithubPacing::default();
+
+        // First tick: the 403 is observed, health degrades honestly.
+        observe_github_and_routing(&args, &mut journal, &mut pacing)
+            .await
+            .unwrap();
+        let state = journal.load_state().unwrap();
+        assert!(!state.github_reachable, "{state:?}");
+
+        // Simulate a burst of reconcile ticks inside the reset window: the
+        // pacer must not send another request (Mock::expect(1) enforces it).
+        for _ in 0..10 {
+            observe_github_and_routing(&args, &mut journal, &mut pacing)
+                .await
+                .unwrap();
+        }
+        server.verify().await;
+
         std::env::remove_var("GITHUB_TOKEN");
         std::fs::remove_dir_all(dir).ok();
     }

@@ -10,7 +10,10 @@ use std::process::Child;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{github_json_request, GitHubScope, ListedWorkflowJob, RunnerGroup};
+use crate::protocol::{
+    github_json_request, github_json_request_with_rate_limit, GitHubScope, ListedWorkflowJob,
+    RunnerGroup,
+};
 
 /// On-disk routing observation. Missing or invalid file is not valid routing.
 pub const ROUTING_FILE: &str = "routing.json";
@@ -188,6 +191,11 @@ pub struct GitHubProbeRequest<'a> {
 pub struct GitHubProbe {
     pub reachable: bool,
     pub evidence: Option<RoutingFields>,
+    /// The shared PAT budget is exhausted; callers must pace to
+    /// `rate_limit_reset_epoch` instead of retrying on the reconcile tick.
+    pub rate_limited: bool,
+    pub rate_limit_reset_epoch: Option<u64>,
+    pub rate_limit_remaining: Option<u64>,
 }
 
 /// Trust scope the process is actually running with.
@@ -248,6 +256,8 @@ pub fn write_evidence(state_dir: &Path, evidence: &RoutingFields) -> anyhow::Res
 
 /// Probe GitHub reachability and compare live group/repos to desired policy.
 /// Labels and trust are the process-configured values (what JIT will send).
+/// Rate-limit telemetry from the response headers is surfaced so the
+/// controller can pace the whole fleet to the token reset window.
 pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     let Ok(scope) = GitHubScope::parse(request.url) else {
         return GitHubProbe::default();
@@ -255,7 +265,7 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     let Ok(runners_url) = scope.runners_url() else {
         return GitHubProbe::default();
     };
-    let Ok((status, body)) = github_json_request(
+    let Ok((status, body, rate_limit)) = github_json_request_with_rate_limit(
         "GET",
         runners_url.as_str(),
         request.token,
@@ -267,6 +277,19 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
         return GitHubProbe::default();
     };
     if !(200..300).contains(&status) {
+        if rate_limit.is_limited(status) {
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            return GitHubProbe {
+                reachable: false,
+                evidence: None,
+                rate_limited: true,
+                rate_limit_reset_epoch: rate_limit.reset_epoch_or_retry_after(now_epoch),
+                rate_limit_remaining: rate_limit.remaining,
+            };
+        }
         return GitHubProbe::default();
     }
     let _ = body;
@@ -319,6 +342,9 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     GitHubProbe {
         reachable: true,
         evidence: Some(evidence),
+        rate_limited: false,
+        rate_limit_reset_epoch: rate_limit.rate_limit_reset_epoch,
+        rate_limit_remaining: rate_limit.remaining,
     }
 }
 
@@ -769,5 +795,51 @@ mod tests {
                 .unwrap();
         assert_eq!(on_disk, evidence);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Secondary-limit 403 carrying `Retry-After` but no
+    /// `x-ratelimit-reset`: the probe must surface a deadline derived from
+    /// `Retry-After` so the controller paces to the requested delay instead
+    /// of the fixed 600s fallback (end-to-end over the native transport).
+    #[tokio::test]
+    async fn rate_limited_probe_derives_reset_from_retry_after() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("retry-after", "30")
+                    .insert_header("x-ratelimit-remaining", "4999"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/tailrocks", server.uri());
+        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        let probe = probe_github(GitHubProbeRequest {
+            url: &url,
+            token: "ghs_test",
+            policy: None,
+            pool_id: None,
+            configured_labels: &["velnor".into()],
+            configured_trust: "trusted",
+        })
+        .await;
+        assert!(!probe.reachable);
+        assert!(probe.rate_limited, "probe={probe:?}");
+        let reset = probe
+            .rate_limit_reset_epoch
+            .expect("retry-after must become a reset deadline");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            reset >= now + 30 && reset <= now + 31,
+            "reset={reset} now={now}"
+        );
     }
 }
