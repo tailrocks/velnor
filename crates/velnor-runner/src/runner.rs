@@ -5586,7 +5586,9 @@ fn reject_incomplete_microvm_plan(
     }
     if let Some((index, name)) = job.steps.iter().enumerate().find_map(|(index, step)| {
         let name = step.reference.as_ref()?.name.as_deref()?;
-        matches!(name, "actions/cache" | "swatinem/rust-cache").then_some((index, name.to_string()))
+        (name.eq_ignore_ascii_case("actions/cache")
+            || name.eq_ignore_ascii_case("swatinem/rust-cache"))
+        .then_some((index, name.to_string()))
     }) {
         return Err(microvm_capability_error(
             &format!("jobs.steps[{index}].reference.name"),
