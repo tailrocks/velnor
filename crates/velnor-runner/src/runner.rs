@@ -1000,97 +1000,111 @@ pub(crate) async fn run_broker_manager(
     let mut health = IdleSlotHealth::new(Instant::now());
     health.token_expires_in = token.expires_in;
 
-    loop {
-        if draining() {
-            return Ok(());
-        }
-        let journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))?;
-        let current = journal
-            .materialized_state()?
-            .slots
-            .into_iter()
-            .find(|slot| slot.slot_id.0 == slot_id);
-        if current
-            .as_ref()
-            .is_none_or(|slot| slot.generation != generation || slot.phase != ActorPhase::Ready)
-        {
-            return Ok(());
-        }
-        let message = poll_broker_message(
-            &mut broker,
-            &mut run_service,
-            &current_broker_url,
-            &mut broker_token,
-            &stored,
-            &session_id,
-            RunnerStatus::Online,
-            stored.settings.disable_update,
-            &mut poll_state,
-            &mut health,
-            &forensics,
-        )
-        .await?;
-        let Some(message) = message else {
-            continue;
-        };
-        if message
-            .message_type
-            .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
-        {
-            current_broker_url = broker_migration_url(&message)?;
-            broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-            continue;
-        }
-        if message
-            .message_type
-            .eq_ignore_ascii_case(FORCE_TOKEN_REFRESH_MESSAGE)
-        {
-            let refreshed = oauth_access_token(&stored).await?;
-            broker_token = refreshed.token.clone();
-            broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-            run_service = RunServiceClient::new(refreshed.token)?;
-            continue;
-        }
-        if !message
-            .message_type
-            .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
-        {
-            if message
-                .message_type
-                .eq_ignore_ascii_case(RUNNER_SHUTDOWN_MESSAGE)
-            {
-                return Ok(());
-            }
-            continue;
-        }
-        let nonce = uuid::Uuid::new_v4().to_string();
-        let handoff_path = crate::node::handoff::path(&state_dir, &nonce);
-        let done_path = crate::node::handoff::completion_path(&state_dir, &nonce);
-        let handoff = crate::node::handoff::AssignmentHandoff::new(
-            slot_id.clone(),
-            generation,
-            nonce,
-            session_id.clone(),
-            current_broker_url.clone(),
-            slot_index,
-            config_dir.clone(),
-            message,
-        );
-        tx.send(BrokerAssignment {
-            handoff,
-            handoff_path,
-            done_path: done_path.clone(),
-        })
-        .await
-        .context("deliver broker assignment to controller")?;
-        while !done_path.is_file() {
+    let run_result: Result<()> = async {
+        loop {
             if draining() {
                 return Ok(());
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))?;
+            let current = journal
+                .materialized_state()?
+                .slots
+                .into_iter()
+                .find(|slot| slot.slot_id.0 == slot_id);
+            if current
+                .as_ref()
+                .is_none_or(|slot| slot.generation != generation || slot.phase != ActorPhase::Ready)
+            {
+                return Ok(());
+            }
+            let message = poll_broker_message(
+                &mut broker,
+                &mut run_service,
+                &current_broker_url,
+                &mut broker_token,
+                &stored,
+                &session_id,
+                RunnerStatus::Online,
+                stored.settings.disable_update,
+                &mut poll_state,
+                &mut health,
+                &forensics,
+            )
+            .await?;
+            let Some(message) = message else {
+                continue;
+            };
+            if message
+                .message_type
+                .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
+            {
+                current_broker_url = broker_migration_url(&message)?;
+                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+                continue;
+            }
+            if message
+                .message_type
+                .eq_ignore_ascii_case(FORCE_TOKEN_REFRESH_MESSAGE)
+            {
+                let refreshed = oauth_access_token(&stored).await?;
+                broker_token = refreshed.token.clone();
+                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+                run_service = RunServiceClient::new(refreshed.token)?;
+                continue;
+            }
+            if !message
+                .message_type
+                .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
+            {
+                if message
+                    .message_type
+                    .eq_ignore_ascii_case(RUNNER_SHUTDOWN_MESSAGE)
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let handoff_path = crate::node::handoff::path(&state_dir, &nonce);
+            let done_path = crate::node::handoff::completion_path(&state_dir, &nonce);
+            let handoff = crate::node::handoff::AssignmentHandoff::new(
+                slot_id.clone(),
+                generation,
+                nonce,
+                session_id.clone(),
+                current_broker_url.clone(),
+                slot_index,
+                config_dir.clone(),
+                message,
+            );
+            tx.send(BrokerAssignment {
+                handoff,
+                handoff_path,
+                done_path: done_path.clone(),
+            })
+            .await
+            .context("deliver broker assignment to controller")?;
+            while !done_path.is_file() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let _ = std::fs::remove_file(done_path);
         }
-        let _ = std::fs::remove_file(done_path);
     }
+    .await;
+    let delete_result = broker.delete_session().await;
+    match delete_result {
+        Ok(()) => forensics.lifecycle("broker session deleted"),
+        Err(error)
+            if error
+                .downcast_ref::<GitHubApiError>()
+                .is_some_and(|api| api.status == 404) =>
+        {
+            forensics.lifecycle("broker session already absent (404)");
+        }
+        Err(error) if run_result.is_ok() => return Err(error).context("delete broker session"),
+        Err(error) => eprintln!("best-effort broker session delete failed: {error:#}"),
+    }
+    run_result
 }
 
 async fn run_with_jit_prewarmer(

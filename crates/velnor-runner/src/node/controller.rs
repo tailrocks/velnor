@@ -336,8 +336,9 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
-            for (_, manager) in broker_managers.drain() {
-                manager.1.abort();
+            let managers = broker_managers.drain().map(|(_, (_, task))| task);
+            for manager in managers {
+                let _ = manager.await;
             }
             drain_children(&args.state_dir, &mut slots, &mut jobs).await?;
             return Ok(());
@@ -440,6 +441,9 @@ async fn supervise_broker_manager(
     let started = Instant::now();
     let mut recovery = RecoveryCoordinator::default();
     loop {
+        if crate::runner::draining() {
+            return;
+        }
         match crate::runner::run_broker_manager(
             run_args.clone(),
             state_dir.clone(),
@@ -465,6 +469,9 @@ async fn supervise_broker_manager(
                     generation.0,
                     wait.as_secs()
                 );
+                if crate::runner::draining() {
+                    return;
+                }
                 tokio::time::sleep(wait).await;
                 if matches!(action, super::recovery::RecoveryAction::Quarantine) {
                     recovery.recovered(started.elapsed());
