@@ -52,7 +52,7 @@ struct PrivateTempFiles {
     paths: Vec<PathBuf>,
 }
 impl PrivateTempFiles {
-    fn new(prefix: &str) -> Result<Self> {
+    fn new(_prefix: &str) -> Result<Self> {
         let dir = std::env::temp_dir().join("velnor-curl");
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("create private curl directory {}", dir.display()))?;
@@ -64,12 +64,11 @@ impl PrivateTempFiles {
         std::fs::set_permissions(&dir, permissions)
             .with_context(|| format!("protect private curl directory {}", dir.display()))?;
 
-        let prefix = format!("{prefix}-");
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let stale = entry.file_type().is_ok_and(|file_type| file_type.is_file())
-                    && entry.file_name().to_string_lossy().starts_with(&prefix)
+                    && entry.file_name().to_string_lossy().starts_with("velnor-")
                     && entry
                         .metadata()
                         .and_then(|metadata| metadata.modified())
