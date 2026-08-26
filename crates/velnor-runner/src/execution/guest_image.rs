@@ -532,6 +532,7 @@ fn build_rootfs(
         "env",
         &[
             "SOURCE_DATE_EPOCH=0".into(),
+            "E2FSPROGS_FAKE_TIME=0".into(),
             "mke2fs".into(),
             "-t".into(),
             "ext4".into(),

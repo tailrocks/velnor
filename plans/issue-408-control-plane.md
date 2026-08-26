@@ -271,6 +271,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `https://snapshot.ubuntu.com/ubuntu/20260826T000000Z` for both architectures
   and validates the pin from `microvm/guest.toml`; guest-image tests pass.
   Candidate advances to `0.1.221` because `v0.1.220` is immutable.
+- Release run `33016087773` passed both snapshot-backed guest jobs and GHCR,
+  but both package jobs produced different ext4 bytes again. The remaining
+  nondeterminism is filesystem metadata from `mke2fs`; image creation now sets
+  `E2FSPROGS_FAKE_TIME=0` alongside `SOURCE_DATE_EPOCH=0`. Candidate advances
+  to `0.1.222` because `v0.1.221` is immutable.
 
 ## Non-goals
 
