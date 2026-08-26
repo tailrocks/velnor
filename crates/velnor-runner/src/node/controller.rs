@@ -250,6 +250,9 @@ struct ControllerMetrics {
     published_unix: u64,
     reconcile_cycles: u64,
     reconcile_duration_ms: DurationQuantiles,
+    reconcile_overlap_count: u64,
+    events_per_second: f64,
+    durable_events_per_second: f64,
     jobs: u32,
     idle_slots: u32,
     slot_processes: usize,
@@ -262,6 +265,12 @@ struct ControllerMetrics {
     journal: JournalStats,
     #[serde(skip)]
     durations_ms: VecDeque<u64>,
+    #[serde(skip)]
+    last_event_total: u64,
+    #[serde(skip)]
+    last_durable_event_total: u64,
+    #[serde(skip)]
+    last_metrics_at: Option<Instant>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -284,6 +293,10 @@ impl ControllerMetrics {
         self.sequence = self.sequence.saturating_add(1);
         self.published_unix = epoch_now();
         self.reconcile_cycles = self.reconcile_cycles.saturating_add(1);
+        // The controller loop is single-owner and never re-enters itself;
+        // retain the explicit invariant in telemetry rather than guessing
+        // from elapsed time.
+        self.reconcile_overlap_count = 0;
         self.durations_ms
             .push_back(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
         while self.durations_ms.len() > 128 {
@@ -305,6 +318,29 @@ impl ControllerMetrics {
         self.waiter_processes = 0;
         self.job_processes = u32::try_from(jobs).unwrap_or(u32::MAX);
         self.journal = journal.clone();
+        let event_total = journal
+            .events
+            .values()
+            .map(|event| event.accepted + event.rejected)
+            .sum::<u64>();
+        let durable_event_total = journal
+            .events
+            .values()
+            .map(|event| event.durable)
+            .sum::<u64>();
+        if let Some(previous) = self.last_metrics_at {
+            let elapsed = previous.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                self.events_per_second =
+                    event_total.saturating_sub(self.last_event_total) as f64 / elapsed;
+                self.durable_events_per_second =
+                    durable_event_total.saturating_sub(self.last_durable_event_total) as f64
+                        / elapsed;
+            }
+        }
+        self.last_event_total = event_total;
+        self.last_durable_event_total = durable_event_total;
+        self.last_metrics_at = Some(Instant::now());
     }
 
     fn publish(&self, state_dir: &std::path::Path) -> anyhow::Result<()> {
@@ -1680,6 +1716,8 @@ mod tests {
         assert_eq!(value["slot_processes"], 16);
         assert_eq!(value["waiter_processes"], 0);
         assert_eq!(value["job_processes"], 0);
+        assert_eq!(value["reconcile_overlap_count"], 0);
+        assert_eq!(value["events_per_second"], 0.0);
     }
 
     fn dummy_exec(url: &str) -> DaemonArgs {
