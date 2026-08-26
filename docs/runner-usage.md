@@ -13,7 +13,10 @@ version:
 ```sh
 sudo apt-get update
 apt-cache policy velnor-runner
-sudo apt-get install velnor-runner=X.Y.Z
+sudo install -d -m 0750 /run/velnor
+sudo /usr/bin/flock --exclusive --nonblock --no-fork \
+  /run/velnor/package-transaction.lock \
+  apt-get install velnor-runner=X.Y.Z
 ```
 
 For first-install repository/keyring setup and the maintainer's complete
@@ -30,6 +33,19 @@ signature, publication record, exact candidate and predecessor, drain the
 fleet, then run the exact-version apt commands above. Do not use a local or
 downloaded `.deb`, `dpkg -i`, a local apt path, a copied binary, or a local
 build. A verified release record is activation metadata, not an installation
+path.
+
+Before the exact apt install, stop the exact Velnor services and doctor timers
+after the fleet is drained. The `flock --no-fork` wrapper holds the exclusive
+`/run/velnor/package-transaction.lock` for the full apt/dpkg transaction.
+Maintainer scripts verify the kernel-reported `FLOCK WRITE` owner
+is an apt-wrapper ancestor, then recheck every Velnor service/timer state plus
+guardian state; marker-only, shared-lock, and direct unwrapped package
+configuration are refused.
+Every shipped Velnor service takes the same lock shared with `--no-fork`, so the
+lock remains held by the actual Velnor process across `exec` and preserves
+systemd signals and `Type=notify`. Package scripts never stop, mask, restart,
+or enable units; removal cleanup remains a separate operator-state teardown
 path.
 
 The package ships the canonical job-image Dockerfile and acyclic build identity.

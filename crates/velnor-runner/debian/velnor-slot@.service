@@ -13,7 +13,7 @@ Slice=velnor-control.slice
 Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
-ExecStart=/usr/bin/velnor-runner slot --state-dir /var/lib/velnor --scope default --slot-index %i
+ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner slot --state-dir /var/lib/velnor --scope default --slot-index %i
 Restart=always
 RestartSec=5
 TimeoutStopSec=10800

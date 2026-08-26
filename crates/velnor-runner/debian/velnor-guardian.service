@@ -13,8 +13,8 @@ Slice=velnor-control.slice
 Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/velnor.env
 # Intentionally omits secrets.env: the guardian must not hold a GitHub token.
-ExecStartPre=/usr/bin/velnor-runner release verify-installed
-ExecStart=/usr/bin/velnor-runner guardian --state-dir /var/lib/velnor
+ExecStartPre=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner release verify-installed
+ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner guardian --state-dir /var/lib/velnor
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

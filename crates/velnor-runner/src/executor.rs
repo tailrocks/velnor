@@ -15,6 +15,7 @@ use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -35,6 +36,7 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
+const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
 const DEFAULT_STEP_TIMEOUT_MINUTES: u64 = 360;
 const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STEP_TIMEOUT_MINUTES * 60);
 /// `docker rm --force` of a Created/removing BuildKit daemon can block until
@@ -4395,13 +4397,14 @@ fn native_cache_restore_main(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
+    validate_cache_paths(&action_state, &path)?;
     let restore_keys = native_input(action, &action_state, "restore-keys");
     let fail_on_cache_miss =
         input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
     let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only"));
     let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
-    let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version)?;
+    let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version, &path)?;
     if let Some(matched_key) = &matched_key {
         if !lookup_only {
             restore_cache_paths(&action_state, matched_key, &path, &version)?;
@@ -4429,7 +4432,8 @@ fn native_cache_restore_main(
         state_values.insert("matchedKey".to_string(), matched_key.clone());
     }
 
-    let persistent_paths = cache_paths(&path)
+    let declared_paths = cache_paths(&path);
+    let persistent_paths = declared_paths
         .iter()
         .filter(|path| velnor_persistent_cache_path(&action_state, path))
         .count();
@@ -4444,9 +4448,14 @@ fn native_cache_restore_main(
                 "{ANSI_GREEN}Cache restored from key: {matched_key}{ANSI_RESET} ({restore_ms}ms)\n"
             ));
         }
-    } else if persistent_paths > 0 && persistent_paths == cache_paths(&path).len() {
+    } else if persistent_paths > 0 && persistent_paths == declared_paths.len() {
         stdout.push_str(&format!(
             "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm){ANSI_RESET}\n"
+        ));
+    } else if persistent_paths > 0 {
+        stdout.push_str(&format!(
+            "{ANSI_GREEN}{persistent_paths}/{} cache path(s) live on Velnor host-persistent storage (always warm){ANSI_RESET}; keyed lookup missed\n",
+            declared_paths.len()
         ));
     } else {
         stdout.push_str(&format!("{ANSI_YELLOW}Cache not found for input keys: "));
@@ -4456,8 +4465,13 @@ fn native_cache_restore_main(
     if !path.is_empty() {
         stdout.push_str(&format!("{ANSI_CYAN}Cache path: {path}{ANSI_RESET}\n"));
     }
-    let summary = if persistent_paths > 0 && persistent_paths == cache_paths(&path).len() {
+    let summary = if persistent_paths > 0 && persistent_paths == declared_paths.len() {
         "## Velnor cache report\n- Backend: actions/cache (native)\n- Store: host-persistent cache class\n- Result: host-persistent store — restore/save skipped\n".to_string()
+    } else if persistent_paths > 0 {
+        format!(
+            "## Velnor cache report\n- Backend: actions/cache (native)\n- Key: `{key}`\n- Result: keyed miss; {persistent_paths}/{} paths host-persistent\n- Restore: {restore_ms} ms\n",
+            declared_paths.len()
+        )
     } else {
         format!(
             "## Velnor cache report\n- Backend: actions/cache (native)\n- Key: `{key}`\n- Result: {}\n- Restore: {restore_ms} ms\n",
@@ -4498,6 +4512,7 @@ fn native_cache_save_main(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
+    validate_cache_paths(&action_state, &path)?;
     let version = cache_scope_version_for(action, &action_state, &path);
     save_cache_result(&action_state, &key, &path, false, &version)
 }
@@ -4509,10 +4524,11 @@ fn native_rust_cache(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let shared_key = native_cache_key(action, &action_state, "shared-key");
     let cache_directories = native_input(action, &action_state, "cache-directories");
+    validate_cache_paths(&action_state, &cache_directories)?;
     let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
     let version = cache_scope_version_for(action, &action_state, &cache_directories);
     let t0 = Instant::now();
-    let matched = find_cache_match(&action_state, &shared_key, "", &version)?;
+    let matched = find_cache_match(&action_state, &shared_key, "", &version, &cache_directories)?;
     if let Some(matched_key) = &matched {
         restore_cache_paths(&action_state, matched_key, &cache_directories, &version)?;
     }
@@ -4660,18 +4676,32 @@ fn normalize_cache_scope_paths(paths: &str) -> String {
     items.join("\n")
 }
 
+fn validate_cache_paths(state: &JobExecutionState, paths: &str) -> Result<()> {
+    for path in cache_paths(paths) {
+        if has_glob_pattern(&path) {
+            let Some((_, pattern)) = cache_glob_base_and_pattern(state, &path)? else {
+                bail!("cache glob '{path}' cannot resolve to Velnor-mapped job storage");
+            };
+            Glob::new(&normalize_glob_pattern(&pattern))
+                .with_context(|| format!("invalid cache glob syntax '{path}'"))?;
+        }
+    }
+    Ok(())
+}
+
 fn find_cache_match(
     state: &JobExecutionState,
     key: &str,
     restore_keys: &str,
     version: &str,
+    paths: &str,
 ) -> Result<Option<String>> {
     let store = cache_store_dir(state, version)?;
     if key.is_empty() || !store.exists() {
         return Ok(None);
     }
     let exact = store.join(sanitize_artifact_name(key));
-    if cache_entry_complete(&exact) {
+    if cache_entry_complete_for_paths(&exact, paths) {
         return Ok(Some(key.to_string()));
     }
     for restore_key in restore_keys
@@ -4679,7 +4709,7 @@ fn find_cache_match(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let mut matches = cache_entries_with_prefix(&store, restore_key)?;
+        let mut matches = cache_entries_with_prefix(&store, restore_key, paths)?;
         matches.sort_by(|left, right| {
             right
                 .created
@@ -4699,12 +4729,16 @@ struct CacheEntryMatch {
     created: u128,
 }
 
-fn cache_entries_with_prefix(store: &Path, prefix: &str) -> Result<Vec<CacheEntryMatch>> {
+fn cache_entries_with_prefix(
+    store: &Path,
+    prefix: &str,
+    paths: &str,
+) -> Result<Vec<CacheEntryMatch>> {
     let sanitized_prefix = sanitize_artifact_name(prefix);
     let mut matches = Vec::new();
     for entry in fs::read_dir(store).with_context(|| format!("read {}", store.display()))? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() || !cache_entry_complete(&entry.path()) {
+        if !entry.file_type()?.is_dir() || !cache_entry_complete_for_paths(&entry.path(), paths) {
             continue;
         }
         let sanitized_key = entry.file_name().to_string_lossy().to_string();
@@ -4750,28 +4784,428 @@ fn restore_cache_paths(
     paths: &str,
     version: &str,
 ) -> Result<()> {
+    let declared_paths = cache_paths(paths);
     let cache_dir = cache_store_dir(state, version)?.join(sanitize_artifact_name(key));
     let _lock = CacheEntryLock::shared(&cache_dir)?;
     if !cache_entry_complete(&cache_dir) {
         bail!("cache entry '{key}' is incomplete");
     }
-    for (index, path) in cache_paths(paths).into_iter().enumerate() {
+    for (index, path) in declared_paths.iter().enumerate() {
         // Paths that live on Velnor's host-persistent mounts (cargo
         // registry/git, mise installs, sccache) are always warm — copying
         // store bytes over them would be pure waste.
-        if velnor_persistent_cache_path(state, &path) {
+        if velnor_persistent_cache_path(state, path) {
+            continue;
+        }
+        if has_glob_pattern(path) {
+            restore_cache_glob_path(state, &cache_dir, index, path, &declared_paths)?;
             continue;
         }
         let source = cache_dir.join(index.to_string());
         if !source.exists() {
             continue;
         }
-        let Some(destination) = resolve_cache_path(state, &path) else {
+        let Some(destination) = resolve_cache_path(state, path) else {
             continue;
         };
         fs::create_dir_all(&destination)
             .with_context(|| format!("create cache restore path {}", destination.display()))?;
         copy_dir_contents(&source, &destination)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CacheGlobManifest {
+    version: u8,
+    entries: Vec<CacheGlobManifestEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CacheGlobManifestEntry {
+    relative: String,
+    kind: CacheGlobEntryKind,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CacheGlobEntryKind {
+    Directory,
+    File,
+}
+
+type CacheGlobSource = (PathBuf, PathBuf, CacheGlobEntryKind);
+type CacheGlobSources = Vec<CacheGlobSource>;
+
+fn cache_entry_complete_for_paths(path: &Path, paths: &str) -> bool {
+    if !cache_entry_complete(path) {
+        return false;
+    }
+    cache_paths(paths)
+        .into_iter()
+        .enumerate()
+        .all(|(index, declared)| {
+            !has_glob_pattern(&declared) || cache_glob_manifest_is_valid(path, index)
+        })
+}
+
+fn cache_glob_manifest_path(cache_entry: &Path, index: usize) -> PathBuf {
+    cache_entry
+        .join(index.to_string())
+        .join(CACHE_GLOB_MANIFEST_FILE)
+}
+
+fn cache_glob_manifest_is_valid(cache_entry: &Path, index: usize) -> bool {
+    let manifest_path = cache_glob_manifest_path(cache_entry, index);
+    let Ok(bytes) = fs::read(manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<CacheGlobManifest>(&bytes) else {
+        return false;
+    };
+    if manifest.version != 1 {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    manifest.entries.iter().all(|entry| {
+        validate_cache_glob_relative(&entry.relative).is_ok() && seen.insert(entry.relative.clone())
+    })
+}
+
+fn canonicalize_cache_path_with_missing_tail(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!("cache glob root must be absolute: {}", path.display());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!(
+            "cache glob root contains a parent traversal: {}",
+            path.display()
+        );
+    }
+
+    let mut cursor = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    bail!("cache glob root contains a symlink: {}", cursor.display());
+                }
+                let mut canonical = fs::canonicalize(&cursor).with_context(|| {
+                    format!("canonicalize cache glob root {}", cursor.display())
+                })?;
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = cursor.file_name() else {
+                    bail!(
+                        "cache glob root has no existing ancestor: {}",
+                        path.display()
+                    );
+                };
+                missing.push(name.to_owned());
+                if !cursor.pop() {
+                    bail!(
+                        "cache glob root has no existing ancestor: {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect cache glob root {}", cursor.display()));
+            }
+        }
+    }
+}
+
+fn cache_glob_base_and_pattern(
+    state: &JobExecutionState,
+    path: &str,
+) -> Result<Option<(PathBuf, String)>> {
+    let Some((base, pattern)) = artifact_glob_base_and_pattern(state, path) else {
+        bail!("cache glob '{path}' cannot resolve to Velnor-mapped job storage");
+    };
+
+    let canonical_base = canonicalize_cache_path_with_missing_tail(&base)?;
+    let mut mapped = false;
+    for root in [
+        state.workspace_host.as_deref(),
+        state.temp_host.as_deref(),
+        state.cargo_target_host.as_deref(),
+        state_home_host(state).as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let canonical_root = canonicalize_cache_path_with_missing_tail(root)?;
+        if canonical_base == canonical_root || canonical_base.starts_with(&canonical_root) {
+            mapped = true;
+            break;
+        }
+    }
+    if !mapped {
+        bail!(
+            "cache glob '{path}' resolves outside Velnor-mapped job storage: {}",
+            canonical_base.display()
+        );
+    }
+    Ok(Some((canonical_base, pattern)))
+}
+
+fn validate_cache_glob_relative(relative: &str) -> Result<PathBuf> {
+    if relative.is_empty() || relative.contains('\\') {
+        bail!("invalid cache glob manifest path '{relative}'");
+    }
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        bail!("cache glob manifest path must be relative: '{relative}'");
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            _ => bail!("cache glob manifest path escapes its root: '{relative}'"),
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn safe_cache_glob_join(root: &Path, relative: &str) -> Result<PathBuf> {
+    let relative = validate_cache_glob_relative(relative)?;
+    if let Ok(metadata) = fs::symlink_metadata(root) {
+        if metadata.file_type().is_symlink() {
+            bail!("cache glob root is a symlink: {}", root.display());
+        }
+    }
+    let mut current = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if metadata.file_type().is_symlink() {
+                bail!("cache glob path contains a symlink: {}", current.display());
+            }
+            if components.peek().is_some() && !metadata.file_type().is_dir() {
+                bail!(
+                    "cache glob path contains a non-directory parent: {}",
+                    current.display()
+                );
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn cache_glob_sources(
+    state: &JobExecutionState,
+    path: &str,
+) -> Result<Option<(PathBuf, CacheGlobSources)>> {
+    let Some((base, pattern)) = cache_glob_base_and_pattern(state, path)? else {
+        return Ok(None);
+    };
+    if !base.exists() {
+        return Ok(Some((base, Vec::new())));
+    }
+    let matcher = Glob::new(&normalize_glob_pattern(&pattern))?.compile_matcher();
+    let mut sources = Vec::new();
+    collect_cache_glob_matches(&base, &base, &matcher, &mut sources)?;
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    sources.dedup_by(|left, right| left.0 == right.0);
+
+    // A matching directory contains every matching descendant. Keep only the
+    // shallowest roots so one glob cannot publish duplicate overlapping trees.
+    let mut roots = Vec::with_capacity(sources.len());
+    for (source, relative, kind) in sources {
+        if roots.iter().any(|(root, _, root_kind)| {
+            *root_kind == CacheGlobEntryKind::Directory && source.starts_with(root)
+        }) {
+            continue;
+        }
+        roots.push((source, relative, kind));
+    }
+    Ok(Some((base, roots)))
+}
+
+fn cache_glob_source_overlaps_persistent_exact(
+    state: &JobExecutionState,
+    declared_paths: &[String],
+    source: &Path,
+    relative: &Path,
+) -> bool {
+    for declared in declared_paths {
+        if has_glob_pattern(declared) || !velnor_persistent_cache_path(state, declared) {
+            continue;
+        }
+        if state.persistent_workspace_target {
+            if let Some(target_relative) = workspace_target_relative(declared) {
+                if relative == target_relative || relative.starts_with(&target_relative) {
+                    return true;
+                }
+            }
+        }
+        if let Some(persistent_path) = resolve_cache_path(state, declared) {
+            if source == persistent_path || source.starts_with(&persistent_path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn workspace_target_relative(path: &str) -> Option<PathBuf> {
+    let path = path.trim();
+    let relative = match path {
+        "target" | "./target" | "/__w/target" => "",
+        _ => path
+            .strip_prefix("target/")
+            .or_else(|| path.strip_prefix("./target/"))
+            .or_else(|| path.strip_prefix("/__w/target/"))?,
+    };
+    Some(Path::new("target").join(relative))
+}
+
+fn collect_cache_glob_matches(
+    root: &Path,
+    current: &Path,
+    matcher: &globset::GlobMatcher,
+    matches: &mut Vec<(PathBuf, PathBuf, CacheGlobEntryKind)>,
+) -> Result<()> {
+    for entry in fs::read_dir(current).with_context(|| format!("read {}", current.display()))? {
+        let entry = entry?;
+        let source = entry.path();
+        let relative = source
+            .strip_prefix(root)
+            .with_context(|| format!("strip cache glob root from {}", source.display()))?
+            .to_path_buf();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            // Repository symlinks are not needed for a cache optimization and
+            // must never be recreated from untrusted cache content.
+            continue;
+        }
+        let kind = if file_type.is_dir() {
+            CacheGlobEntryKind::Directory
+        } else if file_type.is_file() {
+            CacheGlobEntryKind::File
+        } else {
+            bail!(
+                "cache glob contains unsupported file type at {}",
+                source.display()
+            );
+        };
+        let matched = matcher.is_match(&relative);
+        if matched {
+            matches.push((source.clone(), relative, kind));
+        }
+        // A matched directory is already a complete restore root. Do not
+        // descend into it looking for overlapping matches; this keeps the
+        // canonical `**/target` and `**/node_modules` scans bounded by the
+        // directory roots they will copy.
+        if matches!(kind, CacheGlobEntryKind::Directory) && !matched {
+            collect_cache_glob_matches(root, &source, matcher, matches)?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_cache_glob_path(
+    state: &JobExecutionState,
+    cache_entry: &Path,
+    index: usize,
+    path: &str,
+    declared_paths: &[String],
+) -> Result<()> {
+    let Some((base, _)) = cache_glob_base_and_pattern(state, path)? else {
+        return Ok(());
+    };
+    let index_dir = cache_entry.join(index.to_string());
+    let manifest_path = index_dir.join(CACHE_GLOB_MANIFEST_FILE);
+    if !manifest_path.is_file() {
+        bail!("cache entry is missing the concrete-path manifest for glob '{path}'");
+    }
+    let manifest: CacheGlobManifest = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("read cache glob manifest {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parse cache glob manifest {}", manifest_path.display()))?;
+    if manifest.version != 1 {
+        bail!(
+            "unsupported cache glob manifest version {} for '{path}'",
+            manifest.version
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::with_capacity(manifest.entries.len());
+    for entry in manifest.entries {
+        let relative = validate_cache_glob_relative(&entry.relative)?;
+        if !seen.insert(relative.clone()) {
+            bail!(
+                "cache glob manifest contains duplicate path '{}'",
+                entry.relative
+            );
+        }
+        let source = safe_cache_glob_join(&index_dir.join("payload"), &entry.relative)?;
+        let destination = safe_cache_glob_join(&base, &entry.relative)?;
+        if cache_glob_source_overlaps_persistent_exact(
+            state,
+            declared_paths,
+            &destination,
+            &relative,
+        ) {
+            continue;
+        }
+        let source_type = fs::symlink_metadata(&source).with_context(|| {
+            format!(
+                "read cache glob payload for '{}': {}",
+                entry.relative,
+                source.display()
+            )
+        })?;
+        if source_type.file_type().is_symlink() {
+            bail!("cache glob payload is a symlink for '{}'", entry.relative);
+        }
+        let valid_kind = match entry.kind {
+            CacheGlobEntryKind::Directory => source_type.file_type().is_dir(),
+            CacheGlobEntryKind::File => source_type.file_type().is_file(),
+        };
+        if !valid_kind {
+            bail!(
+                "cache glob manifest kind does not match payload for '{}'",
+                entry.relative
+            );
+        }
+        validated.push((source, destination, entry.kind));
+    }
+    for (source, destination, kind) in validated {
+        match kind {
+            CacheGlobEntryKind::Directory => {
+                fs::create_dir_all(&destination).with_context(|| {
+                    format!("create cache glob restore path {}", destination.display())
+                })?;
+                copy_cache_glob_dir_contents(&source, &destination)?;
+            }
+            CacheGlobEntryKind::File => {
+                let parent = destination.parent().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cache glob destination has no parent: {}",
+                        destination.display()
+                    )
+                })?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("create cache glob restore path {}", parent.display())
+                })?;
+                crate::fs_copy::clone_or_copy(&source, &destination).with_context(|| {
+                    format!("restore cache glob file {}", destination.display())
+                })?;
+            }
+        }
     }
     Ok(())
 }
@@ -4797,26 +5231,40 @@ fn workspace_target_cache_path(path: &str) -> bool {
         || path.starts_with("/__w/target/")
 }
 
+fn path_or_child(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn velnor_static_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
+    // These are the relative aliases emitted by the canonical fleet cache
+    // declarations. They resolve to Velnor's mounted Cargo/mise stores even
+    // though Actions treats them as workspace-relative paths on GitHub.
+    if path_or_child(path, ".cargo/registry")
+        || path_or_child(path, ".cargo/git")
+        || path_or_child(path, ".cache/mise")
+        || path_or_child(path, ".local/share/mise/installs")
+    {
+        return true;
+    }
     let home_relative = path
         .strip_prefix("~/")
         .or_else(|| path.strip_prefix("/github/home/"));
     if let Some(rest) = home_relative {
-        return rest.starts_with(".cargo/registry")
-            || rest.starts_with(".cargo/git")
+        return path_or_child(rest, ".cargo/registry")
+            || path_or_child(rest, ".cargo/git")
             // Workflows usually cache ~/.rustup on GitHub-hosted runners. Velnor
             // points RUSTUP_HOME at the image-baked /root/.rustup store instead,
             // so a ~/.rustup cache restore is pure hosted-runner compatibility
             // noise on the Velnor lane.
-            || rest.starts_with(".rustup");
+            || path_or_child(rest, ".rustup");
     }
-    path == "/opt/mise"
-        || path.starts_with("/opt/mise/")
-        || path == "/root/.rustup"
-        || path.starts_with("/root/.rustup/")
-        || path == "/var/cache/sccache"
-        || path.starts_with("/var/cache/sccache/")
+    path_or_child(path, "/opt/mise")
+        || path_or_child(path, "/root/.rustup")
+        || path_or_child(path, "/var/cache/sccache")
 }
 
 fn rust_cache_covered_by_persistent_storage(
@@ -4888,6 +5336,10 @@ fn save_cache_result(
     exact_hit: bool,
     version: &str,
 ) -> Result<StepExecutionResult> {
+    // Validate the complete declaration before resolving or mutating the
+    // shared cache entry. In particular, glob syntax must fail before the
+    // entry lock, staging directory, or metadata can be created.
+    validate_cache_paths(state, paths)?;
     let t0 = Instant::now();
     if key.is_empty() {
         return Ok(cache_save_step_result(
@@ -4907,7 +5359,7 @@ fn save_cache_result(
     let lock_start = Instant::now();
     let _lock = CacheEntryLock::exclusive(&cache_dir)?;
     let lock_wait_ms = lock_start.elapsed().as_millis();
-    if cache_entry_complete(&cache_dir) {
+    if cache_entry_complete_for_paths(&cache_dir, paths) {
         return Ok(cache_save_step_result(
             key,
             SaveOutcome::AlreadyExists,
@@ -4939,18 +5391,102 @@ fn save_cache_result(
     let copy_start = Instant::now();
     let mut saved = 0usize;
     let mut persistent = 0usize;
-    for (index, path) in cache_paths(paths).into_iter().enumerate() {
-        if velnor_persistent_cache_path(state, &path) {
+    let declared_paths = cache_paths(paths);
+    for (index, path) in declared_paths.iter().enumerate() {
+        if velnor_persistent_cache_path(state, path) {
             persistent += 1;
             continue;
         }
-        let Some(source) = resolve_cache_path(state, &path) else {
+        let target = staging_dir.join(index.to_string());
+        if has_glob_pattern(path) {
+            let Some((_base, sources)) = cache_glob_sources(state, path)? else {
+                continue;
+            };
+            let mut entries = Vec::new();
+            for (source, relative, kind) in sources {
+                if cache_glob_source_overlaps_persistent_exact(
+                    state,
+                    &declared_paths,
+                    &source,
+                    &relative,
+                ) {
+                    continue;
+                }
+                let relative_string = relative.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("cache glob path is not valid UTF-8: {}", relative.display())
+                })?;
+                validate_cache_glob_relative(relative_string)?;
+                let destination = safe_cache_glob_join(&target.join("payload"), relative_string)?;
+                match kind {
+                    CacheGlobEntryKind::Directory => {
+                        fs::create_dir_all(&destination).with_context(|| {
+                            format!("create cache glob entry {}", destination.display())
+                        })?;
+                        if let Err(error) = copy_cache_glob_dir_contents(&source, &destination) {
+                            fs::remove_dir_all(&staging_dir).ok();
+                            return Ok(cache_save_step_result(
+                                key,
+                                SaveOutcome::Contended {
+                                    phase: SaveContentionPhase::Copy,
+                                    detail: format!("{error:#}"),
+                                },
+                                SaveTiming {
+                                    lock_wait_ms,
+                                    copy_ms: copy_start.elapsed().as_millis(),
+                                    total_ms: t0.elapsed().as_millis(),
+                                },
+                            ));
+                        }
+                    }
+                    CacheGlobEntryKind::File => {
+                        if let Some(parent) = destination.parent() {
+                            fs::create_dir_all(parent).with_context(|| {
+                                format!("create cache glob entry {}", parent.display())
+                            })?;
+                        }
+                        if let Err(error) = crate::fs_copy::clone_or_copy(&source, &destination) {
+                            fs::remove_dir_all(&staging_dir).ok();
+                            return Ok(cache_save_step_result(
+                                key,
+                                SaveOutcome::Contended {
+                                    phase: SaveContentionPhase::Copy,
+                                    detail: format!("{error:#}"),
+                                },
+                                SaveTiming {
+                                    lock_wait_ms,
+                                    copy_ms: copy_start.elapsed().as_millis(),
+                                    total_ms: t0.elapsed().as_millis(),
+                                },
+                            ));
+                        }
+                    }
+                }
+                entries.push(CacheGlobManifestEntry {
+                    relative: relative_string.to_owned(),
+                    kind,
+                });
+            }
+            fs::create_dir_all(&target)
+                .with_context(|| format!("create cache entry {}", target.display()))?;
+            let manifest = CacheGlobManifest {
+                version: 1,
+                entries,
+            };
+            let manifest_bytes = serde_json::to_vec(&manifest)
+                .context("serialize cache glob concrete-path manifest")?;
+            fs::write(target.join(CACHE_GLOB_MANIFEST_FILE), manifest_bytes)
+                .with_context(|| format!("write cache glob manifest {}", target.display()))?;
+            if !manifest.entries.is_empty() {
+                saved += 1;
+            }
+            continue;
+        }
+        let Some(source) = resolve_cache_path(state, path) else {
             continue;
         };
         if !source.exists() {
             continue;
         }
-        let target = staging_dir.join(index.to_string());
         fs::create_dir_all(&target)
             .with_context(|| format!("create cache entry {}", target.display()))?;
         if let Err(error) = copy_cache_source(&source, &target) {
@@ -7083,6 +7619,36 @@ fn copy_cache_source(source: &Path, destination: &Path) -> Result<()> {
             .with_context(|| format!("copy cache file {}", source.display()))?;
         Ok(())
     }
+}
+
+fn copy_cache_glob_dir_contents(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path)
+                .with_context(|| format!("create {}", destination_path.display()))?;
+            copy_cache_glob_dir_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
+                .with_context(|| format!("copy {}", source_path.display()))?;
+        } else {
+            bail!(
+                "cache glob contains unsupported file type at {}",
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Copy a cache tree in one traversal.
@@ -11502,7 +12068,394 @@ esac
         assert!(workspace_target_cache_path("target"));
         assert!(workspace_target_cache_path("./target/debug"));
         assert!(workspace_target_cache_path("/__w/target/release"));
+        // Persistent target materialization owns only the workspace-root
+        // target. Wildcard targets stay keyed and use concrete manifests.
+        assert!(!workspace_target_cache_path("**/target"));
         assert!(!workspace_target_cache_path("nested/target"));
+    }
+
+    #[test]
+    fn native_cache_globs_round_trip_target_and_node_modules() {
+        let root = temp_dir();
+        let save_temp = root.join("save/temp");
+        let restore_temp = root.join("restore/temp");
+        let save_workspace = save_temp.join("work");
+        let restore_workspace = restore_temp.join("work");
+        fs::create_dir_all(save_workspace.join("target")).unwrap();
+        fs::create_dir_all(save_workspace.join("packages/app/target")).unwrap();
+        fs::create_dir_all(save_workspace.join("node_modules")).unwrap();
+        fs::create_dir_all(save_workspace.join("packages/app/node_modules")).unwrap();
+        fs::write(save_workspace.join("target/root.bin"), "root target\n").unwrap();
+        fs::write(
+            save_workspace.join("packages/app/target/nested.bin"),
+            "nested target\n",
+        )
+        .unwrap();
+        fs::write(
+            save_workspace.join("node_modules/root.js"),
+            "root modules\n",
+        )
+        .unwrap();
+        fs::write(
+            save_workspace.join("packages/app/node_modules/nested.js"),
+            "nested modules\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            "nested.js",
+            save_workspace.join("packages/app/node_modules/link.js"),
+        )
+        .unwrap();
+        fs::create_dir_all(&restore_workspace).unwrap();
+
+        let env = [("GITHUB_REPOSITORY", "Test/Repo")];
+        let paths = "**/target\n**/node_modules";
+        let save = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", paths), ("key", "glob-round-trip")],
+        )];
+        let save_results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&save_temp),
+                &save,
+                &env.iter()
+                    .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                    .collect::<Vec<_>>(),
+                &save_temp,
+            )
+            .unwrap();
+        assert!(save_results[0]
+            .stdout
+            .contains("Saved cache 'glob-round-trip'"));
+
+        let cache_entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("glob-round-trip");
+        assert!(cache_entry_complete_for_paths(&cache_entry, paths));
+        let target_manifest: CacheGlobManifest = serde_json::from_slice(
+            &fs::read(cache_entry.join("0").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        let node_manifest: CacheGlobManifest = serde_json::from_slice(
+            &fs::read(cache_entry.join("1").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(target_manifest
+            .entries
+            .iter()
+            .any(|entry| entry.relative == "target"));
+        assert!(target_manifest
+            .entries
+            .iter()
+            .any(|entry| entry.relative == "packages/app/target"));
+        assert!(node_manifest
+            .entries
+            .iter()
+            .any(|entry| entry.relative == "node_modules"));
+        assert!(node_manifest
+            .entries
+            .iter()
+            .any(|entry| entry.relative == "packages/app/node_modules"));
+
+        let restore = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", paths), ("key", "glob-round-trip")],
+        )];
+        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&restore_temp),
+                &restore,
+                &env.iter()
+                    .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                    .collect::<Vec<_>>(),
+                &restore_temp,
+            )
+            .unwrap();
+        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(
+            fs::read_to_string(restore_workspace.join("target/root.bin")).unwrap(),
+            "root target\n"
+        );
+        assert_eq!(
+            fs::read_to_string(restore_workspace.join("packages/app/target/nested.bin")).unwrap(),
+            "nested target\n"
+        );
+        assert_eq!(
+            fs::read_to_string(restore_workspace.join("node_modules/root.js")).unwrap(),
+            "root modules\n"
+        );
+        assert_eq!(
+            fs::read_to_string(restore_workspace.join("packages/app/node_modules/nested.js"))
+                .unwrap(),
+            "nested modules\n"
+        );
+        assert!(!restore_workspace
+            .join("packages/app/node_modules/link.js")
+            .exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_keeps_empty_glob_manifest_with_other_paths() {
+        let root = temp_dir();
+        let save_temp = root.join("save/temp");
+        let restore_temp = root.join("restore/temp");
+        fs::create_dir_all(save_temp.join("work/cache")).unwrap();
+        fs::create_dir_all(&restore_temp).unwrap();
+        fs::write(save_temp.join("work/cache/state.bin"), "state\n").unwrap();
+
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let paths = "cache\n**/target";
+        let save = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", paths), ("key", "empty-glob")],
+        )];
+        DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
+            .unwrap();
+
+        let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("empty-glob");
+        assert!(entry.join("1").join(CACHE_GLOB_MANIFEST_FILE).is_file());
+        let manifest: CacheGlobManifest = serde_json::from_slice(
+            &fs::read(entry.join("1").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest.entries.is_empty());
+        assert!(cache_entry_complete_for_paths(&entry, paths));
+
+        let restore = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", paths), ("key", "empty-glob")],
+        )];
+        let results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
+            .unwrap();
+        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(
+            fs::read_to_string(restore_temp.join("work/cache/state.bin")).unwrap(),
+            "state\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_glob_deduplicates_persistent_workspace_target() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        let workspace = temp.join("work");
+        let target_store = root.join("target-store");
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        fs::create_dir_all(workspace.join("packages/app/target")).unwrap();
+        fs::write(workspace.join("target/root.bin"), "persistent root\n").unwrap();
+        fs::write(
+            workspace.join("packages/app/target/nested.bin"),
+            "keyed nested\n",
+        )
+        .unwrap();
+
+        let mut state = JobExecutionState::new_with_workspace(
+            &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+            &[],
+            &workspace,
+            &temp,
+        );
+        state.persistent_workspace_target = true;
+        state.cargo_target_host = Some(target_store);
+        let paths = "target\n**/target";
+        let version = cache_scope_version("", "", "", paths);
+        save_cache_result(&state, "glob-dedup", paths, false, &version).unwrap();
+
+        let cache_entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("glob-dedup");
+        let manifest: CacheGlobManifest = serde_json::from_slice(
+            &fs::read(cache_entry.join("1").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(!manifest
+            .entries
+            .iter()
+            .any(|entry| entry.relative == "target"));
+        assert!(manifest
+            .entries
+            .iter()
+            .any(|entry| entry.relative == "packages/app/target"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_glob_manifest_rejects_traversal_and_unmapped_roots() {
+        for path in ["../escape", "nested/../../escape", "/absolute", "./target"] {
+            assert!(
+                validate_cache_glob_relative(path).is_err(),
+                "manifest path unexpectedly accepted: {path}"
+            );
+        }
+        assert!(validate_cache_glob_relative("packages/app/target").is_ok());
+
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
+        assert!(cache_glob_base_and_pattern(&state, "/etc/**").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_cache_glob_is_rejected_before_store_creation() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let step = native_cache_step(
+            None,
+            Some("invalid"),
+            &[("path", "/etc/**"), ("key", "invalid-glob")],
+        );
+        let error = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &[step],
+                &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+                &temp,
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("outside Velnor-mapped job storage"));
+        assert!(!root.join("_velnor_caches").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_actions_cache_save_glob_mutates_no_store() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(temp.join("work/cache")).unwrap();
+        fs::write(temp.join("work/cache/state.bin"), "state\n").unwrap();
+        let paths = "cache/[unterminated";
+        let step = native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", paths), ("key", "malformed-actions-cache")],
+        );
+
+        let error = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &[step],
+                &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+                &temp,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid cache glob syntax"));
+        assert!(!root.join("_velnor_caches").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_rust_cache_save_glob_mutates_no_store() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("cache")).unwrap();
+        fs::write(workspace.join("cache/state.bin"), "state\n").unwrap();
+        let state = JobExecutionState::new_with_workspace(
+            &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+            &[],
+            &workspace,
+            &temp,
+        );
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::RustCache,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("shared-key".into(), "malformed-rust-cache".into()),
+                ("cache-directories".into(), "cache/[unterminated".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+
+        let error = native_rust_cache_save("rust-cache", &action, &state).unwrap_err();
+
+        assert!(error.to_string().contains("invalid cache glob syntax"));
+        assert!(!root.join("_velnor_caches").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canonical_fleet_cache_aliases_are_host_persistent() {
+        for path in [
+            ".cache/mise",
+            ".cache/mise/downloads",
+            ".local/share/mise/installs",
+            ".local/share/mise/installs/rust/1.85.0",
+            ".cargo/registry",
+            ".cargo/registry/cache",
+            ".cargo/git",
+            ".cargo/git/db",
+        ] {
+            assert!(
+                velnor_static_persistent_cache_path(path),
+                "canonical cache alias was not recognized: {path}"
+            );
+        }
+        // Matching is component-aware: similarly named workspace paths must
+        // remain eligible for ordinary keyed cache storage.
+        for path in [
+            ".cargo/registry-old",
+            ".cache/mise-old",
+            ".cargo/config.toml",
+        ] {
+            assert!(
+                !velnor_static_persistent_cache_path(path),
+                "non-canonical path was incorrectly treated as persistent: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_cache_paths_report_host_persistent_subset() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("path".into(), ".cargo/git\n.gradle/caches\n".into()),
+                    ("key".into(), "dependencies-Linux-X64-lock".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert!(results[0]
+            .stdout
+            .contains("1/2 cache path(s) live on Velnor host-persistent storage"));
+        assert!(!results[0].stdout.contains("Cache not found for input keys"));
+        assert!(results[0]
+            .state
+            .summary
+            .contains("keyed miss; 1/2 paths host-persistent"));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -11541,6 +12494,235 @@ esac
             .summary
             .contains("host-persistent store — restore/save skipped")));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_globs_round_trip_with_concrete_manifest() {
+        let root = temp_dir();
+        let save_temp = root.join("save-job/temp");
+        let restore_temp = root.join("restore-job/temp");
+        let save_workspace = save_temp.join("work");
+        fs::create_dir_all(save_workspace.join("target/debug")).unwrap();
+        fs::write(save_workspace.join("target/debug/app"), "target\n").unwrap();
+        fs::create_dir_all(save_workspace.join("packages/app/node_modules/vendor/node_modules"))
+            .unwrap();
+        fs::write(
+            save_workspace.join("packages/app/node_modules/package.json"),
+            "node\n",
+        )
+        .unwrap();
+        fs::write(
+            save_workspace.join("packages/app/node_modules/vendor/node_modules/nested.js"),
+            "nested\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let paths = "**/target\n**/node_modules";
+        let save = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", paths), ("key", "glob-round-trip")],
+        )];
+        let save_results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
+            .unwrap();
+        assert!(save_results[0]
+            .stdout
+            .contains("Saved cache 'glob-round-trip'"));
+
+        let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("glob-round-trip");
+        let target_manifest: CacheGlobManifest = serde_json::from_slice(
+            &fs::read(entry.join("0").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        let node_manifest: CacheGlobManifest = serde_json::from_slice(
+            &fs::read(entry.join("1").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(target_manifest.version, 1);
+        assert_eq!(node_manifest.version, 1);
+        assert_eq!(
+            target_manifest
+                .entries
+                .iter()
+                .map(|entry| entry.relative.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target"]
+        );
+        assert_eq!(
+            node_manifest
+                .entries
+                .iter()
+                .map(|entry| entry.relative.as_str())
+                .collect::<Vec<_>>(),
+            vec!["packages/app/node_modules"]
+        );
+
+        let restore = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", paths), ("key", "glob-round-trip")],
+        )];
+        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
+            .unwrap();
+        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(
+            fs::read_to_string(restore_temp.join("work/target/debug/app")).unwrap(),
+            "target\n"
+        );
+        assert_eq!(
+            fs::read_to_string(restore_temp.join("work/packages/app/node_modules/package.json"))
+                .unwrap(),
+            "node\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                restore_temp.join("work/packages/app/node_modules/vendor/node_modules/nested.js")
+            )
+            .unwrap(),
+            "nested\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_glob_deduplicates_persistent_target_root() {
+        let root = temp_dir();
+        let save_temp = root.join("save-job/temp");
+        let restore_temp = root.join("restore-job/temp");
+        let save_workspace = save_temp.join("work");
+        fs::create_dir_all(save_workspace.join("target")).unwrap();
+        fs::write(save_workspace.join("target/root.txt"), "root\n").unwrap();
+        fs::create_dir_all(save_workspace.join("packages/core/target")).unwrap();
+        fs::write(
+            save_workspace.join("packages/core/target/nested.txt"),
+            "nested\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let paths = "target\n**/target";
+        let mut save_container = container(&save_temp);
+        save_container.cargo_target_host = Some(save_temp.join("target-store"));
+        let save = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", paths), ("key", "target-glob-dedup")],
+        )];
+        let save_results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&save_container, &save, &env, &save_temp)
+            .unwrap();
+        assert!(save_results[0]
+            .stdout
+            .contains("Saved cache 'target-glob-dedup'"));
+
+        let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("target-glob-dedup");
+        assert!(!entry.join("0").exists());
+        let manifest: CacheGlobManifest = serde_json::from_slice(
+            &fs::read(entry.join("1").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest
+                .entries
+                .iter()
+                .map(|entry| entry.relative.as_str())
+                .collect::<Vec<_>>(),
+            vec!["packages/core/target"]
+        );
+
+        let mut restore_container = container(&restore_temp);
+        restore_container.cargo_target_host = Some(restore_temp.join("target-store"));
+        let restore = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", paths), ("key", "target-glob-dedup")],
+        )];
+        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&restore_container, &restore, &env, &restore_temp)
+            .unwrap();
+        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert!(!restore_temp.join("work/target/root.txt").exists());
+        assert_eq!(
+            fs::read_to_string(restore_temp.join("work/packages/core/target/nested.txt")).unwrap(),
+            "nested\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_legacy_glob_entry_is_replaced_on_save() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("target")).unwrap();
+        fs::write(workspace.join("target/app"), "v1\n").unwrap();
+        let state = JobExecutionState::new_with_workspace(
+            &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
+            &[],
+            &workspace,
+            &temp,
+        );
+        let paths = "**/target";
+        let version = cache_scope_version("", "", "", paths);
+        save_cache_result(&state, "legacy-glob", paths, false, &version).unwrap();
+
+        let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("legacy-glob");
+        fs::remove_file(entry.join("0").join(CACHE_GLOB_MANIFEST_FILE)).unwrap();
+        fs::write(workspace.join("target/app"), "v2\n").unwrap();
+        save_cache_result(&state, "legacy-glob", paths, false, &version).unwrap();
+        assert!(cache_entry_complete_for_paths(&entry, paths));
+        assert!(entry.join("0").join(CACHE_GLOB_MANIFEST_FILE).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_glob_manifest_rejects_traversal_before_restore() {
+        assert!(validate_cache_glob_relative("../escape").is_err());
+        assert!(validate_cache_glob_relative("/absolute").is_err());
+        assert!(validate_cache_glob_relative("nested\\escape").is_err());
+        assert_eq!(
+            validate_cache_glob_relative("packages/app/node_modules").unwrap(),
+            PathBuf::from("packages/app/node_modules")
+        );
+
+        let root = temp_dir();
+        let save_temp = root.join("save-job/temp");
+        let restore_temp = root.join("restore-job/temp");
+        let save_workspace = save_temp.join("work");
+        fs::create_dir_all(save_workspace.join("packages/app/node_modules")).unwrap();
+        fs::write(
+            save_workspace.join("packages/app/node_modules/package.json"),
+            "node\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let paths = "**/node_modules";
+        let save = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", paths), ("key", "glob-traversal")],
+        )];
+        DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
+            .unwrap();
+        let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("glob-traversal");
+        fs::write(
+            entry.join("0").join(CACHE_GLOB_MANIFEST_FILE),
+            r#"{"version":1,"entries":[{"relative":"../escape","kind":"directory"}]}"#,
+        )
+        .unwrap();
+        let restore = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", paths), ("key", "glob-traversal")],
+        )];
+        let results = DockerJobEngine::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
+            .unwrap();
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert!(!root.join("restore-job/escape").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -11874,7 +13056,14 @@ esac
         state.temp_host = Some(restore_temp);
 
         assert_eq!(
-            find_cache_match(&state, "rustup-v2-linux-key", "rustup-v2-linux-", version).unwrap(),
+            find_cache_match(
+                &state,
+                "rustup-v2-linux-key",
+                "rustup-v2-linux-",
+                version,
+                "",
+            )
+            .unwrap(),
             None
         );
         fs::remove_dir_all(root).unwrap();
