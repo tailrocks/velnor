@@ -527,6 +527,25 @@ fn build_rootfs(
             |error| MicroVmPreflightFailure::new("guest.rootfs", format!("chmod init: {error}")),
         )?;
     }
+    // mmdebstrap may leave host-time metadata on directories and files even
+    // when package selection is pinned. Normalize every entry before ext4
+    // population so inode timestamps cannot vary between CI workers.
+    run(
+        runner,
+        "find",
+        &[
+            tree.display().to_string(),
+            "-depth".into(),
+            "-exec".into(),
+            "touch".into(),
+            "-h".into(),
+            "-d".into(),
+            "@0".into(),
+            "{}".into(),
+            "+".into(),
+        ],
+        "guest.rootfs",
+    )?;
     run(
         runner,
         "env",

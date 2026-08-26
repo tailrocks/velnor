@@ -276,6 +276,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   nondeterminism is filesystem metadata from `mke2fs`; image creation now sets
   `E2FSPROGS_FAKE_TIME=0` alongside `SOURCE_DATE_EPOCH=0`. Candidate advances
   to `0.1.222` because `v0.1.221` is immutable.
+- Release run `33017677204` passed snapshot-backed guest jobs and GHCR but
+  package jobs still saw different ext4 bytes; `E2FSPROGS_FAKE_TIME=0` alone
+  was insufficient. The rootfs builder now normalizes all tree file and
+  directory mtimes to epoch before `mke2fs`; candidate advances to `0.1.223`
+  because `v0.1.222` is immutable.
 
 ## Non-goals
 
