@@ -151,6 +151,32 @@ fn superseded_docker_script_executor_paths_are_gone() {
         !runner.contains("backend != Some(velnor_model::ExecutionBackendKind::MicroVm)"),
         "missing execution.toml must not be treated as docker for host Docker prune"
     );
+    let leftover = include_str!("../leftover_disk.rs");
+    let cache = include_str!("../cache.rs");
+    assert!(
+        leftover.contains("permits_host_docker_maintenance"),
+        "disk-pressure reclaim must gate host Docker on selected backend"
+    );
+    assert!(
+        leftover.contains("live_job_ids_for_reclaim"),
+        "cache-GC live-job listing must not default missing selection to docker"
+    );
+    assert!(
+        cache.contains("live_job_ids_for_reclaim"),
+        "cache leftover listing must use the backend-gated live-job helper"
+    );
+    assert!(
+        runner.contains("maybe_startup_host_docker_reclaim"),
+        "startup prune must skip host Docker unless docker is selected"
+    );
+    assert!(
+        runner.contains("doctor_host_docker_reclaim"),
+        "doctor reclaim must skip host Docker unless docker is selected"
+    );
+    assert!(
+        runner.contains("reclaim_production_if_hard_pressure_for"),
+        "disk-pressure path must use the gated leftover reclaim"
+    );
 }
 
 #[test]
