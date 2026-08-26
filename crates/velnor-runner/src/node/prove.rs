@@ -11,7 +11,10 @@ use std::process::Child;
 use serde::{Deserialize, Serialize};
 use velnor_model::ExecutionBackendKind;
 
-use crate::protocol::{github_json_request, GitHubScope, ListedWorkflowJob, RunnerGroup};
+use crate::protocol::{
+    github_json_request, github_json_request_with_rate_limit, GitHubScope, ListedWorkflowJob,
+    RunnerGroup,
+};
 
 /// On-disk routing observation. Missing or invalid file is not valid routing.
 pub const ROUTING_FILE: &str = "routing.json";
@@ -188,6 +191,11 @@ pub struct GitHubProbeRequest<'a> {
 pub struct GitHubProbe {
     pub reachable: bool,
     pub evidence: Option<RoutingFields>,
+    /// The shared PAT budget is exhausted; callers must pace to
+    /// `rate_limit_reset_epoch` instead of retrying on the reconcile tick.
+    pub rate_limited: bool,
+    pub rate_limit_reset_epoch: Option<u64>,
+    pub rate_limit_remaining: Option<u64>,
 }
 
 /// Trust scope the process is actually running with.
@@ -218,6 +226,46 @@ pub fn policy_from_github_url(
     fields_complete(&fields).then_some(fields)
 }
 
+/// Directory of generated `<org>-desired-policy.json` files.
+#[must_use]
+pub fn generated_policy_dir() -> PathBuf {
+    std::env::var_os("VELNOR_FLEET_POLICY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/velnor/fleet-policy"))
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedDesiredPolicy {
+    organization: String,
+    group_name: String,
+    selected_repositories: Vec<String>,
+}
+
+/// Desired policy for org-scoped fleets: the generated allowlist, never live
+/// group membership. Copying the first observed membership would bless a
+/// truncated GitHub group (August 2026 drift class).
+#[must_use]
+pub fn org_policy_from_generated(
+    org: &str,
+    labels: Vec<String>,
+    trust_scope: String,
+    policy_dir: &Path,
+) -> Option<RoutingFields> {
+    let path = policy_dir.join(format!("{org}-desired-policy.json"));
+    let generated: GeneratedDesiredPolicy =
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if generated.organization != org {
+        return None;
+    }
+    let fields = RoutingFields {
+        group: generated.group_name,
+        selected_repositories: generated.selected_repositories,
+        labels,
+        trust_scope,
+    };
+    fields_complete(&fields).then_some(fields)
+}
+
 /// Read `routing-policy.json` when present.
 #[must_use]
 pub fn read_policy(state_dir: &Path) -> Option<RoutingFields> {
@@ -225,6 +273,9 @@ pub fn read_policy(state_dir: &Path) -> Option<RoutingFields> {
 }
 
 /// Write desired policy only when the operator has not already done so.
+/// Repo-scoped fleets use this so an operator override wins. Org fleets
+/// must call [`write_policy`]: a live-membership snapshot must not remain
+/// the desired baseline.
 ///
 /// # Errors
 /// Filesystem or JSON failures.
@@ -234,6 +285,16 @@ pub fn write_policy_if_absent(state_dir: &Path, policy: &RoutingFields) -> anyho
         return Ok(());
     }
     write_fields(&path, policy)
+}
+
+/// Replace desired policy. Org fleets rewrite this from the generated
+/// allowlist every cycle so a stale live-membership snapshot cannot stay
+/// the desired baseline.
+///
+/// # Errors
+/// Filesystem or JSON failures.
+pub fn write_policy(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
+    write_fields(&state_dir.join(ROUTING_POLICY_FILE), policy)
 }
 
 /// Persist live GitHub routing evidence. Never a boolean Ready stamp.
@@ -248,6 +309,8 @@ pub fn write_evidence(state_dir: &Path, evidence: &RoutingFields) -> anyhow::Res
 
 /// Probe GitHub reachability and compare live group/repos to desired policy.
 /// Labels and trust are the process-configured values (what JIT will send).
+/// Rate-limit telemetry from the response headers is surfaced so the
+/// controller can pace the whole fleet to the token reset window.
 pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     let Ok(scope) = GitHubScope::parse(request.url) else {
         return GitHubProbe::default();
@@ -255,7 +318,7 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     let Ok(runners_url) = scope.runners_url() else {
         return GitHubProbe::default();
     };
-    let Ok((status, body)) = github_json_request(
+    let Ok((status, body, rate_limit)) = github_json_request_with_rate_limit(
         "GET",
         runners_url.as_str(),
         request.token,
@@ -267,6 +330,19 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
         return GitHubProbe::default();
     };
     if !(200..300).contains(&status) {
+        if rate_limit.is_limited(status) {
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            return GitHubProbe {
+                reachable: false,
+                evidence: None,
+                rate_limited: true,
+                rate_limit_reset_epoch: rate_limit.reset_epoch_or_retry_after(now_epoch),
+                rate_limit_remaining: rate_limit.remaining,
+            };
+        }
         return GitHubProbe::default();
     }
     let _ = body;
@@ -319,6 +395,9 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     GitHubProbe {
         reachable: true,
         evidence: Some(evidence),
+        rate_limited: false,
+        rate_limit_reset_epoch: rate_limit.rate_limit_reset_epoch,
+        rate_limit_remaining: rate_limit.remaining,
     }
 }
 
@@ -731,6 +810,52 @@ mod tests {
         .is_none());
     }
 
+    #[test]
+    fn org_policy_comes_from_generated_allowlist_not_live_membership() {
+        let dir = tmp("generated-policy");
+        let generated = serde_json::json!({
+            "organization": "tailrocks",
+            "group_name": "velnor-trusted",
+            "selected_repositories": ["tailrocks/velnor", "tailrocks/velnor-apt"]
+        });
+        std::fs::write(
+            dir.join("tailrocks-desired-policy.json"),
+            serde_json::to_vec(&generated).unwrap(),
+        )
+        .unwrap();
+        let policy =
+            org_policy_from_generated("tailrocks", vec!["velnor".into()], "trusted".into(), &dir)
+                .unwrap();
+        assert_eq!(
+            policy.selected_repositories,
+            vec!["tailrocks/velnor", "tailrocks/velnor-apt"]
+        );
+        assert_eq!(policy.group, "velnor-trusted");
+        assert!(org_policy_from_generated(
+            "tailrocks",
+            vec!["velnor".into()],
+            "trusted".into(),
+            &tmp("missing-policy"),
+        )
+        .is_none());
+
+        let snapshot = matching_fields();
+        write_policy(&dir, &snapshot).unwrap();
+        write_policy_if_absent(&dir, &policy).unwrap();
+        assert_eq!(
+            read_policy(&dir).unwrap().selected_repositories,
+            snapshot.selected_repositories,
+            "if-absent must not clobber an existing file"
+        );
+        write_policy(&dir, &policy).unwrap();
+        assert_eq!(
+            read_policy(&dir).unwrap().selected_repositories,
+            policy.selected_repositories,
+            "org fleets must replace a live-membership snapshot"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[tokio::test]
     async fn org_probe_without_policy_writes_live_group_and_repos() {
         use serde_json::json;
@@ -793,5 +918,51 @@ mod tests {
                 .unwrap();
         assert_eq!(on_disk, evidence);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Secondary-limit 403 carrying `Retry-After` but no
+    /// `x-ratelimit-reset`: the probe must surface a deadline derived from
+    /// `Retry-After` so the controller paces to the requested delay instead
+    /// of the fixed 600s fallback (end-to-end over the native transport).
+    #[tokio::test]
+    async fn rate_limited_probe_derives_reset_from_retry_after() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("retry-after", "30")
+                    .insert_header("x-ratelimit-remaining", "4999"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/tailrocks", server.uri());
+        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        let probe = probe_github(GitHubProbeRequest {
+            url: &url,
+            token: "ghs_test",
+            policy: None,
+            pool_id: None,
+            configured_labels: &["velnor".into()],
+            configured_trust: "trusted",
+        })
+        .await;
+        assert!(!probe.reachable);
+        assert!(probe.rate_limited, "probe={probe:?}");
+        let reset = probe
+            .rate_limit_reset_epoch
+            .expect("retry-after must become a reset deadline");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            reset >= now + 30 && reset <= now + 31,
+            "reset={reset} now={now}"
+        );
     }
 }
