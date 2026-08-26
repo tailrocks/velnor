@@ -136,7 +136,7 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Idle waiters are gone; workers spawn only after assignment.
 - [x] Broker/session recovery is coordinated, generation-fenced, bounded, and observable.
 - [x] Health/doctor expose useful capacity, resource safety, and churn through health alerts and controller-metrics summaries.
-- [ ] Process-isolation guarantees remain intact or have stronger proof.
+- [x] Process-isolation guarantees remain intact or have stronger proof.
 - [x] Zero-job idle budgets pass for 15+ minutes.
 - [ ] Broker/JIT fault tests pass without retry storms.
 - [ ] Fixture parity and smoke pass without fixture changes.
@@ -213,6 +213,9 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   process creation. Fixture was not changed.
 - Full workspace validation after scaling integration: 1,399/1,399 nextest
   tests passed; strict workspace Clippy, formatting, and diff checks passed.
+- Process-isolation evidence combines slot sibling survival, independent
+  multi-scope controller survival, transient-worker-only topology assertions,
+  and packaged systemd boundary checks.
 
 ## Non-goals
 
