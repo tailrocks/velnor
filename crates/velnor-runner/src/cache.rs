@@ -220,7 +220,11 @@ fn run_gc(
             );
         }
     }
-    match crate::leftover_disk::reclaim_production_leftovers(true) {
+    let backend = crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None)
+        .ok()
+        .map(|file| file.backend())
+        .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
+    match crate::leftover_disk::reclaim_production_leftovers_for(backend, false) {
         Ok(report) => {
             println!(
                 "leftover_workspace_deleted\t{}",
@@ -238,7 +242,11 @@ fn print_leftover_workspace_candidates() {
     for root in &roots {
         println!("leftover_work_root\t{}", root.display());
     }
-    let live = crate::leftover_disk::live_job_ids_from_host_docker().unwrap_or_default();
+    let live =
+        match crate::execution::load_execution_file(std::path::Path::new("/etc/velnor"), None) {
+            Ok(file) if !file.backend().uses_host_docker_socket() => Default::default(),
+            _ => crate::leftover_disk::live_job_ids_from_host_docker().unwrap_or_default(),
+        };
     let orphans = crate::leftover_disk::orphan_job_workspace_paths(&roots, &live);
     println!("leftover_workspace_candidates\t{}", orphans.len());
     for path in orphans {

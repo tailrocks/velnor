@@ -5,7 +5,16 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 WORK_DIR="${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
 DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
-REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
+EXECUTION_TOML="${VELNOR_EXECUTION_TOML:-/etc/velnor/execution.toml}"
+if [[ -z "${VELNOR_REQUIRE_DOCKER_SOCKET:-}" ]]; then
+  if grep -Eq 'backend[[:space:]]*=[[:space:]]*"microvm"' "$EXECUTION_TOML" 2>/dev/null; then
+    REQUIRE_DOCKER_SOCKET=false
+  else
+    REQUIRE_DOCKER_SOCKET=true
+  fi
+else
+  REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET}"
+fi
 CHECK_TARGET_MVP_CONFIG="${VELNOR_CHECK_TARGET_MVP_CONFIG:-false}"
 RUN_TARGET_VERIFY="${VELNOR_RUN_TARGET_VERIFY:-false}"
 TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
@@ -18,7 +27,11 @@ cargo run -q -p velnor-tools -- live-host-doctor-plan \
   --host-arch "$(uname -m)"
 
 echo "==> Checking required host tools"
-for tool in git docker cargo; do
+tools=(git cargo)
+if [[ "$REQUIRE_DOCKER_SOCKET" == "true" ]]; then
+  tools+=(docker)
+fi
+for tool in "${tools[@]}"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing required tool: $tool" >&2
     exit 2

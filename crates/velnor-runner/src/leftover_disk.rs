@@ -264,30 +264,64 @@ pub fn reclaim_production_leftovers(prune_dangling_images: bool) -> Result<Lefto
     )
 }
 
-/// Hard-pressure daemon path: at >= 90% used, reclaim leftover-after-Velnor
-/// disposable classes through the same injectable gate tests cover.
-pub fn reclaim_production_if_hard_pressure(usage_percent: u8) -> Result<LeftoverReclaimReport> {
+/// Reclaim leftover workspaces. The microVM backend never lists or prunes
+/// through the host Docker socket.
+pub fn reclaim_production_leftovers_for(
+    backend: velnor_model::ExecutionBackendKind,
+    prune_dangling_images: bool,
+) -> Result<LeftoverReclaimReport> {
+    if backend.uses_host_docker_socket() {
+        reclaim_production_leftovers(prune_dangling_images)
+    } else {
+        reclaim_microvm_leftovers()
+    }
+}
+
+fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
+    let work_roots = discover_daemon_work_roots();
+    reclaim_leftover_after_velnor(
+        &work_roots,
+        &BTreeSet::new(),
+        |_args| bail!("microvm leftover reclaim does not use host docker"),
+        remove_dir_all,
+        false,
+    )
+}
+
+/// Hard-pressure reclaim that skips host Docker when the selected backend is
+/// `microvm` or selection is unknown.
+pub fn reclaim_production_if_hard_pressure_for(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    usage_percent: u8,
+) -> Result<LeftoverReclaimReport> {
     if usage_percent < HARD_PRESSURE_PERCENT {
         return Ok(LeftoverReclaimReport::default());
     }
-    let work_roots = discover_daemon_work_roots();
-    let live = match live_job_ids_from_host_docker() {
-        Ok(ids) => ids,
-        Err(error) => {
-            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
-            return Ok(LeftoverReclaimReport {
-                skipped_docker: true,
-                ..LeftoverReclaimReport::default()
-            });
+    match backend {
+        Some(velnor_model::ExecutionBackendKind::Docker) => {
+            let work_roots = discover_daemon_work_roots();
+            let live = match live_job_ids_from_host_docker() {
+                Ok(ids) => ids,
+                Err(error) => {
+                    eprintln!(
+                        "leftover workspace reclaim skipped (cannot list live jobs): {error:#}"
+                    );
+                    return Ok(LeftoverReclaimReport {
+                        skipped_docker: true,
+                        ..LeftoverReclaimReport::default()
+                    });
+                }
+            };
+            reclaim_if_hard_pressure(
+                usage_percent,
+                &work_roots,
+                &live,
+                host_docker_if_safe,
+                remove_dir_all,
+            )
         }
-    };
-    reclaim_if_hard_pressure(
-        usage_percent,
-        &work_roots,
-        &live,
-        host_docker_if_safe,
-        remove_dir_all,
-    )
+        Some(velnor_model::ExecutionBackendKind::MicroVm) | None => reclaim_microvm_leftovers(),
+    }
 }
 
 fn host_docker_if_safe(args: &[String]) -> Result<String> {
@@ -430,6 +464,20 @@ velnor-job-not-a-uuid\n\
             "90% path must only prune dangling images, got {commands:?}"
         );
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn microvm_reclaim_does_not_invoke_host_docker() {
+        let report = reclaim_leftover_after_velnor(
+            &[],
+            &BTreeSet::new(),
+            |_| panic!("microvm leftover reclaim must not use host docker"),
+            |_| Ok(()),
+            false,
+        )
+        .unwrap();
+        assert!(report.docker_commands.is_empty());
+        assert!(!report.skipped_docker);
     }
 
     #[test]

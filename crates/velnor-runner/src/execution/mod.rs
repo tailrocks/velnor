@@ -52,7 +52,9 @@ pub use guest_runtime::{
     execute_guest_plan, handle_delivered_plan, host_vsock_connect_path, LoopbackVsock,
     UnixVsockChannel, GUEST_AGENT_PORT,
 };
-pub use isolation::{IsolationIdentity, IsolationResources};
+pub use isolation::{
+    microvm_isolation_root, IsolationIdentity, IsolationResources, MICROVM_ISOLATION_ROOT,
+};
 pub use net::{
     nftables_commands, setup_net_invocations, teardown_is_exact, teardown_net_commands,
     teardown_net_invocations,
@@ -198,10 +200,71 @@ pub fn run_validated_job(
     Ok(outcome)
 }
 
+/// Synthetic jailed probe: guest-local `docker version`, vsock plan, teardown
+/// by isolation ID. Host `/var/run/docker.sock` is never used.
+///
+/// # Errors
+/// Preflight, guest Docker, vsock, or leftover isolation resources.
+pub fn run_synthetic_microvm_probe(world: &mut ExecutionWorld<'_>) -> Result<(), ExecutionError> {
+    let file = velnor_model::ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n")?;
+    let isolation = IsolationIdentity::new("velnor-probe", 1);
+    let resources = IsolationResources::for_identity(isolation.clone(), world.isolation_root);
+    let step = crate::script_step::ScriptStep {
+        id: "guest-docker".into(),
+        display_name: "guest-docker".into(),
+        script: "docker version".into(),
+        shell: crate::container::Shell::Bash,
+        working_directory_container: "/__w".into(),
+        env: Vec::new(),
+        condition: None,
+        continue_on_error: false,
+        timeout_minutes: None,
+    };
+    let mut plan = ValidatedPlan::from_script_steps(
+        "velnor-probe",
+        "velnor/job-ubuntu:26.04",
+        &[step],
+        Vec::new(),
+    );
+    plan.command_files.clear();
+    plan.buildx = false;
+    plan.testcontainers = false;
+    let outcome = run_validated_job(&file, isolation, &plan, world)?;
+    if outcome.conclusion != "success" {
+        return Err(velnor_model::MicroVmPreflightFailure::new(
+            "guest.probe",
+            format!("synthetic probe conclusion {}", outcome.conclusion),
+        )
+        .into());
+    }
+    if !outcome.cleaned {
+        return Err(velnor_model::MicroVmPreflightFailure::new(
+            "guest.probe.teardown",
+            "synthetic probe teardown did not report cleaned",
+        )
+        .into());
+    }
+    for path in resources.teardown_paths() {
+        if world.host_fs.exists(path) {
+            return Err(velnor_model::MicroVmPreflightFailure::new(
+                "guest.probe.teardown",
+                format!(
+                    "{} still present after isolation-id teardown",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Host/guest world used by backends. Tests inject doubles at this boundary.
 pub struct ExecutionWorld<'a> {
     pub kvm: &'a Path,
     pub artifact_root: &'a Path,
+    /// Exec-capable durable root for jailer chroot, disks, vsock. Never `/run`.
+    pub isolation_root: &'a Path,
     pub host_docker_socket: &'a Path,
     pub runner: &'a mut dyn CommandRunner,
     pub firecracker: &'a mut dyn FirecrackerApi,
@@ -362,6 +425,9 @@ pub fn executor_is_proven_at(
             let Ok(proven) = serde_json::from_slice::<MicroVmGeneration>(&bytes) else {
                 return false;
             };
+            if !proven.probe_jailed_guest_docker {
+                return false;
+            }
             let fs = RealHostFs;
             let Ok(packaged) = packaged_generation(artifact_root, &fs) else {
                 return false;

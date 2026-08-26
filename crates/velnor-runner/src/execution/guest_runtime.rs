@@ -122,6 +122,18 @@ impl LoopbackVsock {
         }
     }
 
+    /// Guest agent is up but guest Docker is not healthy.
+    #[must_use]
+    pub fn with_unhealthy_docker(isolation_id: impl Into<String>, generation: u64) -> Self {
+        let mut channel = Self::with_ready(isolation_id, generation);
+        for ready in [&mut channel.ready, &mut channel.rebootstrap_ready] {
+            if let Some(VsockMessage::GuestReady { docker_healthy, .. }) = ready {
+                *docker_healthy = false;
+            }
+        }
+        channel
+    }
+
     /// Override the acknowledgement identity for negative host-side tests.
     #[must_use]
     pub fn with_teardown_ack(

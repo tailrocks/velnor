@@ -1154,17 +1154,22 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
                 Some(format!("daemon_id={daemon_id}")),
             );
         }
-        prune_stale_velnor_docker_resources(&daemon_id);
-        // Reclaim job-id-labelled objects (precreated job environments and
-        // their guest siblings) orphaned by the previous drain/restart. Runs
-        // before any slot accepts a job, so nothing this boot created can be
-        // matched; scoped to THIS daemon id so co-located daemons are
-        // untouched. Best-effort — never blocks startup (velnor#311).
-        if let Err(error) = crate::docker_lease::reclaim_daemon_orphan_jobs(
-            &daemon_id,
-            crate::docker_lease::run_host_docker,
-        ) {
-            eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
+        let backend = crate::execution::load_execution_file(&config_base, None)
+            .ok()
+            .map(|file| file.backend());
+        if backend != Some(velnor_model::ExecutionBackendKind::MicroVm) {
+            prune_stale_velnor_docker_resources(&daemon_id);
+            // Reclaim job-id-labelled objects (precreated job environments and
+            // their guest siblings) orphaned by the previous drain/restart. Runs
+            // before any slot accepts a job, so nothing this boot created can be
+            // matched; scoped to THIS daemon id so co-located daemons are
+            // untouched. Best-effort — never blocks startup (velnor#311).
+            if let Err(error) = crate::docker_lease::reclaim_daemon_orphan_jobs(
+                &daemon_id,
+                crate::docker_lease::run_host_docker,
+            ) {
+                eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
+            }
         }
         if let Some(sink) = crate::ops::global() {
             sink.emit(
@@ -1318,7 +1323,12 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
         if percent >= crate::leftover_disk::HARD_PRESSURE_PERCENT {
             // H0.4: never park for disk without first reclaiming leftover
             // job UUID trees and dangling untagged images.
-            if let Err(error) = crate::leftover_disk::reclaim_production_if_hard_pressure(percent) {
+            let backend = crate::execution::load_execution_file(config_base, None)
+                .ok()
+                .map(|file| file.backend());
+            if let Err(error) =
+                crate::leftover_disk::reclaim_production_if_hard_pressure_for(backend, percent)
+            {
                 eprintln!("leftover-after-Velnor reclaim failed: {error:#}");
             }
         }
@@ -1326,7 +1336,11 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     for root in roots {
         if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
-                let _ = crate::leftover_disk::reclaim_production_leftovers(true);
+                let backend = crate::execution::load_execution_file(config_base, None)
+                    .ok()
+                    .map(|file| file.backend())
+                    .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
+                let _ = crate::leftover_disk::reclaim_production_leftovers_for(backend, false);
                 let free = free_space_bytes(root).unwrap_or(free);
                 if free < DISK_MIN_FREE_BYTES {
                     return Some(format!(
@@ -2193,14 +2207,59 @@ fn preflight_before_daemon_jit_config(
     let mut ran = false;
     for preflight_args in daemon_preflight_args(args, config_base, slots)? {
         crate::preflight::preflight(preflight_args)
-            .context("Docker preflight failed before daemon JIT runner configuration")?;
+            .context("execution backend preflight failed before daemon JIT runner configuration")?;
         ran = true;
     }
     if ran {
-        crate::node::prove::write_executor_ok(config_base)
-            .context("persist executor proof after preflight")?;
+        persist_executor_proof_after_preflight(config_base, slots)?;
     }
     Ok(())
+}
+
+fn persist_executor_proof_after_preflight(config_base: &Path, slots: usize) -> Result<()> {
+    let backend = crate::execution::load_execution_file(config_base, None)
+        .context("execution backend selection failed after preflight")?
+        .backend();
+    match backend {
+        velnor_model::ExecutionBackendKind::Docker => {
+            crate::node::prove::write_executor_ok(config_base)
+                .context("persist docker executor proof after preflight")
+                .map(|_| ())
+        }
+        velnor_model::ExecutionBackendKind::MicroVm => {
+            persist_microvm_probe_proof(config_base, slots)
+        }
+    }
+}
+
+fn persist_microvm_probe_proof(config_base: &Path, slots: usize) -> Result<()> {
+    let proof = crate::node::prove::EXECUTOR_OK;
+    let slot_count = slots.max(1);
+    let mut candidates = vec![config_base.join(proof)];
+    for slot in 1..=slot_count {
+        candidates.push(daemon_slot_config_dir(config_base, slot, slot_count).join(proof));
+    }
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(generation) = serde_json::from_slice::<crate::execution::MicroVmGeneration>(&bytes)
+        else {
+            continue;
+        };
+        if generation.probe_jailed_guest_docker {
+            std::fs::write(config_base.join(proof), bytes).with_context(|| {
+                format!(
+                    "persist microvm probe proof to {}",
+                    config_base.join(proof).display()
+                )
+            })?;
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "microvm advertising requires jailed guest-docker probe proof; docker backend was not used"
+    );
 }
 
 fn daemon_preflight_args(
@@ -2353,9 +2412,13 @@ fn daemon_slot_run_args(
     slot_count: usize,
 ) -> Result<RunArgs> {
     validate_daemon_slot_index(slot_index, slot_count)?;
+    let slot_dir = daemon_slot_config_dir(config_base, slot_index, slot_count);
+    let require_docker_socket = crate::execution::load_execution_file(&slot_dir, None)
+        .map(|file| file.backend().uses_host_docker_socket())
+        .unwrap_or(false);
 
     Ok(RunArgs {
-        config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
+        config_dir: Some(slot_dir),
         pat: args.pat.clone(),
         max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
         once: args.once,
@@ -2382,7 +2445,7 @@ fn daemon_slot_run_args(
             slot_count,
         ),
         skip_preflight: args.skip_preflight,
-        require_docker_socket: args.require_docker_socket,
+        require_docker_socket,
     })
 }
 
@@ -2445,7 +2508,7 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
     }
 
     crate::preflight::preflight(preflight_args_for_run(args, config_dir)?)
-        .context("Docker preflight failed before polling GitHub for jobs")
+        .context("execution backend preflight failed before polling GitHub for jobs")
 }
 
 fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> Result<PreflightArgs> {
@@ -2463,7 +2526,7 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> Result<Preflight
         ),
         docker_host_work_dir: args.docker_host_work_dir.clone(),
         docker_image: args.docker_image.clone(),
-        require_docker_socket: args.require_docker_socket,
+        require_docker_socket: execution_backend.uses_host_docker_socket(),
         require_buildx: true,
         execution_backend: Some(execution_backend),
         config_dir: Some(config_dir.to_path_buf()),
@@ -5283,8 +5346,9 @@ fn execute_microvm_script_job(
     let validated = crate::execution::ValidatedPlan::from_normalized(&normalized);
     let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
     let artifact_root = std::path::PathBuf::from(crate::execution::PACKAGED_MICROVM_ROOT);
+    let isolation_root = crate::execution::microvm_isolation_root();
     let resources =
-        crate::execution::IsolationResources::for_identity(isolation.clone(), &artifact_root);
+        crate::execution::IsolationResources::for_identity(isolation.clone(), &isolation_root);
     let mut vsock = crate::execution::UnixVsockChannel::lazy(
         resources.vsock.clone(),
         crate::execution::FIRECRACKER_GUEST_CID,
@@ -5303,6 +5367,7 @@ fn execute_microvm_script_job(
     let mut world = crate::execution::ExecutionWorld {
         kvm: &kvm,
         artifact_root: &artifact_root,
+        isolation_root: &isolation_root,
         host_docker_socket: &docker_sock,
         runner: &mut runner,
         firecracker: &mut firecracker,
@@ -5904,6 +5969,7 @@ fn execute_script_job_inner(
         let mut world = crate::execution::ExecutionWorld {
             kvm: &kvm,
             artifact_root: &artifact_root,
+            isolation_root: &artifact_root,
             host_docker_socket: &docker_sock,
             runner: &mut preflight_runner,
             firecracker: &mut firecracker_api,
@@ -10378,8 +10444,28 @@ jobs:
 
         assert_eq!(preflight.work_dir, Some(config_dir.join("_work")));
         assert_eq!(preflight.docker_host_work_dir, None);
-        assert!(!preflight.require_docker_socket);
+        assert!(preflight.require_docker_socket);
         assert!(preflight.require_buildx);
+    }
+
+    #[test]
+    fn run_preflight_args_microvm_does_not_require_docker_socket() {
+        let mut args = run_args(false, false, false);
+        args.require_docker_socket = true;
+        let dir = unique_temp_dir("run-preflight-microvm");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        let preflight = preflight_args_for_run(&args, &dir).unwrap();
+        assert!(!preflight.require_docker_socket);
+        assert_eq!(
+            preflight.execution_backend,
+            Some(velnor_model::ExecutionBackendKind::MicroVm)
+        );
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -10712,6 +10798,86 @@ jobs:
         assert!(preflight
             .iter()
             .all(|args| args.docker_image == "velnor/job-ubuntu:26.04"));
+    }
+
+    #[test]
+    fn persist_executor_proof_after_preflight_writes_docker_ok_stamp() {
+        let base = unique_temp_dir("persist-executor-docker");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+
+        persist_executor_proof_after_preflight(&base, 1).unwrap();
+
+        assert_eq!(
+            fs::read(base.join(crate::node::prove::EXECUTOR_OK)).unwrap(),
+            b"ok\n"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn persist_executor_proof_after_preflight_rejects_microvm_without_probe() {
+        let base = unique_temp_dir("persist-executor-microvm");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        fs::write(
+            base.join(crate::node::prove::EXECUTOR_OK),
+            br#"{"generation":"packaged","kind":"firecracker"}"#,
+        )
+        .unwrap();
+
+        let err = persist_executor_proof_after_preflight(&base, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("jailed guest-docker probe proof"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("docker backend was not used"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn persist_executor_proof_after_preflight_copies_slot_probe_stamp() {
+        let base = unique_temp_dir("persist-executor-microvm-slot");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        let slot = daemon_slot_config_dir(&base, 1, 2);
+        fs::create_dir_all(&slot).unwrap();
+        let stamped = serde_json::json!({
+            "velnor_version": "0.1.216",
+            "firecracker_version": "1.16.1",
+            "jailer_version": "1.16.1",
+            "kernel_version": "6.1.102",
+            "firecracker": "a".repeat(64),
+            "jailer": "b".repeat(64),
+            "kernel": "c".repeat(64),
+            "rootfs": "d".repeat(64),
+            "guest_agent": "e".repeat(64),
+            "probe_jailed_guest_docker": true
+        });
+        fs::write(
+            slot.join(crate::node::prove::EXECUTOR_OK),
+            serde_json::to_vec(&stamped).unwrap(),
+        )
+        .unwrap();
+
+        persist_executor_proof_after_preflight(&base, 2).unwrap();
+        let copied: serde_json::Value =
+            serde_json::from_slice(&fs::read(base.join(crate::node::prove::EXECUTOR_OK)).unwrap())
+                .unwrap();
+        assert_eq!(copied["probe_jailed_guest_docker"], true);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

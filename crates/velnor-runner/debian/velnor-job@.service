@@ -1,5 +1,5 @@
 [Unit]
-Description=Velnor job worker %i (transitional Docker executor)
+Description=Velnor job worker %i (transient job unit)
 Documentation=https://github.com/tailrocks/velnor
 # Transient unit; not PartOf the controller.
 

@@ -1,9 +1,9 @@
 [Unit]
 Description=Velnor self-hosted GitHub Actions runner daemon (%i)
 Documentation=https://github.com/tailrocks/velnor
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-Requires=docker.service
+# docker.service is not Required. Backend selection is execution.toml.
 
 [Service]
 # Template instance: one daemon per target scope (repo/org), e.g.
@@ -37,8 +37,7 @@ ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock
   --labels ${VELNOR_LABELS} \
   --slots ${VELNOR_SLOTS} \
   --work-dir ${VELNOR_WORK_DIR} \
-  --replace \
-  --require-docker-socket
+  --replace
 Restart=always
 RestartSec=5
 # Graceful drain: on stop/restart (including apt upgrades) the daemon finishes

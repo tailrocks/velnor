@@ -247,7 +247,8 @@ fn packaged_units_have_no_controller_partof_to_workers() {
     assert!(!include_str!("../debian/velnor-guardian.service")
         .lines()
         .any(|line| line.starts_with("EnvironmentFile=") && line.contains("secrets.env")));
-    assert!(include_str!("../debian/velnor-jobs.slice").contains("transitional Docker"));
+    assert!(include_str!("../debian/velnor-jobs.slice").contains("job-worker slice"));
+    assert!(!include_str!("../debian/velnor-jobs.slice").contains("transitional Docker"));
     let guardian_src = include_str!("../src/node/guardian.rs");
     let code = guardian_src
         .split("#[cfg(test)]")

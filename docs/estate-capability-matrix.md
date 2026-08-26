@@ -29,4 +29,7 @@ other classes. Repository-specific product surfaces are listed as extras.
 - `docker`: current host-Docker semantics (job container, services, per-job network, lease-proxied host socket for trusted scope).
 - `microvm`: same GitHub-visible plan inside one Firecracker guest with guest-local Docker. Host socket is never attached.
 
-Fixture parity must keep `lanes: velnor | github | both`. Estate `microvm` pass is not claimed until Sentry signed-apt live proof exists.
+Fixture parity must keep `lanes: velnor | github | both`. Sentry signed-apt
+microVM **preflight** passed on 2026-08-26 (Firecracker 1.16.1, installed
+`velnor-runner` 0.1.214). A jailed guest-Docker job probe and estate
+`microvm` workflow pass are not claimed: crate 0.1.216 is unpublished.

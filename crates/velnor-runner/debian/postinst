@@ -90,6 +90,8 @@ case "$1" in
       all_velnor_units_drained || fail "refusing package configuration: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
     fi
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
+    # Jailer chroot and writable disks must be exec-capable; /run is tmpfs noexec.
+    install -d -m 0750 /var/lib/velnor/microvm /var/lib/velnor/microvm/jailer /var/lib/velnor/microvm/disks /var/lib/velnor/microvm/vsock
     install -d -m 0750 "$RELEASE_DIR" "$RELEASE_DIR/records"
     # Pre-010 packages may have left an empty concrete active directory. The
     # transactional store uses an atomically replaced active symlink instead.

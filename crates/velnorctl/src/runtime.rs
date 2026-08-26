@@ -298,18 +298,21 @@ pub struct PreflightArgs {
 
 impl From<PreflightArgs> for rt::PreflightArgs {
     fn from(args: PreflightArgs) -> Self {
-        let backend = args
-            .config_dir
-            .as_ref()
-            .and_then(|dir| velnor_runner::execution::load_execution_file(dir, None).ok())
-            .map(|file| file.backend());
+        let (backend, require_docker_socket) = match &args.config_dir {
+            None => (None, true),
+            Some(dir) => match velnor_runner::execution::load_execution_file(dir, None) {
+                Ok(file) => {
+                    let backend = file.backend();
+                    (Some(backend), backend.uses_host_docker_socket())
+                }
+                Err(_) => (None, false),
+            },
+        };
         Self {
             work_dir: args.work_dir,
             docker_host_work_dir: args.docker_host_work_dir,
             docker_image: args.docker_image,
-            require_docker_socket: backend
-                .map(velnor_model::ExecutionBackendKind::uses_host_docker_socket)
-                .unwrap_or(true),
+            require_docker_socket,
             require_buildx: args.require_buildx,
             execution_backend: backend,
             config_dir: args.config_dir,
