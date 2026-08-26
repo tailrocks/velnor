@@ -20,7 +20,7 @@ use crate::protocol::{
     classify_broker_poll_error, classify_registration_error, GitHubApiError, GitHubScope,
     ListedRunner, RegistrationClient, RegistrationErrorClass,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::cleanup;
 use super::exec::load_exec_config;
@@ -335,10 +335,12 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut metrics = ControllerMetrics::default();
     let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
     let recovery = Arc::new(Mutex::new(RecoveryCoordinator::default()));
+    let reconcile_notify = Arc::new(Notify::new());
     let manager_task = tokio::spawn(run_scope_broker_manager(
         args.clone(),
         assignment_tx,
         recovery.clone(),
+        reconcile_notify.clone(),
     ));
     let mut ready_announced = false;
     loop {
@@ -416,7 +418,10 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        tokio::time::sleep(FULL_RECONCILE_INTERVAL).await;
+        tokio::select! {
+            _ = reconcile_notify.notified() => {},
+            _ = tokio::time::sleep(FULL_RECONCILE_INTERVAL) => {},
+        }
     }
 }
 
@@ -427,6 +432,7 @@ async fn run_scope_broker_manager(
     args: ControllerArgs,
     assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
     recovery: Arc<Mutex<RecoveryCoordinator>>,
+    reconcile_notify: Arc<Notify>,
 ) {
     let mut sessions: HashMap<String, (Generation, tokio::task::JoinHandle<()>)> = HashMap::new();
     loop {
@@ -448,6 +454,7 @@ async fn run_scope_broker_manager(
             &mut sessions,
             assignments.clone(),
             recovery.clone(),
+            reconcile_notify.clone(),
         ) {
             eprintln!("scope broker manager reconcile failed: {error:#}");
         }
@@ -461,6 +468,7 @@ fn ensure_broker_managers(
     managers: &mut HashMap<String, (Generation, tokio::task::JoinHandle<()>)>,
     tx: mpsc::Sender<crate::runner::BrokerAssignment>,
     recovery: Arc<Mutex<RecoveryCoordinator>>,
+    reconcile_notify: Arc<Notify>,
 ) -> anyhow::Result<()> {
     let daemon = match load_exec_config(&args.state_dir) {
         Ok(daemon) => daemon,
@@ -497,6 +505,7 @@ fn ensure_broker_managers(
         let task_id = manager_id.clone();
         let manager_tx = tx.clone();
         let manager_recovery = recovery.clone();
+        let manager_notify = reconcile_notify.clone();
         let task = tokio::spawn(async move {
             supervise_broker_manager(
                 run_args,
@@ -506,6 +515,7 @@ fn ensure_broker_managers(
                 index,
                 manager_tx,
                 manager_recovery,
+                manager_notify,
             )
             .await;
         });
@@ -522,6 +532,7 @@ async fn supervise_broker_manager(
     slot_index: usize,
     assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
     recovery: Arc<Mutex<RecoveryCoordinator>>,
+    reconcile_notify: Arc<Notify>,
 ) {
     let started = Instant::now();
     loop {
@@ -536,6 +547,7 @@ async fn supervise_broker_manager(
             slot_index,
             assignments.clone(),
             recovery.clone(),
+            reconcile_notify.clone(),
         )
         .await
         {

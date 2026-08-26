@@ -961,6 +961,7 @@ pub(crate) async fn run_broker_manager(
     slot_index: usize,
     tx: mpsc::Sender<BrokerAssignment>,
     recovery: std::sync::Arc<tokio::sync::Mutex<crate::node::recovery::RecoveryCoordinator>>,
+    reconcile_notify: std::sync::Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let config_dir = config::config_dir(args.config_dir.clone())?;
     let stored = config::load(&config_dir).map_err(local_identity_unavailable)?;
@@ -1075,6 +1076,7 @@ pub(crate) async fn run_broker_manager(
             })
             .await
             .context("deliver broker assignment to controller")?;
+            reconcile_notify.notify_one();
             let completion_nonce = nonce;
             while crate::node::handoff::read_completion(&done_path, &completion_nonce, generation)
                 .is_err()
