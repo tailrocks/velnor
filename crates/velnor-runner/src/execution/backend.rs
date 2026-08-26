@@ -801,7 +801,7 @@ impl BackendSession {
         match self.kind {
             ExecutionBackendKind::Docker => {
                 if let Some(docker) = &mut self.docker {
-                    docker.cancel(world, &mut self.events)?;
+                    docker.cancel(&self.isolation, world, &mut self.events)?;
                 }
             }
             ExecutionBackendKind::MicroVm => {

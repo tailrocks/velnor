@@ -26,7 +26,11 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
             Err(error) => {
                 bail!("execution backend selection failed before preflight: {error}")
             }
-            Ok(_) => bail!("execution backend selection failed before preflight"),
+            Ok(_) => {
+                bail!(
+                    "execution backend selection failed before preflight: [execution] backend is unset"
+                )
+            }
         }
     }
     if args.execution_backend == Some(velnor_model::ExecutionBackendKind::MicroVm) {
@@ -635,6 +639,7 @@ mod tests {
     fn config_dir_without_backend_fails_closed_before_docker() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("execution.toml"), "not a backend table\n").unwrap();
         let args = PreflightArgs {
             work_dir: Some(temp.clone()),
             docker_host_work_dir: None,

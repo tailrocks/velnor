@@ -179,6 +179,103 @@ fn docker_backend_does_not_boot_firecracker() {
 }
 
 #[test]
+fn docker_backend_execute_runs_network_service_and_job_containers() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let docker = socket_for(ExecutionBackendKind::Docker);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "*** ok ***".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let artifacts = PathBuf::from("/microvm");
+    let plan = ValidatedPlan::example_success("job-real-docker");
+    {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        crate::execution::run_validated_job(
+            &file,
+            IsolationIdentity::new("job-real-docker", 1),
+            &plan,
+            &mut world,
+        )
+        .unwrap();
+    }
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "docker" && args.windows(2).any(|w| w == ["network", "create"])
+        }),
+        "docker execute must create the job network, got {:?}",
+        runner.calls
+    );
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "docker" && args.contains(&"postgres:16".to_string())
+        }),
+        "docker execute must run the service container, got {:?}",
+        runner.calls
+    );
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.contains(&"velnor/job-ubuntu:26.04".to_string())
+                && args.contains(&"run".to_string())
+        }),
+        "docker execute must run the job container, got {:?}",
+        runner.calls
+    );
+    assert!(api.calls.is_empty());
+}
+
+#[test]
+fn docker_backend_cancel_runs_docker_rm_force() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let docker = socket_for(ExecutionBackendKind::Docker);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let artifacts = PathBuf::from("/microvm");
+    let plan = ValidatedPlan::example_success("job-cancel-docker");
+    {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        let mut session = open_session(
+            &file,
+            IsolationIdentity::new("job-cancel-docker", 1),
+            &mut world,
+        )
+        .unwrap();
+        session.reserve(&mut world).unwrap();
+        session.prepare(&plan, &mut world).unwrap();
+        session.start(&mut world).unwrap();
+        session.cancel(&mut world).unwrap();
+    }
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.contains(&"rm".to_string())
+                && args.contains(&"--force".to_string())
+                && args.iter().any(|arg| arg.contains("job-cancel-docker"))
+        }),
+        "docker cancel must rm --force the job container, got {:?}",
+        runner.calls
+    );
+}
+
+#[test]
 fn contract_success_failure_cancel_identical_conclusions() {
     let mut docker_out = run_plan(ExecutionBackendKind::Docker, false);
     let mut micro_out = run_plan(ExecutionBackendKind::MicroVm, false);
@@ -281,7 +378,12 @@ fn session_lifecycle_inspect_and_wrong_phase_match_across_backends() {
         };
         let mut api = RecordingFirecracker::default();
         let kvm = PathBuf::from("/dev/kvm");
+        let mut vsock = LoopbackVsock::with_ready("job-lifecycle", 1);
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        if kind == ExecutionBackendKind::MicroVm {
+            world.allow_inline_guest_plan = false;
+            world.vsock = Some(&mut vsock);
+        }
         let mut session = open_session(
             &file,
             IsolationIdentity::new("job-lifecycle", 1),
