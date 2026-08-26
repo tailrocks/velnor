@@ -26,7 +26,7 @@ Velnor unified CI contract (2026-08-09):
 ## Operations
 
 - Wait ≤60 s → check state → diagnose stuck (>2 min pending, no renewal >25 s in-step, step unchanged >2 min).
-- Workflow verification: cancel stale runs and registrations, dispatch fresh, monitor only the new run ID.
+- Workflow verification: cancel every pending/in-progress run before retry; delete stale registrations, confirm both are clear, dispatch fresh, monitor only the new run ID.
 - Never commit `.velnor-compare/` HTML captures (embedded live tokens).
 - Tests: `cargo nextest run`, never `cargo test`; doctests stay nextest-discoverable regressions.
 - Unprivileged by default: no `sudo`; mise user-space; OS-package privilege only via documented mise bootstrap, enforced by `audit-ci`.
@@ -36,6 +36,8 @@ Velnor unified CI contract (2026-08-09):
 ## Direction & decisions
 
 Normative direction: [docs/mission.md](docs/mission.md), docs/vision.md, docs/roadmap.md; docs/prompt.md is the sole active execution prompt; docs/comparison.md is timestamped non-normative evidence. On conflict docs/ wins — fix the prompt. Change procedure: update docs/ first → record one dated decision line here → reconcile plans/README.md and docs/prompt.md.
+
+- 2026-08-26: **Every listed repository defaults to Velnor** (operator): the unified CI contract removes the per-organization GitHub-default split; all listed repositories now default to the `velnor` lane. The public-unmerged trust route remains GitHub-hosted until lower-trust Velnor isolation is proven and does not silently change repository defaults.
 
 Active decisions: two explicit backends `[execution] backend = "docker" | "microvm"` per daemon/pool, no fallback; Firecracker production microVM; Node Architecture v2 supervised processes; Build L3 final isolation target · velnorctl is the final CLI/package after Plan 079, zero aliases, Sentry apt-only from signed `velnor-apt` · sequential runs fully warm; persistent cargo targets job-local materializations; artifact fan-in Results Service authoritative · trust scopes runtime-enforced; warm-runner jobs get daemon resource caps · local-only compiler caches (sccache v0.16.0 / Kache v0.10.0, mutually exclusive, 20 GiB); storage budgets + disk-pressure controller P0 · log format contract is law ([docs/log-format-contract.md](docs/log-format-contract.md)); stability-first standing rules (dual health signals, forensic logs, tracing spans) · Parallax native Apple packaging is the sole measured macOS exception · correctness over ROI; root-cause fixes over symptom patches (docs/mission.md).
 
