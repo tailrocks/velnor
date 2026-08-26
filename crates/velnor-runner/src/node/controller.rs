@@ -347,6 +347,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             return Ok(());
         }
         let started = Instant::now();
+        recover_pending_handoffs(&args, &journal, &mut jobs, &mut job_generations)?;
         ensure_broker_managers(
             &args,
             &journal,
@@ -427,6 +428,9 @@ fn ensure_broker_managers(
             continue;
         };
         if slot.phase != ActorPhase::Ready {
+            continue;
+        }
+        if has_pending_handoff(&args.state_dir, &id.0, slot.generation)? {
             continue;
         }
         if let Some((known_generation, task)) = managers.remove(&id.0) {
@@ -598,6 +602,149 @@ fn drain_broker_assignments(
         };
         job_generations.insert(key.clone(), assignment.handoff.generation.0);
         jobs.insert(key, child);
+    }
+    Ok(())
+}
+
+fn spawn_handoff_worker(
+    args: &ControllerArgs,
+    jobs: &HashMap<String, Child>,
+    handoff: &crate::node::handoff::AssignmentHandoff,
+    handoff_path: &std::path::Path,
+    done_path: &std::path::Path,
+) -> anyhow::Result<Option<Child>> {
+    if jobs.contains_key(&handoff.nonce) {
+        return Ok(None);
+    }
+    let child = Command::new(std::env::current_exe()?)
+        .arg("job")
+        .arg("--state-dir")
+        .arg(&args.state_dir)
+        .arg("--job-id")
+        .arg(&handoff.nonce)
+        .arg("--generation")
+        .arg(handoff.generation.0.to_string())
+        .arg("--slot-index")
+        .arg(handoff.slot_index.to_string())
+        .arg("--scope")
+        .arg(&args.scope)
+        .arg("--handoff")
+        .arg(handoff_path)
+        .arg("--done")
+        .arg(done_path)
+        .spawn()?;
+    Ok(Some(child))
+}
+
+fn has_pending_handoff(
+    state_dir: &std::path::Path,
+    slot_id: &str,
+    generation: Generation,
+) -> anyhow::Result<bool> {
+    let dir = state_dir.join("handoffs");
+    if !dir.is_dir() {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(handoff) = crate::node::handoff::read(&path) {
+            if handoff.slot_id == slot_id && handoff.generation == generation {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Reclaim assignment envelopes left by a controller restart. The envelope
+/// is the authority until the worker consumes it; a new broker manager must
+/// not create a competing session for that slot in the meantime.
+fn recover_pending_handoffs(
+    args: &ControllerArgs,
+    journal: &Journal,
+    jobs: &mut HashMap<String, Child>,
+    job_generations: &mut HashMap<String, u64>,
+) -> anyhow::Result<()> {
+    let dir = args.state_dir.join("handoffs");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let state = journal.materialized_state()?;
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let handoff = match crate::node::handoff::read(&path) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                eprintln!(
+                    "discarding invalid pending handoff {}: {error:#}",
+                    path.display()
+                );
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+        };
+        let valid = state.slots.iter().any(|slot| {
+            slot.slot_id.0 == handoff.slot_id
+                && slot.generation == handoff.generation
+                && !state.jobs.iter().any(|job| {
+                    job.slot_id == slot.slot_id
+                        && matches!(
+                            job.phase,
+                            ActorPhase::Assigned
+                                | ActorPhase::Starting
+                                | ActorPhase::Running
+                                | ActorPhase::Completing
+                        )
+                })
+                && matches!(
+                    slot.phase,
+                    ActorPhase::Ready
+                        | ActorPhase::Assigned
+                        | ActorPhase::Starting
+                        | ActorPhase::Running
+                        | ActorPhase::Completing
+                )
+        });
+        let done = crate::node::handoff::completion_path(&args.state_dir, &handoff.nonce);
+        if !valid {
+            let _ = std::fs::remove_file(&path);
+            let _ = crate::node::handoff::write_completion(
+                &done,
+                &handoff.nonce,
+                handoff.generation,
+                crate::node::handoff::CompletionStatus::Stale,
+            );
+            continue;
+        }
+        if jobs.contains_key(&handoff.nonce) {
+            continue;
+        }
+        match spawn_handoff_worker(args, jobs, &handoff, &path, &done) {
+            Ok(Some(child)) => {
+                job_generations.insert(handoff.nonce.clone(), handoff.generation.0);
+                jobs.insert(handoff.nonce.clone(), child);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                let _ = crate::node::handoff::write_completion(
+                    &done,
+                    &handoff.nonce,
+                    handoff.generation,
+                    crate::node::handoff::CompletionStatus::SpawnFailed,
+                );
+                eprintln!(
+                    "pending broker assignment {} recovery spawn failed: {error:#}",
+                    handoff.nonce
+                );
+            }
+        }
     }
     Ok(())
 }
