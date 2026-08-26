@@ -1764,6 +1764,67 @@ pub enum BrokerPollClass {
     Error,
 }
 
+/// Recovery-relevant class for a failed broker poll. The HTTP status remains
+/// available on `BrokerPoll`; this projection prevents callers from treating
+/// a dead session, auth failure, quota pressure, and a transient outage as the
+/// same idle retry condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerPollErrorClass {
+    Authentication,
+    Forbidden,
+    MissingSession,
+    Conflict,
+    RateLimited,
+    Client,
+    Server,
+    Transport,
+}
+
+#[must_use]
+pub fn classify_broker_poll_error(status: u16) -> BrokerPollErrorClass {
+    match status {
+        401 => BrokerPollErrorClass::Authentication,
+        403 => BrokerPollErrorClass::Forbidden,
+        404 => BrokerPollErrorClass::MissingSession,
+        409 => BrokerPollErrorClass::Conflict,
+        429 => BrokerPollErrorClass::RateLimited,
+        400..=499 => BrokerPollErrorClass::Client,
+        500..=599 => BrokerPollErrorClass::Server,
+        0 => BrokerPollErrorClass::Transport,
+        _ => BrokerPollErrorClass::Transport,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationErrorClass {
+    Quota,
+    Permission,
+    Missing,
+    Conflict,
+    Transient,
+    Transport,
+    Client,
+}
+
+#[must_use]
+pub fn classify_registration_error(
+    status: u16,
+    remaining: Option<u64>,
+    retry_after: Option<u64>,
+) -> RegistrationErrorClass {
+    match status {
+        0 => RegistrationErrorClass::Transport,
+        401 => RegistrationErrorClass::Permission,
+        403 if remaining == Some(0) || retry_after.is_some() => RegistrationErrorClass::Quota,
+        403 => RegistrationErrorClass::Permission,
+        404 => RegistrationErrorClass::Missing,
+        409 => RegistrationErrorClass::Conflict,
+        429 => RegistrationErrorClass::Quota,
+        400..=499 => RegistrationErrorClass::Client,
+        _ => RegistrationErrorClass::Transient,
+    }
+}
+
 pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
     if http_status == 204 {
         return BrokerPollClass::Empty;
@@ -2906,7 +2967,7 @@ pub struct EncryptionKey {
     pub value_base64: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskAgentMessage {
     #[serde(default, rename = "messageId")]
     pub message_id: i64,
@@ -4913,6 +4974,62 @@ mod tests {
         assert_eq!(classify_broker_poll(500, "oops"), BrokerPollClass::Error);
         // curl transport failure yields status 0 and must be an error too.
         assert_eq!(classify_broker_poll(0, ""), BrokerPollClass::Error);
+    }
+
+    #[test]
+    fn classify_broker_poll_errors_for_recovery() {
+        assert_eq!(
+            classify_broker_poll_error(401),
+            BrokerPollErrorClass::Authentication
+        );
+        assert_eq!(
+            classify_broker_poll_error(404),
+            BrokerPollErrorClass::MissingSession
+        );
+        assert_eq!(
+            classify_broker_poll_error(409),
+            BrokerPollErrorClass::Conflict
+        );
+        assert_eq!(
+            classify_broker_poll_error(429),
+            BrokerPollErrorClass::RateLimited
+        );
+        assert_eq!(
+            classify_broker_poll_error(503),
+            BrokerPollErrorClass::Server
+        );
+        assert_eq!(
+            classify_broker_poll_error(0),
+            BrokerPollErrorClass::Transport
+        );
+    }
+
+    #[test]
+    fn classify_registration_errors_without_confusing_quota_and_permission() {
+        assert_eq!(
+            classify_registration_error(403, Some(0), None),
+            RegistrationErrorClass::Quota
+        );
+        assert_eq!(
+            classify_registration_error(403, Some(42), None),
+            RegistrationErrorClass::Permission
+        );
+        assert_eq!(
+            classify_registration_error(403, Some(42), Some(30)),
+            RegistrationErrorClass::Quota
+        );
+        assert_eq!(
+            classify_registration_error(404, None, None),
+            RegistrationErrorClass::Missing
+        );
+        assert_eq!(
+            classify_registration_error(409, None, None),
+            RegistrationErrorClass::Conflict
+        );
+        assert_eq!(
+            classify_registration_error(503, None, None),
+            RegistrationErrorClass::Transient
+        );
     }
 
     #[test]

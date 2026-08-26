@@ -26,6 +26,21 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// must not apply events (N-1 must not clobber an N writer's log).
 pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct JournalEventStats {
+    pub accepted: u64,
+    pub rejected: u64,
+    pub no_op: u64,
+    pub durable: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct JournalStats {
+    pub transactions: u64,
+    pub transaction_time_ms: u64,
+    pub events: HashMap<String, JournalEventStats>,
+}
+
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SCHEMA: &str = "
@@ -134,6 +149,11 @@ impl FleetState {
             .iter()
             .filter(|slot| slot.surge && slot.phase.counts_as_ready())
             .count() as u32;
+        let jobs = self
+            .jobs
+            .iter()
+            .filter(|job| job_occupies_slot(job.phase))
+            .count() as u32;
         HealthDocument {
             control_live: self.control_live,
             journal_writable: self.journal_writable,
@@ -146,6 +166,8 @@ impl FleetState {
             registered_slots: registered,
             capacity_permits: permits,
             executor_ready_slots: executor_ready,
+            jobs,
+            idle_slots: actual_ready.saturating_sub(jobs),
             oldest_queued_job_seconds: oldest_queued_job_seconds(&self.jobs),
             oldest_outbox_entry_seconds: oldest_outbox_age_seconds(&self.outbox),
             external_canary: self.canary,
@@ -471,11 +493,15 @@ pub struct ReduceOutcome {
     pub state: FleetState,
     pub commands: Vec<SideEffect>,
     pub rejected: bool,
+    /// True when the event changed materialized state. Commands may still
+    /// make an accepted intent meaningful when this is false.
+    pub changed: bool,
 }
 
 /// Pure `State + Event -> New State + Commands`. No I/O.
 #[must_use]
 pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
+    let initial_state = state.clone();
     let mut commands = Vec::new();
     let mut rejected = false;
     match event {
@@ -506,6 +532,19 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             if generation < slot.generation {
                 rejected = true;
             } else {
+                if generation > slot.generation {
+                    // A replacement generation cannot inherit proof or a
+                    // remote registration from the retired actor.
+                    slot.executor_proven = false;
+                    slot.session_live = false;
+                    slot.registered = false;
+                    slot.pid = None;
+                    slot.heartbeat_unix = 0;
+                    slot.phase = ActorPhase::Absent;
+                }
+                let needs_spawn = slot.phase == ActorPhase::Absent
+                    || slot.generation != generation
+                    || !slot.permit_held;
                 slot.generation = generation;
                 slot.permit_held = true;
                 slot.surge = surge;
@@ -513,10 +552,12 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 if slot.phase == ActorPhase::Absent {
                     slot.phase = ActorPhase::Provisioning;
                 }
-                commands.push(SideEffect::SpawnSlot {
-                    slot_id,
-                    generation,
-                });
+                if needs_spawn {
+                    commands.push(SideEffect::SpawnSlot {
+                        slot_id,
+                        generation,
+                    });
+                }
             }
         }
         Event::ExecutorProven {
@@ -650,8 +691,20 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             }
         }
         Event::JobStarted { job_id, generation } => {
+            let job_slot_id = state
+                .jobs
+                .iter()
+                .find(|job| job.job_id == job_id)
+                .map(|job| job.slot_id.clone());
+            let slot_generation = job_slot_id.and_then(|slot_id| {
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.slot_id == slot_id)
+                    .map(|slot| slot.generation)
+            });
             if let Some(job) = state.jobs.iter_mut().find(|job| job.job_id == job_id) {
-                if job.generation != generation {
+                if job.generation != generation || slot_generation != Some(generation) {
                     rejected = true;
                 } else {
                     job.phase = ActorPhase::Running;
@@ -717,8 +770,22 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         }
         Event::RemoteAcked { job_id, generation }
         | Event::RemoteObservedTerminal { job_id, generation } => {
+            let job_slot_generation =
+                state
+                    .jobs
+                    .iter()
+                    .find(|job| job.job_id == job_id)
+                    .and_then(|job| {
+                        state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .map(|slot| (job.generation, slot.generation))
+                    });
             if let Some(row) = state.outbox.iter_mut().find(|row| row.job_id == job_id) {
-                if row.generation != generation {
+                if row.generation != generation
+                    || job_slot_generation != Some((generation, generation))
+                {
                     rejected = true;
                 } else {
                     row.remote_acked = true;
@@ -735,7 +802,14 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         Event::JobWorkerLost { job_id, generation } => {
             let job = state.jobs.iter().find(|job| job.job_id == job_id);
             match job {
-                Some(job) if job.generation == generation => {
+                Some(job)
+                    if job.generation == generation
+                        && state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .is_some_and(|slot| slot.generation == generation) =>
+                {
                     // A completing job may still have an outbox payload to
                     // send; the outbox row survives so the send path can
                     // retry — only the lost worker is dropped.
@@ -813,6 +887,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         }
     }
     ReduceOutcome {
+        changed: !rejected && state != initial_state,
         state,
         commands,
         rejected,
@@ -826,6 +901,7 @@ pub struct Journal {
     path: PathBuf,
     /// True when on-disk `user_version` is newer than this binary (N-1 vs N).
     write_blocked: bool,
+    stats: JournalStats,
 }
 
 impl Journal {
@@ -894,6 +970,7 @@ impl Journal {
             conn,
             path: path.to_path_buf(),
             write_blocked,
+            stats: JournalStats::default(),
         };
         // Verify all existing event checksums once. The controller's steady
         // state must not replay an ever-growing log every two seconds.
@@ -912,6 +989,11 @@ impl Journal {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> &JournalStats {
+        &self.stats
     }
 
     /// Read the current materialized state without replaying the event log.
@@ -960,6 +1042,8 @@ impl Journal {
                 "N-1 must not write a journal whose PRAGMA user_version is newer than this binary",
             ));
         }
+        let transaction_started = std::time::Instant::now();
+        self.stats.transactions = self.stats.transactions.saturating_add(1);
         // Lock before reading materialized state. Controller, job, guardian,
         // and completion processes can overlap; a snapshot taken before the
         // write lock could otherwise clobber a concurrent committed event.
@@ -972,17 +1056,38 @@ impl Journal {
         for mut event in events {
             stamp_event(&mut event);
             let outcome = reduce(state.clone(), event.clone());
+            let kind = event_kind(&event).to_owned();
+            let counters = self.stats.events.entry(kind).or_default();
+            counters.accepted = counters
+                .accepted
+                .saturating_add(u64::from(!outcome.rejected));
+            counters.rejected = counters
+                .rejected
+                .saturating_add(u64::from(outcome.rejected));
+            counters.no_op = counters.no_op.saturating_add(u64::from(
+                !outcome.rejected && !outcome.changed && outcome.commands.is_empty(),
+            ));
             if !outcome.rejected {
                 state = outcome.state.clone();
-                let payload = serde_json::to_string(&event).map_err(|error| {
-                    StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
-                        .with_remediation(error.to_string())
-                })?;
-                pending.push((event_generation(&event), event_kind(&event), payload));
+                // Observations are intentionally idempotent. Durable history
+                // records transitions and intents, not every controller tick.
+                // Commands remain durable even when an intent does not change
+                // materialized state (for example RegistrationIntended).
+                if outcome.changed || !outcome.commands.is_empty() {
+                    counters.durable = counters.durable.saturating_add(1);
+                    let payload = serde_json::to_string(&event).map_err(|error| {
+                        StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
+                            .with_remediation(error.to_string())
+                    })?;
+                    pending.push((event_generation(&event), event_kind(&event), payload));
+                }
             }
             outcomes.push(outcome);
         }
         if pending.is_empty() {
+            self.stats.transaction_time_ms = self.stats.transaction_time_ms.saturating_add(
+                u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
             return Ok(outcomes);
         }
 
@@ -996,6 +1101,9 @@ impl Journal {
         }
         persist_state(&tx, &state)?;
         tx.commit()?;
+        self.stats.transaction_time_ms = self.stats.transaction_time_ms.saturating_add(
+            u64::try_from(transaction_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
         Ok(outcomes)
     }
 
@@ -1531,6 +1639,164 @@ mod tests {
             let outcome = journal.apply(event).unwrap();
             assert!(!outcome.rejected);
         }
+    }
+
+    fn event_count(journal: &Journal) -> i64 {
+        journal
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn unchanged_observations_do_not_grow_durable_history() {
+        let (_dir, mut journal) = open_tmp("idempotent-observations");
+        prime_ready(&mut journal, "scope-1");
+        let before = event_count(&journal);
+        let dependency_noops_before = journal
+            .stats()
+            .events
+            .get("dependency")
+            .map_or(0, |stats| stats.no_op);
+        let slot_id = slot("scope-1");
+        let outcomes = journal
+            .apply_many([
+                Event::ControlLive,
+                Event::JournalWritable,
+                Event::Dependency {
+                    github_reachable: true,
+                },
+                Event::Routing {
+                    valid: true,
+                    group_valid: true,
+                },
+                Event::DesiredCapacity { ready: 1, surge: 1 },
+                Event::PermitReserved {
+                    slot_id: slot_id.clone(),
+                    generation: gen(),
+                    surge: false,
+                },
+                Event::ExecutorProven {
+                    slot_id: slot_id.clone(),
+                    generation: gen(),
+                },
+                Event::SessionLive {
+                    slot_id,
+                    generation: gen(),
+                },
+            ])
+            .unwrap();
+        assert!(outcomes.iter().all(|outcome| !outcome.rejected));
+        assert!(outcomes.iter().all(|outcome| !outcome.changed));
+        assert_eq!(event_count(&journal), before);
+        assert_eq!(
+            journal
+                .stats()
+                .events
+                .get("dependency")
+                .map_or(0, |stats| stats.no_op),
+            dependency_noops_before + 1
+        );
+        for _ in 0..5 {
+            journal
+                .apply_many([
+                    Event::Dependency {
+                        github_reachable: true,
+                    },
+                    Event::Routing {
+                        valid: true,
+                        group_valid: true,
+                    },
+                    Event::PermitReserved {
+                        slot_id: slot("scope-1"),
+                        generation: gen(),
+                        surge: false,
+                    },
+                ])
+                .unwrap();
+        }
+        assert_eq!(event_count(&journal), before);
+        assert_eq!(
+            journal
+                .stats()
+                .events
+                .get("dependency")
+                .map_or(0, |stats| stats.no_op),
+            dependency_noops_before + 6
+        );
+        assert_eq!(
+            journal.materialized_state().unwrap(),
+            journal.load_state().unwrap()
+        );
+    }
+
+    #[test]
+    fn new_permit_generation_clears_retired_proof() {
+        let (_dir, mut journal) = open_tmp("generation-fence");
+        prime_ready(&mut journal, "scope-1");
+        let outcome = journal
+            .apply(Event::PermitReserved {
+                slot_id: slot("scope-1"),
+                generation: Generation(2),
+                surge: false,
+            })
+            .unwrap();
+        assert!(!outcome.rejected);
+        let state = journal.load_state().unwrap();
+        let record = &state.slots[0];
+        assert!(!record.executor_proven);
+        assert!(!record.session_live);
+        assert!(!record.registered);
+        assert_eq!(record.phase, ActorPhase::Provisioning);
+        assert!(outcome.commands.contains(&SideEffect::SpawnSlot {
+            slot_id: slot("scope-1"),
+            generation: Generation(2),
+        }));
+    }
+
+    #[test]
+    fn health_distinguishes_active_jobs_from_idle_ready_slots() {
+        let (_dir, mut journal) = open_tmp("health-capacity");
+        prime_ready(&mut journal, "scope-1");
+        let slot_id = slot("scope-1");
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot_id.clone(),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert_eq!(journal.load_state().unwrap().health().jobs, 0);
+        assert_eq!(journal.load_state().unwrap().health().idle_slots, 1);
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot_id.clone(),
+                    job_id: job("job-1"),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert_eq!(journal.load_state().unwrap().health().jobs, 0);
+        assert_eq!(journal.load_state().unwrap().health().idle_slots, 0);
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("job-1"),
+                    slot_id,
+                    attempt: 1,
+                    generation: gen(),
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 1,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert_eq!(journal.load_state().unwrap().health().jobs, 1);
+        assert_eq!(journal.load_state().unwrap().health().idle_slots, 0);
     }
 
     #[test]

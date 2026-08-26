@@ -19,10 +19,11 @@ use std::{
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot},
+    sync::{mpsc, mpsc::UnboundedReceiver, oneshot},
     task::JoinHandle,
 };
 use tracing::Instrument as _;
+use velnor_model::Generation;
 
 use crate::{
     action::{
@@ -172,14 +173,14 @@ fn accept_run_service_job_in_journal(
     journal_dir: &Path,
     config_dir: &Path,
     github_job_id: &str,
-) -> Result<()> {
+) -> Result<Generation> {
     let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let state = journal
         .materialized_state()
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     if state.slots.is_empty() {
-        return Ok(());
+        bail!("no slots available to accept GitHub job {github_job_id}");
     }
     let slot_id = crate::node::complete::infer_slot_id(&journal, config_dir)
         .ok_or_else(|| anyhow::anyhow!("no slot accepted GitHub job {github_job_id}"))?;
@@ -187,8 +188,7 @@ fn accept_run_service_job_in_journal(
         &mut journal,
         &velnor_model::JobId(github_job_id.to_owned()),
         &slot_id,
-    )?;
-    Ok(())
+    )
 }
 
 fn persist_in_flight_job(
@@ -871,6 +871,216 @@ fn registration_was_deleted(error: &anyhow::Error) -> bool {
 
 pub async fn run(args: RunArgs) -> Result<()> {
     run_with_jit_prewarmer(args, None).await
+}
+
+/// Execute exactly one broker assignment from a controller-issued handoff.
+/// This path never starts an idle broker poll loop: the caller is already a
+/// worker for an assignment and the broker session remains owned by the
+/// manager that issued the envelope.
+pub(crate) async fn run_transient_job(
+    job_args: &crate::node::JobArgs,
+    handoff_path: &Path,
+) -> Result<()> {
+    let handoff = crate::node::handoff::read_and_remove(handoff_path)?;
+    let journal = velnor_control::journal::Journal::open(
+        crate::node::complete::journal_dir_near(&handoff.config_dir).join("journal.db"),
+    )?;
+    let expected_slot = format!(
+        "{}-{}",
+        job_args.scope.as_deref().unwrap_or("default"),
+        job_args.slot_index.unwrap_or(handoff.slot_index)
+    );
+    handoff.validate_identity(
+        &expected_slot,
+        Generation(job_args.generation),
+        &job_args.job_id,
+    )?;
+    let state = journal.materialized_state()?;
+    let slot = state
+        .slots
+        .iter()
+        .find(|slot| slot.slot_id.0 == handoff.slot_id)
+        .ok_or_else(|| anyhow::anyhow!("handoff slot {} is absent", handoff.slot_id))?;
+    if slot.generation != handoff.generation {
+        bail!(
+            "handoff generation {} is stale for slot {} (current {})",
+            handoff.generation.0,
+            handoff.slot_id,
+            slot.generation.0
+        );
+    }
+    let daemon = crate::node::exec::load_exec_config(&job_args.state_dir)?;
+    let config_base = daemon
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| job_args.state_dir.clone());
+    let mut args = daemon_slot_run_args(
+        &daemon,
+        &config_base,
+        handoff.slot_index,
+        daemon.slots.max(1),
+    )?;
+    args.config_dir = Some(handoff.config_dir.clone());
+    args.once = true;
+
+    let stored = config::load(&handoff.config_dir)?;
+    let token = oauth_access_token(&stored).await?;
+    ensure_v2_runner_settings(&stored)?;
+    let broker = BrokerClient::new(&handoff.broker_url, token.token.clone())?;
+    let run_service = RunServiceClient::new(token.token)?;
+    let forensics = SlotForensics::new(
+        handoff.config_dir.join("logs"),
+        format!("transient-worker slot={}", handoff.slot_id),
+    );
+    let mut prewarm_trigger = None;
+    handle_v2_message(
+        &broker,
+        &run_service,
+        &handoff.session_id,
+        &stored,
+        &handoff.config_dir,
+        &args,
+        stored.settings.disable_update,
+        &stored.settings.agent_name,
+        &forensics,
+        &mut prewarm_trigger,
+        handoff.task_agent_message,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Assignment delivered by the controller-owned broker manager. The manager
+/// pauses this session until `done_path` exists, so Busy cancellation polling
+/// cannot race a second Online assignment on the same session.
+pub(crate) struct BrokerAssignment {
+    pub handoff: crate::node::handoff::AssignmentHandoff,
+    pub handoff_path: PathBuf,
+    pub done_path: PathBuf,
+}
+
+pub(crate) async fn run_broker_manager(
+    args: RunArgs,
+    state_dir: PathBuf,
+    slot_id: String,
+    generation: Generation,
+    slot_index: usize,
+    tx: mpsc::Sender<BrokerAssignment>,
+) -> Result<()> {
+    let config_dir = config::config_dir(args.config_dir.clone())?;
+    let stored = config::load(&config_dir).map_err(local_identity_unavailable)?;
+    let agent_id = stored
+        .settings
+        .agent_id
+        .ok_or_else(|| anyhow::anyhow!("runner is not configured: missing agent_id"))?;
+    let token = oauth_access_token(&stored).await.map_err(local_failure)?;
+    ensure_v2_runner_settings(&stored).map_err(local_failure)?;
+    let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
+    })?;
+    let mut broker_token = token.token.clone();
+    let mut current_broker_url = server_url_v2.to_owned();
+    let mut broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+    let mut run_service = RunServiceClient::new(token.token)?;
+    let session = TaskAgentSession::new(
+        format!("{} (PID: {})", default_agent_name(), std::process::id()),
+        agent_id,
+        stored.settings.agent_name.clone(),
+    );
+    let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, &current_broker_url);
+    let session = create_broker_session_with_retry(&broker, &session, &diagnostic).await?;
+    let session_id = session
+        .session_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("GitHub broker returned session without sessionId"))?
+        .to_owned();
+    let forensics = SlotForensics::new(
+        config_dir.join("logs"),
+        format!("broker-manager slot={slot_id} generation={}", generation.0),
+    );
+    let mut poll_state = BrokerPollState::default();
+    let mut health = IdleSlotHealth::new(Instant::now());
+    health.token_expires_in = token.expires_in;
+
+    loop {
+        if draining() {
+            return Ok(());
+        }
+        let message = poll_broker_message(
+            &mut broker,
+            &mut run_service,
+            &current_broker_url,
+            &mut broker_token,
+            &stored,
+            &session_id,
+            RunnerStatus::Online,
+            stored.settings.disable_update,
+            &mut poll_state,
+            &mut health,
+            &forensics,
+        )
+        .await?;
+        let Some(message) = message else {
+            continue;
+        };
+        if message
+            .message_type
+            .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
+        {
+            current_broker_url = broker_migration_url(&message)?;
+            broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+            continue;
+        }
+        if message
+            .message_type
+            .eq_ignore_ascii_case(FORCE_TOKEN_REFRESH_MESSAGE)
+        {
+            let refreshed = oauth_access_token(&stored).await?;
+            broker_token = refreshed.token.clone();
+            broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+            run_service = RunServiceClient::new(refreshed.token)?;
+            continue;
+        }
+        if !message
+            .message_type
+            .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
+        {
+            if message
+                .message_type
+                .eq_ignore_ascii_case(RUNNER_SHUTDOWN_MESSAGE)
+            {
+                return Ok(());
+            }
+            continue;
+        }
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let handoff_path = crate::node::handoff::path(&state_dir, &nonce);
+        let done_path = crate::node::handoff::completion_path(&state_dir, &nonce);
+        let handoff = crate::node::handoff::AssignmentHandoff::new(
+            slot_id.clone(),
+            generation,
+            nonce,
+            session_id.clone(),
+            current_broker_url.clone(),
+            slot_index,
+            config_dir.clone(),
+            message,
+        );
+        tx.send(BrokerAssignment {
+            handoff,
+            handoff_path,
+            done_path: done_path.clone(),
+        })
+        .await
+        .context("deliver broker assignment to controller")?;
+        while !done_path.is_file() {
+            if draining() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = std::fs::remove_file(done_path);
+    }
 }
 
 async fn run_with_jit_prewarmer(
@@ -2432,7 +2642,7 @@ fn daemon_slot_configure_args(
     })
 }
 
-fn daemon_slot_run_args(
+pub(crate) fn daemon_slot_run_args(
     args: &DaemonArgs,
     config_base: &Path,
     slot_index: usize,
@@ -3243,6 +3453,13 @@ async fn poll_broker_message(
                     ));
                     return Ok(None);
                 }
+                if let Some(api_error) = error.downcast_ref::<crate::protocol::GitHubApiError>() {
+                    let class = crate::protocol::classify_broker_poll_error(api_error.status);
+                    forensics.broker(&format!(
+                        "poll failure status={} class={class:?}",
+                        api_error.status
+                    ));
+                }
                 if is_credential_poll_error(&error) {
                     match refresh_v2_clients(
                         stored,
@@ -3542,18 +3759,30 @@ async fn handle_job_request(
         .await;
     }
     let mut run_service_job = run_service_job;
-    if let Err(acceptance_error) =
-        accept_run_service_job_in_journal(&run_service_job.journal_dir, config_dir, &job.job_id)
-    {
-        return fail_closed_after_journal_acceptance_error(
-            config_dir,
-            &run_service_job,
-            &acquired_identity,
-            &job,
-            acceptance_error,
-        )
-        .await;
-    }
+    let job_generation = match accept_run_service_job_in_journal(
+        &run_service_job.journal_dir,
+        config_dir,
+        &job.job_id,
+    ) {
+        Ok(generation) => generation,
+        Err(acceptance_error) => {
+            return fail_closed_after_journal_acceptance_error(
+                config_dir,
+                &run_service_job,
+                &acquired_identity,
+                &job,
+                acceptance_error,
+            )
+            .await;
+        }
+    };
+    crate::node::cleanup::write_owned_pid(
+        &run_service_job.journal_dir,
+        &job.job_id,
+        job_generation.0,
+        std::process::id(),
+    )
+    .context("persist transient worker ownership")?;
     run_service_job.journal_state = RunServiceJobJournalState::Accepted;
 
     // Plan 066 required write: the sanitized admission row must persist

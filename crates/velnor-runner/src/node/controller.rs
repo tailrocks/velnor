@@ -4,17 +4,19 @@
 //! are spawned without kill-on-drop, and packaged units must not use
 //! `PartOf=controller`. Every journal side effect is executed here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use clap::Args;
-use velnor_control::journal::{Event, Journal, SideEffect};
+use serde::Serialize;
+use velnor_control::journal::{Event, Journal, JournalStats, SideEffect};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use crate::config;
 use crate::protocol::{GitHubScope, ListedRunner, RegistrationClient};
+use tokio::sync::mpsc::{self, Receiver};
 
 use super::cleanup;
 use super::exec::load_exec_config;
@@ -27,6 +29,13 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Full reconciliation is a safety watchdog, not the broker polling clock.
+/// Broker waiters own the short assignment latency path; running the whole
+/// proof/filesystem/journal pass every two seconds multiplied idle CPU across
+/// every scope and slot. Keep the watchdog bounded while preserving eventual
+/// slot/process recovery and registration reconciliation.
+const FULL_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
+const HEARTBEAT_JOURNAL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -229,6 +238,79 @@ pub struct ControllerArgs {
     pub spawn_slots: bool,
 }
 
+#[derive(Debug, Default, Serialize)]
+struct ControllerMetrics {
+    schema_version: u32,
+    sequence: u64,
+    published_unix: u64,
+    reconcile_cycles: u64,
+    reconcile_duration_ms: DurationQuantiles,
+    jobs: u32,
+    idle_slots: u32,
+    slot_processes: usize,
+    child_processes: usize,
+    journal: JournalStats,
+    #[serde(skip)]
+    durations_ms: VecDeque<u64>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct DurationQuantiles {
+    p50: u64,
+    p95: u64,
+    p99: u64,
+}
+
+impl ControllerMetrics {
+    fn record(
+        &mut self,
+        elapsed: Duration,
+        health: &velnor_model::HealthDocument,
+        slots: usize,
+        jobs: usize,
+        journal: &JournalStats,
+    ) {
+        self.schema_version = 1;
+        self.sequence = self.sequence.saturating_add(1);
+        self.published_unix = epoch_now();
+        self.reconcile_cycles = self.reconcile_cycles.saturating_add(1);
+        self.durations_ms
+            .push_back(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+        while self.durations_ms.len() > 128 {
+            self.durations_ms.pop_front();
+        }
+        let mut sorted = self.durations_ms.iter().copied().collect::<Vec<_>>();
+        sorted.sort_unstable();
+        self.reconcile_duration_ms = DurationQuantiles {
+            p50: quantile(&sorted, 50),
+            p95: quantile(&sorted, 95),
+            p99: quantile(&sorted, 99),
+        };
+        self.jobs = health.jobs;
+        self.idle_slots = health.idle_slots;
+        self.slot_processes = slots;
+        self.child_processes = jobs;
+        self.journal = journal.clone();
+    }
+
+    fn publish(&self, state_dir: &std::path::Path) -> anyhow::Result<()> {
+        let path = state_dir.join("controller-metrics.json");
+        let temporary = state_dir.join(".controller-metrics.json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+}
+
+fn quantile(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (sorted.len() * percentile).div_ceil(100).max(1);
+    let index = (rank - 1).min(sorted.len() - 1);
+    sorted[index]
+}
+
 pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.state_dir)?;
     let mut journal = Journal::open(args.state_dir.join("journal.db"))?;
@@ -244,13 +326,20 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut heartbeats: HashMap<String, (u32, u64)> = HashMap::new();
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
     let mut pacing = GithubPacing::default();
+    let mut metrics = ControllerMetrics::default();
+    let (assignment_tx, mut assignment_rx) = mpsc::channel(32);
+    let mut broker_managers: HashMap<String, (Generation, tokio::task::JoinHandle<()>)> =
+        HashMap::new();
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
             drain_children(&mut slots, &mut jobs).await?;
             return Ok(());
         }
-        let cycle = reconcile_once(
+        let started = Instant::now();
+        ensure_broker_managers(&args, &journal, &mut broker_managers, assignment_tx.clone())?;
+        drain_broker_assignments(&args, &journal, &mut jobs, &mut assignment_rx)?;
+        let (cycle, health) = reconcile_once(
             &args,
             &mut journal,
             &server,
@@ -261,6 +350,17 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut pacing,
         )
         .await?;
+        drain_broker_assignments(&args, &journal, &mut jobs, &mut assignment_rx)?;
+        metrics.record(
+            started.elapsed(),
+            &health,
+            slots.len(),
+            jobs.len(),
+            journal.stats(),
+        );
+        if let Err(error) = metrics.publish(&args.state_dir) {
+            eprintln!("Warning: controller metrics publication failed: {error:#}");
+        }
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
         if args.once {
@@ -271,8 +371,119 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(FULL_RECONCILE_INTERVAL).await;
     }
+}
+
+fn ensure_broker_managers(
+    args: &ControllerArgs,
+    journal: &Journal,
+    managers: &mut HashMap<String, (Generation, tokio::task::JoinHandle<()>)>,
+    tx: mpsc::Sender<crate::runner::BrokerAssignment>,
+) -> anyhow::Result<()> {
+    let daemon = match load_exec_config(&args.state_dir) {
+        Ok(daemon) => daemon,
+        Err(_) => return Ok(()),
+    };
+    let base = daemon
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| args.state_dir.clone());
+    let total = args.desired_ready.saturating_add(args.surge).max(1) as usize;
+    let state = journal.materialized_state()?;
+    for index in 1..=total {
+        let id = slot_id(&args.scope, index);
+        let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) else {
+            continue;
+        };
+        if slot.phase != ActorPhase::Ready {
+            continue;
+        }
+        if let Some((known_generation, task)) = managers.remove(&id.0) {
+            if known_generation == slot.generation && !task.is_finished() {
+                managers.insert(id.0.clone(), (known_generation, task));
+                continue;
+            }
+            task.abort();
+        }
+        let run_args = crate::runner::daemon_slot_run_args(&daemon, &base, index, total)?;
+        let state_dir = args.state_dir.clone();
+        let manager_id = id.0.clone();
+        let generation = slot.generation;
+        let task_id = manager_id.clone();
+        let manager_tx = tx.clone();
+        let task = tokio::spawn(async move {
+            if let Err(error) = crate::runner::run_broker_manager(
+                run_args,
+                state_dir,
+                manager_id.clone(),
+                generation,
+                index,
+                manager_tx,
+            )
+            .await
+            {
+                eprintln!("broker manager {manager_id} stopped: {error:#}");
+            }
+        });
+        managers.insert(task_id, (generation, task));
+    }
+    Ok(())
+}
+
+fn drain_broker_assignments(
+    args: &ControllerArgs,
+    journal: &Journal,
+    jobs: &mut HashMap<String, Child>,
+    receiver: &mut Receiver<crate::runner::BrokerAssignment>,
+) -> anyhow::Result<()> {
+    while let Ok(assignment) = receiver.try_recv() {
+        let state = journal.materialized_state()?;
+        let valid = state.slots.iter().any(|slot| {
+            slot.slot_id.0 == assignment.handoff.slot_id
+                && slot.generation == assignment.handoff.generation
+                && slot.phase == ActorPhase::Ready
+                && !state.jobs.iter().any(|job| {
+                    job.slot_id == slot.slot_id
+                        && matches!(
+                            job.phase,
+                            ActorPhase::Assigned
+                                | ActorPhase::Starting
+                                | ActorPhase::Running
+                                | ActorPhase::Completing
+                        )
+                })
+        });
+        if !valid {
+            std::fs::write(&assignment.done_path, b"stale")?;
+            continue;
+        }
+        crate::node::handoff::write_atomic(&assignment.handoff_path, &assignment.handoff)?;
+        let exe = std::env::current_exe()?;
+        let key = assignment.handoff.nonce.clone();
+        if jobs.contains_key(&key) {
+            continue;
+        }
+        let child = Command::new(exe)
+            .arg("job")
+            .arg("--state-dir")
+            .arg(&args.state_dir)
+            .arg("--job-id")
+            .arg(&key)
+            .arg("--generation")
+            .arg(assignment.handoff.generation.0.to_string())
+            .arg("--slot-index")
+            .arg(assignment.handoff.slot_index.to_string())
+            .arg("--scope")
+            .arg(&args.scope)
+            .arg("--handoff")
+            .arg(&assignment.handoff_path)
+            .arg("--done")
+            .arg(&assignment.done_path)
+            .spawn()?;
+        jobs.insert(key, child);
+    }
+    Ok(())
 }
 
 /// Stop idle controller-owned slot processes when the daemon receives SIGTERM.
@@ -335,25 +546,41 @@ async fn reconcile_once(
     heartbeats: &mut HashMap<String, (u32, u64)>,
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
-) -> anyhow::Result<LocalCycle> {
+) -> anyhow::Result<(LocalCycle, velnor_model::HealthDocument)> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
-    let generation = Generation::INITIAL;
-    let mut effects = Vec::new();
+    let existing = journal.materialized_state()?;
+    let permit_events = (1..=total).map(|index| {
+        let id = slot_id(&args.scope, index as usize);
+        let generation = existing
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == id)
+            .map_or(Generation::INITIAL, |slot| slot.generation);
+        Event::PermitReserved {
+            slot_id: id,
+            generation,
+            surge: index > args.desired_ready,
+        }
+    });
+    let effects = journal
+        .apply_many(permit_events)?
+        .into_iter()
+        .flat_map(|outcome| outcome.commands)
+        .collect::<Vec<_>>();
+    for command in effects {
+        execute_effect(args, journal, slots, &mut *pacing, command).await?;
+    }
+    // Slot process recovery is supervision, not a durable state transition.
+    // Keep checking the child boundary without re-journaling PermitReserved
+    // (a dead child may leave the slot in Provisioning with the same permit).
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
-        let surge = index > args.desired_ready;
-        effects.extend(
-            journal
-                .apply(Event::PermitReserved {
-                    slot_id: id,
-                    generation,
-                    surge,
-                })?
-                .commands,
-        );
-    }
-    for command in effects {
-        execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?;
+        let generation = existing
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == id)
+            .map_or(Generation::INITIAL, |slot| slot.generation);
+        maybe_spawn_slot(args, journal, slots, &id, generation)?;
     }
 
     ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
@@ -365,22 +592,23 @@ async fn reconcile_once(
         reconcile_remote_registrations(args, journal, jobs).await?;
     }
 
-    let mut proof_effects = Vec::new();
     let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
     let executor = prove::observe_executor(&args.state_dir, execution.backend());
     let snapshot = journal.materialized_state()?;
     let now = tokio::time::Instant::now();
+    let mut proof_events = Vec::new();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
+        let generation = snapshot
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == id)
+            .map_or(Generation::INITIAL, |slot| slot.generation);
         if executor {
-            proof_effects.extend(
-                journal
-                    .apply(Event::ExecutorProven {
-                        slot_id: id.clone(),
-                        generation,
-                    })?
-                    .commands,
-            );
+            proof_events.push(Event::ExecutorProven {
+                slot_id: id.clone(),
+                generation,
+            });
         }
         let journal_pid = snapshot
             .slots
@@ -388,30 +616,26 @@ async fn reconcile_once(
             .find(|slot| slot.slot_id == id)
             .and_then(|slot| slot.pid);
         if prove::observe_session(slots.get_mut(&id.0), journal_pid) {
-            proof_effects.extend(
-                journal
-                    .apply(Event::SessionLive {
-                        slot_id: id.clone(),
-                        generation,
-                    })?
-                    .commands,
-            );
+            proof_events.push(Event::SessionLive {
+                slot_id: id.clone(),
+                generation,
+            });
         }
-        let state = journal.materialized_state()?;
-        if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) {
+        if let Some(slot) = snapshot.slots.iter().find(|slot| slot.slot_id == id) {
             if slot.ready_proof().is_ok() && !slot.registered && pacing.registration_due(&id.0, now)
             {
-                proof_effects.extend(
-                    journal
-                        .apply(Event::RegistrationIntended {
-                            slot_id: id,
-                            generation,
-                        })?
-                        .commands,
-                );
+                proof_events.push(Event::RegistrationIntended {
+                    slot_id: id,
+                    generation,
+                });
             }
         }
     }
+    let proof_effects = journal
+        .apply_many(proof_events)?
+        .into_iter()
+        .flat_map(|outcome| outcome.commands)
+        .collect::<Vec<_>>();
     let mut registrations = Vec::new();
     for command in proof_effects {
         match command {
@@ -419,12 +643,15 @@ async fn reconcile_once(
                 slot_id,
                 generation,
             } => registrations.push((slot_id, generation)),
-            command => execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?,
+            command => execute_effect(args, journal, slots, &mut *pacing, command).await?,
         }
     }
     register_runners(args, journal, pacing, registrations).await?;
 
-    spawn_ready_waiters(args, journal, jobs)?;
+    // Slot processes own the idle broker/session lifecycle. The controller
+    // only starts a transient child after `JobOwned` emits `StartJob`.
+    // Starting one idle `job` child per Ready slot recreated the broker poll
+    // loop and multiplied registration/session recovery work.
     reclaim_orphaned_jobs(args, journal)?;
 
     for row in journal.pending_outbox()? {
@@ -442,14 +669,13 @@ async fn reconcile_once(
     let mut health = journal.materialized_state()?.health();
     health.execution_backend = execution.backend();
     server.publish(&health)?;
-    Ok(LocalCycle::finished())
+    Ok((LocalCycle::finished(), health))
 }
 
 async fn execute_effect(
     args: &ControllerArgs,
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
-    jobs: &mut HashMap<String, Child>,
     pacing: &mut GithubPacing,
     command: SideEffect,
 ) -> anyhow::Result<()> {
@@ -462,9 +688,10 @@ async fn execute_effect(
             slot_id,
             generation,
         } => register_runner(args, journal, pacing, slot_id, generation).await,
-        SideEffect::StartJob { job_id, generation } => {
-            maybe_spawn_job(args, journal, jobs, &job_id.0, generation.0, None)
-        }
+        // Broker assignments are spawned by `drain_broker_assignments` before
+        // run-service acquisition. `JobOwned` is the durable proof emitted by
+        // that worker; spawning again here would create a second poller.
+        SideEffect::StartJob { .. } => Ok(()),
         SideEffect::AdvertiseCapacity { permits } => {
             std::fs::write(
                 args.state_dir.join("advertised-capacity"),
@@ -548,8 +775,17 @@ async fn register_runners(
             // against an exhausted PAT. Permission 403 with remaining>0 does not.
             let now = tokio::time::Instant::now();
             pacing.record_registration_error(&slot_id.0, now, &error);
+            let class = error
+                .downcast_ref::<crate::protocol::GitHubApiError>()
+                .map(|api_error| {
+                    crate::protocol::classify_registration_error(
+                        api_error.status,
+                        api_error.remaining,
+                        api_error.retry_after_seconds,
+                    )
+                });
             eprintln!(
-                "Warning: JIT register {} failed (slot stays unregistered; backing off {}s): {error:#}",
+                "Warning: JIT register {} failed (class={class:?}, slot stays unregistered; backing off {}s): {error:#}",
                 slot_id.0,
                 pacing
                     .registration_retry
@@ -777,17 +1013,19 @@ async fn observe_github_and_routing(
             // state rather than stamping a false observation.
         }
     }
+    let mut observations = Vec::new();
     if dependency_observed || !probe_configured(args) {
-        journal.apply(Event::Dependency {
+        observations.push(Event::Dependency {
             github_reachable: reachable,
-        })?;
+        });
     }
     let _ = prove::reconcile_from_dir(&args.state_dir)?;
     let routing = prove::observe_routing(&args.state_dir);
-    journal.apply(Event::Routing {
+    observations.push(Event::Routing {
         valid: routing.valid,
         group_valid: routing.group_valid,
-    })?;
+    });
+    journal.apply_many(observations)?;
     Ok(())
 }
 
@@ -798,49 +1036,6 @@ fn probe_configured(args: &ControllerArgs) -> bool {
         return false;
     };
     exec.url.is_some() && exec.pat.is_some()
-}
-
-/// GitHub session waiters for Ready slots. Do not apply Assigned: REST
-/// queued ids are not broker job ids, and Ready must stay Ready until
-/// `accept_job` on the broker GUID.
-fn spawn_ready_waiters(
-    args: &ControllerArgs,
-    journal: &Journal,
-    jobs: &mut HashMap<String, Child>,
-) -> anyhow::Result<()> {
-    if load_exec_config(&args.state_dir).is_err() {
-        return Ok(());
-    }
-    let state = journal.materialized_state()?;
-    for slot in &state.slots {
-        if slot.phase != ActorPhase::Ready {
-            continue;
-        }
-        if state.jobs.iter().any(|job| {
-            job.slot_id == slot.slot_id
-                && matches!(
-                    job.phase,
-                    ActorPhase::Assigned
-                        | ActorPhase::Starting
-                        | ActorPhase::Running
-                        | ActorPhase::Completing
-                )
-        }) {
-            continue;
-        }
-        if jobs.contains_key(&slot.slot_id.0) {
-            continue;
-        }
-        maybe_spawn_job(
-            args,
-            journal,
-            jobs,
-            &format!("wait-{}", slot.slot_id.0),
-            slot.generation.0,
-            Some(&slot.slot_id.0),
-        )?;
-    }
-    Ok(())
 }
 
 /// Return slots occupied by job workers that died without a terminal
@@ -855,14 +1050,7 @@ fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow
         ) {
             continue;
         }
-        // A ready-slot waiter is spawned before GitHub assigns a job, so its
-        // durable ownership marker is keyed by the waiter identity rather
-        // than the later journal job id. Check both markers: otherwise a
-        // controller restart sees the live waiter as an orphan immediately
-        // after it accepts a job and reclaims the slot underneath it.
-        let waiter_id = format!("wait-{}", job.slot_id.0);
         let worker_live = cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
-            .or_else(|| cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0))
             .is_some_and(prove::pid_is_alive);
         if worker_live {
             continue;
@@ -925,6 +1113,10 @@ fn ingest_slot_heartbeats(
     seen: &mut HashMap<String, (u32, u64)>,
 ) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let mut pending = Vec::new();
     for index in 1..=total {
         let path = heartbeat_path(&args.state_dir, index);
@@ -943,6 +1135,8 @@ fn ingest_slot_heartbeats(
             || seen.get(&id.0).is_some_and(|(pid, sequence)| {
                 *pid == heartbeat.pid && *sequence >= heartbeat.sequence
             })
+            || (slot.pid == Some(heartbeat.pid)
+                && now.saturating_sub(slot.heartbeat_unix) < HEARTBEAT_JOURNAL_INTERVAL.as_secs())
         {
             continue;
         }
@@ -999,53 +1193,6 @@ fn maybe_spawn_slot(
     Ok(())
 }
 
-fn maybe_spawn_job(
-    args: &ControllerArgs,
-    journal: &Journal,
-    jobs: &mut HashMap<String, Child>,
-    job_id: &str,
-    generation: u64,
-    slot_key: Option<&str>,
-) -> anyhow::Result<()> {
-    let key = slot_key
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            journal.materialized_state().ok().and_then(|state| {
-                state
-                    .jobs
-                    .into_iter()
-                    .find(|job| job.job_id.0 == job_id)
-                    .map(|job| job.slot_id.0)
-            })
-        })
-        .unwrap_or_else(|| job_id.to_owned());
-    if jobs.contains_key(&key) {
-        return Ok(());
-    }
-    if cleanup::read_owned_pid(&args.state_dir, job_id, generation).is_some_and(prove::pid_is_alive)
-    {
-        return Ok(());
-    }
-    let exe = std::env::current_exe()?;
-    let slot_index = slot_index_from_id(&SlotId(key.clone()));
-    let child = Command::new(exe)
-        .arg("job")
-        .arg("--state-dir")
-        .arg(&args.state_dir)
-        .arg("--job-id")
-        .arg(job_id)
-        .arg("--generation")
-        .arg(generation.to_string())
-        .arg("--slot-index")
-        .arg(slot_index.to_string())
-        .arg("--scope")
-        .arg(&args.scope)
-        .spawn()?;
-    cleanup::write_owned_pid(&args.state_dir, job_id, generation, child.id())?;
-    jobs.insert(key, child);
-    Ok(())
-}
-
 fn reap(children: &mut HashMap<String, Child>) {
     let mut dead = Vec::new();
     for (id, child) in children.iter_mut() {
@@ -1092,6 +1239,14 @@ mod tests {
     /// so a parallel test's cleanup `remove_var` must not land mid-test.
     static GITHUB_TOKEN_ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    #[test]
+    fn duration_quantiles_use_nearest_rank_for_small_samples() {
+        assert_eq!(quantile(&[1, 100], 50), 1);
+        assert_eq!(quantile(&[1, 100], 95), 100);
+        assert_eq!(quantile(&[1, 2, 3, 4], 99), 4);
+        assert_eq!(quantile(&[], 50), 0);
+    }
 
     fn dummy_exec(url: &str) -> DaemonArgs {
         serde_json::from_value(json!({

@@ -65,6 +65,12 @@ pub struct HealthDocument {
     pub registered_slots: u32,
     pub capacity_permits: u32,
     pub executor_ready_slots: u32,
+    /// Jobs currently occupying slots, including assigned/starting/running.
+    #[serde(default)]
+    pub jobs: u32,
+    /// Ready capacity not currently occupied by a job.
+    #[serde(default)]
+    pub idle_slots: u32,
     pub oldest_queued_job_seconds: u64,
     pub oldest_outbox_entry_seconds: u64,
     pub external_canary: CanaryStatus,
@@ -74,7 +80,7 @@ pub struct HealthDocument {
 
 impl HealthDocument {
     /// Every JSON object key the health contract requires, in document order.
-    pub const REQUIRED_KEYS: [&'static str; 16] = [
+    pub const REQUIRED_KEYS: [&'static str; 18] = [
         "control_live",
         "journal_writable",
         "github_reachable",
@@ -86,6 +92,8 @@ impl HealthDocument {
         "registered_slots",
         "capacity_permits",
         "executor_ready_slots",
+        "jobs",
+        "idle_slots",
         "oldest_queued_job_seconds",
         "oldest_outbox_entry_seconds",
         "external_canary",
@@ -109,6 +117,8 @@ impl HealthDocument {
             registered_slots: 0,
             capacity_permits: 0,
             executor_ready_slots: 0,
+            jobs: 0,
+            idle_slots: 0,
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,
             external_canary: CanaryStatus::Unknown,
@@ -324,6 +334,8 @@ mod tests {
             registered_slots: 4,
             capacity_permits: 5,
             executor_ready_slots: 4,
+            jobs: 0,
+            idle_slots: 4,
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,
             external_canary: CanaryStatus::Unknown,

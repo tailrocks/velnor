@@ -26,10 +26,26 @@ pub struct JobArgs {
     /// One GitHub job then persist completion. Never skips the worker.
     #[arg(long)]
     pub once: bool,
+    /// Secure broker assignment envelope produced by the controller.
+    #[arg(long)]
+    pub handoff: Option<PathBuf>,
+    /// Completion marker consumed by the broker manager.
+    #[arg(long)]
+    pub done: Option<PathBuf>,
 }
 
 pub async fn run(args: JobArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.state_dir)?;
+    if let Some(handoff) = args.handoff.as_deref() {
+        let result = crate::runner::run_transient_job(&args, handoff).await;
+        if let Some(done) = args.done.as_deref() {
+            if let Some(parent) = done.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(done, b"done")?;
+        }
+        return result;
+    }
     let mut journal = Journal::open(args.state_dir.join("journal.db"))?;
     let job_id = JobId(args.job_id.clone());
     let generation = Generation(args.generation);
