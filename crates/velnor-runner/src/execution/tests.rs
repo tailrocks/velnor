@@ -3,6 +3,40 @@ use crate::executor::CommandResult;
 use std::path::{Path, PathBuf};
 use velnor_model::{ExecutionBackendKind, ExecutionFile};
 
+#[test]
+fn checkout_guest_inputs_carry_token_and_flags() {
+    let plan = crate::checkout::CheckoutPlan {
+        step_id: "co".into(),
+        display_name: "checkout".into(),
+        clone_url: "https://github.com/tailrocks/velnor".into(),
+        version: Some("refs/pull/1/merge".into()),
+        destination: PathBuf::from("/__w/repo"),
+        token: Some("secret-token".into()),
+        fetch_depth: Some(1),
+        fetch_tags: true,
+        persist_credentials: false,
+        clean: true,
+        lfs: false,
+        condition: None,
+        continue_on_error: false,
+        timeout_minutes: None,
+    };
+    let inputs =
+        super::backend::executable_inputs(&crate::executor::ExecutableStep::Checkout(plan));
+    let get = |name: &str| {
+        inputs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("missing input {name}"))
+    };
+    assert_eq!(get("token"), "secret-token");
+    assert_eq!(get("fetch_tags"), "1");
+    assert_eq!(get("persist_credentials"), "0");
+    assert_eq!(get("clean"), "1");
+    assert_eq!(get("fetch_depth"), "1");
+}
+
 fn seed_microvm_world(fs: &mut MemoryFs, root: &Path) {
     fs.create_dir_all(root).unwrap();
     for (name, bytes) in [
@@ -1656,7 +1690,7 @@ fn synthetic_microvm_probe_runs_guest_docker_without_host_socket() {
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
     world.allow_inline_guest_plan = false;
     world.vsock = Some(&mut vsock);
-    crate::execution::run_synthetic_microvm_probe(&mut world).unwrap();
+    crate::execution::run_synthetic_microvm_probe_with(&mut world, "velnor-probe").unwrap();
     assert!(runner
         .calls
         .iter()
@@ -1680,7 +1714,8 @@ fn synthetic_microvm_probe_fails_closed_when_guest_docker_unhealthy() {
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
     world.allow_inline_guest_plan = false;
     world.vsock = Some(&mut vsock);
-    let err = crate::execution::run_synthetic_microvm_probe(&mut world).unwrap_err();
+    let err =
+        crate::execution::run_synthetic_microvm_probe_with(&mut world, "velnor-probe").unwrap_err();
     assert!(err.to_string().contains("guest Docker"), "{err}");
     assert!(!runner.calls.iter().any(|(program, args)| {
         program == "docker" && args.iter().any(|arg| arg.contains("docker.sock"))
