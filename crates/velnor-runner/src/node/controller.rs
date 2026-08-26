@@ -17,7 +17,8 @@ use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use crate::config;
 use crate::protocol::{
-    classify_broker_poll_error, GitHubApiError, GitHubScope, ListedRunner, RegistrationClient,
+    classify_broker_poll_error, classify_registration_error, GitHubApiError, GitHubScope,
+    ListedRunner, RegistrationClient, RegistrationErrorClass,
 };
 use tokio::sync::{mpsc, Mutex};
 
@@ -365,6 +366,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut heartbeats,
             &mut last_registration_reconcile,
             &mut pacing,
+            &recovery,
         )
         .await?;
         let recovery = recovery.lock().await;
@@ -858,6 +860,7 @@ async fn reconcile_once(
     heartbeats: &mut HashMap<String, (u32, u64)>,
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
+    recovery: &Arc<Mutex<RecoveryCoordinator>>,
 ) -> anyhow::Result<(LocalCycle, velnor_model::HealthDocument)> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
     let existing = journal.materialized_state()?;
@@ -901,7 +904,7 @@ async fn reconcile_once(
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
-        reconcile_remote_registrations(args, journal, jobs).await?;
+        reconcile_remote_registrations(args, journal, jobs, recovery).await?;
     }
 
     let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
@@ -1140,6 +1143,7 @@ async fn reconcile_remote_registrations(
     args: &ControllerArgs,
     journal: &mut Journal,
     jobs: &mut HashMap<String, Child>,
+    recovery: &Arc<Mutex<RecoveryCoordinator>>,
 ) -> anyhow::Result<()> {
     let exec = match load_exec_config(&args.state_dir) {
         Ok(exec) => exec,
@@ -1158,7 +1162,33 @@ async fn reconcile_remote_registrations(
     let remote = match RegistrationClient::new()?.list_runners(&scope, pat).await {
         Ok(remote) => remote,
         Err(error) => {
+            let class = error.downcast_ref::<GitHubApiError>().map_or(
+                RegistrationErrorClass::Transport,
+                |api| {
+                    classify_registration_error(api.status, api.remaining, api.retry_after_seconds)
+                },
+            );
+            let broker_class = match class {
+                RegistrationErrorClass::Permission | RegistrationErrorClass::Client => {
+                    crate::protocol::BrokerPollErrorClass::Forbidden
+                }
+                RegistrationErrorClass::Missing => {
+                    crate::protocol::BrokerPollErrorClass::MissingSession
+                }
+                RegistrationErrorClass::Conflict => crate::protocol::BrokerPollErrorClass::Conflict,
+                RegistrationErrorClass::Quota => crate::protocol::BrokerPollErrorClass::RateLimited,
+                RegistrationErrorClass::Transient => crate::protocol::BrokerPollErrorClass::Server,
+                RegistrationErrorClass::Transport => {
+                    crate::protocol::BrokerPollErrorClass::Transport
+                }
+            };
+            let mut coordinator = recovery.lock().await;
+            let action = coordinator.observe(
+                RecoverySignal::Error(broker_class),
+                Duration::from_secs(epoch_now()),
+            );
             eprintln!("registration reconciliation lookup failed: {error:#}");
+            eprintln!("registration recovery class={class:?} action={action:?}");
             return Ok(());
         }
     };
@@ -1726,9 +1756,14 @@ mod tests {
             once: true,
             spawn_slots: false,
         };
-        reconcile_remote_registrations(&args, &mut journal, &mut HashMap::new())
-            .await
-            .unwrap();
+        reconcile_remote_registrations(
+            &args,
+            &mut journal,
+            &mut HashMap::new(),
+            &Arc::new(Mutex::new(RecoveryCoordinator::default())),
+        )
+        .await
+        .unwrap();
         let slot = journal
             .load_state()
             .unwrap()
