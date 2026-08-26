@@ -13,7 +13,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -952,6 +952,198 @@ pub(crate) struct BrokerAssignment {
     pub done_path: PathBuf,
 }
 
+/// One scope-owned broker session. This is deliberately data, not a task:
+/// the controller multiplexes all instances from one Tokio event loop.
+pub(crate) struct ScopeBrokerSession {
+    pub(crate) slot_id: String,
+    pub(crate) generation: Generation,
+    pub(crate) slot_index: usize,
+    config_dir: PathBuf,
+    broker: BrokerClient,
+    broker_token: String,
+    current_broker_url: String,
+    session_id: String,
+    stored: StoredRunnerConfig,
+    pending_completion: Option<(PathBuf, String)>,
+    retry_at: tokio::time::Instant,
+    forensics: SlotForensics,
+}
+
+pub(crate) enum ScopeBrokerPoll {
+    Idle,
+    Stopped,
+}
+
+impl ScopeBrokerSession {
+    pub(crate) async fn open(
+        args: &RunArgs,
+        _state_dir: &Path,
+        slot_id: String,
+        generation: Generation,
+        slot_index: usize,
+    ) -> Result<Self> {
+        let config_dir = config::config_dir(args.config_dir.clone())?;
+        let stored = config::load(&config_dir).map_err(local_identity_unavailable)?;
+        let agent_id = stored
+            .settings
+            .agent_id
+            .ok_or_else(|| anyhow::anyhow!("runner is not configured: missing agent_id"))?;
+        let token = oauth_access_token(&stored).await.map_err(local_failure)?;
+        ensure_v2_runner_settings(&stored).map_err(local_failure)?;
+        let server_url = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
+        })?;
+        let broker_token = token.token;
+        let broker = BrokerClient::new(server_url, broker_token.clone())?;
+        let session = TaskAgentSession::new(
+            format!("{} (PID: {})", default_agent_name(), std::process::id()),
+            agent_id,
+            stored.settings.agent_name.clone(),
+        );
+        let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, server_url);
+        let session = create_broker_session_with_retry(&broker, &session, &diagnostic).await?;
+        let session_id = session
+            .session_id
+            .ok_or_else(|| anyhow::anyhow!("GitHub broker returned session without sessionId"))?;
+        Ok(Self {
+            slot_id: slot_id.clone(),
+            generation,
+            slot_index,
+            config_dir: config_dir.clone(),
+            broker,
+            broker_token,
+            current_broker_url: server_url.to_owned(),
+            session_id,
+            stored,
+            pending_completion: None,
+            retry_at: tokio::time::Instant::now(),
+            forensics: SlotForensics::new(
+                config_dir.join("logs"),
+                format!("broker-manager slot={slot_id} generation={}", generation.0),
+            ),
+        })
+    }
+
+    pub(crate) async fn poll(
+        &mut self,
+        state_dir: &Path,
+        tx: &mpsc::Sender<BrokerAssignment>,
+        signals: &BrokerManagerSignals,
+    ) -> Result<ScopeBrokerPoll> {
+        if draining() {
+            return Ok(ScopeBrokerPoll::Stopped);
+        }
+        if tokio::time::Instant::now() < self.retry_at {
+            return Ok(ScopeBrokerPoll::Idle);
+        }
+        if let Some((path, nonce)) = self.pending_completion.take() {
+            if crate::node::handoff::read_completion(&path, &nonce, self.generation).is_err() {
+                self.pending_completion = Some((path, nonce));
+                return Ok(ScopeBrokerPoll::Idle);
+            }
+            let _ = fs::remove_file(path);
+        }
+        let journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))?;
+        let current = journal
+            .materialized_state()?
+            .slots
+            .into_iter()
+            .find(|slot| slot.slot_id.0 == self.slot_id);
+        if current.as_ref().is_none_or(|slot| {
+            slot.generation != self.generation || slot.phase != ActorPhase::Ready
+        }) {
+            return Ok(ScopeBrokerPoll::Stopped);
+        }
+        let message = poll_broker_step(
+            &mut self.broker,
+            &self.session_id,
+            RunnerStatus::Online,
+            self.stored.settings.disable_update,
+            &signals.broker_metrics,
+        )
+        .await?;
+        signals
+            .recovery
+            .lock()
+            .await
+            .recovered(Duration::from_secs(crate::node::controller::epoch_now()));
+        let Some(message) = message else {
+            return Ok(ScopeBrokerPoll::Idle);
+        };
+        if message
+            .message_type
+            .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
+        {
+            self.current_broker_url = broker_migration_url(&message)?;
+            self.broker = BrokerClient::new(&self.current_broker_url, self.broker_token.clone())?;
+            return Ok(ScopeBrokerPoll::Idle);
+        }
+        if message
+            .message_type
+            .eq_ignore_ascii_case(FORCE_TOKEN_REFRESH_MESSAGE)
+        {
+            let refreshed = oauth_access_token(&self.stored).await?;
+            self.broker_token = refreshed.token;
+            self.broker = BrokerClient::new(&self.current_broker_url, self.broker_token.clone())?;
+            return Ok(ScopeBrokerPoll::Idle);
+        }
+        if !message
+            .message_type
+            .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
+        {
+            return Ok(
+                if message
+                    .message_type
+                    .eq_ignore_ascii_case(RUNNER_SHUTDOWN_MESSAGE)
+                {
+                    ScopeBrokerPoll::Stopped
+                } else {
+                    ScopeBrokerPoll::Idle
+                },
+            );
+        }
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let handoff_path = crate::node::handoff::path(state_dir, &nonce);
+        let done_path = crate::node::handoff::completion_path(state_dir, &nonce);
+        let handoff = crate::node::handoff::AssignmentHandoff::new(
+            self.slot_id.clone(),
+            self.generation,
+            nonce.clone(),
+            self.session_id.clone(),
+            self.current_broker_url.clone(),
+            self.slot_index,
+            self.config_dir.clone(),
+            message,
+        );
+        tx.send(BrokerAssignment {
+            handoff,
+            handoff_path,
+            done_path: done_path.clone(),
+        })
+        .await
+        .context("deliver broker assignment to controller")?;
+        self.pending_completion = Some((done_path.clone(), nonce));
+        signals.reconcile_notify.notify_one();
+        Ok(ScopeBrokerPoll::Idle)
+    }
+
+    pub(crate) fn backoff(&mut self, delay: Duration) {
+        self.retry_at = tokio::time::Instant::now() + delay;
+    }
+
+    pub(crate) async fn close(self) {
+        if let Err(error) = self.broker.delete_session().await {
+            if !error
+                .downcast_ref::<GitHubApiError>()
+                .is_some_and(|api| api.status == 404)
+            {
+                self.forensics
+                    .lifecycle(&format!("broker session delete failed: {error:#}"));
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct BrokerMetrics {
     pub requests: AtomicU64,
@@ -960,6 +1152,69 @@ pub(crate) struct BrokerMetrics {
     pub errors: AtomicU64,
     pub error_statuses: std::sync::Mutex<std::collections::BTreeMap<u16, u64>>,
     pub latency_ms: AtomicU64,
+}
+
+#[derive(Default)]
+struct JitDeleteMetrics {
+    attempts: AtomicU64,
+    successes: AtomicU64,
+    failures: AtomicU64,
+    latency_ms: AtomicU64,
+    error_statuses: std::sync::Mutex<BTreeMap<u16, u64>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct JitDeleteMetricsSnapshot {
+    pub attempts: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub latency_ms: u64,
+    pub error_statuses: BTreeMap<u16, u64>,
+}
+
+fn jit_delete_metrics() -> &'static JitDeleteMetrics {
+    static METRICS: OnceLock<JitDeleteMetrics> = OnceLock::new();
+    METRICS.get_or_init(JitDeleteMetrics::default)
+}
+
+impl JitDeleteMetrics {
+    fn record(&self, result: &Result<()>, elapsed: Duration) {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        self.latency_ms.fetch_add(
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        match result {
+            Ok(()) => {
+                self.successes.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                self.failures.fetch_add(1, Ordering::Relaxed);
+                if let Some(status) = error.downcast_ref::<GitHubApiError>().map(|api| api.status) {
+                    if let Ok(mut statuses) = self.error_statuses.lock() {
+                        *statuses.entry(status).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    fn snapshot(&self) -> JitDeleteMetricsSnapshot {
+        JitDeleteMetricsSnapshot {
+            attempts: self.attempts.load(Ordering::Relaxed),
+            successes: self.successes.load(Ordering::Relaxed),
+            failures: self.failures.load(Ordering::Relaxed),
+            latency_ms: self.latency_ms.load(Ordering::Relaxed),
+            error_statuses: self
+                .error_statuses
+                .lock()
+                .map_or_else(|_| BTreeMap::new(), |statuses| statuses.clone()),
+        }
+    }
+}
+
+pub(crate) fn jit_delete_metrics_snapshot() -> JitDeleteMetricsSnapshot {
+    jit_delete_metrics().snapshot()
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -1019,159 +1274,6 @@ pub(crate) struct BrokerManagerSignals {
     pub recovery: std::sync::Arc<tokio::sync::Mutex<crate::node::recovery::RecoveryCoordinator>>,
     pub reconcile_notify: std::sync::Arc<tokio::sync::Notify>,
     pub broker_metrics: std::sync::Arc<BrokerMetrics>,
-}
-
-pub(crate) async fn run_broker_manager(
-    args: RunArgs,
-    state_dir: PathBuf,
-    slot_id: String,
-    generation: Generation,
-    slot_index: usize,
-    tx: mpsc::Sender<BrokerAssignment>,
-    signals: BrokerManagerSignals,
-) -> Result<()> {
-    let config_dir = config::config_dir(args.config_dir.clone())?;
-    let stored = config::load(&config_dir).map_err(local_identity_unavailable)?;
-    let agent_id = stored
-        .settings
-        .agent_id
-        .ok_or_else(|| anyhow::anyhow!("runner is not configured: missing agent_id"))?;
-    let token = oauth_access_token(&stored).await.map_err(local_failure)?;
-    ensure_v2_runner_settings(&stored).map_err(local_failure)?;
-    let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
-    })?;
-    let mut broker_token = token.token.clone();
-    let mut current_broker_url = server_url_v2.to_owned();
-    let mut broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-    let session = TaskAgentSession::new(
-        format!("{} (PID: {})", default_agent_name(), std::process::id()),
-        agent_id,
-        stored.settings.agent_name.clone(),
-    );
-    let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, &current_broker_url);
-    let session = create_broker_session_with_retry(&broker, &session, &diagnostic).await?;
-    let session_id = session
-        .session_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("GitHub broker returned session without sessionId"))?
-        .to_owned();
-    let forensics = SlotForensics::new(
-        config_dir.join("logs"),
-        format!("broker-manager slot={slot_id} generation={}", generation.0),
-    );
-
-    let run_result: Result<()> = async {
-        loop {
-            if draining() {
-                return Ok(());
-            }
-            let journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))?;
-            let current = journal
-                .materialized_state()?
-                .slots
-                .into_iter()
-                .find(|slot| slot.slot_id.0 == slot_id);
-            if current
-                .as_ref()
-                .is_none_or(|slot| slot.generation != generation || slot.phase != ActorPhase::Ready)
-            {
-                return Ok(());
-            }
-            let message = poll_broker_step(
-                &mut broker,
-                &session_id,
-                RunnerStatus::Online,
-                stored.settings.disable_update,
-                &signals.broker_metrics,
-            )
-            .await?;
-            signals
-                .recovery
-                .lock()
-                .await
-                .recovered(Duration::from_secs(crate::node::controller::epoch_now()));
-            let Some(message) = message else {
-                // One request per control cycle. Recovery owns retry timing;
-                // this yield only prevents an empty broker response from
-                // turning the scope manager into a busy loop.
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                continue;
-            };
-            if message
-                .message_type
-                .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
-            {
-                current_broker_url = broker_migration_url(&message)?;
-                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-                continue;
-            }
-            if message
-                .message_type
-                .eq_ignore_ascii_case(FORCE_TOKEN_REFRESH_MESSAGE)
-            {
-                let refreshed = oauth_access_token(&stored).await?;
-                broker_token = refreshed.token.clone();
-                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-                continue;
-            }
-            if !message
-                .message_type
-                .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
-            {
-                if message
-                    .message_type
-                    .eq_ignore_ascii_case(RUNNER_SHUTDOWN_MESSAGE)
-                {
-                    return Ok(());
-                }
-                continue;
-            }
-            let nonce = uuid::Uuid::new_v4().to_string();
-            let handoff_path = crate::node::handoff::path(&state_dir, &nonce);
-            let done_path = crate::node::handoff::completion_path(&state_dir, &nonce);
-            let handoff = crate::node::handoff::AssignmentHandoff::new(
-                slot_id.clone(),
-                generation,
-                nonce.clone(),
-                session_id.clone(),
-                current_broker_url.clone(),
-                slot_index,
-                config_dir.clone(),
-                message,
-            );
-            tx.send(BrokerAssignment {
-                handoff,
-                handoff_path,
-                done_path: done_path.clone(),
-            })
-            .await
-            .context("deliver broker assignment to controller")?;
-            signals.reconcile_notify.notify_one();
-            let completion_nonce = nonce;
-            while crate::node::handoff::read_completion(&done_path, &completion_nonce, generation)
-                .is_err()
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            let _ = std::fs::remove_file(done_path);
-        }
-    }
-    .await;
-    let delete_result = broker.delete_session().await;
-    match delete_result {
-        Ok(()) => forensics.lifecycle("broker session deleted"),
-        Err(error)
-            if error
-                .downcast_ref::<GitHubApiError>()
-                .is_some_and(|api| api.status == 404) =>
-        {
-            forensics.lifecycle("broker session already absent (404)");
-        }
-        Err(error) if run_result.is_ok() => return Err(error).context("delete broker session"),
-        Err(error) => eprintln!("best-effort broker session delete failed: {error:#}"),
-    }
-    run_result
 }
 
 async fn run_with_jit_prewarmer(
@@ -2366,6 +2468,18 @@ async fn cleanup_configured_daemon_slots(
 /// in-flight job so the lease can drop, then retry DELETE. If GitHub still
 /// holds the runner busy, quarantine (keep local identity) instead of JIT-churn.
 async fn delete_runner_keeping_busy_identity(
+    scope: &GitHubScope,
+    pat: &str,
+    agent_id: i64,
+    slot_dir: Option<&Path>,
+) -> Result<()> {
+    let started = Instant::now();
+    let result = delete_runner_keeping_busy_identity_inner(scope, pat, agent_id, slot_dir).await;
+    jit_delete_metrics().record(&result, started.elapsed());
+    result
+}
+
+async fn delete_runner_keeping_busy_identity_inner(
     scope: &GitHubScope,
     pat: &str,
     agent_id: i64,

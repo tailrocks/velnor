@@ -56,6 +56,7 @@ const RATE_LIMIT_HEADROOM_REMAINING: u64 = 100;
 /// Per-slot JIT registration retry backoff ceiling. The first retries are
 /// deliberately short (5s doubling) — only sustained failures grow long.
 const REGISTRATION_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
+const BROKER_OPEN_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
 
 /// Fleet-wide REST pacing for the shared PAT, owned by the controller.
 /// Read-only probes and JIT registration retries draw from the same budget:
@@ -288,6 +289,11 @@ struct JitMetrics {
     create_successes: u64,
     create_failures: u64,
     create_latency_ms: u64,
+    delete_attempts: u64,
+    delete_successes: u64,
+    delete_failures: u64,
+    delete_latency_ms: u64,
+    delete_error_statuses: std::collections::BTreeMap<u16, u64>,
 }
 
 impl ControllerMetrics {
@@ -462,6 +468,12 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut job_generations,
             &mut assignment_rx,
         )?;
+        let delete_metrics = crate::runner::jit_delete_metrics_snapshot();
+        jit_metrics.delete_attempts = delete_metrics.attempts;
+        jit_metrics.delete_successes = delete_metrics.successes;
+        jit_metrics.delete_failures = delete_metrics.failures;
+        jit_metrics.delete_latency_ms = delete_metrics.latency_ms;
+        jit_metrics.delete_error_statuses = delete_metrics.error_statuses;
         metrics.record(
             started.elapsed(),
             &health,
@@ -495,13 +507,15 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
 /// per slot for protocol isolation, but creation, retry budget, assignment
 /// delivery, and drain are coordinated by this single state machine.
 struct ScopeBrokerManager {
-    sessions: HashMap<String, (Generation, tokio::task::JoinHandle<()>)>,
+    sessions: HashMap<String, crate::runner::ScopeBrokerSession>,
+    open_retries: HashMap<String, (tokio::time::Instant, u32)>,
 }
 
 impl ScopeBrokerManager {
     fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            open_retries: HashMap::new(),
         }
     }
 
@@ -515,29 +529,99 @@ impl ScopeBrokerManager {
     ) {
         loop {
             if crate::runner::draining() {
-                for (_, (_, task)) in self.sessions.drain() {
-                    let _ = task.await;
+                for (_, session) in self.sessions.drain() {
+                    session.close().await;
                 }
                 return;
             }
-            self.sessions.retain(|_, (_, task)| !task.is_finished());
             let journal_path = args.state_dir.join("journal.db");
             let Ok(journal) = Journal::open(journal_path) else {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             };
-            if let Err(error) = ensure_broker_managers(
+            let slots = match journal.materialized_state() {
+                Ok(state) => state.slots,
+                Err(error) => {
+                    eprintln!("scope broker manager state read failed: {error:#}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            if let Err(error) = ensure_broker_sessions(
                 &args,
-                &journal,
+                slots,
                 &mut self.sessions,
-                assignments.clone(),
+                &mut self.open_retries,
                 recovery.clone(),
-                reconcile_notify.clone(),
-                broker_metrics.clone(),
-            ) {
+            )
+            .await
+            {
                 eprintln!("scope broker manager reconcile failed: {error:#}");
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let signals = crate::runner::BrokerManagerSignals {
+                recovery: recovery.clone(),
+                reconcile_notify: reconcile_notify.clone(),
+                broker_metrics: broker_metrics.clone(),
+            };
+            let stopped = Arc::new(Mutex::new(Vec::<String>::new()));
+            let failed = Arc::new(Mutex::new(Vec::<(String, Duration)>::new()));
+            use futures_util::stream::{self, StreamExt as _};
+            stream::iter(self.sessions.values_mut())
+                .for_each_concurrent(16, |session| {
+                    let state_dir = args.state_dir.clone();
+                    let assignments = assignments.clone();
+                    let signals = signals.clone();
+                    let stopped = stopped.clone();
+                    let failed = failed.clone();
+                    async move {
+                        match session.poll(&state_dir, &assignments, &signals).await {
+                            Ok(crate::runner::ScopeBrokerPoll::Stopped) => {
+                                stopped.lock().await.push(session.slot_id.clone());
+                            }
+                            Ok(crate::runner::ScopeBrokerPoll::Idle) => {}
+                            Err(error) => {
+                            let class = error
+                                .downcast_ref::<GitHubApiError>()
+                                .map_or(crate::protocol::BrokerPollErrorClass::Transport, |api| {
+                                    classify_broker_poll_error(api.status)
+                                });
+                            let now = Duration::from_secs(epoch_now());
+                            let (action, wait) = {
+                                let mut coordinator = signals.recovery.lock().await;
+                                let action = coordinator.observe(RecoverySignal::Error(class), now);
+                                let wait = coordinator.retry_at().saturating_sub(now);
+                                (action, wait)
+                            };
+                            session.backoff(wait);
+                            failed.lock().await.push((session.slot_id.clone(), wait));
+                            eprintln!(
+                                "broker session {} generation {} failed class={class:?} action={action:?}; retrying in {}s: {error:#}",
+                                session.slot_id, session.generation.0, wait.as_secs()
+                            );
+                            }
+                        }
+                    }
+                })
+                .await;
+            for id in stopped.lock().await.drain(..) {
+                if let Some(session) = self.sessions.remove(&id) {
+                    session.close().await;
+                }
+            }
+            for (id, wait) in failed.lock().await.drain(..) {
+                if let Some(session) = self.sessions.remove(&id) {
+                    session.close().await;
+                }
+                let delay = wait.max(Duration::from_secs(1));
+                self.open_retries
+                    .entry(id)
+                    .and_modify(|(deadline, streak)| {
+                        *streak = streak.saturating_add(1);
+                        *deadline = tokio::time::Instant::now() + delay;
+                    })
+                    .or_insert((tokio::time::Instant::now() + delay, 1));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
 }
@@ -560,14 +644,12 @@ async fn run_scope_broker_manager(
         .await;
 }
 
-fn ensure_broker_managers(
+async fn ensure_broker_sessions(
     args: &ControllerArgs,
-    journal: &Journal,
-    managers: &mut HashMap<String, (Generation, tokio::task::JoinHandle<()>)>,
-    tx: mpsc::Sender<crate::runner::BrokerAssignment>,
+    slots: Vec<velnor_control::journal::SlotRecord>,
+    managers: &mut HashMap<String, crate::runner::ScopeBrokerSession>,
+    open_retries: &mut HashMap<String, (tokio::time::Instant, u32)>,
     recovery: Arc<Mutex<RecoveryCoordinator>>,
-    reconcile_notify: Arc<Notify>,
-    broker_metrics: Arc<crate::runner::BrokerMetrics>,
 ) -> anyhow::Result<()> {
     let daemon = match load_exec_config(&args.state_dir) {
         Ok(daemon) => daemon,
@@ -578,78 +660,58 @@ fn ensure_broker_managers(
         .clone()
         .unwrap_or_else(|| args.state_dir.clone());
     let total = args.desired_ready.saturating_add(args.surge).max(1) as usize;
-    let state = journal.materialized_state()?;
+    let mut desired = HashMap::new();
     for index in 1..=total {
         let id = slot_id(&args.scope, index);
-        let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) else {
+        let Some(slot) = slots.iter().find(|slot| slot.slot_id == id) else {
             continue;
         };
         if slot.phase != ActorPhase::Ready {
             continue;
         }
-        if has_pending_handoff(&args.state_dir, &id.0, slot.generation)? {
+        desired.insert(id.0.clone(), (slot.generation, index));
+    }
+    let stale = managers
+        .keys()
+        .filter(|id| {
+            desired
+                .get(*id)
+                .is_none_or(|(generation, _)| managers[*id].generation != *generation)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for id in stale {
+        open_retries.remove(&id);
+        if let Some(session) = managers.remove(&id) {
+            session.close().await;
+        }
+    }
+    for (id, (generation, index)) in desired {
+        if managers.contains_key(&id) {
             continue;
         }
-        if let Some((known_generation, task)) = managers.remove(&id.0) {
-            if known_generation == slot.generation && !task.is_finished() {
-                managers.insert(id.0.clone(), (known_generation, task));
+        let run_args = crate::runner::daemon_slot_run_args(&daemon, &base, index, total)?;
+        if has_pending_handoff(&args.state_dir, &id, generation)? {
+            continue;
+        }
+        if let Some((deadline, _)) = open_retries.get(&id) {
+            if tokio::time::Instant::now() < *deadline {
                 continue;
             }
-            task.abort();
         }
-        let run_args = crate::runner::daemon_slot_run_args(&daemon, &base, index, total)?;
-        let state_dir = args.state_dir.clone();
-        let manager_id = id.0.clone();
-        let generation = slot.generation;
-        let task_id = manager_id.clone();
-        let manager_tx = tx.clone();
-        let manager_signals = crate::runner::BrokerManagerSignals {
-            recovery: recovery.clone(),
-            reconcile_notify: reconcile_notify.clone(),
-            broker_metrics: broker_metrics.clone(),
-        };
-        let task = tokio::spawn(async move {
-            supervise_broker_manager(
-                run_args,
-                state_dir,
-                manager_id,
-                generation,
-                index,
-                manager_tx,
-                manager_signals,
-            )
-            .await;
-        });
-        managers.insert(task_id, (generation, task));
-    }
-    Ok(())
-}
-
-async fn supervise_broker_manager(
-    run_args: crate::args::RunArgs,
-    state_dir: PathBuf,
-    slot_id: String,
-    generation: Generation,
-    slot_index: usize,
-    assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
-    signals: crate::runner::BrokerManagerSignals,
-) {
-    loop {
-        if crate::runner::draining() {
-            return;
-        }
-        match crate::runner::run_broker_manager(
-            run_args.clone(),
-            state_dir.clone(),
-            slot_id.clone(),
+        match crate::runner::ScopeBrokerSession::open(
+            &run_args,
+            &args.state_dir,
+            id.clone(),
             generation,
-            slot_index,
-            assignments.clone(),
-            signals.clone(),
+            index,
         )
         .await
         {
-            Ok(()) => return,
+            Ok(session) => {
+                open_retries.remove(&id);
+                managers.insert(id, session);
+            }
             Err(error) => {
                 let class = error
                     .downcast_ref::<GitHubApiError>()
@@ -657,24 +719,23 @@ async fn supervise_broker_manager(
                         classify_broker_poll_error(api.status)
                     });
                 let now = Duration::from_secs(epoch_now());
-                let (action, wait) = {
-                    let mut coordinator = signals.recovery.lock().await;
-                    let action = coordinator.observe(RecoverySignal::Error(class), now);
-                    let wait = coordinator.retry_at().saturating_sub(now);
-                    (action, wait)
-                };
-                eprintln!(
-                    "broker manager {slot_id} generation {} failed class={class:?} action={action:?}; retrying in {}s: {error:#}",
-                    generation.0,
-                    wait.as_secs()
-                );
-                if crate::runner::draining() {
-                    return;
-                }
-                tokio::time::sleep(wait).await;
+                let mut coordinator = recovery.lock().await;
+                coordinator.observe(RecoverySignal::Error(class), now);
+                let streak = open_retries
+                    .get(&id)
+                    .map_or(1, |(_, streak)| streak.saturating_add(1));
+                let delay = broker_open_retry_delay(streak);
+                open_retries.insert(id.clone(), (tokio::time::Instant::now() + delay, streak));
+                eprintln!("broker session open failed class={class:?}: {error:#}");
             }
         }
     }
+    Ok(())
+}
+
+fn broker_open_retry_delay(streak: u32) -> Duration {
+    let shift = streak.saturating_sub(1).min(9);
+    (Duration::from_secs(1) * (1u32 << shift)).min(BROKER_OPEN_RETRY_MAX_BACKOFF)
 }
 
 fn drain_broker_assignments(
@@ -1746,6 +1807,16 @@ mod tests {
         assert_eq!(quantile(&[1, 100], 95), 100);
         assert_eq!(quantile(&[1, 2, 3, 4], 99), 4);
         assert_eq!(quantile(&[], 50), 0);
+    }
+
+    #[test]
+    fn broker_session_open_retry_is_exponential_and_capped() {
+        assert_eq!(broker_open_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(broker_open_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(broker_open_retry_delay(3), Duration::from_secs(4));
+        assert_eq!(broker_open_retry_delay(10), Duration::from_secs(512));
+        assert_eq!(broker_open_retry_delay(11), Duration::from_secs(600));
+        assert_eq!(broker_open_retry_delay(100), Duration::from_secs(600));
     }
 
     #[test]

@@ -234,6 +234,81 @@ fn guardian_completes_a_cycle_without_job_execution() {
 }
 
 #[test]
+fn scope_broker_manager_is_one_event_loop_and_idle_has_no_waiter_path() {
+    let controller = include_str!("../src/node/controller.rs");
+    let manager = controller
+        .split("struct ScopeBrokerManager")
+        .nth(1)
+        .and_then(|source| source.split("async fn run_scope_broker_manager").next())
+        .expect("scope broker manager source");
+    assert!(manager.contains("ScopeBrokerSession"));
+    assert!(manager.contains("for_each_concurrent(16"));
+    assert!(
+        !manager.contains("JoinHandle") && !manager.contains("tokio::spawn"),
+        "scope broker manager must not create one polling task per slot"
+    );
+    let runner = include_str!("../src/runner.rs");
+    assert!(runner.contains("struct ScopeBrokerSession"));
+    assert!(
+        !runner.contains("run_broker_manager(")
+            || !runner.contains("pub(crate) async fn run_broker_manager"),
+        "legacy per-slot broker manager entrypoint must be removed"
+    );
+    let job = include_str!("../src/node/job.rs");
+    assert!(job.contains("run_transient_job"));
+    assert!(
+        !controller.contains(".arg(\"job\")") || controller.contains("drain_broker_assignments"),
+        "job command is only an assignment handoff path"
+    );
+}
+
+#[test]
+fn live_idle_controller_reports_zero_job_workers() {
+    let dir = scratch("idle-worker-budget");
+    let mut controller = Command::new(runner())
+        .args([
+            "controller",
+            "--state-dir",
+            dir.to_str().unwrap(),
+            "--scope",
+            "idle-budget",
+            "--desired-ready",
+            "2",
+            "--surge",
+            "0",
+            "--spawn-slots",
+            "false",
+        ])
+        .env_remove("GITHUB_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn idle controller");
+    let metrics_path = dir.join("controller-metrics.json");
+    for _ in 0..40 {
+        if metrics_path.is_file() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        metrics_path.is_file(),
+        "idle controller did not publish metrics"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let metrics: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metrics_path).unwrap()).unwrap();
+    assert_eq!(metrics["jobs"], 0);
+    assert_eq!(metrics["waiter_processes"], 0);
+    assert_eq!(metrics["job_processes"], 0);
+    assert!(metrics["reconcile_cycles"].as_u64().unwrap_or(0) >= 1);
+    controller.kill().ok();
+    let _ = controller.wait();
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn packaged_units_have_no_controller_partof_to_workers() {
     let controller = include_str!("../debian/velnor-controller@.service");
     let slot = include_str!("../debian/velnor-slot@.service");
