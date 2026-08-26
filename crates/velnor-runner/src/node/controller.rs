@@ -693,10 +693,9 @@ async fn reconcile_once(
     }
     register_runners(args, journal, pacing, registrations).await?;
 
-    // Slot processes own the idle broker/session lifecycle. The controller
-    // only starts a transient child after `JobOwned` emits `StartJob`.
-    // Starting one idle `job` child per Ready slot recreated the broker poll
-    // loop and multiplied registration/session recovery work.
+    // Controller-owned broker managers own the idle session lifecycle. The
+    // controller only starts a transient child after receiving an assignment.
+    // `JobOwned` is proof from that worker, never a second spawn trigger.
     reclaim_orphaned_jobs(args, journal)?;
 
     for row in journal.pending_outbox()? {
