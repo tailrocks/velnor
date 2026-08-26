@@ -15,13 +15,16 @@ use velnor_control::journal::{Event, Journal, JournalStats, SideEffect};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use crate::config;
-use crate::protocol::{GitHubScope, ListedRunner, RegistrationClient};
+use crate::protocol::{
+    classify_broker_poll_error, GitHubApiError, GitHubScope, ListedRunner, RegistrationClient,
+};
 use tokio::sync::mpsc::{self, Receiver};
 
 use super::cleanup;
 use super::exec::load_exec_config;
 use super::health::HealthServer;
 use super::prove;
+use super::recovery::{RecoveryCoordinator, RecoverySignal};
 use super::slot::{heartbeat_path, slot_id, SlotHeartbeat};
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
@@ -416,22 +419,59 @@ fn ensure_broker_managers(
         let task_id = manager_id.clone();
         let manager_tx = tx.clone();
         let task = tokio::spawn(async move {
-            if let Err(error) = crate::runner::run_broker_manager(
-                run_args,
-                state_dir,
-                manager_id.clone(),
-                generation,
-                index,
-                manager_tx,
+            supervise_broker_manager(
+                run_args, state_dir, manager_id, generation, index, manager_tx,
             )
-            .await
-            {
-                eprintln!("broker manager {manager_id} stopped: {error:#}");
-            }
+            .await;
         });
         managers.insert(task_id, (generation, task));
     }
     Ok(())
+}
+
+async fn supervise_broker_manager(
+    run_args: crate::args::RunArgs,
+    state_dir: PathBuf,
+    slot_id: String,
+    generation: Generation,
+    slot_index: usize,
+    assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
+) {
+    let started = Instant::now();
+    let mut recovery = RecoveryCoordinator::default();
+    loop {
+        match crate::runner::run_broker_manager(
+            run_args.clone(),
+            state_dir.clone(),
+            slot_id.clone(),
+            generation,
+            slot_index,
+            assignments.clone(),
+        )
+        .await
+        {
+            Ok(()) => return,
+            Err(error) => {
+                let class = error
+                    .downcast_ref::<GitHubApiError>()
+                    .map_or(crate::protocol::BrokerPollErrorClass::Transport, |api| {
+                        classify_broker_poll_error(api.status)
+                    });
+                let now = started.elapsed();
+                let action = recovery.observe(RecoverySignal::Error(class), now);
+                let wait = recovery.retry_at().saturating_sub(now);
+                eprintln!(
+                    "broker manager {slot_id} generation {} failed class={class:?} action={action:?}; retrying in {}s: {error:#}",
+                    generation.0,
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+                if matches!(action, super::recovery::RecoveryAction::Quarantine) {
+                    recovery.recovered(started.elapsed());
+                }
+            }
+        }
+    }
 }
 
 fn drain_broker_assignments(
