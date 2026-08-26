@@ -258,6 +258,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   hashes were pinned, and the candidate advanced to `0.1.219` because
   `v0.1.218` was canceled before publication. The rootfs source still uses
   moving `noble` package indexes; reproducible rebuild proof remains open.
+- GitHub release run `33012620348` passed both guest artifact jobs and GHCR,
+  then failed both architecture package jobs because `mmdebstrap noble`
+  produced new rootfs bytes (`x86_64=7e321307dd21639681ad997ebddfe3a30d49c9bc65ea309bf32155a85e0738ba`,
+  `aarch64=cb90630dd1c93b871020722c1441da200ffe0b79011b36cfe1dafbefd7a78035`).
+  Manifest pins were refreshed; candidate advances to `0.1.220` because
+  `v0.1.219` is immutable. The moving-index reproducibility defect remains
+  open and is not hidden by the release gate.
 
 ## Non-goals
 

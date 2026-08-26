@@ -14,8 +14,8 @@
     "aarch64": "dc738af1ab93e8c723e9d72abadc94b5d1039df9be5a8861fcf6e4e354e6370c"
   },
   "rootfs": {
-    "x86_64": "1db7724dcddb6acada8bf2176ab1dde69fbffa11acb20a92fc0cde2a78cb7467",
-    "aarch64": "053dcaaf8f491c4f676b6ab7e455685e12c86d806822cc16c28a2d8161814929"
+    "x86_64": "7e321307dd21639681ad997ebddfe3a30d49c9bc65ea309bf32155a85e0738ba",
+    "aarch64": "cb90630dd1c93b871020722c1441da200ffe0b79011b36cfe1dafbefd7a78035"
   },
   "guest_agent": {
     "x86_64": "64064123aafaf92691c5b45b4881607dd32e36f736f666ca531ffed0d31a1159",
