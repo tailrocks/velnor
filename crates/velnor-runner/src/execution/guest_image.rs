@@ -715,6 +715,25 @@ mod tests {
     }
 
     #[test]
+    fn stage_rejects_bytes_that_do_not_match_source_manifest() {
+        let mut fs = MemoryFs::default();
+        let root = PathBuf::from("/release/microvm");
+        fs.write(&root.join("firecracker"), b"fc").unwrap();
+        fs.write(&root.join("jailer"), b"jailer").unwrap();
+        fs.write(&root.join("vmlinux"), b"kernel").unwrap();
+        fs.write(&root.join("rootfs.ext4"), b"rootfs").unwrap();
+        fs.write(&root.join("velnor-guest-agent"), b"agent")
+            .unwrap();
+        let expected = crate::execution::expected_checksums_for_arch("x86_64").unwrap();
+        let error = stage_release_dir(&root, &mut fs, Some(&expected)).unwrap_err();
+        assert_eq!(error.requirement, "artifacts.checksum");
+        assert!(
+            error.to_string().contains("staged") && error.to_string().contains("expected"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn build_fails_closed_off_linux_without_invoking_make() {
         let mut runner = RecordingCommands {
             next: CommandResult {
