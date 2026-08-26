@@ -889,7 +889,7 @@ impl Journal {
             }
             transaction.commit()?;
         }
-        let mut journal = Self {
+        let journal = Self {
             conn,
             path: path.to_path_buf(),
             write_blocked,
