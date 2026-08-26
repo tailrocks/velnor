@@ -513,8 +513,10 @@ fn ensure_broker_managers(
         let generation = slot.generation;
         let task_id = manager_id.clone();
         let manager_tx = tx.clone();
-        let manager_recovery = recovery.clone();
-        let manager_notify = reconcile_notify.clone();
+        let manager_signals = crate::runner::BrokerManagerSignals {
+            recovery: recovery.clone(),
+            reconcile_notify: reconcile_notify.clone(),
+        };
         let task = tokio::spawn(async move {
             supervise_broker_manager(
                 run_args,
@@ -523,8 +525,7 @@ fn ensure_broker_managers(
                 generation,
                 index,
                 manager_tx,
-                manager_recovery,
-                manager_notify,
+                manager_signals,
             )
             .await;
         });
@@ -540,8 +541,7 @@ async fn supervise_broker_manager(
     generation: Generation,
     slot_index: usize,
     assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
-    recovery: Arc<Mutex<RecoveryCoordinator>>,
-    reconcile_notify: Arc<Notify>,
+    signals: crate::runner::BrokerManagerSignals,
 ) {
     let started = Instant::now();
     loop {
@@ -555,8 +555,7 @@ async fn supervise_broker_manager(
             generation,
             slot_index,
             assignments.clone(),
-            recovery.clone(),
-            reconcile_notify.clone(),
+            signals.clone(),
         )
         .await
         {
@@ -569,7 +568,7 @@ async fn supervise_broker_manager(
                     });
                 let now = started.elapsed();
                 let (action, wait) = {
-                    let mut coordinator = recovery.lock().await;
+                    let mut coordinator = signals.recovery.lock().await;
                     let action = coordinator.observe(RecoverySignal::Error(class), now);
                     let wait = coordinator.retry_at().saturating_sub(now);
                     (action, wait)
