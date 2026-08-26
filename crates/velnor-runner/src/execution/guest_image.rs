@@ -616,7 +616,7 @@ fn build_rootfs(
             "-L".into(),
             "velnor-guest".into(),
             "-E".into(),
-            "hash_seed=00000000-0000-0000-0000-000000000002".into(),
+            "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,root_perms=0755,lazy_itable_init=0,lazy_journal_init=0".into(),
             "-d".into(),
             tree.display().to_string(),
             output.display().to_string(),

@@ -293,6 +293,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `aarch64=45b868f628b3a1725d8f38df59ddaf07c047014d73511943a149202269cb373f`).
   Explicit ext4 filesystem time `-T 0` is now supplied to `mke2fs`; candidate
   advances to `0.1.225` because `v0.1.224` is immutable.
+- Release run `33022119754` was canceled while its package gate remained
+  pending after guest/image work. The builder now fixes mke2fs root
+  ownership/perms and disables lazy inode/journal initialization; candidate
+  advances to `0.1.226` because `v0.1.225` is immutable. APT and Sentry remain
+  gated on a successful signed release.
 
 ## Non-goals
 
