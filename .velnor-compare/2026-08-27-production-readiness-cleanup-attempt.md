@@ -47,3 +47,12 @@ respectively. Each check suite also remains `status=queued` with zero check
 runs and unchanged `updated_at` since creation. This is an observed GitHub-side
 queue-object blocker; normal and force cancellation cannot target it. The
 evidence does not establish the deeper backend cause.
+
+## Subsequent independent recheck
+
+Fresh read-only investigator rechecked the three runs and suites after this
+record was pushed: all remain `queued`, with zero jobs, zero check runs, and
+no conclusion. Repository-wide ChainArgos state has zero in-progress runs but
+these three nonterminal queue objects remain. The cleanup checkbox therefore
+cannot be checked, and verification remains prohibited until GitHub-side
+remediation changes those objects to terminal state or removes them.
