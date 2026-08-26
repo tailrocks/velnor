@@ -58,7 +58,7 @@ runs.
 
 - [x] Inventory all open Velnor PRs and all remote branches; record unique
   commits relative to `main`.
-- [ ] Inventory recent failed, cancelled, stuck, and flaky runs for all three
+- [x] Inventory recent failed, cancelled, stuck, and flaky runs for all three
   repositories, including repository, SHA, lane, job, step, run ID, symptom,
   frequency, and first known failure.
 - [ ] Inventory Sentry runners, stale registrations, active jobs, Docker
