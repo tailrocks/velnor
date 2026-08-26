@@ -23,19 +23,16 @@ Goal: install and upgrade the Velnor runner daemon with native apt:
 ```bash
 sudo apt update
 sudo install -d -m 0750 /run/velnor
-sudo sh -c '
-  exec 9>>/run/velnor/package-transaction.lock
-  /usr/bin/flock --exclusive --nonblock 9
-  export VELNOR_PACKAGE_TRANSACTION_FD=9
-  exec apt-get install velnor-runner=X.Y.Z
-'
+sudo /usr/bin/flock --exclusive --nonblock --no-fork \
+  /run/velnor/package-transaction.lock \
+  apt-get install velnor-runner=X.Y.Z
 ```
 
-The wrapper's fd 9 must remain inherited through the complete exact-version
-apt transaction. It holds the exclusive package lock while `dpkg` unpacks and
-configures the package; maintainer scripts require that inherited fd and its
-kernel-reported `FLOCK WRITE` mode. Direct marker-only, shared-lock, `apt-get
-install`, `apt upgrade`, or `dpkg` invocation is refused.
+The `flock --no-fork` process is replaced by `apt-get`, which remains the
+exclusive kernel lock owner through the complete exact-version apt/dpkg
+transaction. Maintainer scripts require that `FLOCK WRITE` owner to be an
+apt-wrapper ancestor. Direct marker-only, shared-lock, `apt-get install`,
+`apt upgrade`, or `dpkg` invocation is refused.
 First install uses the same wrapper.
 
 Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
@@ -145,12 +142,9 @@ echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://velnor-apt.tailrocks.
   | sudo tee /etc/apt/sources.list.d/velnor.list
 sudo apt update
 sudo install -d -m 0750 /run/velnor
-sudo sh -c '
-  exec 9>>/run/velnor/package-transaction.lock
-  /usr/bin/flock --exclusive --nonblock 9
-  export VELNOR_PACKAGE_TRANSACTION_FD=9
-  exec apt-get install velnor-runner=X.Y.Z
-'
+sudo /usr/bin/flock --exclusive --nonblock --no-fork \
+  /run/velnor/package-transaction.lock \
+  apt-get install velnor-runner=X.Y.Z
 # then set non-secret config and the operator-owned token separately:
 sudo nano /etc/velnor/velnor.env      # URL=..., NAME=..., LABELS=..., SLOTS=...
 sudo install -m 0600 /dev/null /etc/velnor/secrets.env
@@ -198,12 +192,9 @@ recovery.
    exact version, never an unpinned candidate:
    ```bash
    sudo install -d -m 0750 /run/velnor
-   sudo sh -c '
-     exec 9>>/run/velnor/package-transaction.lock
-     /usr/bin/flock --exclusive --nonblock 9
-     export VELNOR_PACKAGE_TRANSACTION_FD=9
-     exec apt-get install velnor-runner=X.Y.Z
-   '
+   sudo /usr/bin/flock --exclusive --nonblock --no-fork \
+     /run/velnor/package-transaction.lock \
+     apt-get install velnor-runner=X.Y.Z
    dpkg-query -W velnor-runner
    ```
 5. Activate the immutable release record, verify the installed package and
@@ -212,7 +203,7 @@ recovery.
    units. Run doctor and the fixture smoke before restoring traffic.
 6. Rollback uses only the exact signed predecessor already retained in the
    repository: drain, verify its signed identity, `apt-get update`, and
-   `install -d -m 0750 /run/velnor` plus the fd-inheriting exclusive flock
+   `install -d -m 0750 /run/velnor` plus the `flock --no-fork` exclusive
    wrapper around `apt-get install velnor-runner=<exact-predecessor>`. Prove rollback, then use
    the same exact signed-APT procedure to move forward. Never republish an old
    release merely to roll back.

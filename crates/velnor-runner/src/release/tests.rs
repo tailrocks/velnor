@@ -34,9 +34,7 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
     assert!(!postinst.contains("install -d -m 0750 \"$ACTIVE_DIR\""));
     assert!(postinst.contains("rmdir \"$ACTIVE_DIR\""));
     assert!(postinst.contains("require_package_transaction_lock"));
-    assert!(postinst.contains("VELNOR_PACKAGE_TRANSACTION_FD"));
     assert!(postinst.contains("/proc/locks"));
-    assert!(!postinst.contains("VELNOR_PACKAGE_TRANSACTION_LOCK_HELD"));
     assert!(postinst.contains("all_velnor_units_drained"));
     assert!(
         postinst.find("require_package_transaction_lock").unwrap()
@@ -62,11 +60,9 @@ fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
     let preinst = include_str!("../../debian/preinst");
 
     assert!(preinst.contains("PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock"));
-    assert!(preinst.contains("VELNOR_PACKAGE_TRANSACTION_FD"));
     assert!(preinst.contains("/proc/locks"));
-    assert!(preinst.contains("$2 == \"FLOCK\" && $4 == \"WRITE\""));
-    assert!(preinst.contains("inherited fd has no exclusive lock"));
-    assert!(!preinst.contains("VELNOR_PACKAGE_TRANSACTION_LOCK_HELD"));
+    assert!(preinst.contains("$2 == \"FLOCK\""));
+    assert!(preinst.contains("exclusive lock owner is not an apt-wrapper ancestor"));
     assert!(preinst.contains("systemctl show --property=LoadState --value velnor-guardian.service"));
     assert!(preinst.contains("not-found) return 0"));
     assert!(preinst.contains(
@@ -120,12 +116,11 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
     let marker_spoof = Command::new("sh")
         .arg(&script)
         .arg("install")
-        .env("VELNOR_PACKAGE_TRANSACTION_LOCK_HELD", "1")
         .output()
         .unwrap();
     assert!(
         !marker_spoof.status.success(),
-        "a marker without an inherited fd must fail: {}",
+        "an unwrapped package transaction must fail: {}",
         String::from_utf8_lossy(&marker_spoof.stderr)
     );
 
@@ -133,9 +128,8 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
         Command::new("sh")
             .arg("-c")
             .arg(
-                "exec 9>>\"$1\"; export VELNOR_PACKAGE_TRANSACTION_FD=9; \
-                 /usr/bin/flock --$3 --nonblock 9; \
-                 exec sh \"$2\" install",
+                "/usr/bin/flock --$3 --nonblock --no-fork \"$1\" \
+                 sh \"$2\" install",
             )
             .arg("velnor-lock-test")
             .arg(&lock)
@@ -147,7 +141,7 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
     let shared_spoof = run_wrapped("shared");
     assert!(
         !shared_spoof.status.success(),
-        "a shared inherited lock must fail: {}",
+        "a shared package lock must fail: {}",
         String::from_utf8_lossy(&shared_spoof.stderr)
     );
     let exclusive_wrapper = run_wrapped("exclusive");

@@ -202,11 +202,18 @@ fn persist_in_flight_job(
         run_service_url: run_service_job.run_service_url.clone(),
         billing_owner_id: run_service_job.billing_owner_id.clone(),
     };
-    fs::write(
-        in_flight_job_path(config_dir),
-        serde_json::to_vec_pretty(&record).context("serialize in-flight job")?,
-    )
-    .context("write in-flight job lease")
+    let path = in_flight_job_path(config_dir);
+    let temporary = path.with_file_name(format!("in-flight-job.json.tmp-{}", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(&record).context("serialize in-flight job")?;
+    if let Err(error) = fs::write(&temporary, bytes) {
+        fs::remove_file(&temporary).ok();
+        return Err(error).context("write temporary in-flight job lease");
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        fs::remove_file(&temporary).ok();
+        return Err(error).context("publish in-flight job lease");
+    }
+    Ok(())
 }
 
 fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
@@ -225,6 +232,32 @@ fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
         fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
+}
+
+fn clear_in_flight_job_if_matches(config_dir: &Path, job_id: &str) -> Result<bool> {
+    let Some(record) = load_in_flight_job(config_dir)? else {
+        return Ok(false);
+    };
+    if record.job_id != job_id {
+        return Ok(false);
+    }
+    clear_in_flight_job(config_dir)?;
+    Ok(true)
+}
+
+fn recorded_job_journal_state(journal_dir: &Path, job_id: &str) -> RunServiceJobJournalState {
+    let Ok(journal) = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+    else {
+        return RunServiceJobJournalState::Accepted;
+    };
+    let Ok(state) = journal.load_state() else {
+        return RunServiceJobJournalState::Accepted;
+    };
+    if state.jobs.iter().any(|job| job.job_id.0 == job_id) {
+        RunServiceJobJournalState::Accepted
+    } else {
+        RunServiceJobJournalState::Acquired
+    }
 }
 
 fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
@@ -300,12 +333,13 @@ async fn complete_recorded_in_flight_job(
     };
     let token = oauth_access_token(stored).await?;
     let client = RunServiceClient::new(token.token)?;
+    let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
     let ctx = RunServiceJobContext {
         client,
         run_service_url: record.run_service_url,
         billing_owner_id: record.billing_owner_id,
-        journal_dir: crate::node::complete::journal_dir_near(slot_dir),
-        journal_state: RunServiceJobJournalState::Accepted,
+        journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
+        journal_dir,
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
@@ -3410,6 +3444,7 @@ async fn handle_job_request(
     let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
     if let Err(persist_error) = persist_in_flight_job(config_dir, &run_service_job, &job) {
         return fail_closed_after_in_flight_persist_error(
+            config_dir,
             &run_service_job,
             &acquired_identity,
             &job,
@@ -8052,9 +8087,9 @@ async fn fail_closed_after_journal_acceptance_error(
     );
     eprintln!("Failing acquired GitHub job closed: {reason}");
 
-    // This is the only completion attempt for this pre-journal failure. The
-    // in-flight record is cleared after that attempt, including a failed
-    // attempt, so teardown cannot submit a duplicate completion.
+    // This is the only completion attempt for this pre-journal failure in this
+    // process. Keep the exact record when completion fails so recovery can
+    // retry it; clear it only after GitHub accepted the terminal completion.
     let completion = complete_acquired_job_failure(
         run_service_job,
         acquired_identity,
@@ -8070,10 +8105,14 @@ async fn fail_closed_after_journal_acceptance_error(
         );
     }
 
-    let cleanup = clear_in_flight_job(config_dir);
+    let cleanup = if completion.is_ok() {
+        clear_in_flight_job_if_matches(config_dir, &acquired_identity.job_id)
+    } else {
+        Ok(false)
+    };
     if let Err(error) = &cleanup {
         eprintln!(
-            "Could not clear in-flight record for acquired GitHub job {} after journal acceptance failure: {error:#}",
+            "Could not clear matching in-flight record for acquired GitHub job {} after journal acceptance failure: {error:#}",
             acquired_identity.job_id
         );
     }
@@ -8086,13 +8125,14 @@ async fn fail_closed_after_journal_acceptance_error(
     }
     if let Err(error) = cleanup {
         failure = failure.context(format!(
-            "in-flight record cleanup after journal acceptance failure also failed: {error:#}"
+            "matching in-flight record cleanup after journal acceptance failure also failed: {error:#}"
         ));
     }
     Err(failure)
 }
 
 async fn fail_closed_after_in_flight_persist_error(
+    config_dir: &Path,
     run_service_job: &RunServiceJobContext,
     acquired_identity: &AcquiredJobIdentity,
     job: &AgentJobRequestMessage,
@@ -8119,10 +8159,27 @@ async fn fail_closed_after_in_flight_persist_error(
         );
     }
 
+    let cleanup = if completion.is_ok() {
+        clear_in_flight_job_if_matches(config_dir, &acquired_identity.job_id)
+    } else {
+        Ok(false)
+    };
+    if let Err(error) = &cleanup {
+        eprintln!(
+            "Could not clear matching in-flight record for acquired GitHub job {} after persist failure: {error:#}",
+            acquired_identity.job_id
+        );
+    }
+
     let mut failure = persist_error.context(reason);
     if let Err(error) = completion {
         failure = failure.context(format!(
             "fail-closed completion attempt also failed: {error:#}"
+        ));
+    }
+    if let Err(error) = cleanup {
+        failure = failure.context(format!(
+            "matching in-flight record cleanup after persist failure also failed: {error:#}"
         ));
     }
     Err(failure)
@@ -10986,7 +11043,7 @@ jobs:
     }
 
     #[tokio::test]
-    async fn journal_acceptance_failure_clears_after_one_failed_completion_attempt() {
+    async fn journal_acceptance_failure_preserves_retry_record_after_failed_completion() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -11022,7 +11079,7 @@ jobs:
         let rendered = format!("{error:#}");
         assert!(rendered.contains("Assigned rejected"));
         assert!(rendered.contains("completion attempt also failed"));
-        assert!(!in_flight_job_path(&config_dir).exists());
+        assert!(in_flight_job_path(&config_dir).exists());
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }

@@ -34,36 +34,37 @@ guardian_inactive() {
 }
 
 require_package_transaction_lock() {
-  # The deployment wrapper opens fd 9, takes an exclusive flock on it, exports
-  # the fd number, and execs apt. A marker plus a second lock probe is not
-  # proof: it accepts an arbitrary environment value and cannot distinguish a
-  # conflicting shared lock from the wrapper's exclusive lock.
-  lock_fd=${VELNOR_PACKAGE_TRANSACTION_FD:-}
-  case "$lock_fd" in
-    ''|*[!0-9]*) fail "refusing package transaction: wrapper lock fd is missing or invalid" ;;
-    0|1|2) fail "refusing package transaction: wrapper lock fd must not be a standard stream" ;;
-  esac
-  lock_fd_path="/proc/self/fd/$lock_fd"
-  [ -e "$lock_fd_path" ] \
-    || fail "refusing package transaction: wrapper lock fd $lock_fd was not inherited"
-  lock_fd_target=$(readlink "$lock_fd_path" 2>/dev/null || true)
-  [ "$lock_fd_target" = "$PACKAGE_TRANSACTION_LOCK" ] \
-    || fail "refusing package transaction: wrapper fd $lock_fd is not $PACKAGE_TRANSACTION_LOCK"
-
-  # Linux exposes flock mode in /proc/locks. Require a WRITE lock for this
-  # inode. This rejects a shared-lock spoof (READ) and, together with the
-  # inherited fd/path check above, binds the kernel proof to the apt wrapper's
-  # open file description without acquiring a new lock in this script.
+  # The deployment wrapper takes an exclusive lock on the path with --no-fork,
+  # so the apt process itself remains the kernel lock owner through dpkg and
+  # every maintainer script. Never accept a caller-controlled marker or acquire
+  # a new lock here: a shared lock or an unrelated process must fail closed.
   lock_inode=$(stat -c '%i' "$PACKAGE_TRANSACTION_LOCK" 2>/dev/null || true)
   [ -n "$lock_inode" ] \
     || fail "refusing package transaction: cannot stat $PACKAGE_TRANSACTION_LOCK"
-  lock_mode=$(awk -v inode="$lock_inode" '
-    $2 == "FLOCK" && $4 == "WRITE" {
+  lock_owner=$(awk -v inode="$lock_inode" '
+    $2 == "FLOCK" {
       split($6, device_inode, ":")
-      if (device_inode[3] == inode) { print $4; exit }
-    }' /proc/locks 2>/dev/null || true)
-  [ "$lock_mode" = WRITE ] \
-    || fail "refusing package transaction: inherited fd has no exclusive lock for $PACKAGE_TRANSACTION_LOCK"
+      if (device_inode[3] == inode) {
+        if ($4 != "WRITE") exit 2
+        print $5
+        exit
+      }
+    }' /proc/locks 2>/dev/null) || lock_owner=
+  case "$lock_owner" in
+    ''|*[!0-9]*) fail "refusing package transaction: no exclusive lock owner for $PACKAGE_TRANSACTION_LOCK" ;;
+  esac
+  current_pid=$$
+  while [ "$current_pid" -gt 1 ]; do
+    [ "$current_pid" = "$lock_owner" ] && return 0
+    parent_pid=$(awk '$1 == "PPid:" { print $2; exit }' \
+      "/proc/$current_pid/status" 2>/dev/null || true)
+    case "$parent_pid" in
+      ''|*[!0-9]*) break ;;
+    esac
+    [ "$parent_pid" = "$current_pid" ] && break
+    current_pid=$parent_pid
+  done
+  fail "refusing package transaction: exclusive lock owner is not an apt-wrapper ancestor"
 }
 
 all_velnor_units_drained() {
