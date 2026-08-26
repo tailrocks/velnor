@@ -261,8 +261,12 @@ impl CommandRunner for ProcessCommandRunner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&process.pid)
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            child
+                .kill()
+                .with_context(|| format!("kill {}", process.pid))?;
+            child
+                .wait()
+                .with_context(|| format!("wait for {}", process.pid))?;
             return Ok(());
         }
         let status = Command::new("kill")

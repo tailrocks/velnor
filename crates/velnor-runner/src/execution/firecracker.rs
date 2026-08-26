@@ -231,8 +231,14 @@ impl FirecrackerBackend {
         }
         if identity_ok {
             // Load taints a Firecracker process; a failed load needs a fresh VMM.
-            if let Some(previous) = self.jailer.take() {
-                let _ = world.runner.kill(&previous);
+            if let Some(previous) = self.jailer.clone() {
+                world.runner.kill(&previous).map_err(|error| {
+                    ExecutionError::Isolation(format!(
+                        "kill jailer pid {} after snapshot failure: {error:#}",
+                        previous.pid
+                    ))
+                })?;
+                self.jailer = None;
             }
             self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
         }
@@ -316,7 +322,7 @@ impl FirecrackerBackend {
             conclusion: JobConclusion::Cancelled,
             exit_code: 1,
         });
-        self.stop_jailer(world, events);
+        self.stop_jailer(world, events)?;
         Ok(())
     }
 
@@ -326,22 +332,51 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        self.stop_jailer(world, events);
+        let mut failures = Vec::new();
+        if let Err(error) = self.stop_jailer(world, events) {
+            failures.push(error.to_string());
+        }
         for (program, args) in teardown_net_invocations(resources) {
-            let _ = world.runner.run(&program, &args);
+            match world.runner.run(&program, &args) {
+                Ok(result) if result.code == 0 => {}
+                Ok(result) => failures.push(format!(
+                    "network teardown {program} {} exited {}",
+                    args.join(" "),
+                    result.code
+                )),
+                Err(error) => failures.push(format!(
+                    "network teardown {program} {}: {error:#}",
+                    args.join(" ")
+                )),
+            }
         }
         events.push(ExecutionEvent::FirecrackerApi("teardown_net".into()));
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ExecutionError::Isolation(format!(
+                "microvm teardown uncertain: {}",
+                failures.join("; ")
+            )))
+        }
     }
 
-    fn stop_jailer(&mut self, world: &mut ExecutionWorld<'_>, events: &mut Vec<ExecutionEvent>) {
-        if let Some(jailer) = self.jailer.take() {
-            let _ = world.runner.kill(&jailer);
+    fn stop_jailer(
+        &mut self,
+        world: &mut ExecutionWorld<'_>,
+        events: &mut Vec<ExecutionEvent>,
+    ) -> Result<(), ExecutionError> {
+        if let Some(jailer) = self.jailer.clone() {
+            world.runner.kill(&jailer).map_err(|error| {
+                ExecutionError::Isolation(format!("kill jailer pid {}: {error:#}", jailer.pid))
+            })?;
+            self.jailer = None;
             events.push(ExecutionEvent::FirecrackerApi(format!(
                 "kill jailer pid {}",
                 jailer.pid
             )));
         }
+        Ok(())
     }
 }
 

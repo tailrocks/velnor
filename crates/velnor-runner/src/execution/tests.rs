@@ -892,6 +892,73 @@ fn microvm_spawns_jailer_with_api_socket_and_unique_net() {
 }
 
 #[test]
+fn microvm_teardown_kill_failure_fences_and_attempts_network_cleanup() {
+    let resources = IsolationResources::for_identity(
+        IsolationIdentity::new("job-kill-failure", 1),
+        Path::new("/run"),
+    );
+    let mut fs = MemoryFs::default();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    let artifacts = PathBuf::from("/microvm");
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut runner = RecordingCommands {
+        fail_kill: Some("permission denied".into()),
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let mut backend = FirecrackerBackend {
+        jailer: Some(crate::executor::SpawnedProcess { pid: 7 }),
+        ..FirecrackerBackend::default()
+    };
+    let mut events = Vec::new();
+    let error = {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        backend
+            .teardown(&resources, &mut world, &mut events)
+            .unwrap_err()
+    };
+    assert!(error.to_string().contains("microvm teardown uncertain"));
+    assert!(error.to_string().contains("kill jailer pid 7"));
+    assert!(runner.calls.iter().any(|(program, args)| {
+        program == "ip" && args.windows(2).any(|window| window == ["netns", "delete"])
+    }));
+    assert!(
+        backend.jailer.is_some(),
+        "uncertain jailer cleanup was discarded"
+    );
+}
+
+#[test]
+fn microvm_teardown_network_failure_is_not_reported_clean() {
+    let resources = IsolationResources::for_identity(
+        IsolationIdentity::new("job-net-failure", 1),
+        Path::new("/run"),
+    );
+    let mut fs = MemoryFs::default();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    let artifacts = PathBuf::from("/microvm");
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut runner = RecordingCommands {
+        codes: vec![1],
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let mut backend = FirecrackerBackend::default();
+    let mut events = Vec::new();
+    let error = {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        backend
+            .teardown(&resources, &mut world, &mut events)
+            .unwrap_err()
+    };
+    assert!(error.to_string().contains("microvm teardown uncertain"));
+    assert!(error.to_string().contains("network teardown"));
+    assert!(runner.calls.iter().any(|(program, args)| {
+        program == "ip" && args.windows(2).any(|window| window == ["netns", "delete"])
+    }));
+}
+
+#[test]
 fn log_substring_does_not_override_explicit_exit() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();

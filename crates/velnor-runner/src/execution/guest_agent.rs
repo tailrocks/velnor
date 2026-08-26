@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use velnor_model::{GuestJobPlan, JobConclusion, VsockCodecError, VsockMessage, PROTOCOL_VERSION};
 
+use super::guest_runtime::{guest_capability_error, validate_guest_plan};
+
 /// Guest identity announced on `GuestReady`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestSessionEnv {
@@ -57,6 +59,16 @@ where
                 plan_bytes,
             }) => {
                 let decoded = GuestJobPlan::decode(&plan_bytes).ok();
+                if let Some(plan) = &decoded {
+                    validate_guest_plan(plan)?;
+                    if !plan.command_files.is_empty() {
+                        return Err(guest_capability_error(
+                            "guest.command_files",
+                            "non-empty",
+                            "empty until guest result-file transfer is implemented",
+                        ));
+                    }
+                }
                 let (conclusion, code) = if let Some(planned) =
                     decoded.as_ref().and_then(GuestJobPlan::planned_conclusion)
                 {

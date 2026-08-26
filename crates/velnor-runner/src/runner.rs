@@ -5168,39 +5168,9 @@ fn execute_microvm_script_job(
     docker_image: &str,
     node_action_image: &str,
     trust_scope: &str,
+    run_service_url: &str,
+    billing_owner_id: Option<String>,
 ) -> Result<ScriptJobResult> {
-    let file = velnor_model::ExecutionFile {
-        execution: velnor_model::ExecutionSection {
-            backend: velnor_model::ExecutionBackendKind::MicroVm,
-        },
-    };
-    let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
-    let resources = crate::execution::IsolationResources::for_identity(
-        isolation.clone(),
-        std::path::Path::new("/run/velnor"),
-    );
-    let mut fs = crate::execution::RealHostFs;
-    let mut runner = crate::executor::ProcessCommandRunner;
-    let mut api = crate::execution::UnixFirecrackerClient::new(resources.api_socket());
-    let mut vsock = crate::execution::UnixVsockChannel::lazy(
-        resources.vsock.clone(),
-        crate::execution::FIRECRACKER_GUEST_CID,
-        crate::execution::GUEST_AGENT_PORT,
-    );
-    let artifact_root = std::path::PathBuf::from(crate::execution::PACKAGED_MICROVM_ROOT);
-    let kvm = std::path::PathBuf::from("/dev/kvm");
-    let docker = std::path::PathBuf::from("/var/run/docker.sock");
-    let mut world = crate::execution::ExecutionWorld {
-        kvm: &kvm,
-        artifact_root: &artifact_root,
-        host_docker_socket: &docker,
-        runner: &mut runner,
-        firecracker: &mut api,
-        host_fs: &mut fs,
-        vsock: Some(&mut vsock),
-        docker_engine: None,
-        allow_inline_guest_plan: false,
-    };
     let run_root = std::path::PathBuf::from("/run/velnor");
     let container = crate::github_adapter::github_job_container_spec(
         job,
@@ -5220,8 +5190,10 @@ fn execute_microvm_script_job(
         trust_scope,
     );
     if container.mount_docker_socket {
-        return Err(anyhow::anyhow!(
-            "microvm plan mounted host docker.sock; docker backend was not used"
+        return Err(microvm_capability_error(
+            "execution.container.mount_docker_socket",
+            "true",
+            "false",
         ));
     }
     let steps = script_steps
@@ -5231,82 +5203,81 @@ fn execute_microvm_script_job(
         .collect();
     let normalized = crate::github_adapter::github_normalized_job_plan(
         job,
-        "",
-        None,
+        run_service_url,
+        billing_owner_id,
         container,
         steps,
         crate::runtime_env::job_environment_variables(job),
-        Vec::new(),
+        job_context_data(job),
     );
-    let plan = crate::execution::ValidatedPlan::from_normalized(&normalized);
-    let outcome = crate::execution::run_validated_job(&file, isolation, &plan, &mut world)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let result = match outcome.conclusion {
-        "success" => TaskResult::Succeeded,
-        "cancelled" => TaskResult::Canceled,
-        _ => TaskResult::Failed,
-    };
-    Ok(ScriptJobResult {
-        result,
-        outputs: BTreeMap::new(),
-        environment_url: None,
-        step_logs: microvm_step_logs(script_steps, &outcome),
-        teardown: None,
-        timings: ExecutionTimings::default(),
-    })
+    reject_incomplete_microvm_plan(job, script_steps, &normalized)
 }
 
-fn microvm_step_logs(
+fn microvm_capability_error(field: &str, received: &str, accepted: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "unsupported capability: field '{field}' received '{received}'; accepted '{accepted}'; manifest version {}",
+        crate::manifest::MANIFEST_VERSION
+    )
+}
+
+fn reject_incomplete_microvm_plan(
+    job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
-    outcome: &crate::execution::ExecutionOutcome,
-) -> Vec<StepLog> {
-    let mut buckets = vec![Vec::new(); script_steps.len()];
-    let mut current = 0_usize;
-    for line in &outcome.log_lines {
-        if let Some(index) = script_steps
-            .iter()
-            .position(|step| line.contains(&format!("[velnor-step {}]", step.id)))
-        {
-            current = index;
-        }
-        if let Some(bucket) = buckets.get_mut(current) {
-            bucket.push(line.clone());
-        }
+    plan: &crate::plan::NormalizedJobPlan,
+) -> Result<ScriptJobResult> {
+    if plan.execution.job_container.image.trim().is_empty() {
+        return Err(microvm_capability_error(
+            "execution.job_container.image",
+            "<empty>",
+            "non-empty guest image",
+        ));
     }
-    if buckets.iter().all(Vec::is_empty) {
-        if let Some(first) = buckets.first_mut() {
-            first.extend(outcome.log_lines.iter().cloned());
-        }
+    if let Some((index, step)) = job.steps.iter().enumerate().find(|(_, step)| {
+        step.enabled
+            && !matches!(
+                step.reference_type(),
+                Some(crate::job_message::ActionReferenceType::Script)
+            )
+    }) {
+        let received = step
+            .reference_type()
+            .map_or_else(|| "absent".to_string(), |kind| format!("{kind:?}"));
+        return Err(microvm_capability_error(
+            &format!("jobs.steps[{index}].reference.type"),
+            &received,
+            "Script until native guest action execution is complete",
+        ));
     }
-    script_steps
-        .iter()
-        .enumerate()
-        .map(|(index, step)| {
-            let now = unix_now_iso8601();
-            StepLog {
-                step_id: step.id.clone(),
-                display_name: if step.display_name.is_empty() {
-                    step.id.clone()
-                } else {
-                    step.display_name.clone()
-                },
-                order: i32::try_from(index + 1).unwrap_or(i32::MAX),
-                started_at: now.clone(),
-                completed_at: now,
-                lines: buckets.get(index).cloned().unwrap_or_default(),
-                masks: Vec::new(),
-                annotations: Vec::new(),
-                telemetry: Vec::new(),
-                exit_code: outcome.exit_code,
-                skipped: false,
-                failure_ignored: false,
-                error_count: if outcome.exit_code == 0 { 0 } else { 1 },
-                warning_count: 0,
-                notice_count: 0,
-                summary: String::new(),
-            }
-        })
-        .collect()
+    if plan.steps.len() != script_steps.len() {
+        return Err(microvm_capability_error(
+            "execution.steps",
+            "script-only projection",
+            "complete ordered normalized job steps",
+        ));
+    }
+    if plan
+        .github_report
+        .as_ref()
+        .is_none_or(|report| report.run_service_url.trim().is_empty())
+    {
+        return Err(microvm_capability_error(
+            "github_report.run_service_url",
+            "<empty>",
+            "non-empty GitHub run-service URL",
+        ));
+    }
+    if plan.execution.context_data.is_empty() {
+        return Err(microvm_capability_error(
+            "execution.context_data",
+            "<empty>",
+            "complete GitHub context data",
+        ));
+    }
+    Err(microvm_capability_error(
+        "execution.microvm.result_bridge",
+        "unimplemented",
+        "complete guest command-file bytes, outputs, environment URL, logs, and teardown result",
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5335,6 +5306,8 @@ fn execute_script_job_inner(
             docker_image,
             node_action_image,
             trust_scope,
+            run_service_url,
+            billing_owner_id,
         );
     }
     let execution_started = Instant::now();
@@ -9263,6 +9236,26 @@ mod tests {
             "variables": variables
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn microvm_job_rejects_incomplete_plan_before_backend_side_effects() {
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let error = execute_microvm_script_job(
+            &job,
+            &[],
+            "ubuntu:24.04",
+            "node:24",
+            "trusted",
+            "https://run.service/jobs/1",
+            None,
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("unsupported capability"), "{text}");
+        assert!(text.contains("execution.context_data"), "{text}");
+        assert!(text.contains("received '<empty>'"), "{text}");
+        assert!(text.contains("manifest version 9"), "{text}");
     }
 
     #[test]

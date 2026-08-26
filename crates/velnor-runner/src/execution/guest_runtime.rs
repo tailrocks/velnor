@@ -94,21 +94,11 @@ impl VsockChannel for LoopbackVsock {
             plan_bytes,
         } = &message
         {
-            let (conclusion, exit_code, command_files) = match GuestJobPlan::decode(plan_bytes) {
-                Ok(plan) => {
-                    let (conclusion, exit_code) = plan
-                        .planned_conclusion()
-                        .unwrap_or((JobConclusion::Success, 0));
-                    (conclusion, exit_code, plan.command_files)
-                }
-                Err(_) => (JobConclusion::Failure, 1, Vec::new()),
-            };
-            for path in command_files {
-                self.pending.push(VsockMessage::CommandFile {
-                    path,
-                    bytes: Vec::new(),
-                });
-            }
+            let plan = GuestJobPlan::decode(plan_bytes)?;
+            validate_guest_plan(&plan)?;
+            let (conclusion, exit_code) = plan
+                .planned_conclusion()
+                .unwrap_or((JobConclusion::Success, 0));
             self.pending.push(VsockMessage::JobCompleted {
                 conclusion,
                 exit_code,
@@ -133,13 +123,15 @@ impl VsockChannel for LoopbackVsock {
 /// Run the plan: network, services, job container, steps, cleanup.
 ///
 /// # Errors
-/// Docker CLI failures. Does not fall back to another backend.
+/// Unsupported guest-plan fields or Docker CLI failures. Does not fall back to
+/// another backend.
 pub fn execute_guest_plan(
     plan: &GuestJobPlan,
     runner: &mut dyn CommandRunner,
     events: &mut Vec<ExecutionEvent>,
     host_docker: bool,
 ) -> Result<i32, String> {
+    validate_guest_plan(plan)?;
     if let Some((conclusion, exit_code)) = plan.planned_conclusion() {
         record_plan_files(plan, events);
         events.push(ExecutionEvent::JobCompleted {
@@ -206,16 +198,11 @@ pub fn execute_guest_plan(
     let mut code = 0_i32;
     for step in &plan.steps {
         events.push(log_line(&format!("[velnor-step {}]", step.id)));
-        let script = if step.script.is_empty() {
-            format!("echo {}", step.id)
-        } else {
-            step.script.clone()
-        };
         let result = docker(
             runner,
             events,
             host_docker,
-            &["exec", &job_name, "sh", "-c", &script],
+            &["exec", &job_name, "sh", "-c", &step.script],
         )?;
         if !result.stdout.is_empty() {
             for line in result.stdout.lines() {
@@ -242,6 +229,40 @@ pub fn execute_guest_plan(
         exit_code: code,
     });
     Ok(code)
+}
+
+pub(crate) fn validate_guest_plan(plan: &GuestJobPlan) -> Result<(), String> {
+    if plan.image.trim().is_empty() {
+        return Err(guest_capability_error(
+            "guest.image",
+            "<empty>",
+            "non-empty guest image",
+        ));
+    }
+    for (index, step) in plan.steps.iter().enumerate() {
+        if let Some(action) = &step.action {
+            return Err(guest_capability_error(
+                &format!("guest.steps[{index}].action"),
+                action,
+                "none until a native guest action adapter exists",
+            ));
+        }
+        if step.script.trim().is_empty() {
+            return Err(guest_capability_error(
+                &format!("guest.steps[{index}].script"),
+                "<empty>",
+                "non-empty script",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn guest_capability_error(field: &str, received: &str, accepted: &str) -> String {
+    format!(
+        "unsupported capability: field '{field}' received '{received}'; accepted '{accepted}'; manifest version {}",
+        crate::manifest::MANIFEST_VERSION
+    )
 }
 
 fn record_plan_files(plan: &GuestJobPlan, events: &mut Vec<ExecutionEvent>) {
@@ -403,6 +424,38 @@ mod tests {
     }
 
     #[test]
+    fn empty_guest_script_fails_closed_before_docker_side_effects() {
+        let mut plan = sample_plan();
+        plan.steps[0].script.clear();
+        let mut runner = RecordingCommands::default();
+        let error = execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap_err();
+        assert!(error.contains("guest.steps[0].script"), "{error}");
+        assert!(error.contains("received '<empty>'"), "{error}");
+        assert!(error.contains("manifest version"), "{error}");
+        assert!(
+            runner.calls.is_empty(),
+            "guest plan ran Docker: {:?}",
+            runner.calls
+        );
+    }
+
+    #[test]
+    fn guest_action_fails_closed_before_docker_side_effects() {
+        let mut plan = sample_plan();
+        plan.steps[0].action = Some("actions/unknown@sha".into());
+        let mut runner = RecordingCommands::default();
+        let error = execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap_err();
+        assert!(error.contains("guest.steps[0].action"), "{error}");
+        assert!(error.contains("actions/unknown@sha"), "{error}");
+        assert!(error.contains("manifest version"), "{error}");
+        assert!(
+            runner.calls.is_empty(),
+            "guest plan ran Docker: {:?}",
+            runner.calls
+        );
+    }
+
+    #[test]
     fn delivered_plan_rejects_docker_sock_bytes() {
         let mut plan = sample_plan();
         plan.steps[0].script = "cat /var/run/docker.sock".into();
@@ -425,10 +478,6 @@ mod tests {
                 plan_bytes: plan.encode().unwrap(),
             })
             .unwrap();
-        assert!(matches!(
-            vsock.recv().unwrap(),
-            VsockMessage::CommandFile { path, .. } if path == "GITHUB_OUTPUT"
-        ));
         assert!(matches!(
             vsock.recv().unwrap(),
             VsockMessage::JobCompleted {

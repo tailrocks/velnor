@@ -390,6 +390,7 @@ pub struct RecordingCommands {
     pub codes: Vec<i32>,
     pub next_pid: u32,
     pub fail_spawn: Option<String>,
+    pub fail_kill: Option<String>,
     pub spawned: Vec<SpawnedProcess>,
     pub killed: Vec<u32>,
 }
@@ -406,6 +407,7 @@ impl Default for RecordingCommands {
             codes: Vec::new(),
             next_pid: 1,
             fail_spawn: None,
+            fail_kill: None,
             spawned: Vec::new(),
             killed: Vec::new(),
         }
@@ -436,6 +438,9 @@ impl CommandRunner for RecordingCommands {
     fn kill(&mut self, process: &SpawnedProcess) -> anyhow::Result<()> {
         self.calls
             .push(("kill".into(), vec![process.pid.to_string()]));
+        if let Some(detail) = &self.fail_kill {
+            anyhow::bail!("kill {}: {detail}", process.pid);
+        }
         self.killed.push(process.pid);
         Ok(())
     }
