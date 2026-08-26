@@ -333,7 +333,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
-            drain_children(&mut slots, &mut jobs).await?;
+            drain_children(&args.state_dir, &mut slots, &mut jobs).await?;
             return Ok(());
         }
         let started = Instant::now();
@@ -437,6 +437,7 @@ fn drain_broker_assignments(
     jobs: &mut HashMap<String, Child>,
     receiver: &mut Receiver<crate::runner::BrokerAssignment>,
 ) -> anyhow::Result<()> {
+    std::fs::create_dir_all(args.state_dir.join("handoffs"))?;
     while let Ok(assignment) = receiver.try_recv() {
         let state = journal.materialized_state()?;
         let valid = state.slots.iter().any(|slot| {
@@ -492,6 +493,7 @@ fn drain_broker_assignments(
 /// lost job. The daemon's drain flag lives in the supervisor process, so this
 /// explicit handoff is the process boundary that makes graceful drain real.
 async fn drain_children(
+    state_dir: &std::path::Path,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
@@ -501,7 +503,7 @@ async fn drain_children(
 
     loop {
         reap(slots);
-        reap(jobs);
+        reap_jobs(state_dir, jobs);
         if slots.is_empty() && jobs.is_empty() {
             return Ok(());
         }
@@ -665,7 +667,7 @@ async fn reconcile_once(
     }
 
     reap(slots);
-    reap(jobs);
+    reap_jobs(&args.state_dir, jobs);
     let mut health = journal.materialized_state()?.health();
     health.execution_backend = execution.backend();
     server.publish(&health)?;
@@ -1201,6 +1203,25 @@ fn reap(children: &mut HashMap<String, Child>) {
         }
     }
     for id in dead {
+        children.remove(&id);
+    }
+}
+
+/// Wake the broker manager when a transient worker exits without publishing
+/// its normal completion marker. This covers pre-acquisition crashes, where
+/// no durable job record exists for `reclaim_orphaned_jobs` to recover.
+fn reap_jobs(state_dir: &std::path::Path, children: &mut HashMap<String, Child>) {
+    let mut dead = Vec::new();
+    for (id, child) in children.iter_mut() {
+        if let Ok(Some(_)) = child.try_wait() {
+            dead.push(id.clone());
+        }
+    }
+    for id in dead {
+        let _ = std::fs::write(
+            crate::node::handoff::completion_path(state_dir, &id),
+            b"exited",
+        );
         children.remove(&id);
     }
 }

@@ -124,6 +124,14 @@ pub fn write_atomic(path: &Path, handoff: &AssignmentHandoff) -> Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create handoff directory {}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 0700 {}", parent.display()))?;
+    }
     let bytes = serde_json::to_vec(handoff).context("serialize assignment handoff")?;
     let temporary = parent.join(format!(".{}.{}.tmp", path_name(path), Uuid::new_v4()));
 

@@ -23,7 +23,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::Generation;
+use velnor_model::{ActorPhase, Generation};
 
 use crate::{
     action::{
@@ -882,9 +882,7 @@ pub(crate) async fn run_transient_job(
     handoff_path: &Path,
 ) -> Result<()> {
     let handoff = crate::node::handoff::read_and_remove(handoff_path)?;
-    let journal = velnor_control::journal::Journal::open(
-        crate::node::complete::journal_dir_near(&handoff.config_dir).join("journal.db"),
-    )?;
+    let journal = velnor_control::journal::Journal::open(job_args.state_dir.join("journal.db"))?;
     let expected_slot = format!(
         "{}-{}",
         job_args.scope.as_deref().unwrap_or("default"),
@@ -1004,6 +1002,18 @@ pub(crate) async fn run_broker_manager(
 
     loop {
         if draining() {
+            return Ok(());
+        }
+        let journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))?;
+        let current = journal
+            .materialized_state()?
+            .slots
+            .into_iter()
+            .find(|slot| slot.slot_id.0 == slot_id);
+        if current
+            .as_ref()
+            .is_none_or(|slot| slot.generation != generation || slot.phase != ActorPhase::Ready)
+        {
             return Ok(());
         }
         let message = poll_broker_message(
