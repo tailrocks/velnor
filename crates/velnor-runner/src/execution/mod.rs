@@ -10,6 +10,7 @@ mod cache_transport;
 mod docker;
 mod firecracker;
 mod guest;
+mod guest_actions;
 mod guest_agent;
 mod guest_image;
 mod guest_runtime;
@@ -19,9 +20,9 @@ mod snapshot;
 mod unix_api;
 
 pub use artifacts::{
-    hex_sha256, packaged_generation, require_coherent_generation, verify_microvm_artifacts,
-    ArtifactChecksums, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION, JAILER_VERSION,
-    PACKAGED_MICROVM_ROOT,
+    expected_checksums_for_arch, hex_sha256, packaged_generation, require_coherent_generation,
+    verify_microvm_artifacts, ArtifactChecksums, MicroVmArtifactSet, MicroVmGeneration,
+    FIRECRACKER_VERSION, JAILER_VERSION, PACKAGED_MICROVM_ROOT,
 };
 pub use backend::{
     BackendPhase, BackendSession, ExecutionError, ExecutionEvent, ExecutionOutcome, ValidatedPlan,
@@ -51,7 +52,10 @@ pub use guest_runtime::{
     execute_guest_plan, handle_delivered_plan, host_vsock_connect_path, LoopbackVsock,
     UnixVsockChannel, GUEST_AGENT_PORT,
 };
-pub use isolation::{IsolationIdentity, IsolationResources};
+pub use isolation::{
+    is_host_docker_control_socket, microvm_isolation_root, IsolationIdentity, IsolationResources,
+    MICROVM_ISOLATION_ROOT, MICROVM_NO_HOST_DOCKER_SOCKET,
+};
 pub use net::{
     nftables_commands, setup_net_invocations, teardown_is_exact, teardown_net_commands,
     teardown_net_invocations,
@@ -64,9 +68,18 @@ pub use unix_api::UnixFirecrackerClient;
 /// # Errors
 /// Plan decode or guest Docker failure.
 pub fn run_guest_plan_bytes(plan_bytes: &[u8]) -> Result<i32, String> {
+    Ok(run_guest_plan_with_events(plan_bytes)?.0)
+}
+
+/// Decode a vsock plan, run it on guest Docker, and return result-bridge events.
+///
+/// # Errors
+/// Plan decode or guest Docker failure.
+pub fn run_guest_plan_with_events(plan_bytes: &[u8]) -> Result<(i32, Vec<ExecutionEvent>), String> {
     let mut runner = crate::executor::ProcessCommandRunner;
     let mut events = Vec::new();
-    handle_delivered_plan(plan_bytes, &mut runner, &mut events)
+    let code = handle_delivered_plan(plan_bytes, &mut runner, &mut events)?;
+    Ok((code, events))
 }
 
 /// Production GitHub job engine owned by the Docker backend.
@@ -188,10 +201,71 @@ pub fn run_validated_job(
     Ok(outcome)
 }
 
+/// Synthetic jailed probe: guest-local `docker version`, vsock plan, teardown
+/// by isolation ID. Host `/var/run/docker.sock` is never used.
+///
+/// # Errors
+/// Preflight, guest Docker, vsock, or leftover isolation resources.
+pub fn run_synthetic_microvm_probe(world: &mut ExecutionWorld<'_>) -> Result<(), ExecutionError> {
+    let file = velnor_model::ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n")?;
+    let isolation = IsolationIdentity::new("velnor-probe", 1);
+    let resources = IsolationResources::for_identity(isolation.clone(), world.isolation_root);
+    let step = crate::script_step::ScriptStep {
+        id: "guest-docker".into(),
+        display_name: "guest-docker".into(),
+        script: "docker version".into(),
+        shell: crate::container::Shell::Bash,
+        working_directory_container: "/__w".into(),
+        env: Vec::new(),
+        condition: None,
+        continue_on_error: false,
+        timeout_minutes: None,
+    };
+    let mut plan = ValidatedPlan::from_script_steps(
+        "velnor-probe",
+        "velnor/job-ubuntu:26.04",
+        &[step],
+        Vec::new(),
+    );
+    plan.command_files.clear();
+    plan.buildx = false;
+    plan.testcontainers = false;
+    let outcome = run_validated_job(&file, isolation, &plan, world)?;
+    if outcome.conclusion != "success" {
+        return Err(velnor_model::MicroVmPreflightFailure::new(
+            "guest.probe",
+            format!("synthetic probe conclusion {}", outcome.conclusion),
+        )
+        .into());
+    }
+    if !outcome.cleaned {
+        return Err(velnor_model::MicroVmPreflightFailure::new(
+            "guest.probe.teardown",
+            "synthetic probe teardown did not report cleaned",
+        )
+        .into());
+    }
+    for path in resources.teardown_paths() {
+        if world.host_fs.exists(path) {
+            return Err(velnor_model::MicroVmPreflightFailure::new(
+                "guest.probe.teardown",
+                format!(
+                    "{} still present after isolation-id teardown",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Host/guest world used by backends. Tests inject doubles at this boundary.
 pub struct ExecutionWorld<'a> {
     pub kvm: &'a Path,
     pub artifact_root: &'a Path,
+    /// Exec-capable durable root for jailer chroot, disks, vsock. Never `/run`.
+    pub isolation_root: &'a Path,
     pub host_docker_socket: &'a Path,
     pub runner: &'a mut dyn CommandRunner,
     pub firecracker: &'a mut dyn FirecrackerApi,
@@ -352,6 +426,9 @@ pub fn executor_is_proven_at(
             let Ok(proven) = serde_json::from_slice::<MicroVmGeneration>(&bytes) else {
                 return false;
             };
+            if !proven.probe_jailed_guest_docker {
+                return false;
+            }
             let fs = RealHostFs;
             let Ok(packaged) = packaged_generation(artifact_root, &fs) else {
                 return false;
@@ -392,6 +469,7 @@ impl From<MicroVmPreflightFailure> for ExecutionError {
 pub struct RecordingCommands {
     pub calls: Vec<(String, Vec<String>)>,
     pub next: CommandResult,
+    pub results: Vec<CommandResult>,
     pub codes: Vec<i32>,
     pub next_pid: u32,
     pub fail_spawn: Option<String>,
@@ -409,6 +487,7 @@ impl Default for RecordingCommands {
                 stdout: String::new(),
                 stderr: String::new(),
             },
+            results: Vec::new(),
             codes: Vec::new(),
             next_pid: 1,
             fail_spawn: None,
@@ -422,7 +501,11 @@ impl Default for RecordingCommands {
 impl CommandRunner for RecordingCommands {
     fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
         self.calls.push((program.to_string(), args.to_vec()));
-        let mut result = self.next.clone();
+        let mut result = if self.results.is_empty() {
+            self.next.clone()
+        } else {
+            self.results.remove(0)
+        };
         if !self.codes.is_empty() {
             result.code = self.codes.remove(0);
         }

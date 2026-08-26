@@ -1,9 +1,10 @@
 [Unit]
 Description=Velnor self-hosted GitHub Actions runner daemon
 Documentation=https://github.com/tailrocks/velnor
-After=network-online.target docker.service velnor-guardian.service
+After=network-online.target velnor-guardian.service
 Wants=network-online.target velnor-guardian.service
-Requires=docker.service
+# docker.service is not Required. The docker backend fail-closes at preflight
+# if the host socket is missing. The microvm backend must not depend on it.
 
 [Service]
 # Type=notify + WatchdogSec: READY means the local control cycle can run, not
@@ -39,8 +40,7 @@ ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock
   --labels ${VELNOR_LABELS} \
   --slots ${VELNOR_SLOTS} \
   --work-dir ${VELNOR_WORK_DIR} \
-  --replace \
-  --require-docker-socket
+  --replace
 Restart=always
 RestartSec=5
 # Graceful drain: on stop/restart (including apt upgrades) the daemon finishes

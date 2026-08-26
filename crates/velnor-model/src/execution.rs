@@ -48,6 +48,26 @@ impl ExecutionBackendKind {
     pub fn uses_host_docker_socket(self) -> bool {
         matches!(self, Self::Docker)
     }
+
+    /// Prune, reclaim, doctor, and preflight may talk to the host Docker
+    /// socket only when the selected backend is docker. Missing selection is
+    /// never treated as docker.
+    #[must_use]
+    pub fn permits_host_docker_maintenance(backend: Option<Self>) -> bool {
+        backend.is_some_and(Self::uses_host_docker_socket)
+    }
+
+    /// Why host Docker prune/reclaim must not run. `None` means docker is selected.
+    #[must_use]
+    pub fn host_docker_maintenance_skip_reason(backend: Option<Self>) -> Option<&'static str> {
+        match backend {
+            Some(Self::Docker) => None,
+            Some(Self::MicroVm) => Some(
+                "microvm backend does not use the host Docker socket; docker backend was not used",
+            ),
+            None => Some("execution backend selection failed; docker backend was not used"),
+        }
+    }
 }
 
 impl std::fmt::Display for ExecutionBackendKind {
@@ -244,6 +264,31 @@ mod tests {
     fn docker_uses_host_socket_microvm_does_not() {
         assert!(ExecutionBackendKind::Docker.uses_host_docker_socket());
         assert!(!ExecutionBackendKind::MicroVm.uses_host_docker_socket());
+        assert!(ExecutionBackendKind::permits_host_docker_maintenance(Some(
+            ExecutionBackendKind::Docker
+        )));
+        assert!(!ExecutionBackendKind::permits_host_docker_maintenance(
+            Some(ExecutionBackendKind::MicroVm)
+        ));
+        assert!(!ExecutionBackendKind::permits_host_docker_maintenance(None));
+        assert!(
+            ExecutionBackendKind::host_docker_maintenance_skip_reason(None)
+                .unwrap()
+                .contains("execution backend selection failed")
+        );
+        assert!(
+            ExecutionBackendKind::host_docker_maintenance_skip_reason(Some(
+                ExecutionBackendKind::MicroVm
+            ))
+            .unwrap()
+            .contains("docker backend was not used")
+        );
+        assert_eq!(
+            ExecutionBackendKind::host_docker_maintenance_skip_reason(Some(
+                ExecutionBackendKind::Docker
+            )),
+            None
+        );
     }
 
     #[test]

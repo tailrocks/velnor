@@ -54,6 +54,28 @@ fn sanitize(raw: &str) -> String {
         .collect()
 }
 
+/// Jailer chroot, writable disks, and vsock UDS. Must be exec-capable: not
+/// tmpfs `noexec` `/run`, not packaged `/usr/share/velnor/microvm`.
+pub const MICROVM_ISOLATION_ROOT: &str = "/var/lib/velnor/microvm";
+/// Path wired into the microVM execution world so the host control socket is
+/// never even named. Not a real listener.
+pub const MICROVM_NO_HOST_DOCKER_SOCKET: &str = "/var/lib/velnor/microvm/no-host-docker.sock";
+
+/// Host Docker Engine control sockets. The microVM backend must not use these.
+#[must_use]
+pub fn is_host_docker_control_socket(path: &Path) -> bool {
+    path == Path::new("/var/run/docker.sock") || path == Path::new("/run/docker.sock")
+}
+
+/// Production isolation root under `VELNOR_STORAGE_ROOT` lib, else the packaged
+/// `/var/lib/velnor/microvm` path.
+#[must_use]
+pub fn microvm_isolation_root() -> PathBuf {
+    crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.lib_root.join("microvm"))
+        .unwrap_or_else(|| PathBuf::from(MICROVM_ISOLATION_ROOT))
+}
+
 /// Host resources owned by one isolation identity. Teardown deletes only these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsolationResources {
@@ -67,10 +89,11 @@ pub struct IsolationResources {
 }
 
 impl IsolationResources {
+    /// `isolation_root` is exec-capable durable storage (never `/run`).
     #[must_use]
-    pub fn for_identity(identity: IsolationIdentity, run_root: &Path) -> Self {
+    pub fn for_identity(identity: IsolationIdentity, isolation_root: &Path) -> Self {
         let jailer_id = identity.as_jailer_id();
-        let chroot_base = run_root.join("jailer");
+        let chroot_base = isolation_root.join("jailer");
         Self {
             chroot: chroot_base
                 .join("firecracker")
@@ -79,8 +102,12 @@ impl IsolationResources {
             chroot_base,
             netns: PathBuf::from("/var/run/netns").join(&jailer_id),
             tap: tap_name(&jailer_id),
-            vsock: run_root.join("vsock").join(format!("{jailer_id}.sock")),
-            writable_disk: run_root.join("disks").join(format!("{jailer_id}.rw.ext4")),
+            vsock: isolation_root
+                .join("vsock")
+                .join(format!("{jailer_id}.sock")),
+            writable_disk: isolation_root
+                .join("disks")
+                .join(format!("{jailer_id}.rw.ext4")),
             identity,
         }
     }
@@ -120,7 +147,7 @@ mod tests {
     #[test]
     fn tap_name_fits_ifnamesz_and_api_socket_is_under_chroot() {
         let long = IsolationIdentity::new("j".repeat(200), 7);
-        let resources = IsolationResources::for_identity(long, Path::new("/run/velnor"));
+        let resources = IsolationResources::for_identity(long, Path::new(MICROVM_ISOLATION_ROOT));
         assert!(resources.tap.len() <= 15, "{}", resources.tap);
         assert!(resources.tap.starts_with("vt"));
         assert!(resources
@@ -129,8 +156,39 @@ mod tests {
         assert_ne!(resources.api_socket(), resources.vsock);
         let other = IsolationResources::for_identity(
             IsolationIdentity::new("other", 7),
-            Path::new("/run/velnor"),
+            Path::new(MICROVM_ISOLATION_ROOT),
         );
         assert_ne!(resources.tap, other.tap);
+    }
+
+    #[test]
+    fn jailer_chroot_is_not_under_noexec_run_or_packaged_share() {
+        let resources = IsolationResources::for_identity(
+            IsolationIdentity::new("job", 1),
+            Path::new(MICROVM_ISOLATION_ROOT),
+        );
+        assert!(resources.chroot_base.starts_with(MICROVM_ISOLATION_ROOT));
+        assert!(!resources.chroot_base.starts_with("/run"));
+        assert!(!resources.chroot.starts_with("/run"));
+        assert!(!resources.chroot_base.starts_with("/usr/share"));
+        let layout = crate::storage::StorageLayout::from_prefix(Path::new("/var"));
+        assert_eq!(layout.run_root, Path::new("/run/velnor"));
+        assert_eq!(
+            layout.lib_root.join("microvm"),
+            Path::new(MICROVM_ISOLATION_ROOT)
+        );
+        assert_ne!(layout.lib_root.join("microvm"), layout.run_root);
+    }
+
+    #[test]
+    fn microvm_world_must_not_name_the_host_docker_socket() {
+        assert!(MICROVM_NO_HOST_DOCKER_SOCKET.starts_with(MICROVM_ISOLATION_ROOT));
+        assert!(!is_host_docker_control_socket(Path::new(
+            MICROVM_NO_HOST_DOCKER_SOCKET
+        )));
+        assert!(is_host_docker_control_socket(Path::new(
+            "/var/run/docker.sock"
+        )));
+        assert!(is_host_docker_control_socket(Path::new("/run/docker.sock")));
     }
 }

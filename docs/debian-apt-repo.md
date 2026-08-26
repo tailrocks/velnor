@@ -59,7 +59,13 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
    - `maintainer-scripts`: `postinst` creates the state/cache/runtime/log dirs,
      migrates any legacy token out of `velnor.env`, reloads systemd, and leaves
      start/enable under operator control. The daemon currently runs as root
-     because it owns Docker-backed job containers and bind mounts.
+     because the packaged default `docker` backend owns host Docker job
+     containers and bind mounts. The same package also ships pinned microVM
+     identity under `/usr/share/velnor/microvm/` (Firecracker/jailer 1.16.1,
+     kernel 6.1.102, `rootfs.ext4`, `velnor-guest-agent`, `pins.json`,
+     `manifest.json` sha256). `postinst` verifies those bytes offline. Operator
+     selection remains `/etc/velnor/execution.toml` `[execution] backend =
+     "docker"` (packaged default) or `"microvm"` with no fallback.
    - systemd unit: `Restart=always`, separate config and secret environment
      files, so the PAT stays off argv/`/proc`; `WantedBy=multi-user.target` for
      boot start. The default and templated units have the same sandboxing and

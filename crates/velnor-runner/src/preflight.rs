@@ -17,25 +17,55 @@ pub fn preflight(args: PreflightArgs) -> Result<()> {
 }
 
 fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) -> Result<()> {
+    if args.execution_backend.is_none() {
+        let dir = args
+            .config_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/etc/velnor"));
+        match crate::execution::load_execution_file(dir, None) {
+            Err(error) => {
+                bail!("execution backend selection failed before preflight: {error}")
+            }
+            Ok(_) => {
+                bail!(
+                    "execution backend selection failed before preflight: [execution] backend is unset"
+                )
+            }
+        }
+    }
     if args.execution_backend == Some(velnor_model::ExecutionBackendKind::MicroVm) {
         let mut fs = crate::execution::RealHostFs;
-        let mut api = crate::execution::RecordingFirecracker::default();
         let artifact_root = std::path::PathBuf::from("/usr/share/velnor/microvm");
         let kvm = std::path::PathBuf::from("/dev/kvm");
-        let docker = std::path::PathBuf::from("/var/run/docker.sock");
-        let mut world = crate::execution::ExecutionWorld {
-            kvm: &kvm,
-            artifact_root: &artifact_root,
-            host_docker_socket: &docker,
-            runner,
-            firecracker: &mut api,
-            host_fs: &mut fs,
-            vsock: None,
-            docker_engine: None,
-            allow_inline_guest_plan: false,
-        };
-        crate::execution::FirecrackerBackend::preflight(&mut world)?;
-        let generation = crate::execution::packaged_generation(&artifact_root, &fs)?;
+        let docker = std::path::PathBuf::from(crate::execution::MICROVM_NO_HOST_DOCKER_SOCKET);
+        let isolation = crate::execution::IsolationIdentity::new("velnor-probe", 1);
+        let isolation_root = crate::execution::microvm_isolation_root();
+        let resources =
+            crate::execution::IsolationResources::for_identity(isolation, &isolation_root);
+        let mut api = crate::execution::UnixFirecrackerClient::new(resources.api_socket());
+        let mut vsock = crate::execution::UnixVsockChannel::lazy(
+            resources.vsock.clone(),
+            crate::execution::FIRECRACKER_GUEST_CID,
+            crate::execution::GUEST_AGENT_PORT,
+        );
+        {
+            let mut world = crate::execution::ExecutionWorld {
+                kvm: &kvm,
+                artifact_root: &artifact_root,
+                isolation_root: &isolation_root,
+                host_docker_socket: &docker,
+                runner,
+                firecracker: &mut api,
+                host_fs: &mut fs,
+                vsock: Some(&mut vsock),
+                docker_engine: None,
+                allow_inline_guest_plan: false,
+            };
+            crate::execution::FirecrackerBackend::preflight(&mut world)?;
+            crate::execution::run_synthetic_microvm_probe(&mut world)?;
+        }
+        let generation = crate::execution::packaged_generation(&artifact_root, &fs)?
+            .with_jailed_guest_docker_probe();
         if let Some(config_dir) = &args.config_dir {
             crate::node::prove::write_microvm_executor_ok(config_dir, &generation)?;
         }
@@ -413,7 +443,7 @@ mod tests {
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: true,
-            execution_backend: None,
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             config_dir: None,
         };
         let mut runner = RecordingRunner::default();
@@ -513,7 +543,7 @@ mod tests {
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: false,
-            execution_backend: None,
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             config_dir: None,
         };
         let mut runner = RecordingRunner {
@@ -541,7 +571,7 @@ mod tests {
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: false,
-            execution_backend: None,
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             config_dir: None,
         };
         let mut runner = RecordingRunner {
@@ -571,7 +601,7 @@ mod tests {
             docker_image: "minimal:latest".to_string(),
             require_docker_socket: false,
             require_buildx: false,
-            execution_backend: None,
+            execution_backend: Some(velnor_model::ExecutionBackendKind::Docker),
             config_dir: None,
         };
         let mut runner = RecordingRunner {
@@ -603,6 +633,54 @@ mod tests {
         ] {
             assert!(command.contains(target));
         }
+    }
+
+    #[test]
+    fn config_dir_without_backend_fails_closed_before_docker() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("execution.toml"), "not a backend table\n").unwrap();
+        let args = PreflightArgs {
+            work_dir: Some(temp.clone()),
+            docker_host_work_dir: None,
+            docker_image: "ubuntu:24.04".to_string(),
+            require_docker_socket: false,
+            require_buildx: false,
+            execution_backend: None,
+            config_dir: Some(temp.clone()),
+        };
+        let mut runner = RecordingRunner::default();
+
+        let error = preflight_with_runner(args, &mut runner).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("execution backend selection failed before preflight"));
+        assert!(error.to_string().contains("[execution] backend"), "{error}");
+        assert!(runner.calls.is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn missing_backend_without_config_dir_fails_before_docker() {
+        let temp = temp_dir();
+        let args = PreflightArgs {
+            work_dir: Some(temp.clone()),
+            docker_host_work_dir: None,
+            docker_image: "ubuntu:24.04".to_string(),
+            require_docker_socket: true,
+            require_buildx: true,
+            execution_backend: None,
+            config_dir: None,
+        };
+        let mut runner = RecordingRunner::default();
+        let error = preflight_with_runner(args, &mut runner).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("execution backend selection failed before preflight"));
+        assert!(error.to_string().contains("[execution] backend"), "{error}");
+        assert!(runner.calls.is_empty());
+        fs::remove_dir_all(&temp).ok();
     }
 
     #[test]

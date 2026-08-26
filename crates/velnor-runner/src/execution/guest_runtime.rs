@@ -11,7 +11,8 @@ use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMes
 use super::artifacts::hex_sha256;
 use super::backend::ExecutionEvent;
 use super::VsockChannel;
-use crate::executor::{CommandResult, CommandRunner};
+use crate::executor::{CommandResult, CommandRunner, JobExecutionState, StepExecutionResult};
+use crate::script_step::StepCommandState;
 
 /// Guest agent AF_VSOCK / Firecracker host-connect port.
 pub const GUEST_AGENT_PORT: u32 = 5000;
@@ -122,6 +123,18 @@ impl LoopbackVsock {
         }
     }
 
+    /// Guest agent is up but guest Docker is not healthy.
+    #[must_use]
+    pub fn with_unhealthy_docker(isolation_id: impl Into<String>, generation: u64) -> Self {
+        let mut channel = Self::with_ready(isolation_id, generation);
+        for ready in [&mut channel.ready, &mut channel.rebootstrap_ready] {
+            if let Some(VsockMessage::GuestReady { docker_healthy, .. }) = ready {
+                *docker_healthy = false;
+            }
+        }
+        channel
+    }
+
     /// Override the acknowledgement identity for negative host-side tests.
     #[must_use]
     pub fn with_teardown_ack(
@@ -148,6 +161,20 @@ impl LoopbackVsock {
 
 impl VsockChannel for LoopbackVsock {
     fn send(&mut self, message: VsockMessage) -> Result<(), String> {
+        if let VsockMessage::ImportBlob {
+            digest_sha256,
+            bytes,
+        } = &message
+        {
+            super::cache_transport::CacheBlob {
+                digest_sha256: digest_sha256.clone(),
+                bytes: bytes.clone(),
+            }
+            .import()
+            .map_err(|error| error.to_string())?;
+            self.sent.push(message);
+            return Ok(());
+        }
         if matches!(&message, VsockMessage::PrepareSnapshot) {
             self.pending.push(VsockMessage::SnapshotReady);
             if let Some(ready) = self.rebootstrap_ready.take() {
@@ -201,6 +228,21 @@ impl VsockChannel for LoopbackVsock {
                 return Err("loopback rejected plan identity mismatch".into());
             }
             validate_guest_plan(&plan)?;
+            for path in &plan.command_files {
+                self.pending.push(VsockMessage::CommandFile {
+                    path: path.clone(),
+                    bytes: format!("{path}=bridged\n").into_bytes(),
+                });
+            }
+            let export = result_export_payload(&plan, Some("https://example.test/env"));
+            self.pending.push(VsockMessage::ResultExport {
+                digest_sha256: hex_sha256(&export),
+                bytes: export,
+            });
+            self.pending.push(VsockMessage::Stdio {
+                stream: 1,
+                bytes: b"[velnor-step result-bridge]\n".to_vec(),
+            });
             let (conclusion, exit_code) = plan
                 .planned_conclusion()
                 .unwrap_or((JobConclusion::Success, 0));
@@ -307,6 +349,16 @@ pub fn execute_guest_plan(
         for env in &plan.env {
             args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
         }
+        args.extend([
+            "-e".into(),
+            "GITHUB_OUTPUT=/github/file_commands/GITHUB_OUTPUT".into(),
+            "-e".into(),
+            "GITHUB_ENV=/github/file_commands/GITHUB_ENV".into(),
+            "-e".into(),
+            "GITHUB_PATH=/github/file_commands/GITHUB_PATH".into(),
+            "-e".into(),
+            "GITHUB_STEP_SUMMARY=/github/file_commands/GITHUB_STEP_SUMMARY".into(),
+        ]);
         if !plan.workspace.is_empty() {
             args.extend(["-w".into(), plan.workspace.clone()]);
         }
@@ -316,31 +368,185 @@ pub fn execute_guest_plan(
     if plan.buildx {
         docker(runner, events, host_docker, &["buildx", "version"])?;
     }
-    let mut code = 0_i32;
-    for step in &plan.steps {
-        events.push(log_line(&format!("[velnor-step {}]", step.id)));
-        let result = docker(
+    if !plan.image.is_empty() {
+        docker(
             runner,
             events,
             host_docker,
-            &["exec", &job_name, "sh", "-c", &step.script],
+            &[
+                "exec",
+                &job_name,
+                "sh",
+                "-c",
+                "mkdir -p /github/file_commands && : > /github/file_commands/GITHUB_OUTPUT && : > /github/file_commands/GITHUB_ENV && : > /github/file_commands/GITHUB_PATH && : > /github/file_commands/GITHUB_STEP_SUMMARY",
+            ],
+        )?;
+    }
+    if !plan.image.is_empty() {
+        import_guest_cache(plan, &job_name, runner, events, host_docker)?;
+    }
+    let base_env: Vec<(String, String)> = plan
+        .env
+        .iter()
+        .map(|env| (env.name.clone(), env.value.clone()))
+        .collect();
+    let mut state = JobExecutionState::new_with_context(&base_env, &plan.context_data);
+    let mut code = 0_i32;
+    for step in &plan.steps {
+        events.push(log_line(&format!("[velnor-step {}]", step.id)));
+        let step_state = state.with_step_action(&step.id);
+        if !step_state.evaluate_condition(step.condition.as_deref()) {
+            state.apply(
+                &step.id,
+                &StepExecutionResult {
+                    exit_code: 0,
+                    state: StepCommandState::default(),
+                    skipped: true,
+                    failure_ignored: false,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
+            events.push(log_line(&format!(
+                "Step skipped: condition evaluated to false ({})",
+                step.condition.as_deref().unwrap_or("success()")
+            )));
+            continue;
+        }
+        let mut resolved_step = step.clone();
+        resolved_step.script = step_state.resolve_expressions(&step.script);
+        resolved_step.working_directory = step_state.resolve_expressions(&step.working_directory);
+        resolved_step.inputs = step
+            .inputs
+            .iter()
+            .map(|input| velnor_model::GuestEnvVar {
+                name: input.name.clone(),
+                value: step_state.resolve_expressions(&input.value),
+            })
+            .collect();
+        resolved_step.env = step_state
+            .resolve_env(
+                &step
+                    .env
+                    .iter()
+                    .map(|env| (env.name.clone(), env.value.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .map(|(name, value)| velnor_model::GuestEnvVar { name, value })
+            .collect();
+        let script = super::guest_actions::guest_step_script(&resolved_step)?;
+        let mut exec = vec!["exec".into()];
+        if !resolved_step.working_directory.is_empty() {
+            exec.extend(["-w".into(), resolved_step.working_directory.clone()]);
+        }
+        let step_env = step_state.step_env(&[]);
+        for (name, value) in &step_env {
+            exec.push("-e".into());
+            exec.push(format!("{name}={value}"));
+        }
+        for env in &resolved_step.env {
+            exec.push("-e".into());
+            exec.push(format!("{}={}", env.name, env.value));
+        }
+        if !step_state.path_prepend().is_empty() {
+            let base_path = step_env
+                .iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+            exec.push("-e".into());
+            exec.push(format!(
+                "PATH={}:{}",
+                step_state.path_prepend().join(":"),
+                base_path
+            ));
+        }
+        for input in &resolved_step.inputs {
+            let name = input
+                .name
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || ch == '_' {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>();
+            exec.push("-e".into());
+            exec.push(format!("VELNOR_INPUT_{name}={}", input.value));
+        }
+        exec.extend([job_name.clone(), "sh".into(), "-c".into(), script]);
+        let result = docker_owned_timeout(
+            runner,
+            events,
+            host_docker,
+            exec,
+            guest_step_timeout(step.timeout_ms),
         )?;
         if !result.stdout.is_empty() {
             for line in result.stdout.lines() {
                 events.push(log_line(line));
             }
         }
-        if result.code != 0 {
+        if !result.stderr.is_empty() {
+            for line in result.stderr.lines() {
+                events.push(ExecutionEvent::Log {
+                    stream: 2,
+                    line: line.to_string(),
+                });
+            }
+        }
+        let mut command_state = StepCommandState::default();
+        if !plan.image.is_empty() && !plan.command_files.is_empty() {
+            apply_step_command_files(
+                &job_name,
+                runner,
+                events,
+                host_docker,
+                &plan.command_files,
+                &mut command_state,
+            )?;
+        }
+        for (name, value) in &command_state.outputs {
+            events.push(ExecutionEvent::Output {
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+        let failed = result.code != 0;
+        let failure_ignored = failed && step.continue_on_error;
+        state.apply(
+            &step.id,
+            &StepExecutionResult {
+                exit_code: result.code,
+                state: command_state,
+                skipped: false,
+                failure_ignored,
+                stdout: result.stdout,
+                stderr: result.stderr,
+            },
+        );
+        if failed && !failure_ignored {
             code = result.code;
             break;
         }
+    }
+    if !plan.image.is_empty() {
+        collect_guest_command_files(plan, &job_name, runner, events, host_docker)?;
+    }
+    if !plan.image.is_empty() && code == 0 {
+        export_guest_cache(plan, &job_name, runner, events, host_docker)?;
     }
     let _ = docker(runner, events, host_docker, &["rm", "-f", &job_name]);
     for service in plan.services.iter().rev() {
         let _ = docker(runner, events, host_docker, &["rm", "-f", &service.name]);
     }
     let _ = docker(runner, events, host_docker, &["network", "rm", &network]);
-    record_plan_files(plan, events);
+    if plan.image.is_empty() {
+        record_plan_files(plan, events);
+    }
     events.push(ExecutionEvent::JobCompleted {
         conclusion: if code == 0 {
             JobConclusion::Success
@@ -362,19 +568,34 @@ pub(crate) fn validate_guest_plan(plan: &GuestJobPlan) -> Result<(), String> {
             ));
         }
     }
-    if !plan.command_files.is_empty() {
-        return Err(guest_capability_error(
-            "guest.command_files",
-            &format!("{:?}", plan.command_files),
-            "empty until guest result-file transfer is implemented",
-        ));
-    }
-    if !plan.cache.is_empty() {
-        return Err(guest_capability_error(
-            "guest.cache",
-            &format!("{:?}", plan.cache),
-            "empty until native guest cache transfer is implemented",
-        ));
+    // Command files are the result_bridge: guest writes GITHUB_* files and
+    // the host collects their bytes over vsock. Non-empty is required.
+    for (index, cache) in plan.cache.iter().enumerate() {
+        if cache.digest.trim().is_empty() {
+            return Err(guest_capability_error(
+                &format!("guest.cache[{index}].digest"),
+                "<empty>",
+                "sha256 digest",
+            ));
+        }
+        if cache.bytes.is_empty() {
+            return Err(guest_capability_error(
+                &format!("guest.cache[{index}].bytes"),
+                "<empty>",
+                "non-empty bytes for a digest-verified cache blob",
+            ));
+        }
+        let blob = super::cache_transport::CacheBlob {
+            digest_sha256: cache.digest.clone(),
+            bytes: cache.bytes.clone(),
+        };
+        blob.import().map_err(|error| {
+            guest_capability_error(
+                &format!("guest.cache[{index}].digest"),
+                &error.detail,
+                "bytes whose sha256 matches the declared digest",
+            )
+        })?;
     }
     if !plan.artifacts.is_empty() {
         return Err(guest_capability_error(
@@ -419,19 +640,8 @@ pub(crate) fn validate_guest_plan(plan: &GuestJobPlan) -> Result<(), String> {
         ));
     }
     for (index, step) in plan.steps.iter().enumerate() {
-        if let Some(action) = &step.action {
-            return Err(guest_capability_error(
-                &format!("guest.steps[{index}].action"),
-                action,
-                "none until a native guest action adapter exists",
-            ));
-        }
-        if step.script.trim().is_empty() {
-            return Err(guest_capability_error(
-                &format!("guest.steps[{index}].script"),
-                "<empty>",
-                "non-empty script",
-            ));
+        if let Err(error) = super::guest_actions::guest_step_script(step) {
+            return Err(error.replace("guest.steps[].", &format!("guest.steps[{index}].")));
         }
     }
     Ok(())
@@ -486,16 +696,325 @@ pub(crate) fn guest_capability_error(field: &str, received: &str, accepted: &str
     )
 }
 
-fn record_plan_files(plan: &GuestJobPlan, events: &mut Vec<ExecutionEvent>) {
+fn collect_guest_command_files(
+    plan: &GuestJobPlan,
+    job_name: &str,
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+) -> Result<(), String> {
+    let mut live_outputs = Vec::new();
     for path in &plan.command_files {
-        events.push(ExecutionEvent::CommandFile { path: path.clone() });
-    }
-    for output in &plan.outputs {
-        events.push(ExecutionEvent::Output {
-            name: output.name.clone(),
-            value: output.value.clone(),
+        let contents = cat_guest_file(job_name, path, runner, events, host_docker)?;
+        if path == "GITHUB_OUTPUT" && !contents.trim().is_empty() {
+            if let Ok(parsed) = parse_file_commands(&contents) {
+                live_outputs = parsed;
+            }
+        }
+        events.push(ExecutionEvent::CommandFile {
+            path: path.clone(),
+            bytes: contents.into_bytes(),
         });
     }
+    record_result_export(plan, events, &live_outputs);
+    Ok(())
+}
+
+fn cat_guest_file(
+    job_name: &str,
+    name: &str,
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+) -> Result<String, String> {
+    let guest_path = format!("/github/file_commands/{name}");
+    let result = docker(
+        runner,
+        events,
+        host_docker,
+        &["exec", job_name, "cat", &guest_path],
+    )
+    .map_err(|error| {
+        guest_capability_error(
+            "guest.result_bridge",
+            &format!("collect {name} failed: {error}"),
+            "readable GITHUB_* command-file bytes",
+        )
+    })?;
+    if result.code != 0 {
+        return Err(guest_capability_error(
+            "guest.result_bridge",
+            &format!("collect {name} exit {}", result.code),
+            "readable GITHUB_* command-file bytes",
+        ));
+    }
+    Ok(result.stdout)
+}
+
+fn apply_step_command_files(
+    job_name: &str,
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    command_files: &[String],
+    command_state: &mut StepCommandState,
+) -> Result<(), String> {
+    let has_output = command_files.iter().any(|path| path == "GITHUB_OUTPUT");
+    let has_env = command_files.iter().any(|path| path == "GITHUB_ENV");
+    let has_path = command_files.iter().any(|path| path == "GITHUB_PATH");
+    if has_output {
+        let output_file = cat_guest_file(job_name, "GITHUB_OUTPUT", runner, events, host_docker)?;
+        command_state.outputs = parse_file_commands(&output_file)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+    }
+    if has_env {
+        let env_file = cat_guest_file(job_name, "GITHUB_ENV", runner, events, host_docker)?;
+        command_state.env = parse_file_commands(&env_file)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+    }
+    if has_path {
+        let path_file = cat_guest_file(job_name, "GITHUB_PATH", runner, events, host_docker)?;
+        command_state.path = path_file
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+    if !has_output && !has_env && !has_path {
+        return Ok(());
+    }
+    docker(
+        runner,
+        events,
+        host_docker,
+        &[
+            "exec",
+            job_name,
+            "sh",
+            "-c",
+            ": > /github/file_commands/GITHUB_OUTPUT; : > /github/file_commands/GITHUB_ENV; : > /github/file_commands/GITHUB_PATH",
+        ],
+    )?;
+    Ok(())
+}
+
+fn parse_file_commands(contents: &str) -> Result<Vec<(String, String)>, String> {
+    crate::command_files::parse_command_file_contents(contents)
+        .map(|commands| {
+            commands
+                .into_iter()
+                .map(|command| (command.name, command.value))
+                .collect()
+        })
+        .map_err(|error| {
+            guest_capability_error(
+                "guest.result_bridge",
+                &error.to_string(),
+                "valid GITHUB_ENV/GITHUB_OUTPUT command-file syntax",
+            )
+        })
+}
+
+fn import_guest_cache(
+    plan: &GuestJobPlan,
+    job_name: &str,
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+) -> Result<(), String> {
+    for (index, cache) in plan.cache.iter().enumerate() {
+        if cache.bytes.is_empty() {
+            continue;
+        }
+        let blob = super::cache_transport::CacheBlob {
+            digest_sha256: cache.digest.clone(),
+            bytes: cache.bytes.clone(),
+        };
+        let bytes = blob.import().map_err(|error| {
+            guest_capability_error(
+                &format!("guest.cache[{index}].digest"),
+                &cache.digest,
+                &format!("verified blob bytes ({error})"),
+            )
+        })?;
+        let path = if cache.path.is_empty() {
+            format!("/__w/.cache/{}", cache.digest)
+        } else {
+            cache.path.clone()
+        };
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+        docker_owned(
+            runner,
+            events,
+            host_docker,
+            vec![
+                "exec".into(),
+                "-e".into(),
+                format!("VELNOR_CACHE_PATH={path}"),
+                "-e".into(),
+                format!("VELNOR_CACHE_B64={encoded}"),
+                job_name.into(),
+                "sh".into(),
+                "-c".into(),
+                "mkdir -p \"$(dirname \"$VELNOR_CACHE_PATH\")\" && printf '%s' \"$VELNOR_CACHE_B64\" | base64 -d > \"$VELNOR_CACHE_PATH\"".into(),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn export_guest_cache(
+    plan: &GuestJobPlan,
+    job_name: &str,
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+) -> Result<(), String> {
+    for (index, cache) in plan.cache.iter().enumerate() {
+        let path = if cache.path.is_empty() {
+            format!("/__w/.cache/{}", cache.digest)
+        } else {
+            cache.path.clone()
+        };
+        let result = docker(
+            runner,
+            events,
+            host_docker,
+            &["exec", job_name, "cat", &path],
+        )
+        .map_err(|error| {
+            guest_capability_error(
+                &format!("guest.cache[{index}].path"),
+                &error,
+                "exported cache bytes after success",
+            )
+        })?;
+        if result.code != 0 {
+            return Err(guest_capability_error(
+                &format!("guest.cache[{index}].path"),
+                &format!("export exit {}", result.code),
+                "exported cache bytes after success",
+            ));
+        }
+        let blob = super::cache_transport::CacheBlob::from_bytes(result.stdout.into_bytes());
+        let published =
+            super::cache_transport::publish_on_success(true, blob).map_err(|error| {
+                guest_capability_error(
+                    &format!("guest.cache[{index}].digest"),
+                    &cache.digest,
+                    &format!("success-only digest-verified publish ({error})"),
+                )
+            })?;
+        if let Some(published) = published {
+            events.push(ExecutionEvent::ResultExport {
+                digest_sha256: published.digest_sha256.clone(),
+                bytes: published.bytes,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn record_planned_result_bridge(plan: &GuestJobPlan, events: &mut Vec<ExecutionEvent>) {
+    record_plan_files(plan, events);
+}
+
+fn record_plan_files(plan: &GuestJobPlan, events: &mut Vec<ExecutionEvent>) {
+    for path in &plan.command_files {
+        events.push(ExecutionEvent::CommandFile {
+            path: path.clone(),
+            bytes: Vec::new(),
+        });
+    }
+    record_result_export(plan, events, &[]);
+}
+
+fn record_result_export(
+    plan: &GuestJobPlan,
+    events: &mut Vec<ExecutionEvent>,
+    live_outputs: &[(String, String)],
+) {
+    let observed_outputs: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ExecutionEvent::Output { name, value } => Some((name.clone(), value.clone())),
+            _ => None,
+        })
+        .collect();
+    let outputs: Vec<(String, String)> = if !live_outputs.is_empty() {
+        live_outputs.to_vec()
+    } else if !observed_outputs.is_empty() {
+        observed_outputs
+    } else {
+        plan.outputs
+            .iter()
+            .map(|output| (output.name.clone(), output.value.clone()))
+            .collect()
+    };
+    if events
+        .iter()
+        .all(|event| !matches!(event, ExecutionEvent::Output { .. }))
+    {
+        for (name, value) in &outputs {
+            events.push(ExecutionEvent::Output {
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    let environment_url = outputs
+        .iter()
+        .find(|(name, _)| name == "environment_url")
+        .map(|(_, value)| value.as_str());
+    let export = result_export_payload_from_outputs(&outputs, environment_url);
+    events.push(ExecutionEvent::ResultExport {
+        digest_sha256: super::artifacts::hex_sha256(&export),
+        bytes: export,
+    });
+}
+
+pub(crate) fn result_export_payload_from_outputs(
+    outputs: &[(String, String)],
+    environment_url: Option<&str>,
+) -> Vec<u8> {
+    let outputs: Vec<serde_json::Value> = outputs
+        .iter()
+        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .collect();
+    serde_json::to_vec(&serde_json::json!({
+        "outputs": outputs,
+        "environment_url": environment_url.unwrap_or(""),
+    }))
+    .unwrap_or_else(|_| b"{\"outputs\":[],\"environment_url\":\"\"}".to_vec())
+}
+
+pub(crate) fn result_export_payload(plan: &GuestJobPlan, environment_url: Option<&str>) -> Vec<u8> {
+    let outputs: Vec<serde_json::Value> = plan
+        .outputs
+        .iter()
+        .map(|output| {
+            serde_json::json!({
+                "name": output.name,
+                "value": output.value,
+            })
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({
+        "outputs": outputs,
+        "environment_url": environment_url.unwrap_or(""),
+    }))
+    .unwrap_or_else(|_| b"{\"outputs\":[],\"environment_url\":\"\"}".to_vec())
+}
+
+const DEFAULT_GUEST_STEP_TIMEOUT_MS: u64 = 360 * 60 * 1_000;
+
+fn guest_step_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_GUEST_STEP_TIMEOUT_MS).max(1))
 }
 
 fn docker_owned(
@@ -503,6 +1022,22 @@ fn docker_owned(
     events: &mut Vec<ExecutionEvent>,
     host_docker: bool,
     owned: Vec<String>,
+) -> Result<CommandResult, String> {
+    docker_owned_timeout(
+        runner,
+        events,
+        host_docker,
+        owned,
+        Duration::from_millis(DEFAULT_GUEST_STEP_TIMEOUT_MS),
+    )
+}
+
+fn docker_owned_timeout(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    owned: Vec<String>,
+    timeout: Duration,
 ) -> Result<CommandResult, String> {
     if owned.iter().any(|arg| arg.contains("docker.sock")) {
         return Err("guest plan refused a docker.sock mount".into());
@@ -519,7 +1054,7 @@ fn docker_owned(
         )));
     }
     runner
-        .run("docker", &owned)
+        .run_timeout("docker", &owned, timeout)
         .map_err(|error| format!("docker {}: {error}", owned.join(" ")))
 }
 
@@ -580,6 +1115,12 @@ mod tests {
                 id: "run".into(),
                 script: "echo hi".into(),
                 action: None,
+                inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_ms: None,
             }],
             timeout_ms: 1000,
             cancel_requested: false,
@@ -595,6 +1136,7 @@ mod tests {
                 value: "true".into(),
             }],
             workspace: "/__w".into(),
+            context_data: Vec::new(),
             cache: Vec::new(),
             artifacts: Vec::new(),
             annotations: Vec::new(),
@@ -669,6 +1211,297 @@ mod tests {
     }
 
     #[test]
+    fn guest_checkout_action_runs_git_inside_job_container() {
+        let mut plan = sample_plan();
+        plan.steps = vec![GuestStep {
+            id: "checkout".into(),
+            script: String::new(),
+            action: Some("actions/checkout".into()),
+            inputs: vec![
+                velnor_model::GuestEnvVar {
+                    name: "clone_url".into(),
+                    value: "https://github.com/tailrocks/velnor.git".into(),
+                },
+                velnor_model::GuestEnvVar {
+                    name: "version".into(),
+                    value: "abc123".into(),
+                },
+                velnor_model::GuestEnvVar {
+                    name: "destination".into(),
+                    value: "/__w/velnor".into(),
+                },
+            ],
+            env: Vec::new(),
+            working_directory: String::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_ms: None,
+        }];
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 0,
+                stdout: "ok".into(),
+                stderr: String::new(),
+            },
+            ..RecordingCommands::default()
+        };
+        let mut events = Vec::new();
+        let code = execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
+        assert_eq!(code, 0);
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.iter()
+                .any(|arg| arg.contains("VELNOR_INPUT_clone_url="))
+                && args.iter().any(|arg| arg.contains("git -C"))
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::JobCompleted {
+                conclusion: JobConclusion::Success,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn guest_step_env_and_working_directory_reach_docker_exec() {
+        let mut plan = sample_plan();
+        plan.steps[0].env = vec![velnor_model::GuestEnvVar {
+            name: "STEP_ENV".into(),
+            value: "from-step".into(),
+        }];
+        plan.steps[0].working_directory = "/__w/src".into();
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            ..RecordingCommands::default()
+        };
+        execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.windows(2).any(|w| w == ["-w", "/__w/src"])
+                && args.iter().any(|arg| arg == "STEP_ENV=from-step")
+        }));
+    }
+
+    #[test]
+    fn guest_applies_github_env_to_later_steps() {
+        let mut plan = sample_plan();
+        plan.command_files = vec!["GITHUB_ENV".into()];
+        plan.steps.push(GuestStep {
+            id: "second".into(),
+            script: "echo $FOO".into(),
+            action: None,
+            inputs: Vec::new(),
+            env: Vec::new(),
+            working_directory: String::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_ms: None,
+        });
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 0,
+                stdout: "FOO=bar".into(),
+                stderr: String::new(),
+            },
+            ..RecordingCommands::default()
+        };
+        execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.iter().any(|arg| arg == "FOO=bar")));
+    }
+
+    #[test]
+    fn guest_collect_failure_fails_closed() {
+        let mut plan = sample_plan();
+        plan.command_files = vec!["GITHUB_ENV".into()];
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 1,
+                stdout: String::new(),
+                stderr: "missing".into(),
+            },
+            codes: vec![0, 0, 0, 0, 0],
+            ..RecordingCommands::default()
+        };
+        let error = execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap_err();
+        assert!(error.contains("guest.result_bridge"), "{error}");
+        assert!(error.contains("collect"), "{error}");
+    }
+
+    #[test]
+    fn guest_cache_import_export_is_digest_verified() {
+        let blob = super::super::cache_transport::CacheBlob::from_bytes(b"warm-cache".to_vec());
+        let mut plan = sample_plan();
+        plan.cache = vec![velnor_model::GuestCacheOp {
+            digest: blob.digest_sha256.clone(),
+            bytes: blob.bytes.clone(),
+            path: "/__w/.cache/blob".into(),
+        }];
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 0,
+                stdout: "warm-cache".into(),
+                stderr: String::new(),
+            },
+            ..RecordingCommands::default()
+        };
+        let mut events = Vec::new();
+        execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.iter()
+                .any(|arg| arg.starts_with("VELNOR_CACHE_PATH=/__w/.cache/blob"))
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::ResultExport { digest_sha256, .. }
+                if digest_sha256 == &blob.digest_sha256
+        )));
+    }
+
+    #[test]
+    fn guest_resolves_step_outputs_before_later_step_execution() {
+        let mut plan = sample_plan();
+        plan.services.clear();
+        plan.command_files = vec!["GITHUB_OUTPUT".into()];
+        plan.outputs.clear();
+        plan.steps = vec![
+            GuestStep {
+                id: "first".into(),
+                script: "echo first".into(),
+                action: None,
+                inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_ms: None,
+            },
+            GuestStep {
+                id: "second".into(),
+                script: "test \"${{ steps.first.outputs.value }}\" = parity".into(),
+                action: None,
+                inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_ms: None,
+            },
+        ];
+        let result = |stdout: &str| CommandResult {
+            code: 0,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        };
+        let mut runner = RecordingCommands {
+            results: vec![
+                result(""),               // network create
+                result(""),               // job container
+                result(""),               // command-file initialization
+                result(""),               // first step
+                result("value=parity\n"), // first step output
+                result(""),               // clear first output
+                result(""),               // second step
+                result(""),               // second step output
+                result(""),               // clear second output
+                result(""),               // final output collection
+                result(""),               // job cleanup
+                result(""),               // network cleanup
+            ],
+            ..RecordingCommands::default()
+        };
+        execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| { args.iter().any(|arg| arg == "test \"parity\" = parity") }));
+    }
+
+    #[test]
+    fn guest_honors_conditions_and_continue_on_error() {
+        let mut plan = sample_plan();
+        plan.services.clear();
+        plan.outputs.clear();
+        plan.steps = vec![
+            GuestStep {
+                id: "skipped".into(),
+                script: "false".into(),
+                action: None,
+                inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
+                condition: Some("false".into()),
+                continue_on_error: false,
+                timeout_ms: None,
+            },
+            GuestStep {
+                id: "ignored".into(),
+                script: "false".into(),
+                action: None,
+                inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
+                condition: None,
+                continue_on_error: true,
+                timeout_ms: None,
+            },
+            GuestStep {
+                id: "after".into(),
+                script: "true".into(),
+                action: None,
+                inputs: Vec::new(),
+                env: Vec::new(),
+                working_directory: String::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_ms: None,
+            },
+        ];
+        let mut runner = RecordingCommands {
+            codes: vec![0, 0, 0, 1, 0],
+            ..RecordingCommands::default()
+        };
+        execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
+        assert!(!runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.iter().any(|arg| arg == "GITHUB_ACTION=skipped")));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| { args.windows(2).any(|window| window == ["-c", "true"]) }));
+    }
+
+    #[test]
+    fn guest_command_files_are_collected_as_result_bridge_bytes() {
+        let mut plan = sample_plan();
+        plan.command_files = vec!["GITHUB_ENV".into()];
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 0,
+                stdout: "FOO=bar\n".into(),
+                stderr: String::new(),
+            },
+            ..RecordingCommands::default()
+        };
+        let mut events = Vec::new();
+        execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::CommandFile { path, bytes }
+                if path == "GITHUB_ENV" && bytes == b"FOO=bar\n"
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ExecutionEvent::ResultExport { .. })));
+    }
+
+    #[test]
     fn guest_action_fails_closed_before_docker_side_effects() {
         let mut plan = sample_plan();
         plan.steps[0].action = Some("actions/unknown@sha".into());
@@ -721,23 +1554,36 @@ mod tests {
         );
 
         let mut plan = sample_plan();
-        plan.command_files = vec!["GITHUB_OUTPUT".into()];
-        assert_unsupported_guest_field(
-            plan,
-            "guest.command_files",
-            "[\"GITHUB_OUTPUT\"]",
-            "empty until guest result-file transfer is implemented",
+        plan.cache = vec![velnor_model::GuestCacheOp {
+            digest: "sha256:cache".into(),
+            bytes: b"not-the-digest".to_vec(),
+            path: "/__w/.cache".into(),
+        }];
+        let error = execute_guest_plan(
+            &plan,
+            &mut RecordingCommands::default(),
+            &mut Vec::new(),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("guest.cache[0].digest"), "{error}");
+        assert!(error.contains("declared sha256:cache != actual"), "{error}");
+        assert!(
+            error.contains("bytes whose sha256 matches the declared digest"),
+            "{error}"
         );
 
         let mut plan = sample_plan();
         plan.cache = vec![velnor_model::GuestCacheOp {
             digest: "sha256:cache".into(),
+            bytes: Vec::new(),
+            path: "/__w/.cache".into(),
         }];
         assert_unsupported_guest_field(
             plan,
-            "guest.cache",
-            "[GuestCacheOp { digest: \"sha256:cache\" }]",
-            "empty until native guest cache transfer is implemented",
+            "guest.cache[0].bytes",
+            "<empty>",
+            "non-empty bytes for a digest-verified cache blob",
         );
 
         let mut plan = sample_plan();
@@ -878,13 +1724,18 @@ mod tests {
                 plan_bytes,
             })
             .unwrap();
-        assert!(matches!(
-            vsock.recv().unwrap(),
-            VsockMessage::JobCompleted {
-                conclusion: JobConclusion::Success,
-                exit_code: 0
+        loop {
+            match vsock.recv().unwrap() {
+                VsockMessage::CommandFile { .. }
+                | VsockMessage::ResultExport { .. }
+                | VsockMessage::Stdio { .. } => {}
+                VsockMessage::JobCompleted {
+                    conclusion: JobConclusion::Success,
+                    exit_code: 0,
+                } => break,
+                other => panic!("unexpected {other:?}"),
             }
-        ));
+        }
         assert!(matches!(
             vsock.recv().unwrap(),
             VsockMessage::TeardownAck {

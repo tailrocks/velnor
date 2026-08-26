@@ -186,8 +186,8 @@ impl FirecrackerBackend {
             )
             .into());
         }
-        if world.host_fs.exists(world.host_docker_socket) {
-            // Presence is allowed on the host; the backend must not use it.
+        if super::isolation::is_host_docker_control_socket(world.host_docker_socket) {
+            return Err(ExecutionError::HostDockerForbidden);
         }
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
         verify_microvm_artifacts(&set, world.host_fs)?;
@@ -884,6 +884,17 @@ fn drive_vsock(
         .into());
     }
     let deadline = std::time::Instant::now() + timeout;
+    for cache in &expected.cache {
+        if cache.bytes.is_empty() {
+            continue;
+        }
+        vsock
+            .send(VsockMessage::ImportBlob {
+                digest_sha256: cache.digest.clone(),
+                bytes: cache.bytes.clone(),
+            })
+            .map_err(|detail| MicroVmPreflightFailure::new("vsock.import_blob", detail))?;
+    }
     vsock
         .send(message)
         .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?;
@@ -966,8 +977,25 @@ fn drive_vsock(
                     exit_code,
                 });
             }
-            VsockMessage::CommandFile { path, .. } => {
-                events.push(ExecutionEvent::CommandFile { path });
+            VsockMessage::CommandFile { path, bytes } => {
+                events.push(ExecutionEvent::CommandFile { path, bytes });
+            }
+            VsockMessage::ResultExport {
+                digest_sha256,
+                bytes,
+            } => {
+                let actual = crate::execution::hex_sha256(&bytes);
+                if actual != digest_sha256 {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.result_export",
+                        format!("digest {digest_sha256} != sha256(bytes) {actual}"),
+                    )
+                    .into());
+                }
+                events.push(ExecutionEvent::ResultExport {
+                    digest_sha256,
+                    bytes,
+                });
             }
             VsockMessage::Stdio { stream, bytes } => {
                 events.push(ExecutionEvent::Log {

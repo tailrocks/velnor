@@ -37,3 +37,7 @@ credential persistence unless a documented writer step requires otherwise.
 The GitHub lane is retained permanently so releases remain possible when the
 Velnor fleet is unavailable. Changes to runner labels, lane matrices, actions,
 or cache behavior must pass `velnor`, `github`, and `both` verification.
+
+Never add a repository-controlled execution-backend input. Operator selection
+is `[execution] backend = "docker"` or `"microvm"` in `execution.toml` per
+daemon/pool, with no fallback.

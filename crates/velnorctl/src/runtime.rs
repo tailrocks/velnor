@@ -5,7 +5,7 @@
 //! [`velnor_runner::args`] is exhaustive `From`, never a second argv walk.
 //! `daemon` / `release` / `run` are not public `velnorctl` commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use velnor_runner::args as rt;
@@ -298,19 +298,24 @@ pub struct PreflightArgs {
 
 impl From<PreflightArgs> for rt::PreflightArgs {
     fn from(args: PreflightArgs) -> Self {
-        let backend = args
+        let dir = args
             .config_dir
-            .as_ref()
-            .and_then(|dir| velnor_runner::execution::load_execution_file(dir, None).ok())
-            .map(|file| file.backend());
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/etc/velnor"));
+        let (backend, require_docker_socket) =
+            match velnor_runner::execution::load_execution_file(dir, None) {
+                Ok(file) => {
+                    let backend = file.backend();
+                    (Some(backend), backend.uses_host_docker_socket())
+                }
+                Err(_) => (None, false),
+            };
         Self {
             work_dir: args.work_dir,
             docker_host_work_dir: args.docker_host_work_dir,
             docker_image: args.docker_image,
-            require_docker_socket: backend
-                .map(velnor_model::ExecutionBackendKind::uses_host_docker_socket)
-                .unwrap_or(true),
-            require_buildx: args.require_buildx,
+            require_docker_socket,
+            require_buildx: require_docker_socket && args.require_buildx,
             execution_backend: backend,
             config_dir: args.config_dir,
         }
@@ -377,5 +382,81 @@ impl From<StatusArgs> for rt::StatusArgs {
             slots: args.slots,
             check_target_mvp: args.check_target_mvp,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "velnorctl-preflight-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn preflight_cli(config_dir: Option<PathBuf>) -> PreflightArgs {
+        PreflightArgs {
+            config_dir,
+            work_dir: None,
+            docker_host_work_dir: None,
+            docker_image: "ubuntu:24.04".into(),
+            require_buildx: true,
+        }
+    }
+
+    #[test]
+    fn invalid_execution_toml_does_not_force_host_docker_socket() {
+        let dir = temp_dir("invalid");
+        fs::write(dir.join("execution.toml"), "not a backend table\n").unwrap();
+        let converted: rt::PreflightArgs = preflight_cli(Some(dir.clone())).into();
+        assert!(converted.execution_backend.is_none());
+        assert!(!converted.require_docker_socket);
+        assert!(!converted.require_buildx);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn microvm_execution_toml_does_not_require_host_docker_socket() {
+        let dir = temp_dir("microvm");
+        fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        let converted: rt::PreflightArgs = preflight_cli(Some(dir.clone())).into();
+        assert_eq!(
+            converted.execution_backend,
+            Some(velnor_model::ExecutionBackendKind::MicroVm)
+        );
+        assert!(!converted.require_docker_socket);
+        assert!(!converted.require_buildx);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn docker_execution_toml_requires_host_docker_socket() {
+        let dir = temp_dir("docker");
+        fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+        let converted: rt::PreflightArgs = preflight_cli(Some(dir.clone())).into();
+        assert_eq!(
+            converted.execution_backend,
+            Some(velnor_model::ExecutionBackendKind::Docker)
+        );
+        assert!(converted.require_docker_socket);
+        assert!(converted.require_buildx);
+        fs::remove_dir_all(dir).ok();
     }
 }

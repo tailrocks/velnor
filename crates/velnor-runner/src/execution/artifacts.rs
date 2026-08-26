@@ -15,6 +15,7 @@ pub const JAILER_VERSION: &str = "1.16.1";
 pub const PACKAGED_MICROVM_ROOT: &str = "/usr/share/velnor/microvm";
 
 const PINS_JSON: &str = include_str!("../../../../microvm/pins.json");
+const SOURCE_MANIFEST: &str = include_str!("../../../../microvm/manifest.json");
 
 /// Checksummed microVM artifact set bound to one Velnor release identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +219,10 @@ pub struct MicroVmGeneration {
     pub kernel: String,
     pub rootfs: String,
     pub guest_agent: String,
+    /// Set only after a jailed synthetic probe: guest agent + guest Docker
+    /// healthy, isolation-id teardown, no host Docker socket.
+    #[serde(default)]
+    pub probe_jailed_guest_docker: bool,
 }
 
 impl MicroVmGeneration {
@@ -233,7 +238,14 @@ impl MicroVmGeneration {
             kernel: set.kernel.sha256.clone(),
             rootfs: set.rootfs.sha256.clone(),
             guest_agent: set.guest_agent.sha256.clone(),
+            probe_jailed_guest_docker: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_jailed_guest_docker_probe(mut self) -> Self {
+        self.probe_jailed_guest_docker = true;
+        self
     }
 }
 
@@ -323,6 +335,89 @@ pub fn require_coherent_generation(
         }
     }
     Ok(())
+}
+
+/// Source-tree checksums for one guest architecture.
+///
+/// Firecracker and jailer must match `microvm/pins.json`. Kernel, rootfs, and
+/// guest-agent come from `microvm/manifest.json`.
+///
+/// # Errors
+/// Unknown architecture, UNSET pin, or pins.json/manifest.json disagreement.
+pub fn expected_checksums_for_arch(
+    arch: &str,
+) -> Result<ArtifactChecksums, MicroVmPreflightFailure> {
+    let arch = match arch {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        other => {
+            return Err(MicroVmPreflightFailure::new(
+                "guest.arch",
+                format!("unsupported guest arch {other}"),
+            ));
+        }
+    };
+    let file: ManifestFile = serde_json::from_str(SOURCE_MANIFEST).map_err(|error| {
+        MicroVmPreflightFailure::new(
+            "artifacts.manifest",
+            format!("invalid source manifest.json: {error}"),
+        )
+    })?;
+    require_pin_version(
+        "artifacts.firecracker_version",
+        &file.firecracker_version,
+        FIRECRACKER_VERSION,
+    )?;
+    require_pin_version(
+        "artifacts.jailer_version",
+        &file.jailer_version,
+        JAILER_VERSION,
+    )?;
+    let pins = parse_pins()?;
+    let tarball = pins.tarballs.get(arch).ok_or_else(|| {
+        MicroVmPreflightFailure::new(
+            "artifacts.firecracker_tarball",
+            format!("no Firecracker tarball pin for {arch}"),
+        )
+    })?;
+    let checksums = ArtifactChecksums {
+        firecracker_version: FIRECRACKER_VERSION.to_string(),
+        jailer_version: JAILER_VERSION.to_string(),
+        firecracker: require_sha256(
+            "firecracker",
+            &file.firecracker.resolve("firecracker", arch)?,
+        )?,
+        jailer: require_sha256("jailer", &file.jailer.resolve("jailer", arch)?)?,
+        kernel: require_sha256("kernel", &file.kernel.resolve("kernel", arch)?)?,
+        rootfs: require_sha256("rootfs", &file.rootfs.resolve("rootfs", arch)?)?,
+        guest_agent: require_sha256(
+            "guest_agent",
+            &file.guest_agent.resolve("guest_agent", arch)?,
+        )?,
+        snapshot: None,
+    };
+    let expected_firecracker =
+        require_sha256(&format!("{arch}.firecracker"), &tarball.firecracker_sha256)?;
+    let expected_jailer = require_sha256(&format!("{arch}.jailer"), &tarball.jailer_sha256)?;
+    if checksums.firecracker != expected_firecracker {
+        return Err(MicroVmPreflightFailure::new(
+            "artifacts.checksum",
+            format!(
+                "firecracker source manifest {} != pins.json {expected_firecracker}",
+                checksums.firecracker
+            ),
+        ));
+    }
+    if checksums.jailer != expected_jailer {
+        return Err(MicroVmPreflightFailure::new(
+            "artifacts.checksum",
+            format!(
+                "jailer source manifest {} != pins.json {expected_jailer}",
+                checksums.jailer
+            ),
+        ));
+    }
+    Ok(checksums)
 }
 
 fn parse_pins() -> Result<MicroVmPinsFile, MicroVmPreflightFailure> {
@@ -490,6 +585,7 @@ mod tests {
             kernel: "c".repeat(64),
             rootfs: "d".repeat(64),
             guest_agent: "e".repeat(64),
+            probe_jailed_guest_docker: false,
         };
         let right = left.clone();
         left.firecracker = "f".repeat(64);
@@ -509,5 +605,34 @@ mod tests {
         assert!(x86.url.contains(FIRECRACKER_VERSION));
         assert!(arm.url.contains(FIRECRACKER_VERSION));
         assert_ne!(hex_sha256(b"not-the-tarball"), x86.sha256);
+    }
+
+    #[test]
+    fn expected_checksums_for_arch_rejects_unknown_arch() {
+        let error = expected_checksums_for_arch("riscv64").unwrap_err();
+        assert_eq!(error.requirement, "guest.arch");
+        assert!(error.to_string().contains("riscv64"), "{error}");
+    }
+
+    #[test]
+    fn source_manifest_matches_pins_for_firecracker_and_jailer() {
+        let pins = parse_pins().unwrap();
+        for arch in ["x86_64", "aarch64"] {
+            let expected = expected_checksums_for_arch(arch).unwrap();
+            let tarball = pins.tarballs.get(arch).unwrap();
+            assert_eq!(expected.firecracker, tarball.firecracker_sha256, "{arch}");
+            assert_eq!(expected.jailer, tarball.jailer_sha256, "{arch}");
+            assert_eq!(expected.kernel.len(), 64, "{arch}");
+            assert_eq!(expected.rootfs.len(), 64, "{arch}");
+            assert_eq!(expected.guest_agent.len(), 64, "{arch}");
+        }
+        let amd64 = expected_checksums_for_arch("amd64").unwrap();
+        let x86 = expected_checksums_for_arch("x86_64").unwrap();
+        assert_eq!(amd64, x86);
+        let arm64 = expected_checksums_for_arch("arm64").unwrap();
+        let aarch64 = expected_checksums_for_arch("aarch64").unwrap();
+        assert_eq!(arm64, aarch64);
+        assert_ne!(x86.kernel, aarch64.kernel);
+        assert_ne!(x86.guest_agent, aarch64.guest_agent);
     }
 }

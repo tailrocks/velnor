@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use velnor_runner::execution::{
-    build_guest_image_cli, stage_release_dir, GuestArch, RealHostFs, KERNEL_TARBALL,
+    build_guest_image_cli, expected_checksums_for_arch, stage_release_dir, GuestArch, RealHostFs,
+    KERNEL_TARBALL,
 };
 
 fn main() {
@@ -19,16 +20,38 @@ fn run() -> Result<(), String> {
         Some("stage") => stage(&mut args),
         Some("build") => build(&mut args),
         _ => Err(
-            "usage: velnor-guest-image stage --root DIR | build --arch ARCH --out DIR --tarball PATH [--guest-agent PATH]"
+            "usage: velnor-guest-image stage --root DIR --arch ARCH | build --arch ARCH --out DIR --tarball PATH [--guest-agent PATH]"
                 .into(),
         ),
     }
 }
 
 fn stage(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
-    let root = flag_value(args, "--root")?;
+    let mut root = None;
+    let mut arch = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--root" => {
+                root = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "missing --root value".to_string())?,
+                ));
+            }
+            "--arch" => {
+                arch = Some(
+                    args.next()
+                        .ok_or_else(|| "missing --arch value".to_string())?,
+                );
+            }
+            other => return Err(format!("unknown stage flag {other}")),
+        }
+    }
+    let root = root.ok_or("missing --root")?;
+    let arch = GuestArch::parse(arch.as_deref().ok_or("missing --arch")?)
+        .map_err(|error| error.to_string())?;
+    let expected = expected_checksums_for_arch(arch.as_str()).map_err(|error| error.to_string())?;
     let mut fs = RealHostFs;
-    stage_release_dir(&root, &mut fs, None).map_err(|error| error.to_string())?;
+    stage_release_dir(&root, &mut fs, Some(&expected)).map_err(|error| error.to_string())?;
     println!("staged coherent microVM identity in {}", root.display());
     Ok(())
 }
@@ -86,17 +109,4 @@ fn build(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     println!("built {} and {}", kernel.display(), rootfs.display());
     println!("kernel source {KERNEL_TARBALL}");
     Ok(())
-}
-
-fn flag_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<PathBuf, String> {
-    match args.next().as_deref() {
-        Some(flag) if flag == name => args
-            .next()
-            .map(PathBuf::from)
-            .ok_or_else(|| format!("missing {name} value")),
-        other => Err(format!(
-            "expected {name}, got {}",
-            other.unwrap_or_default()
-        )),
-    }
 }

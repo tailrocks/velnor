@@ -31,7 +31,7 @@ fn run() -> Result<(), String> {
             let mut stream = accept_af_vsock(&listener)?;
             let env = GuestSessionEnv::from_guest_env()?;
             serve_guest_session_with_state(&mut stream, &env, &mut state, |bytes| {
-                velnor_runner::execution::run_guest_plan_bytes(bytes)
+                velnor_runner::execution::run_guest_plan_with_events(bytes)
             })?;
         }
     }

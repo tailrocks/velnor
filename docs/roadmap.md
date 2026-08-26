@@ -57,9 +57,10 @@ v1](security/build-l3-boundary-v1.md) with its [versioned threat/control/test
 matrix](security/build-l3-threat-control-test-v1.tsv). Both remain
 design-only until Plans 012 and 017 implement and prove them live. The
 shipped selection type is `velnor_model::{JobExecutorKind, MicroVmKind,
-MicroVmControl}`: host Docker is the live executor; Firecracker plus
-direct API and jailer activate as production; Cloud Hypervisor fails as
-not-proven; Kata and firecracker-containerd cannot activate.
+MicroVmControl}`: host Docker is the packaged default `docker` backend;
+Firecracker plus direct API and jailer is the `microvm` backend; Cloud
+Hypervisor fails as not-proven; Kata and firecracker-containerd cannot
+activate. There is no automatic fallback between backends.
 
 ## velnorctl migration
 
@@ -136,7 +137,9 @@ The first product goal is:
 - run existing GitHub Actions jobs without changing workflow YAML
 - use GitHub's current runner V2 broker/run-service protocol only
 - create runner identities through GitHub's JIT configuration API only
-- run every assigned Linux job inside a Docker container
+- run every assigned Linux job through the selected execution backend
+  (`docker`: host Docker job container; `microvm`: Firecracker guest with
+  guest-local Docker)
 - let one Velnor daemon manage multiple internal runner slots
 - support the first target workflow surface used by `jackin-project/jackin` and
   `ChainArgos/java-monorepo`
@@ -364,7 +367,8 @@ Product model:
 - daemon owns `--slots N`
 - each slot has its own JIT runner identity
 - each slot has its own V2 broker session
-- each assigned job runs in one isolated Docker job container
+- each assigned job runs in one isolated execution backend (`docker` job
+  container or `microvm` guest with guest-local Docker)
 - daemon can run multiple jobs concurrently by supervising multiple slots
 
 JIT runner lifecycle:
@@ -373,7 +377,7 @@ JIT runner lifecycle:
 2. decode and store slot settings
 3. start V2 broker session
 4. acquire one job
-5. execute job in Docker
+5. execute job through the selected backend
 6. complete job through run-service
 7. recycle slot by creating a fresh JIT runner config
 
@@ -386,8 +390,10 @@ Cleanup rule:
 
 ## Docker Execution Model
 
-Every target job runs in a fresh Linux Docker job container, even if the GitHub
-workflow does not declare `container:`.
+The `docker` backend runs every assigned Linux job in a fresh host Docker job
+container, even if the GitHub workflow does not declare `container:`. The
+`microvm` backend is a separate selected executor (Firecracker plus guest-local
+Docker), not a fallback from this path.
 
 Required Docker behavior:
 
@@ -741,7 +747,8 @@ Open naming choice:
 - remove-token language disappears from user-facing script errors
 - readiness remains non-mutating
 - smoke cleanup deletes exact Velnor-created JIT runner ids when needed
-- live scripts support macOS daemon host only when Docker preflight passes
+- live scripts support macOS daemon host only when the selected backend
+  preflight passes (`docker` requires Docker; `microvm` is Linux KVM only)
 
 ### 7. Run public fixture proof
 

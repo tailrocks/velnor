@@ -97,13 +97,17 @@ impl DockerBackend {
 
     pub(crate) fn cancel(
         &mut self,
+        isolation: &IsolationIdentity,
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let _ = world;
-        events.push(ExecutionEvent::HostDockerInvoked(
-            "docker rm --force".into(),
-        ));
+        let job = format!("velnor-job-{}", isolation.id);
+        let args = ["rm".into(), "--force".into(), job];
+        events.push(ExecutionEvent::HostDockerInvoked(format!(
+            "docker {}",
+            args.join(" ")
+        )));
+        let _ = world.runner.run("docker", &args);
         events.push(ExecutionEvent::JobCompleted {
             conclusion: JobConclusion::Cancelled,
             exit_code: 1,

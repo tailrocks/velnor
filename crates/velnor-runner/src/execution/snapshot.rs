@@ -262,6 +262,7 @@ mod tests {
             kernel: "c".repeat(64),
             rootfs: "d".repeat(64),
             guest_agent: "e".repeat(64),
+            probe_jailed_guest_docker: false,
         };
         let isolation = IsolationIdentity::new("job-1", 1);
         let snap =

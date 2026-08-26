@@ -243,7 +243,19 @@ pub fn live_job_ids_from_host_docker() -> Result<BTreeSet<String>> {
     Ok(live_job_ids_from_docker_ps(&listed))
 }
 
-pub fn reclaim_production_leftovers(prune_dangling_images: bool) -> Result<LeftoverReclaimReport> {
+/// List live job IDs from host Docker only when that backend is selected.
+/// Missing selection and `microvm` return an empty set and never open the socket.
+pub fn live_job_ids_for_reclaim(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+) -> Result<BTreeSet<String>> {
+    if velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
+        live_job_ids_from_host_docker()
+    } else {
+        Ok(BTreeSet::new())
+    }
+}
+
+fn reclaim_production_leftovers(prune_dangling_images: bool) -> Result<LeftoverReclaimReport> {
     let work_roots = discover_daemon_work_roots();
     let live = match live_job_ids_from_host_docker() {
         Ok(ids) => ids,
@@ -264,15 +276,64 @@ pub fn reclaim_production_leftovers(prune_dangling_images: bool) -> Result<Lefto
     )
 }
 
-/// Hard-pressure daemon path: at >= 90% used, reclaim leftover-after-Velnor
-/// disposable classes through the same injectable gate tests cover.
-pub fn reclaim_production_if_hard_pressure(usage_percent: u8) -> Result<LeftoverReclaimReport> {
+/// Reclaim leftover workspaces. The microVM backend never lists or prunes
+/// through the host Docker socket.
+pub fn reclaim_production_leftovers_for(
+    backend: velnor_model::ExecutionBackendKind,
+    prune_dangling_images: bool,
+) -> Result<LeftoverReclaimReport> {
+    if backend.uses_host_docker_socket() {
+        reclaim_production_leftovers(prune_dangling_images)
+    } else {
+        reclaim_microvm_leftovers()
+    }
+}
+
+fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
+    // Work roots are shared by all daemon pools. MicroVM selection alone does
+    // not identify ownership, so deleting every UUID absent from the current
+    // pool's live set can remove an active Docker job from another pool.
+    // Leave reclamation to the coordinator until it supplies a pool-scoped
+    // ownership lease.
+    Ok(LeftoverReclaimReport::default())
+}
+
+/// Hard-pressure reclaim that skips host Docker when the selected backend is
+/// `microvm` or selection is unknown.
+pub fn reclaim_production_if_hard_pressure_for(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    usage_percent: u8,
+) -> Result<LeftoverReclaimReport> {
+    reclaim_production_if_hard_pressure_with(
+        backend,
+        usage_percent,
+        &discover_daemon_work_roots(),
+        host_docker_if_safe,
+        remove_dir_all,
+    )
+}
+
+/// Injectable hard-pressure reclaim. Host Docker listing and prune run only
+/// when the selected backend permits host Docker maintenance.
+pub fn reclaim_production_if_hard_pressure_with(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    usage_percent: u8,
+    work_roots: &[PathBuf],
+    mut docker: impl FnMut(&[String]) -> Result<String>,
+    remove_dir: impl FnMut(&Path) -> Result<()>,
+) -> Result<LeftoverReclaimReport> {
     if usage_percent < HARD_PRESSURE_PERCENT {
         return Ok(LeftoverReclaimReport::default());
     }
-    let work_roots = discover_daemon_work_roots();
-    let live = match live_job_ids_from_host_docker() {
-        Ok(ids) => ids,
+    if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
+        // A backend choice is not an ownership proof: `work_roots` can contain
+        // active jobs belonging to another daemon/pool. Fail closed until the
+        // cross-daemon coordinator exposes pool-scoped leases here.
+        let _ = (work_roots, remove_dir);
+        return Ok(LeftoverReclaimReport::default());
+    }
+    let live = match docker(&list_live_job_names_args()) {
+        Ok(listed) => live_job_ids_from_docker_ps(&listed),
         Err(error) => {
             eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
             return Ok(LeftoverReclaimReport {
@@ -281,13 +342,7 @@ pub fn reclaim_production_if_hard_pressure(usage_percent: u8) -> Result<Leftover
             });
         }
     };
-    reclaim_if_hard_pressure(
-        usage_percent,
-        &work_roots,
-        &live,
-        host_docker_if_safe,
-        remove_dir_all,
-    )
+    reclaim_if_hard_pressure(usage_percent, work_roots, &live, docker, remove_dir)
 }
 
 fn host_docker_if_safe(args: &[String]) -> Result<String> {
@@ -430,6 +485,78 @@ velnor-job-not-a-uuid\n\
             "90% path must only prune dangling images, got {commands:?}"
         );
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn microvm_reclaim_does_not_invoke_host_docker() {
+        let report = reclaim_leftover_after_velnor(
+            &[],
+            &BTreeSet::new(),
+            |_| panic!("microvm leftover reclaim must not use host docker"),
+            |_| Ok(()),
+            false,
+        )
+        .unwrap();
+        assert!(report.docker_commands.is_empty());
+        assert!(!report.skipped_docker);
+    }
+
+    #[test]
+    fn live_job_ids_for_reclaim_skip_host_docker_when_unselected_or_microvm() {
+        assert!(live_job_ids_for_reclaim(None).unwrap().is_empty());
+        assert!(
+            live_job_ids_for_reclaim(Some(velnor_model::ExecutionBackendKind::MicroVm))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn hard_pressure_microvm_and_missing_never_invoke_host_docker() {
+        for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
+            let mut removed = Vec::new();
+            let report = reclaim_production_if_hard_pressure_with(
+                backend,
+                HARD_PRESSURE_PERCENT,
+                &[PathBuf::from("/var/lib/velnor-trusted/work/active-job")],
+                |_| panic!("host docker must not run for {backend:?}"),
+                |path| {
+                    removed.push(path.to_path_buf());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(report.docker_commands.is_empty(), "{backend:?}");
+            assert!(!report.skipped_docker, "{backend:?}");
+            assert!(
+                removed.is_empty(),
+                "cross-pool workspace was reclaimed: {removed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hard_pressure_docker_lists_live_jobs_through_injected_docker() {
+        let mut calls = Vec::new();
+        let report = reclaim_production_if_hard_pressure_with(
+            Some(velnor_model::ExecutionBackendKind::Docker),
+            HARD_PRESSURE_PERCENT,
+            &[],
+            |args| {
+                calls.push(args.to_vec());
+                Ok(String::new())
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            calls.iter().any(|args| args
+                .windows(2)
+                .any(|w| w == ["ps".to_string(), "--all".to_string()]
+                    || w == ["image".to_string(), "prune".to_string()])),
+            "docker hard-pressure reclaim must list or prune via host docker, got {calls:?}"
+        );
+        assert_leftover_docker_commands_are_safe(&report.docker_commands);
     }
 
     #[test]

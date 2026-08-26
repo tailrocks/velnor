@@ -1154,18 +1154,10 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
                 Some(format!("daemon_id={daemon_id}")),
             );
         }
-        prune_stale_velnor_docker_resources(&daemon_id);
-        // Reclaim job-id-labelled objects (precreated job environments and
-        // their guest siblings) orphaned by the previous drain/restart. Runs
-        // before any slot accepts a job, so nothing this boot created can be
-        // matched; scoped to THIS daemon id so co-located daemons are
-        // untouched. Best-effort — never blocks startup (velnor#311).
-        if let Err(error) = crate::docker_lease::reclaim_daemon_orphan_jobs(
-            &daemon_id,
-            crate::docker_lease::run_host_docker,
-        ) {
-            eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
-        }
+        let backend = crate::execution::load_execution_file(&config_base, None)
+            .ok()
+            .map(|file| file.backend());
+        maybe_startup_host_docker_reclaim(backend, &daemon_id);
         if let Some(sink) = crate::ops::global() {
             sink.emit(
                 velnor_model::EventReason::GcCompleted,
@@ -1318,7 +1310,12 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
         if percent >= crate::leftover_disk::HARD_PRESSURE_PERCENT {
             // H0.4: never park for disk without first reclaiming leftover
             // job UUID trees and dangling untagged images.
-            if let Err(error) = crate::leftover_disk::reclaim_production_if_hard_pressure(percent) {
+            let backend = crate::execution::load_execution_file(config_base, None)
+                .ok()
+                .map(|file| file.backend());
+            if let Err(error) =
+                crate::leftover_disk::reclaim_production_if_hard_pressure_for(backend, percent)
+            {
                 eprintln!("leftover-after-Velnor reclaim failed: {error:#}");
             }
         }
@@ -1326,7 +1323,11 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     for root in roots {
         if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
-                let _ = crate::leftover_disk::reclaim_production_leftovers(true);
+                let backend = crate::execution::load_execution_file(config_base, None)
+                    .ok()
+                    .map(|file| file.backend())
+                    .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
+                let _ = crate::leftover_disk::reclaim_production_leftovers_for(backend, false);
                 let free = free_space_bytes(root).unwrap_or(free);
                 if free < DISK_MIN_FREE_BYTES {
                     return Some(format!(
@@ -2193,14 +2194,59 @@ fn preflight_before_daemon_jit_config(
     let mut ran = false;
     for preflight_args in daemon_preflight_args(args, config_base, slots)? {
         crate::preflight::preflight(preflight_args)
-            .context("Docker preflight failed before daemon JIT runner configuration")?;
+            .context("execution backend preflight failed before daemon JIT runner configuration")?;
         ran = true;
     }
     if ran {
-        crate::node::prove::write_executor_ok(config_base)
-            .context("persist executor proof after preflight")?;
+        persist_executor_proof_after_preflight(config_base, slots)?;
     }
     Ok(())
+}
+
+fn persist_executor_proof_after_preflight(config_base: &Path, slots: usize) -> Result<()> {
+    let backend = crate::execution::load_execution_file(config_base, None)
+        .context("execution backend selection failed after preflight")?
+        .backend();
+    match backend {
+        velnor_model::ExecutionBackendKind::Docker => {
+            crate::node::prove::write_executor_ok(config_base)
+                .context("persist docker executor proof after preflight")
+                .map(|_| ())
+        }
+        velnor_model::ExecutionBackendKind::MicroVm => {
+            persist_microvm_probe_proof(config_base, slots)
+        }
+    }
+}
+
+fn persist_microvm_probe_proof(config_base: &Path, slots: usize) -> Result<()> {
+    let proof = crate::node::prove::EXECUTOR_OK;
+    let slot_count = slots.max(1);
+    let mut candidates = vec![config_base.join(proof)];
+    for slot in 1..=slot_count {
+        candidates.push(daemon_slot_config_dir(config_base, slot, slot_count).join(proof));
+    }
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(generation) = serde_json::from_slice::<crate::execution::MicroVmGeneration>(&bytes)
+        else {
+            continue;
+        };
+        if generation.probe_jailed_guest_docker {
+            std::fs::write(config_base.join(proof), bytes).with_context(|| {
+                format!(
+                    "persist microvm probe proof to {}",
+                    config_base.join(proof).display()
+                )
+            })?;
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "microvm advertising requires jailed guest-docker probe proof; docker backend was not used"
+    );
 }
 
 fn daemon_preflight_args(
@@ -2227,6 +2273,46 @@ fn validate_daemon_slots(slots: usize) -> Result<usize> {
         bail!("--slots must be greater than zero");
     }
     Ok(slots)
+}
+
+fn maybe_startup_host_docker_reclaim(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    daemon_id: &str,
+) {
+    maybe_startup_host_docker_reclaim_with(
+        backend,
+        daemon_id,
+        prune_stale_velnor_docker_resources,
+        |id| {
+            crate::docker_lease::reclaim_daemon_orphan_jobs(
+                id,
+                crate::docker_lease::run_host_docker,
+            )
+        },
+    );
+}
+
+fn maybe_startup_host_docker_reclaim_with(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    daemon_id: &str,
+    mut prune: impl FnMut(&str),
+    mut reclaim: impl FnMut(&str) -> anyhow::Result<()>,
+) {
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("startup host Docker reclaim skipped: {reason}");
+        return;
+    }
+    prune(daemon_id);
+    // Reclaim job-id-labelled objects (precreated job environments and
+    // their guest siblings) orphaned by the previous drain/restart. Runs
+    // before any slot accepts a job, so nothing this boot created can be
+    // matched; scoped to THIS daemon id so co-located daemons are
+    // untouched. Best-effort — never blocks startup (velnor#311).
+    if let Err(error) = reclaim(daemon_id) {
+        eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
+    }
 }
 
 /// Remove leftover Velnor Docker resources from previous (possibly crashed)
@@ -2353,9 +2439,13 @@ fn daemon_slot_run_args(
     slot_count: usize,
 ) -> Result<RunArgs> {
     validate_daemon_slot_index(slot_index, slot_count)?;
+    let slot_dir = daemon_slot_config_dir(config_base, slot_index, slot_count);
+    let require_docker_socket = crate::execution::load_execution_file(&slot_dir, None)
+        .map(|file| file.backend().uses_host_docker_socket())
+        .unwrap_or(false);
 
     Ok(RunArgs {
-        config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
+        config_dir: Some(slot_dir),
         pat: args.pat.clone(),
         max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
         once: args.once,
@@ -2382,7 +2472,7 @@ fn daemon_slot_run_args(
             slot_count,
         ),
         skip_preflight: args.skip_preflight,
-        require_docker_socket: args.require_docker_socket,
+        require_docker_socket,
     })
 }
 
@@ -2445,7 +2535,7 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
     }
 
     crate::preflight::preflight(preflight_args_for_run(args, config_dir)?)
-        .context("Docker preflight failed before polling GitHub for jobs")
+        .context("execution backend preflight failed before polling GitHub for jobs")
 }
 
 fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> Result<PreflightArgs> {
@@ -2463,8 +2553,8 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> Result<Preflight
         ),
         docker_host_work_dir: args.docker_host_work_dir.clone(),
         docker_image: args.docker_image.clone(),
-        require_docker_socket: args.require_docker_socket,
-        require_buildx: true,
+        require_docker_socket: execution_backend.uses_host_docker_socket(),
+        require_buildx: execution_backend.uses_host_docker_socket(),
         execution_backend: Some(execution_backend),
         config_dir: Some(config_dir.to_path_buf()),
     })
@@ -5269,11 +5359,7 @@ fn execute_microvm_script_job(
             "false",
         ));
     }
-    let steps = script_steps
-        .iter()
-        .cloned()
-        .map(crate::executor::ExecutableStep::Script)
-        .collect();
+    let steps = microvm_executable_steps(job, script_steps)?;
     let normalized = crate::github_adapter::github_normalized_job_plan(
         job,
         run_service_url,
@@ -5283,7 +5369,168 @@ fn execute_microvm_script_job(
         crate::runtime_env::job_environment_variables(job),
         job_context_data(job),
     );
-    reject_incomplete_microvm_plan(job, script_steps, &normalized)
+    reject_incomplete_microvm_plan(job, &normalized)?;
+    let validated = crate::execution::ValidatedPlan::from_normalized(&normalized);
+    let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
+    let artifact_root = std::path::PathBuf::from(crate::execution::PACKAGED_MICROVM_ROOT);
+    let isolation_root = crate::execution::microvm_isolation_root();
+    let resources =
+        crate::execution::IsolationResources::for_identity(isolation.clone(), &isolation_root);
+    let mut vsock = crate::execution::UnixVsockChannel::lazy(
+        resources.vsock.clone(),
+        crate::execution::FIRECRACKER_GUEST_CID,
+        crate::execution::GUEST_AGENT_PORT,
+    );
+    let mut firecracker = crate::execution::UnixFirecrackerClient::new(resources.api_socket());
+    let mut fs = crate::execution::RealHostFs;
+    let mut runner = crate::executor::ProcessCommandRunner;
+    let kvm = std::path::PathBuf::from("/dev/kvm");
+    let docker_sock = std::path::PathBuf::from(crate::execution::MICROVM_NO_HOST_DOCKER_SOCKET);
+    let execution_file = velnor_model::ExecutionFile {
+        execution: velnor_model::ExecutionSection {
+            backend: velnor_model::ExecutionBackendKind::MicroVm,
+        },
+    };
+    let mut world = crate::execution::ExecutionWorld {
+        kvm: &kvm,
+        artifact_root: &artifact_root,
+        isolation_root: &isolation_root,
+        host_docker_socket: &docker_sock,
+        runner: &mut runner,
+        firecracker: &mut firecracker,
+        host_fs: &mut fs,
+        vsock: Some(&mut vsock),
+        docker_engine: None,
+        allow_inline_guest_plan: false,
+    };
+    let outcome =
+        crate::execution::run_validated_job(&execution_file, isolation, &validated, &mut world)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(script_job_result_from_outcome(job, outcome))
+}
+
+fn microvm_executable_steps(
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+) -> Result<Vec<crate::executor::ExecutableStep>> {
+    let mut scripts = script_steps.iter();
+    let mut ordered = Vec::new();
+    let workspace = std::path::Path::new("/__w");
+    for (index, step) in job
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| step.enabled)
+    {
+        match step.reference_type() {
+            Some(crate::job_message::ActionReferenceType::Script) => {
+                let script = scripts
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("script step mapping count mismatch"))?;
+                ordered.push(crate::executor::ExecutableStep::Script(script.clone()));
+            }
+            Some(crate::job_message::ActionReferenceType::Repository) => {
+                let repository = step
+                    .reference
+                    .as_ref()
+                    .and_then(|reference| reference.name.as_deref())
+                    .unwrap_or("");
+                if crate::checkout::is_checkout_step(step) {
+                    ordered.push(crate::executor::ExecutableStep::Checkout(
+                        crate::checkout::checkout_plan(job, workspace, step, index)?,
+                    ));
+                    continue;
+                }
+                let Some(adapter) = crate::action::native_action_adapter(repository) else {
+                    return Err(microvm_capability_error(
+                        &format!("jobs.steps[{index}].reference.name"),
+                        repository,
+                        "an admitted native adapter",
+                    ));
+                };
+                let git_ref = step
+                    .reference
+                    .as_ref()
+                    .and_then(|reference| reference.git_ref.clone())
+                    .unwrap_or_else(|| repository.to_string());
+                let invocation = crate::action::NativeActionInvocation {
+                    git_ref,
+                    adapter,
+                    cache_kind: crate::action::cache_action_kind(
+                        step.reference
+                            .as_ref()
+                            .and_then(|reference| reference.path.as_deref()),
+                    )
+                    .ok(),
+                    source_path: step
+                        .reference
+                        .as_ref()
+                        .and_then(|reference| reference.path.clone()),
+                    inputs: crate::action::string_inputs(step)?,
+                    env: crate::script_step::step_environment(step)?,
+                };
+                ordered.push(crate::executor::ExecutableStep::Native {
+                    step_id: step.id.clone().unwrap_or_else(|| format!("step-{index}")),
+                    display_name: step.display_name_template().unwrap_or_default(),
+                    invocation,
+                    condition: step.condition.clone(),
+                    continue_on_error: crate::script_step::step_continue_on_error(step),
+                    timeout_minutes: crate::script_step::step_timeout_minutes(step),
+                });
+            }
+            other => {
+                let received =
+                    other.map_or_else(|| "absent".to_string(), |kind| format!("{kind:?}"));
+                return Err(microvm_capability_error(
+                    &format!("jobs.steps[{index}].reference.type"),
+                    &received,
+                    "Script or native Repository",
+                ));
+            }
+        }
+    }
+    Ok(ordered)
+}
+
+fn script_job_result_from_outcome(
+    job: &AgentJobRequestMessage,
+    outcome: crate::execution::ExecutionOutcome,
+) -> ScriptJobResult {
+    let result = if outcome.exit_code == 0 {
+        crate::protocol::TaskResult::Succeeded
+    } else {
+        crate::protocol::TaskResult::Failed
+    };
+    ScriptJobResult {
+        result,
+        outputs: outcome.outputs.into_iter().collect(),
+        environment_url: outcome.environment_url,
+        step_logs: vec![StepLog {
+            step_id: "microvm".into(),
+            display_name: "microvm result bridge".into(),
+            order: 1,
+            started_at: unix_now_iso8601(),
+            completed_at: unix_now_iso8601(),
+            lines: outcome.log_lines,
+            masks: job_secret_mask_values(job),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: outcome.exit_code,
+            skipped: false,
+            failure_ignored: false,
+            error_count: i32::from(outcome.exit_code != 0),
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        }],
+        teardown: None,
+        timings: ExecutionTimings {
+            first_step_ms: 0,
+            checkout_ms: 0,
+            container_boot_ms: 0,
+            steps_ms: 0,
+        },
+    }
 }
 
 fn microvm_capability_error(field: &str, received: &str, accepted: &str) -> anyhow::Error {
@@ -5295,9 +5542,8 @@ fn microvm_capability_error(field: &str, received: &str, accepted: &str) -> anyh
 
 fn reject_incomplete_microvm_plan(
     job: &AgentJobRequestMessage,
-    script_steps: &[crate::script_step::ScriptStep],
     plan: &crate::plan::NormalizedJobPlan,
-) -> Result<ScriptJobResult> {
+) -> Result<()> {
     if plan.execution.job_container.image.trim().is_empty() {
         return Err(microvm_capability_error(
             "execution.job_container.image",
@@ -5305,27 +5551,19 @@ fn reject_incomplete_microvm_plan(
             "non-empty guest image",
         ));
     }
-    if let Some((index, step)) = job.steps.iter().enumerate().find(|(_, step)| {
-        step.enabled
-            && !matches!(
-                step.reference_type(),
-                Some(crate::job_message::ActionReferenceType::Script)
-            )
-    }) {
+    if let Some((index, step)) = job
+        .steps
+        .iter()
+        .enumerate()
+        .find(|(_, step)| step.enabled && !microvm_step_is_admitted(step))
+    {
         let received = step
             .reference_type()
             .map_or_else(|| "absent".to_string(), |kind| format!("{kind:?}"));
         return Err(microvm_capability_error(
             &format!("jobs.steps[{index}].reference.type"),
             &received,
-            "Script until native guest action execution is complete",
-        ));
-    }
-    if plan.steps.len() != script_steps.len() {
-        return Err(microvm_capability_error(
-            "execution.steps",
-            "script-only projection",
-            "complete ordered normalized job steps",
+            "Script or native Repository",
         ));
     }
     if plan
@@ -5346,11 +5584,52 @@ fn reject_incomplete_microvm_plan(
             "complete GitHub context data",
         ));
     }
-    Err(microvm_capability_error(
-        "execution.microvm.result_bridge",
-        "unimplemented",
-        "complete guest command-file bytes, outputs, environment URL, logs, and teardown result",
-    ))
+    if let Some((index, name)) = job.steps.iter().enumerate().find_map(|(index, step)| {
+        let name = step.reference.as_ref()?.name.as_deref()?;
+        (name.eq_ignore_ascii_case("actions/cache")
+            || name.eq_ignore_ascii_case("swatinem/rust-cache"))
+        .then_some((index, name.to_string()))
+    }) {
+        return Err(microvm_capability_error(
+            &format!("jobs.steps[{index}].reference.name"),
+            &name,
+            "no cache action until key-to-blob transport is admitted",
+        ));
+    }
+    if let Some((index, step)) = plan.steps.iter().enumerate().find_map(|(index, step)| {
+        let crate::executor::ExecutableStep::Native { invocation, .. } = step else {
+            return None;
+        };
+        matches!(
+            invocation.adapter,
+            crate::action::NativeActionAdapter::Cache
+                | crate::action::NativeActionAdapter::RustCache
+        )
+        .then_some((index, invocation))
+    }) {
+        return Err(microvm_capability_error(
+            &format!("jobs.steps[{index}].reference.name"),
+            &format!("{:?}", step.adapter),
+            "no cache action until key-to-blob transport is admitted",
+        ));
+    }
+    Ok(())
+}
+
+fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
+    match step.reference_type() {
+        Some(crate::job_message::ActionReferenceType::Script) => true,
+        Some(crate::job_message::ActionReferenceType::Repository) => {
+            let repository = step
+                .reference
+                .as_ref()
+                .and_then(|reference| reference.name.as_deref())
+                .unwrap_or("");
+            crate::checkout::is_checkout_step(step)
+                || crate::action::native_action_adapter(repository).is_some()
+        }
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5746,6 +6025,7 @@ fn execute_script_job_inner(
         let mut world = crate::execution::ExecutionWorld {
             kvm: &kvm,
             artifact_root: &artifact_root,
+            isolation_root: &artifact_root,
             host_docker_socket: &docker_sock,
             runner: &mut preflight_runner,
             firecracker: &mut firecracker_api,
@@ -8901,6 +9181,27 @@ fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
 /// Fleet health probe: list this daemon's registered runners on GitHub and
 /// fail (non-zero exit) when none are healthy, so a systemd timer surfaces a
 /// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
+fn doctor_host_docker_reclaim(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    mut docker: impl FnMut(&[String]) -> Result<String>,
+) {
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("doctor host Docker reclaim skipped: {reason}");
+        return;
+    }
+    if let Err(error) = crate::docker_lease::reclaim_orphan_jobs(&mut docker) {
+        eprintln!("Warning: leftover job Docker reclaim failed: {error:#}");
+    }
+    if let Err(error) = crate::docker_lease::reclaim_unlabeled_testcontainers(&mut docker) {
+        eprintln!("Warning: leftover guest Docker reclaim failed: {error:#}");
+    }
+    if let Err(error) = crate::docker_lease::reclaim_unlabeled_job_image_siblings(&mut docker) {
+        eprintln!("Warning: leftover job-image Docker reclaim failed: {error:#}");
+    }
+}
+
 pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let Some(pat) = args.pat.as_deref().filter(|p| !p.trim().is_empty()) else {
         if let Some(problem) = diagnose_github_token(args.pat.as_deref()) {
@@ -8978,24 +9279,13 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
         free, reserved_bytes, reservation_count, active_leases, cache_logical, cache_physical
     );
-    if let Err(error) =
-        crate::docker_lease::reclaim_orphan_jobs(crate::docker_lease::run_host_docker)
-    {
-        eprintln!("Warning: leftover job Docker reclaim failed: {error:#}");
-    }
-    if let Err(error) =
-        crate::docker_lease::reclaim_unlabeled_testcontainers(crate::docker_lease::run_host_docker)
-    {
-        eprintln!("Warning: leftover guest Docker reclaim failed: {error:#}");
-    }
-    if let Err(error) = crate::docker_lease::reclaim_unlabeled_job_image_siblings(
-        crate::docker_lease::run_host_docker,
-    ) {
-        eprintln!("Warning: leftover job-image Docker reclaim failed: {error:#}");
-    }
     let config_base = config::config_dir(None)?
         .join("daemons")
         .join(sanitize_daemon_config_component(&args.name));
+    let backend = crate::execution::load_execution_file(&config_base, None)
+        .ok()
+        .map(|file| file.backend());
+    doctor_host_docker_reclaim(backend, crate::docker_lease::run_host_docker);
     let sample_size = usize::try_from(env_u64(
         "VELNOR_SLO_SAMPLE_SIZE",
         DEFAULT_SLO_SAMPLE_SIZE as u64,
@@ -9429,6 +9719,62 @@ mod tests {
             "variables": variables
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn microvm_job_admits_native_checkout_and_no_longer_stubs_result_bridge() {
+        let job: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job-checkout",
+                "jobDisplayName": "Checkout",
+                "requestId": 1,
+                "resources": {
+                    "repositories": [{
+                        "alias": "self",
+                        "url": "https://github.com/tailrocks/velnor",
+                        "name": "tailrocks/velnor",
+                        "version": "abc123"
+                    }]
+                },
+                "variables": {
+                    "system.github.token": { "value": "ghs", "isSecret": true }
+                },
+                "contextData": { "github": { "sha": "abc123", "ref": "refs/heads/main" } },
+                "steps": [{
+                    "id": "checkout",
+                    "enabled": true,
+                    "reference": {
+                        "type": "Repository",
+                        "name": "actions/checkout",
+                        "ref": "v4"
+                    }
+                }]
+            }))
+            .unwrap();
+        let error = execute_microvm_script_job(
+            &job,
+            &[],
+            "ubuntu:24.04",
+            "node:24",
+            "trusted",
+            "https://run.service/jobs/1",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("jobs.steps[0].reference.type"), "{error}");
+        assert!(!error.contains("result_bridge"), "{error}");
+        assert!(
+            error.contains("unsupported capability")
+                || error.contains("preflight")
+                || error.contains("kvm")
+                || error.contains("microvm")
+                || error.contains("guest"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -10164,8 +10510,87 @@ jobs:
 
         assert_eq!(preflight.work_dir, Some(config_dir.join("_work")));
         assert_eq!(preflight.docker_host_work_dir, None);
-        assert!(!preflight.require_docker_socket);
+        assert!(preflight.require_docker_socket);
         assert!(preflight.require_buildx);
+    }
+
+    #[test]
+    fn run_preflight_args_microvm_does_not_require_docker_socket() {
+        let mut args = run_args(false, false, false);
+        args.require_docker_socket = true;
+        let dir = unique_temp_dir("run-preflight-microvm");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        let preflight = preflight_args_for_run(&args, &dir).unwrap();
+        assert!(!preflight.require_docker_socket);
+        assert!(!preflight.require_buildx);
+        assert_eq!(
+            preflight.execution_backend,
+            Some(velnor_model::ExecutionBackendKind::MicroVm)
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn startup_host_docker_reclaim_skips_when_microvm_or_unselected() {
+        for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
+            let mut pruned = false;
+            let mut reclaimed = false;
+            maybe_startup_host_docker_reclaim_with(
+                backend,
+                "daemon-x",
+                |_| pruned = true,
+                |_| {
+                    reclaimed = true;
+                    Ok(())
+                },
+            );
+            assert!(!pruned, "{backend:?}");
+            assert!(!reclaimed, "{backend:?}");
+        }
+    }
+
+    #[test]
+    fn startup_host_docker_reclaim_runs_when_docker_selected() {
+        let mut pruned = None;
+        let mut reclaimed = None;
+        maybe_startup_host_docker_reclaim_with(
+            Some(velnor_model::ExecutionBackendKind::Docker),
+            "daemon-x",
+            |id| pruned = Some(id.to_string()),
+            |id| {
+                reclaimed = Some(id.to_string());
+                Ok(())
+            },
+        );
+        assert_eq!(pruned.as_deref(), Some("daemon-x"));
+        assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn doctor_host_docker_reclaim_skips_socket_when_microvm_or_unselected() {
+        for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
+            doctor_host_docker_reclaim(backend, |_| {
+                panic!("doctor must not use host docker for {backend:?}")
+            });
+        }
+    }
+
+    #[test]
+    fn doctor_host_docker_reclaim_docker_backend_lists_jobs() {
+        let mut calls = Vec::new();
+        doctor_host_docker_reclaim(Some(velnor_model::ExecutionBackendKind::Docker), |args| {
+            calls.push(args.to_vec());
+            Ok(String::new())
+        });
+        assert!(
+            !calls.is_empty(),
+            "docker doctor reclaim must invoke host docker"
+        );
     }
 
     #[test]
@@ -10498,6 +10923,86 @@ jobs:
         assert!(preflight
             .iter()
             .all(|args| args.docker_image == "velnor/job-ubuntu:26.04"));
+    }
+
+    #[test]
+    fn persist_executor_proof_after_preflight_writes_docker_ok_stamp() {
+        let base = unique_temp_dir("persist-executor-docker");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+
+        persist_executor_proof_after_preflight(&base, 1).unwrap();
+
+        assert_eq!(
+            fs::read(base.join(crate::node::prove::EXECUTOR_OK)).unwrap(),
+            b"ok\n"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn persist_executor_proof_after_preflight_rejects_microvm_without_probe() {
+        let base = unique_temp_dir("persist-executor-microvm");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        fs::write(
+            base.join(crate::node::prove::EXECUTOR_OK),
+            br#"{"generation":"packaged","kind":"firecracker"}"#,
+        )
+        .unwrap();
+
+        let err = persist_executor_proof_after_preflight(&base, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("jailed guest-docker probe proof"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("docker backend was not used"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn persist_executor_proof_after_preflight_copies_slot_probe_stamp() {
+        let base = unique_temp_dir("persist-executor-microvm-slot");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        let slot = daemon_slot_config_dir(&base, 1, 2);
+        fs::create_dir_all(&slot).unwrap();
+        let stamped = serde_json::json!({
+            "velnor_version": "0.1.216",
+            "firecracker_version": "1.16.1",
+            "jailer_version": "1.16.1",
+            "kernel_version": "6.1.102",
+            "firecracker": "a".repeat(64),
+            "jailer": "b".repeat(64),
+            "kernel": "c".repeat(64),
+            "rootfs": "d".repeat(64),
+            "guest_agent": "e".repeat(64),
+            "probe_jailed_guest_docker": true
+        });
+        fs::write(
+            slot.join(crate::node::prove::EXECUTOR_OK),
+            serde_json::to_vec(&stamped).unwrap(),
+        )
+        .unwrap();
+
+        persist_executor_proof_after_preflight(&base, 2).unwrap();
+        let copied: serde_json::Value =
+            serde_json::from_slice(&fs::read(base.join(crate::node::prove::EXECUTOR_OK)).unwrap())
+                .unwrap();
+        assert_eq!(copied["probe_jailed_guest_docker"], true);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

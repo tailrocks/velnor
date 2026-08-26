@@ -1,5 +1,5 @@
 [Unit]
-Description=Velnor job-worker slice (transitional Docker executor; not Build L3)
+Description=Velnor job-worker slice
 Documentation=https://github.com/tailrocks/velnor
 
 [Slice]
