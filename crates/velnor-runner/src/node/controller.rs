@@ -49,6 +49,10 @@ const REGISTRATION_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
 struct GithubPacing {
     next_probe: tokio::time::Instant,
     probe_failures: u32,
+    /// Fleet-wide hold on JIT registration while the shared PAT is exhausted.
+    /// Independent of per-slot retry: a quota 403/429 must not let proven
+    /// unregistered slots keep calling `jit_configure_one_slot`.
+    rest_hold_until: Option<tokio::time::Instant>,
     /// slot_id -> (next allowed attempt, failure streak)
     registration_retry: HashMap<String, (tokio::time::Instant, u32)>,
 }
@@ -58,6 +62,7 @@ impl Default for GithubPacing {
         Self {
             next_probe: tokio::time::Instant::now(),
             probe_failures: 0,
+            rest_hold_until: None,
             registration_retry: HashMap::new(),
         }
     }
@@ -100,35 +105,47 @@ impl GithubPacing {
             self.probe_failures += 1;
             let hold = reset_epoch
                 .and_then(|epoch| until_epoch_with_jitter(epoch, salt))
-                .unwrap_or(GITHUB_PROBE_MAX_BACKOFF);
-            self.next_probe = now + hold.max(GITHUB_PROBE_MIN_INTERVAL);
+                .unwrap_or(GITHUB_PROBE_MAX_BACKOFF)
+                .max(GITHUB_PROBE_MIN_INTERVAL);
+            self.next_probe = now + hold;
+            self.rest_hold_until = Some(now + hold);
             return;
         }
         if let (Some(remaining), Some(reset_epoch)) = (remaining, reset_epoch) {
             if remaining < RATE_LIMIT_HEADROOM_REMAINING {
                 // Nearly exhausted: keep the remaining budget for
-                // registration/DELETE traffic until the window resets.
+                // DELETE traffic until the window resets. Do not spend it
+                // on new JIT registrations.
                 if let Some(hold) = until_epoch_with_jitter(reset_epoch, salt) {
-                    self.next_probe = now + hold.max(GITHUB_PROBE_MIN_INTERVAL);
+                    let hold = hold.max(GITHUB_PROBE_MIN_INTERVAL);
+                    self.next_probe = now + hold;
+                    self.rest_hold_until = Some(now + hold);
                     return;
                 }
             }
         }
         self.probe_failures = 0;
+        self.rest_hold_until = None;
         self.next_probe = now + GITHUB_PROBE_MIN_INTERVAL;
     }
 
     /// Record an unreachable (but not rate-limited) probe: exponential
     /// backoff, capped, so a GitHub outage does not cost 30 probes/minute.
     fn record_probe_unreachable(&mut self, now: tokio::time::Instant) {
+        let exp = 1u32
+            .checked_shl(self.probe_failures.min(4))
+            .unwrap_or(u32::MAX);
         let backoff = GITHUB_PROBE_MIN_INTERVAL
-            .saturating_mul(1 + self.probe_failures.min(9))
+            .saturating_mul(exp)
             .min(GITHUB_PROBE_MAX_BACKOFF);
         self.probe_failures += 1;
         self.next_probe = now + backoff;
     }
 
     fn registration_due(&self, slot_id: &str, now: tokio::time::Instant) -> bool {
+        if self.rest_hold_until.is_some_and(|deadline| now < deadline) {
+            return false;
+        }
         self.registration_retry
             .get(slot_id)
             .is_none_or(|(deadline, _)| now >= *deadline)
@@ -914,6 +931,10 @@ mod tests {
         pacing.record_probe_unreachable(now + Duration::from_secs(60));
         assert!(!pacing.probe_due(now + Duration::from_secs(60 + 119)));
         assert!(pacing.probe_due(now + Duration::from_secs(60 + 120)));
+        // Third failure is 240s, not linear 180s.
+        pacing.record_probe_unreachable(now + Duration::from_secs(180));
+        assert!(!pacing.probe_due(now + Duration::from_secs(180 + 239)));
+        assert!(pacing.probe_due(now + Duration::from_secs(180 + 240)));
     }
 
     #[test]
@@ -953,6 +974,27 @@ mod tests {
         // Success clears the backoff entirely.
         pacing.record_registration_success("velnor-1");
         assert!(pacing.registration_due("velnor-1", now));
+    }
+
+    #[test]
+    fn pacing_quota_holds_all_registrations_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        let reset = epoch_now() + 3500;
+        assert!(pacing.registration_due("proven-unregistered", now));
+        pacing.record_probe(now, true, Some(0), Some(reset));
+        assert!(
+            !pacing.registration_due("proven-unregistered", now + Duration::from_secs(600)),
+            "quota 403 must not let proven slots keep issuing JIT"
+        );
+        assert!(pacing.registration_due("proven-unregistered", now + Duration::from_secs(3700)));
+        pacing.record_probe(
+            now + Duration::from_secs(3700),
+            false,
+            Some(4999),
+            Some(epoch_now() + 7200),
+        );
+        assert!(pacing.registration_due("proven-unregistered", now + Duration::from_secs(3700)));
     }
 
     /// Regression oracle for the August 2026 quota-exhaustion class: a 403

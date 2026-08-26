@@ -278,11 +278,15 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     };
     if !(200..300).contains(&status) {
         if rate_limit.is_limited(status) {
+            let now_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             return GitHubProbe {
                 reachable: false,
                 evidence: None,
                 rate_limited: true,
-                rate_limit_reset_epoch: rate_limit.rate_limit_reset_epoch,
+                rate_limit_reset_epoch: rate_limit.reset_epoch_or_retry_after(now_epoch),
                 rate_limit_remaining: rate_limit.remaining,
             };
         }

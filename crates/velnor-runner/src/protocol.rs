@@ -144,6 +144,16 @@ impl GitHubRateLimitStatus {
         }
         self.remaining == Some(0) || self.retry_after_seconds.is_some()
     }
+
+    /// Absolute wait epoch: `x-ratelimit-reset` when present, otherwise
+    /// `now + Retry-After` for secondary/abuse 403s that omit the reset header.
+    #[must_use]
+    pub fn reset_epoch_or_retry_after(self, now_epoch: u64) -> Option<u64> {
+        self.rate_limit_reset_epoch.or_else(|| {
+            self.retry_after_seconds
+                .map(|seconds| now_epoch.saturating_add(seconds))
+        })
+    }
 }
 
 impl GitHubRetryHint {
@@ -5735,6 +5745,11 @@ mod tests {
             remaining: Some(4200),
         };
         assert!(abuse.is_limited(403));
+        assert_eq!(abuse.reset_epoch_or_retry_after(1_000), Some(1_030));
+        assert_eq!(
+            exhausted.reset_epoch_or_retry_after(1_000),
+            Some(1_800_000_000)
+        );
 
         let throttled = GitHubRateLimitStatus::default();
         assert!(throttled.is_limited(429));
