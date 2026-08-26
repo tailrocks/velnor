@@ -103,12 +103,7 @@ impl GithubPacing {
         let salt = std::process::id() as u64;
         if rate_limited {
             self.probe_failures += 1;
-            let hold = reset_epoch
-                .and_then(|epoch| until_epoch_with_jitter(epoch, salt))
-                .unwrap_or(GITHUB_PROBE_MAX_BACKOFF)
-                .max(GITHUB_PROBE_MIN_INTERVAL);
-            self.next_probe = now + hold;
-            self.rest_hold_until = Some(now + hold);
+            self.hold_rest_until(now, reset_epoch);
             return;
         }
         if let (Some(remaining), Some(reset_epoch)) = (remaining, reset_epoch) {
@@ -155,9 +150,42 @@ impl GithubPacing {
         self.registration_retry.remove(slot_id);
     }
 
-    /// Failed JIT registration: back off per slot (5s doubling, capped), or
-    /// until the GitHub-reported reset when the failure was a rate limit.
-    /// At most one retry per slot per window — no positive feedback loop.
+    /// Fleet-wide REST hold until the GitHub reset epoch. Same duration
+    /// formula as a rate-limited probe: jittered remaining window, or the
+    /// probe backoff ceiling when GitHub omitted the reset header (429).
+    fn hold_rest_until(&mut self, now: tokio::time::Instant, reset_epoch: Option<u64>) {
+        let salt = std::process::id() as u64;
+        let hold = reset_epoch
+            .and_then(|epoch| until_epoch_with_jitter(epoch, salt))
+            .unwrap_or(GITHUB_PROBE_MAX_BACKOFF)
+            .max(GITHUB_PROBE_MIN_INTERVAL);
+        self.next_probe = now + hold;
+        self.rest_hold_until = Some(now + hold);
+    }
+
+    /// Failed JIT: per-slot backoff always. Quota 403/429 also parks every
+    /// other unregistered slot until reset. Permission 403 with remaining > 0
+    /// must not set `rest_hold_until`.
+    fn record_registration_error(
+        &mut self,
+        slot_id: &str,
+        now: tokio::time::Instant,
+        error: &anyhow::Error,
+    ) {
+        if let Some(quota) = crate::protocol::github_api_quota_status(error) {
+            self.hold_rest_until(now, quota.reset_epoch_or_retry_after(epoch_now()));
+        }
+        self.record_registration_failure(
+            slot_id,
+            now,
+            crate::protocol::github_api_retry_delay(error),
+        );
+    }
+
+    /// Failed JIT registration: back off this slot (5s doubling, capped), or
+    /// until the GitHub-reported reset when headers carry a delay. Per-slot
+    /// only — a Duration hint is not quota evidence (permission 403s also
+    /// carry `x-ratelimit-reset`).
     fn record_registration_failure(
         &mut self,
         slot_id: &str,
@@ -487,13 +515,11 @@ async fn register_runners(
 
     for (slot_id, generation, result) in outcomes {
         if let Err(error) = result {
-            // A failed registration must not retry on the next 2s tick:
-            // rate-limited requests feed on their own retries. Back off per
-            // slot (or until the GitHub reset epoch when the failure carries
-            // rate-limit headers) so at most one attempt lands per window.
-            let hint = crate::protocol::github_api_retry_delay(&error);
+            // Per-slot backoff always. Quota 403/429 also sets rest_hold_until
+            // so other unregistered slots do not keep calling generate-jitconfig
+            // against an exhausted PAT. Permission 403 with remaining>0 does not.
             let now = tokio::time::Instant::now();
-            pacing.record_registration_failure(&slot_id.0, now, hint);
+            pacing.record_registration_error(&slot_id.0, now, &error);
             eprintln!(
                 "Warning: JIT register {} failed (slot stays unregistered; backing off {}s): {error:#}",
                 slot_id.0,
@@ -995,6 +1021,72 @@ mod tests {
             Some(epoch_now() + 7200),
         );
         assert!(pacing.registration_due("proven-unregistered", now + Duration::from_secs(3700)));
+    }
+
+    #[test]
+    fn pacing_jit_quota_holds_all_registrations_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        let reset = epoch_now() + 3500;
+        let quota = anyhow::Error::from(crate::protocol::GitHubApiError {
+            status: 403,
+            action: "JIT runner config request".into(),
+            body: "API rate limit exceeded".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(reset),
+            remaining: Some(0),
+        });
+        assert!(pacing.registration_due("velnor-1", now));
+        assert!(pacing.registration_due("velnor-2", now));
+        pacing.record_registration_error("velnor-1", now, &quota);
+        assert!(
+            !pacing.registration_due("velnor-1", now + Duration::from_secs(600)),
+            "failing slot stays backed off"
+        );
+        assert!(
+            !pacing.registration_due("velnor-2", now + Duration::from_secs(600)),
+            "quota 403/429 must hold ALL unregistered slots via rest_hold_until"
+        );
+        assert!(pacing.registration_due("velnor-2", now + Duration::from_secs(3700)));
+
+        let throttled = anyhow::Error::from(crate::protocol::GitHubApiError {
+            status: 429,
+            action: "JIT runner config request".into(),
+            body: "too many requests".into(),
+            retry_after_seconds: Some(30),
+            rate_limit_reset_epoch: None,
+            remaining: None,
+        });
+        let mut pacing = GithubPacing::default();
+        pacing.record_registration_error("velnor-1", now, &throttled);
+        assert!(
+            !pacing.registration_due("velnor-2", now + Duration::from_secs(59)),
+            "429 Retry-After must fleet-hold (floor is the 60s probe interval)"
+        );
+        assert!(pacing.registration_due("velnor-2", now + Duration::from_secs(76)));
+    }
+
+    #[test]
+    fn pacing_permission_403_does_not_hold_other_slots() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        let permission = anyhow::Error::from(crate::protocol::GitHubApiError {
+            status: 403,
+            action: "JIT runner config request".into(),
+            body: "Resource not accessible by integration".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(epoch_now() + 3500),
+            remaining: Some(4200),
+        });
+        pacing.record_registration_error("velnor-1", now, &permission);
+        assert!(
+            !pacing.registration_due("velnor-1", now + Duration::from_secs(4)),
+            "failing slot still backs off"
+        );
+        assert!(
+            pacing.registration_due("velnor-2", now),
+            "permission 403 with remaining>0 must not fleet-hold"
+        );
     }
 
     /// Regression oracle for the August 2026 quota-exhaustion class: a 403

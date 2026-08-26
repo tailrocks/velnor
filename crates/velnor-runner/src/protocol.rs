@@ -43,6 +43,9 @@ pub struct GitHubApiError {
     pub body: String,
     pub retry_after_seconds: Option<u64>,
     pub rate_limit_reset_epoch: Option<u64>,
+    /// `x-ratelimit-remaining`. Required to tell quota 403 (remaining=0)
+    /// from permission 403 (remaining>0); GitHub sends reset headers on both.
+    pub remaining: Option<u64>,
 }
 
 /// GitHub DELETE `/actions/runners/{id}` while the runner still holds a job.
@@ -96,6 +99,7 @@ fn github_api_error(
         body: body.into(),
         retry_after_seconds: None,
         rate_limit_reset_epoch: None,
+        remaining: None,
     }
     .into()
 }
@@ -212,8 +216,20 @@ fn github_api_error_with_retry(
         body: body.into(),
         retry_after_seconds: hint.retry_after_seconds,
         rate_limit_reset_epoch: hint.rate_limit_reset_epoch,
+        remaining: hint.remaining,
     }
     .into()
+}
+
+impl GitHubApiError {
+    #[must_use]
+    pub fn rate_limit_status(&self) -> GitHubRateLimitStatus {
+        GitHubRateLimitStatus {
+            retry_after_seconds: self.retry_after_seconds,
+            rate_limit_reset_epoch: self.rate_limit_reset_epoch,
+            remaining: self.remaining,
+        }
+    }
 }
 
 pub fn github_api_retry_delay(error: &anyhow::Error) -> Option<std::time::Duration> {
@@ -228,10 +244,21 @@ pub fn github_api_retry_delay(error: &anyhow::Error) -> Option<std::time::Durati
             GitHubRetryHint {
                 retry_after_seconds: error.retry_after_seconds,
                 rate_limit_reset_epoch: error.rate_limit_reset_epoch,
-                remaining: None,
+                remaining: error.remaining,
             }
             .delay(now_epoch)
         })
+}
+
+/// Quota-limited 403/429 telemetry. Permission 403s with remaining > 0
+/// return `None` so they cannot hold the whole fleet.
+#[must_use]
+pub fn github_api_quota_status(error: &anyhow::Error) -> Option<GitHubRateLimitStatus> {
+    error.chain().find_map(|cause| {
+        let api = cause.downcast_ref::<GitHubApiError>()?;
+        let status = api.rate_limit_status();
+        status.is_limited(api.status).then_some(status)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5693,14 +5720,63 @@ mod tests {
     #[test]
     fn github_retry_headers_drive_reset_aware_delay() {
         let hint = parse_github_retry_headers(
-            b"HTTP/2 403\r\nRetry-After: 17\r\nX-RateLimit-Reset: 1060\r\n\r\n",
+            b"HTTP/2 403\r\nRetry-After: 17\r\nX-RateLimit-Reset: 1060\r\nX-RateLimit-Remaining: 0\r\n\r\n",
         );
         assert_eq!(hint.retry_after_seconds, Some(17));
         assert_eq!(hint.rate_limit_reset_epoch, Some(1060));
+        assert_eq!(hint.remaining, Some(0));
         assert_eq!(hint.delay(1000), Some(std::time::Duration::from_secs(60)));
 
         let error = github_api_error_with_retry("quota", 403, "exhausted", hint);
         assert!(github_api_retry_delay(&error).is_some());
+        assert_eq!(
+            github_api_quota_status(&error).and_then(|status| status.remaining),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn github_api_quota_status_requires_exhaustion_not_permission() {
+        let permission = github_api_error_with_retry(
+            "JIT runner config request",
+            403,
+            "Resource not accessible by integration",
+            GitHubRetryHint {
+                retry_after_seconds: None,
+                rate_limit_reset_epoch: Some(1_800_000_000),
+                remaining: Some(4200),
+            },
+        );
+        assert!(
+            github_api_quota_status(&permission).is_none(),
+            "permission 403 with remaining>0 must not fleet-hold"
+        );
+        assert!(
+            github_api_retry_delay(&permission).is_some(),
+            "reset headers may still delay the failing slot"
+        );
+
+        let exhausted = github_api_error_with_retry(
+            "JIT runner config request",
+            403,
+            "API rate limit exceeded",
+            GitHubRetryHint {
+                retry_after_seconds: None,
+                rate_limit_reset_epoch: Some(1_800_000_000),
+                remaining: Some(0),
+            },
+        );
+        let quota = github_api_quota_status(&exhausted).expect("quota 403 remaining=0");
+        assert_eq!(quota.remaining, Some(0));
+        assert_eq!(quota.rate_limit_reset_epoch, Some(1_800_000_000));
+
+        let throttled = github_api_error_with_retry(
+            "JIT runner config request",
+            429,
+            "too many requests",
+            GitHubRetryHint::default(),
+        );
+        assert!(github_api_quota_status(&throttled).is_some());
     }
 
     #[test]

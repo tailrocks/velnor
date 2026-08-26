@@ -9321,6 +9321,7 @@ mod tests {
             body: r#"{"errorKind":"OAuthRegistrationNotFound"}"#.into(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         let gone = anyhow::Error::new(crate::protocol::OAuthRegistrationNotFound(
             "Registration deadbeef was not found.".to_string(),
@@ -9331,6 +9332,7 @@ mod tests {
             body: "token expired".into(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         let server = anyhow::Error::from(GitHubApiError {
             status: 500,
@@ -9338,6 +9340,7 @@ mod tests {
             body: "oops".into(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         assert!(lock_renewal_refresh_is_terminal(&missing));
         assert!(lock_renewal_refresh_is_terminal(&gone));
@@ -9423,6 +9426,7 @@ mod tests {
             body: String::new(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         let forbidden_error = anyhow::Error::from(GitHubApiError {
             status: 403,
@@ -9430,6 +9434,7 @@ mod tests {
             body: "denied".into(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         let server_error = anyhow::Error::from(GitHubApiError {
             status: 500,
@@ -9437,6 +9442,7 @@ mod tests {
             body: "oops".into(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         let missing_runner = anyhow::Error::from(GitHubApiError {
             status: 404,
@@ -9444,6 +9450,7 @@ mod tests {
             body: r#"{"errorKind":"RunnerNotFound"}"#.into(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         let string_error = anyhow::anyhow!("get broker message failed: status=401, body=");
 
@@ -9463,6 +9470,7 @@ mod tests {
             body: String::new(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
         let server_error = anyhow::Error::from(GitHubApiError {
             status: 500,
@@ -9470,6 +9478,7 @@ mod tests {
             body: String::new(),
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
+            remaining: None,
         });
 
         assert!(should_refresh_completion_after_error(&auth_error, false));
