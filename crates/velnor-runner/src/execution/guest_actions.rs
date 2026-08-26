@@ -63,17 +63,42 @@ fn guest_action_script(step: &GuestStep, action: &str) -> Result<String, String>
 fn guest_checkout_script(_step: &GuestStep) -> String {
     // Values arrive via `docker exec -e VELNOR_INPUT_*` so untrusted
     // checkout inputs never interpolate into the script text.
+    // Auth parity with actions/checkout: the resolved token is delivered as
+    // VELNOR_INPUT_token; persist_credentials=false keeps it out of the
+    // workspace .git/config by passing the header per command instead.
     r#"set -eu
 dest="${VELNOR_INPUT_destination:-/__w}"
 clone_url="${VELNOR_INPUT_clone_url:?}"
 version="${VELNOR_INPUT_version:-}"
 depth="${VELNOR_INPUT_fetch_depth:-}"
+token="${VELNOR_INPUT_token:-${GITHUB_TOKEN:-}}"
+fetch_tags="${VELNOR_INPUT_fetch_tags:-0}"
+persist="${VELNOR_INPUT_persist_credentials:-1}"
+clean="${VELNOR_INPUT_clean:-1}"
 mkdir -p "$dest"
+if [ "$clean" = "1" ] && [ -d "$dest/.git" ]; then
+  git -C "$dest" clean -ffdx
+  git -C "$dest" reset --hard
+fi
 git -C "$dest" init
+header=""
+if [ -n "$token" ]; then
+  header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+fi
+# persist-credentials=true (upstream default): keep the header in the
+# workspace .git/config so later steps authenticate the same way.
+if [ -n "$header" ] && [ "$persist" = "1" ]; then
+  git -C "$dest" config http.extraheader "$header"
+fi
 git -C "$dest" remote remove origin >/dev/null 2>&1 || true
 git -C "$dest" remote add origin "$clone_url"
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-  git -C "$dest" config http.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+tags_flag=""
+if [ "$fetch_tags" = "1" ]; then
+  tags_flag="--tags"
+fi
+depth_arg=""
+if [ -n "$depth" ]; then
+  depth_arg="--depth=$depth"
 fi
 refspec="$version"
 if [ -n "${GITHUB_REF:-}" ] && [ -n "$version" ]; then
@@ -84,10 +109,11 @@ if [ -n "${GITHUB_REF:-}" ] && [ -n "$version" ]; then
       ;;
   esac
 fi
-if [ -n "$depth" ]; then
-  git -C "$dest" -c protocol.version=2 fetch --prune --no-tags --depth="$depth" origin "$refspec"
+# shellcheck disable=SC2086
+if [ -n "$header" ] && [ "$persist" != "1" ]; then
+  git -c "http.extraheader=$header" -C "$dest" -c protocol.version=2 fetch --prune --no-tags $tags_flag $depth_arg origin "$refspec"
 else
-  git -C "$dest" -c protocol.version=2 fetch --prune --no-tags origin "$refspec"
+  git -C "$dest" -c protocol.version=2 fetch --prune --no-tags $tags_flag $depth_arg origin "$refspec"
 fi
 git -C "$dest" checkout --force FETCH_HEAD
 "#

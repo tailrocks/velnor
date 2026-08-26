@@ -204,11 +204,29 @@ pub fn run_validated_job(
 /// Synthetic jailed probe: guest-local `docker version`, vsock plan, teardown
 /// by isolation ID. Host `/var/run/docker.sock` is never used.
 ///
+/// The probe identity is unique per run so concurrent preflights (parallel
+/// daemon instances, doctor during startup) never share a jailer chroot,
+/// Firecracker API socket, vsock UDS, or writable disk.
+///
 /// # Errors
 /// Preflight, guest Docker, vsock, or leftover isolation resources.
 pub fn run_synthetic_microvm_probe(world: &mut ExecutionWorld<'_>) -> Result<(), ExecutionError> {
+    let probe = format!("velnor-probe-{}", uuid::Uuid::new_v4().simple());
+    run_synthetic_microvm_probe_with(world, probe)
+}
+
+/// Probe variant with an explicit identity; production always goes through
+/// [`run_synthetic_microvm_probe`], which generates a unique id.
+///
+/// # Errors
+/// Same as [`run_synthetic_microvm_probe`].
+pub fn run_synthetic_microvm_probe_with(
+    world: &mut ExecutionWorld<'_>,
+    probe: impl Into<String>,
+) -> Result<(), ExecutionError> {
     let file = velnor_model::ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n")?;
-    let isolation = IsolationIdentity::new("velnor-probe", 1);
+    let probe = probe.into();
+    let isolation = IsolationIdentity::new(probe.clone(), 1);
     let resources = IsolationResources::for_identity(isolation.clone(), world.isolation_root);
     let step = crate::script_step::ScriptStep {
         id: "guest-docker".into(),
@@ -221,12 +239,8 @@ pub fn run_synthetic_microvm_probe(world: &mut ExecutionWorld<'_>) -> Result<(),
         continue_on_error: false,
         timeout_minutes: None,
     };
-    let mut plan = ValidatedPlan::from_script_steps(
-        "velnor-probe",
-        "velnor/job-ubuntu:26.04",
-        &[step],
-        Vec::new(),
-    );
+    let mut plan =
+        ValidatedPlan::from_script_steps(probe, "velnor/job-ubuntu:26.04", &[step], Vec::new());
     plan.command_files.clear();
     plan.buildx = false;
     plan.testcontainers = false;
