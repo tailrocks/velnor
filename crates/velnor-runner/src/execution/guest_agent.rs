@@ -4,7 +4,9 @@ use std::io::{Read, Write};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use velnor_model::{JobConclusion, VsockCodecError, VsockMessage, PROTOCOL_VERSION};
+use velnor_model::{
+    derive_execution_nonce, JobConclusion, VsockCodecError, VsockMessage, PROTOCOL_VERSION,
+};
 
 use super::artifacts::hex_sha256;
 use super::guest_runtime::{decode_guest_plan, guest_capability_error, validate_guest_plan};
@@ -12,13 +14,24 @@ use super::guest_runtime::{decode_guest_plan, guest_capability_error, validate_g
 const GUEST_DOCKER_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const GUEST_DOCKER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Guest identity announced on `GuestReady`.
+/// Immutable identity injected into the guest boot command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestSessionEnv {
     isolation_id: String,
     generation: u64,
     docker_healthy: bool,
     job_credentials_absent: bool,
+}
+
+/// Guest-agent lifecycle across host connections.
+///
+/// The snapshot boundary is valid only while this state is waiting for the
+/// next `GuestIdentity`. A restored VM therefore re-enters the handshake
+/// instead of resuming inside a prior plan-delivery loop.
+#[derive(Debug, Default)]
+pub struct GuestAgentState {
+    session_active: bool,
+    last_session_challenge: Option<String>,
 }
 
 impl GuestSessionEnv {
@@ -50,12 +63,7 @@ impl GuestSessionEnv {
         let docker_healthy = wait_for_guest_docker(
             GUEST_DOCKER_READY_TIMEOUT,
             GUEST_DOCKER_RETRY_INTERVAL,
-            || {
-                Command::new("docker")
-                    .args(["info", "--format", "{{.ServerVersion}}"])
-                    .status()
-                    .is_ok_and(|status| status.success())
-            },
+            probe_guest_docker,
             std::thread::sleep,
         );
         if !docker_healthy {
@@ -81,6 +89,24 @@ impl GuestSessionEnv {
 pub fn serve_guest_session<S, F>(
     stream: &mut S,
     env: &GuestSessionEnv,
+    run_plan: F,
+) -> Result<(), String>
+where
+    S: Read + Write,
+    F: FnMut(&[u8]) -> Result<i32, String>,
+{
+    let mut state = GuestAgentState::default();
+    serve_guest_session_with_state(stream, env, &mut state, run_plan)
+}
+
+/// Serve one host connection using persistent guest-agent lifecycle state.
+///
+/// # Errors
+/// Protocol or plan-execution failures.
+pub fn serve_guest_session_with_state<S, F>(
+    stream: &mut S,
+    env: &GuestSessionEnv,
+    state: &mut GuestAgentState,
     mut run_plan: F,
 ) -> Result<(), String>
 where
@@ -93,9 +119,15 @@ where
     if !env.docker_healthy || !env.job_credentials_absent {
         return Err("guest readiness proof is missing Docker or credential proof".into());
     }
+    if state.session_active {
+        return Err(
+            "guest protocol state is already active; session boundary transition required".into(),
+        );
+    }
     let VsockMessage::GuestIdentity {
         isolation_id: session_isolation_id,
         generation: session_generation,
+        restored: _restored,
     } = VsockMessage::read_from(&mut *stream)
         .map_err(|error| format!("read session identity: {error}"))?
     else {
@@ -106,106 +138,133 @@ where
         ));
     };
     require_session_identity(&session_isolation_id, session_generation)?;
+    // The command-line identity is immutable for the VM lifetime. This check
+    // applies before GuestReady on both cold and restored sessions.
+    require_identity(
+        "guest.identity.isolation_id",
+        &session_isolation_id,
+        &env.isolation_id,
+    )?;
+    require_session_generation(session_generation, env.generation)?;
+    let session_challenge = new_session_challenge(state.last_session_challenge.as_deref());
+    state.session_active = true;
+    state.last_session_challenge = Some(session_challenge.clone());
     VsockMessage::GuestReady {
         isolation_id: session_isolation_id.clone(),
         generation: session_generation,
         docker_healthy: env.docker_healthy,
         job_credentials_absent: env.job_credentials_absent,
+        session_challenge: session_challenge.clone(),
     }
     .write_to(stream)
     .map_err(|error| format!("write ready: {error}"))?;
-    let mut delivered_state: Option<(String, String)> = None;
-    loop {
-        match VsockMessage::read_from(&mut *stream) {
-            Ok(VsockMessage::Cancel) => break,
-            Ok(VsockMessage::TeardownAck { .. }) => {
+    match VsockMessage::read_from(&mut *stream) {
+        Ok(VsockMessage::Cancel) => {
+            state.session_active = false;
+            Ok(())
+        }
+        Ok(VsockMessage::TeardownAck { .. }) => Err(guest_capability_error(
+            "guest.teardown_ack",
+            "host-to-guest",
+            "guest-to-host acknowledgement",
+        )),
+        Ok(VsockMessage::PrepareSnapshot) => {
+            VsockMessage::SnapshotReady
+                .write_to(stream)
+                .map_err(|error| format!("write snapshot readiness: {error}"))?;
+            state.session_active = false;
+            Ok(())
+        }
+        Ok(VsockMessage::DeliverPlan {
+            job_id,
+            isolation_id,
+            generation,
+            execution_nonce,
+            plan_sha256,
+            plan_bytes,
+        }) => {
+            if execution_nonce.is_empty() {
                 return Err(guest_capability_error(
-                    "guest.teardown_ack",
-                    "host-to-guest",
-                    "guest-to-host acknowledgement",
+                    "guest.execution_nonce",
+                    "<empty>",
+                    "a fresh non-empty nonce per execution",
                 ));
             }
-            Ok(VsockMessage::DeliverPlan {
+            let expected_execution_nonce = derive_execution_nonce(
+                &session_challenge,
+                &job_id,
+                &isolation_id,
+                generation,
+                &plan_sha256,
+            );
+            if execution_nonce != expected_execution_nonce {
+                return Err(guest_capability_error(
+                        "guest.execution_nonce",
+                        &execution_nonce,
+                        &format!("the nonce derived from the current session challenge and plan ({expected_execution_nonce})"),
+                    ));
+            }
+            let actual_plan_sha256 = hex_sha256(&plan_bytes);
+            if plan_sha256 != actual_plan_sha256 {
+                return Err(guest_capability_error(
+                    "guest.plan_sha256",
+                    &plan_sha256,
+                    &format!("the SHA-256 digest of plan_bytes ({actual_plan_sha256})"),
+                ));
+            }
+            require_identity(
+                "guest.plan.isolation_id",
+                &isolation_id,
+                &session_isolation_id,
+            )?;
+            require_generation(generation, session_generation)?;
+            let plan = decode_guest_plan(&plan_bytes)?;
+            require_identity("guest.plan.job_id", &plan.job_id, &job_id)?;
+            require_identity("guest.plan.isolation_id", &plan.isolation_id, &isolation_id)?;
+            require_generation(plan.generation, generation)?;
+            validate_guest_plan(&plan)?;
+            let (conclusion, code) = if let Some(planned) = plan.planned_conclusion() {
+                planned
+            } else {
+                let code = run_plan(&plan_bytes)?;
+                (
+                    if code == 0 {
+                        JobConclusion::Success
+                    } else {
+                        JobConclusion::Failure
+                    },
+                    code,
+                )
+            };
+            VsockMessage::JobCompleted {
+                conclusion,
+                exit_code: code,
+            }
+            .write_to(stream)
+            .map_err(|error| format!("write conclusion: {error}"))?;
+            VsockMessage::TeardownAck {
                 job_id,
                 isolation_id,
                 generation,
                 execution_nonce,
                 plan_sha256,
-                plan_bytes,
-            }) => {
-                if delivered_state.is_some() {
-                    return Err(guest_capability_error(
-                        "guest.execution_nonce",
-                        &execution_nonce,
-                        "one DeliverPlan per guest session",
-                    ));
-                }
-                if execution_nonce.is_empty() {
-                    return Err(guest_capability_error(
-                        "guest.execution_nonce",
-                        "<empty>",
-                        "a fresh non-empty nonce per execution",
-                    ));
-                }
-                let actual_plan_sha256 = hex_sha256(&plan_bytes);
-                if plan_sha256 != actual_plan_sha256 {
-                    return Err(guest_capability_error(
-                        "guest.plan_sha256",
-                        &plan_sha256,
-                        &format!("the SHA-256 digest of plan_bytes ({actual_plan_sha256})"),
-                    ));
-                }
-                require_identity(
-                    "guest.plan.isolation_id",
-                    &isolation_id,
-                    &session_isolation_id,
-                )?;
-                require_generation(generation, session_generation)?;
-                let plan = decode_guest_plan(&plan_bytes)?;
-                require_identity("guest.plan.job_id", &plan.job_id, &job_id)?;
-                require_identity("guest.plan.isolation_id", &plan.isolation_id, &isolation_id)?;
-                require_generation(plan.generation, generation)?;
-                validate_guest_plan(&plan)?;
-                delivered_state = Some((execution_nonce.clone(), plan_sha256.clone()));
-                let (ack_nonce, ack_plan_sha256) = delivered_state
-                    .as_ref()
-                    .expect("delivered state is set before acknowledgement");
-                let (conclusion, code) = if let Some(planned) = plan.planned_conclusion() {
-                    planned
-                } else {
-                    let code = run_plan(&plan_bytes)?;
-                    (
-                        if code == 0 {
-                            JobConclusion::Success
-                        } else {
-                            JobConclusion::Failure
-                        },
-                        code,
-                    )
-                };
-                VsockMessage::JobCompleted {
-                    conclusion,
-                    exit_code: code,
-                }
-                .write_to(stream)
-                .map_err(|error| format!("write conclusion: {error}"))?;
-                VsockMessage::TeardownAck {
-                    job_id,
-                    isolation_id,
-                    generation,
-                    execution_nonce: ack_nonce.clone(),
-                    plan_sha256: ack_plan_sha256.clone(),
-                }
-                .write_to(stream)
-                .map_err(|error| format!("write ack: {error}"))?;
-                return Ok(());
             }
-            Ok(_) => {}
-            Err(VsockCodecError::Io { .. }) => break,
-            Err(error) => return Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
+            .write_to(stream)
+            .map_err(|error| format!("write ack: {error}"))?;
+            state.session_active = false;
+            Ok(())
         }
+        Ok(message) => Err(guest_capability_error(
+            "guest.protocol",
+            &format!("unexpected message {message:?}"),
+            "Cancel, PrepareSnapshot, or exactly one DeliverPlan",
+        )),
+        Err(VsockCodecError::Io { .. }) => {
+            state.session_active = false;
+            Ok(())
+        }
+        Err(error) => Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
     }
-    Ok(())
 }
 
 fn wait_for_guest_docker<F, S>(
@@ -215,12 +274,16 @@ fn wait_for_guest_docker<F, S>(
     mut sleep: S,
 ) -> bool
 where
-    F: FnMut() -> bool,
+    F: FnMut(Duration) -> bool,
     S: FnMut(Duration),
 {
     let deadline = Instant::now() + timeout;
     loop {
-        if probe() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        if probe(remaining) {
             return true;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -228,6 +291,47 @@ where
             return false;
         }
         sleep(retry_interval.min(remaining));
+    }
+}
+
+fn probe_guest_docker(timeout: Duration) -> bool {
+    let mut command = Command::new("docker");
+    command.args(["info", "--format", "{{.ServerVersion}}"]);
+    run_command_with_deadline(&mut command, timeout)
+}
+
+fn run_command_with_deadline(command: &mut Command, timeout: Duration) -> bool {
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10).min(remaining));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn new_session_challenge(previous: Option<&str>) -> String {
+    loop {
+        let challenge = uuid::Uuid::new_v4().to_string();
+        if previous != Some(challenge.as_str()) {
+            return challenge;
+        }
     }
 }
 
@@ -282,6 +386,18 @@ fn require_generation(received: u64, expected: u64) -> Result<(), String> {
             "guest.plan.generation",
             &received.to_string(),
             "the expected non-zero session generation",
+        ))
+    }
+}
+
+fn require_session_generation(received: u64, expected: u64) -> Result<(), String> {
+    if received == expected && received != 0 {
+        Ok(())
+    } else {
+        Err(guest_capability_error(
+            "guest.identity.generation",
+            &received.to_string(),
+            "the expected non-zero boot/session generation",
         ))
     }
 }
@@ -368,7 +484,7 @@ mod tests {
         let ready = wait_for_guest_docker(
             Duration::from_secs(1),
             Duration::ZERO,
-            || {
+            |_| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
                 attempt >= 3
@@ -377,6 +493,208 @@ mod tests {
         );
         assert!(ready);
         assert_eq!(attempts.get(), 3);
+    }
+
+    #[test]
+    fn guest_docker_probe_kills_hung_process_at_deadline() {
+        let started = Instant::now();
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        assert!(!run_command_with_deadline(
+            &mut command,
+            Duration::from_millis(50)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cold_boot_identity_mismatch_fails_before_guest_ready() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let env = GuestSessionEnv {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            docker_healthy: true,
+            job_credentials_absent: true,
+        };
+        let thread = std::thread::spawn(move || serve_guest_session(&mut guest, &env, |_| Ok(0)));
+        VsockMessage::GuestIdentity {
+            isolation_id: "wrong-identity".into(),
+            generation: 7,
+            restored: false,
+        }
+        .write_to(&mut host)
+        .unwrap();
+        let error = thread.join().unwrap().unwrap_err();
+        assert!(error.contains("guest.identity.isolation_id"), "{error}");
+        assert!(error.contains("expected session identity"), "{error}");
+    }
+
+    #[test]
+    fn restore_closes_pre_snapshot_session_and_rebinds_fresh_session() {
+        let env = GuestSessionEnv {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            docker_healthy: true,
+            job_credentials_absent: true,
+        };
+        let (mut first_host, mut first_guest) = UnixStream::pair().unwrap();
+        let (mut restored_host, mut restored_guest) = UnixStream::pair().unwrap();
+        let first_env = env.clone();
+        let restored_env = env.clone();
+        let first = std::thread::spawn(move || {
+            let mut state = GuestAgentState::default();
+            serve_guest_session_with_state(&mut first_guest, &first_env, &mut state, |_| Ok(0))?;
+            serve_guest_session_with_state(&mut restored_guest, &restored_env, &mut state, |_| {
+                Ok(0)
+            })
+        });
+        VsockMessage::GuestIdentity {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            restored: false,
+        }
+        .write_to(&mut first_host)
+        .unwrap();
+        let first_challenge = match VsockMessage::read_from(&mut first_host).unwrap() {
+            VsockMessage::GuestReady {
+                isolation_id,
+                generation,
+                session_challenge,
+                ..
+            } => {
+                assert_eq!(isolation_id, "boot-identity");
+                assert_eq!(generation, 7);
+                session_challenge
+            }
+            other => panic!("expected first GuestReady, got {other:?}"),
+        };
+        VsockMessage::PrepareSnapshot
+            .write_to(&mut first_host)
+            .unwrap();
+        assert_eq!(
+            VsockMessage::read_from(&mut first_host).unwrap(),
+            VsockMessage::SnapshotReady
+        );
+        VsockMessage::GuestIdentity {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            restored: true,
+        }
+        .write_to(&mut restored_host)
+        .unwrap();
+        match VsockMessage::read_from(&mut restored_host).unwrap() {
+            VsockMessage::GuestReady {
+                isolation_id,
+                generation,
+                session_challenge,
+                ..
+            } => {
+                assert_eq!(isolation_id, "boot-identity");
+                assert_eq!(generation, 7);
+                assert_ne!(session_challenge, first_challenge);
+            }
+            other => panic!("expected restored GuestReady, got {other:?}"),
+        }
+        VsockMessage::Cancel.write_to(&mut restored_host).unwrap();
+        first.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn restored_session_rejects_nonce_from_previous_session() {
+        let env = GuestSessionEnv {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            docker_healthy: true,
+            job_credentials_absent: true,
+        };
+        let plan = GuestJobPlan {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            job_id: "boot-identity".into(),
+            image: "velnor/job-ubuntu:26.04".into(),
+            services: Vec::new(),
+            steps: Vec::new(),
+            timeout_ms: 1000,
+            cancel_requested: false,
+            fail: false,
+            cache_digest: None,
+            command_files: Vec::new(),
+            outputs: Vec::new(),
+            env: Vec::new(),
+            workspace: "/__w".into(),
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
+        };
+        let bytes = plan.encode().unwrap();
+        let plan_sha256 = hex_sha256(&bytes);
+        let (mut first_host, mut first_guest) = UnixStream::pair().unwrap();
+        let (mut restored_host, mut restored_guest) = UnixStream::pair().unwrap();
+        let first_env = env.clone();
+        let restored_env = env;
+        let thread = std::thread::spawn(move || {
+            let mut state = GuestAgentState::default();
+            serve_guest_session_with_state(&mut first_guest, &first_env, &mut state, |_| Ok(0))?;
+            serve_guest_session_with_state(&mut restored_guest, &restored_env, &mut state, |_| {
+                Ok(0)
+            })
+        });
+        VsockMessage::GuestIdentity {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            restored: false,
+        }
+        .write_to(&mut first_host)
+        .unwrap();
+        let first_challenge = match VsockMessage::read_from(&mut first_host).unwrap() {
+            VsockMessage::GuestReady {
+                session_challenge, ..
+            } => session_challenge,
+            other => panic!("expected first GuestReady, got {other:?}"),
+        };
+        VsockMessage::PrepareSnapshot
+            .write_to(&mut first_host)
+            .unwrap();
+        assert_eq!(
+            VsockMessage::read_from(&mut first_host).unwrap(),
+            VsockMessage::SnapshotReady
+        );
+        VsockMessage::GuestIdentity {
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            restored: true,
+        }
+        .write_to(&mut restored_host)
+        .unwrap();
+        let second_challenge = match VsockMessage::read_from(&mut restored_host).unwrap() {
+            VsockMessage::GuestReady {
+                session_challenge, ..
+            } => session_challenge,
+            other => panic!("expected restored GuestReady, got {other:?}"),
+        };
+        assert_ne!(first_challenge, second_challenge);
+        VsockMessage::DeliverPlan {
+            job_id: "boot-identity".into(),
+            isolation_id: "boot-identity".into(),
+            generation: 7,
+            execution_nonce: derive_execution_nonce(
+                &first_challenge,
+                "boot-identity",
+                "boot-identity",
+                7,
+                &plan_sha256,
+            ),
+            plan_sha256,
+            plan_bytes: bytes,
+        }
+        .write_to(&mut restored_host)
+        .unwrap();
+        let error = thread.join().unwrap().unwrap_err();
+        assert!(error.contains("guest.execution_nonce"), "{error}");
+        assert!(error.contains("current session challenge"), "{error}");
     }
 
     #[test]
@@ -422,25 +740,36 @@ mod tests {
         VsockMessage::GuestIdentity {
             isolation_id: "job-1".into(),
             generation: 7,
+            restored: false,
         }
         .write_to(&mut host)
         .unwrap();
         let ready = VsockMessage::read_from(&mut host).unwrap();
-        assert_eq!(
-            ready,
+        let execution_nonce = match ready {
             VsockMessage::GuestReady {
-                isolation_id: "job-1".into(),
-                generation: 7,
-                docker_healthy: true,
-                job_credentials_absent: true,
+                isolation_id,
+                generation,
+                docker_healthy,
+                job_credentials_absent,
+                session_challenge,
+            } => {
+                assert_eq!(isolation_id, "job-1");
+                assert_eq!(generation, 7);
+                assert!(docker_healthy);
+                assert!(job_credentials_absent);
+                session_challenge
             }
-        );
+            other => panic!("expected GuestReady, got {other:?}"),
+        };
+        let plan_sha256 = hex_sha256(&bytes);
+        let execution_nonce =
+            derive_execution_nonce(&execution_nonce, "job-1", "job-1", 7, &plan_sha256);
         VsockMessage::DeliverPlan {
             job_id: "job-1".into(),
             isolation_id: "job-1".into(),
             generation: 7,
-            execution_nonce: "nonce-1".into(),
-            plan_sha256: hex_sha256(&bytes),
+            execution_nonce,
+            plan_sha256,
             plan_bytes: bytes,
         }
         .write_to(&mut host)
@@ -479,19 +808,30 @@ mod tests {
         VsockMessage::GuestIdentity {
             isolation_id: "job-malformed".into(),
             generation: 1,
+            restored: false,
         }
         .write_to(&mut host)
         .unwrap();
-        assert!(matches!(
-            VsockMessage::read_from(&mut host).unwrap(),
-            VsockMessage::GuestReady { .. }
-        ));
+        let session_challenge = match VsockMessage::read_from(&mut host).unwrap() {
+            VsockMessage::GuestReady {
+                session_challenge, ..
+            } => session_challenge,
+            other => panic!("expected GuestReady, got {other:?}"),
+        };
+        let plan_sha256 = hex_sha256(b"not a GuestJobPlan");
+        let execution_nonce = derive_execution_nonce(
+            &session_challenge,
+            "job-malformed",
+            "job-malformed",
+            1,
+            &plan_sha256,
+        );
         VsockMessage::DeliverPlan {
             job_id: "job-malformed".into(),
             isolation_id: "job-malformed".into(),
             generation: 1,
-            execution_nonce: "nonce-malformed".into(),
-            plan_sha256: hex_sha256(b"not a GuestJobPlan"),
+            execution_nonce,
+            plan_sha256,
             plan_bytes: b"not a GuestJobPlan".to_vec(),
         }
         .write_to(&mut host)
@@ -523,18 +863,23 @@ mod tests {
         VsockMessage::GuestIdentity {
             isolation_id: "job-expected".into(),
             generation: 4,
+            restored: false,
         }
         .write_to(&mut host)
         .unwrap();
-        assert!(matches!(
-            VsockMessage::read_from(&mut host).unwrap(),
+        let session_challenge = match VsockMessage::read_from(&mut host).unwrap() {
             VsockMessage::GuestReady {
                 isolation_id,
                 generation: 4,
                 docker_healthy: true,
-                job_credentials_absent: true
-            } if isolation_id == "job-expected"
-        ));
+                job_credentials_absent: true,
+                session_challenge,
+            } => {
+                assert_eq!(isolation_id, "job-expected");
+                session_challenge
+            }
+            other => panic!("expected GuestReady, got {other:?}"),
+        };
         let mut plan = GuestJobPlan {
             isolation_id: "job-expected".into(),
             generation: 4,
@@ -558,13 +903,22 @@ mod tests {
             testcontainers: false,
         };
         plan.job_id = "job-replayed".into();
+        let plan_bytes = plan.encode().unwrap();
+        let plan_sha256 = hex_sha256(&plan_bytes);
+        let execution_nonce = derive_execution_nonce(
+            &session_challenge,
+            "job-expected",
+            "job-expected",
+            4,
+            &plan_sha256,
+        );
         VsockMessage::DeliverPlan {
             job_id: "job-expected".into(),
             isolation_id: "job-expected".into(),
             generation: 4,
-            execution_nonce: "nonce-replayed".into(),
-            plan_sha256: hex_sha256(&plan.encode().unwrap()),
-            plan_bytes: plan.encode().unwrap(),
+            execution_nonce,
+            plan_sha256,
+            plan_bytes,
         }
         .write_to(&mut host)
         .unwrap();

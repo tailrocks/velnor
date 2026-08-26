@@ -10,13 +10,42 @@ use sha2::{Digest, Sha256};
 use crate::job_summary::JobConclusion;
 
 /// Protocol version. Mismatch fails closed.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
 /// stdout stream tag in [`VsockMessage::Stdio`].
 pub const STDOUT_STREAM: u8 = 1;
 /// stderr stream tag in [`VsockMessage::Stdio`].
 pub const STDERR_STREAM: u8 = 2;
+
+/// Derive the one-use plan nonce from the guest-issued session challenge.
+///
+/// Length-prefixing every input makes the binding unambiguous. Both sides
+/// derive this value; the host never invents a nonce the guest did not bind to
+/// its current session.
+#[must_use]
+pub fn derive_execution_nonce(
+    session_challenge: &str,
+    job_id: &str,
+    isolation_id: &str,
+    generation: u64,
+    plan_sha256: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"velnor-vsock-execution-nonce-v1\0");
+    for value in [session_challenge, job_id, isolation_id, plan_sha256] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(generation.to_be_bytes());
+    let digest = digest.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
 
 const HEADER_LEN: usize = 8;
 const CHECKSUM_LEN: usize = 32;
@@ -27,12 +56,14 @@ pub enum VsockMessage {
     GuestIdentity {
         isolation_id: String,
         generation: u64,
+        restored: bool,
     },
     GuestReady {
         isolation_id: String,
         generation: u64,
         docker_healthy: bool,
         job_credentials_absent: bool,
+        session_challenge: String,
     },
     DeliverPlan {
         job_id: String,
@@ -65,6 +96,8 @@ pub enum VsockMessage {
         text: String,
     },
     Cancel,
+    PrepareSnapshot,
+    SnapshotReady,
     Telemetry {
         cpu_millis: u64,
         memory_bytes: u64,
@@ -104,6 +137,8 @@ impl VsockMessage {
             Self::ResultExport { .. } => 11,
             Self::TeardownAck { .. } => 12,
             Self::JobCompleted { .. } => 13,
+            Self::PrepareSnapshot => 15,
+            Self::SnapshotReady => 16,
         }
     }
 
@@ -221,20 +256,24 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
         VsockMessage::GuestIdentity {
             isolation_id,
             generation,
+            restored,
         } => {
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
+            payload.push(u8::from(*restored));
         }
         VsockMessage::GuestReady {
             isolation_id,
             generation,
             docker_healthy,
             job_credentials_absent,
+            session_challenge,
         } => {
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
             payload.push(u8::from(*docker_healthy));
             payload.push(u8::from(*job_credentials_absent));
+            write_string(&mut payload, session_challenge)?;
         }
         VsockMessage::DeliverPlan {
             job_id,
@@ -307,6 +346,7 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             write_string(&mut payload, conclusion.as_str())?;
             payload.extend_from_slice(&exit_code.to_be_bytes());
         }
+        VsockMessage::PrepareSnapshot | VsockMessage::SnapshotReady => {}
     }
     Ok(payload)
 }
@@ -317,9 +357,11 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         14 => {
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
+            let restored = read_u8(&mut cur)? != 0;
             VsockMessage::GuestIdentity {
                 isolation_id,
                 generation,
+                restored,
             }
         }
         1 => {
@@ -327,11 +369,13 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
             let generation = read_u64(&mut cur)?;
             let docker_healthy = read_u8(&mut cur)? != 0;
             let job_credentials_absent = read_u8(&mut cur)? != 0;
+            let session_challenge = read_string(&mut cur)?;
             VsockMessage::GuestReady {
                 isolation_id,
                 generation,
                 docker_healthy,
                 job_credentials_absent,
+                session_challenge,
             }
         }
         2 => {
@@ -419,6 +463,8 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
                 exit_code,
             }
         }
+        15 => VsockMessage::PrepareSnapshot,
+        16 => VsockMessage::SnapshotReady,
         other => return Err(VsockCodecError::UnknownKind { kind: other }),
     };
     if !cur.is_empty() {
@@ -554,11 +600,23 @@ mod tests {
 
     #[test]
     fn round_trip_guest_ready_and_cancel() {
+        let identity = VsockMessage::GuestIdentity {
+            isolation_id: "job-1".into(),
+            generation: 7,
+            restored: true,
+        };
+        let bytes = identity.encode().unwrap();
+        assert_eq!(VsockMessage::decode(&bytes).unwrap(), identity);
+        assert_eq!(
+            VsockMessage::decode(&VsockMessage::PrepareSnapshot.encode().unwrap()).unwrap(),
+            VsockMessage::PrepareSnapshot
+        );
         let ready = VsockMessage::GuestReady {
             isolation_id: "job-1".into(),
             generation: 7,
             docker_healthy: true,
             job_credentials_absent: true,
+            session_challenge: "00000000-0000-4000-8000-000000000001".into(),
         };
         let bytes = ready.encode().unwrap();
         assert_eq!(VsockMessage::decode(&bytes).unwrap(), ready);
@@ -604,6 +662,7 @@ mod tests {
                 generation: 1,
                 docker_healthy: true,
                 job_credentials_absent: true,
+                session_challenge: "00000000-0000-4000-8000-000000000001".into(),
             }
             .encode()
             .unwrap(),
@@ -620,6 +679,7 @@ mod tests {
                 generation: 1,
                 docker_healthy: true,
                 job_credentials_absent: true,
+                session_challenge: "00000000-0000-4000-8000-000000000001".into(),
             }
         );
     }

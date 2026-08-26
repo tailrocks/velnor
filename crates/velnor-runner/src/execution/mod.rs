@@ -40,7 +40,9 @@ pub use guest::{
 };
 #[cfg(target_os = "linux")]
 pub use guest_agent::{accept_af_vsock, bind_af_vsock};
-pub use guest_agent::{serve_guest_session, GuestSessionEnv};
+pub use guest_agent::{
+    serve_guest_session, serve_guest_session_with_state, GuestAgentState, GuestSessionEnv,
+};
 pub use guest_image::{
     build_guest_image, build_guest_image_cli, merged_kernel_fragment, stage_release_dir,
     verify_kernel_tarball, GuestArch, GuestImageRequest, BOOT_KCONFIG,
@@ -88,6 +90,9 @@ pub trait VsockChannel {
     /// Bound how long a single idle `recv` may block. No-op for channels
     /// without an underlying socket timeout (test loopbacks).
     fn set_idle_timeout(&mut self, _timeout: std::time::Duration) {}
+    /// Drop a completed control connection so a resumed guest can accept a
+    /// fresh session after snapshot preparation.
+    fn reset(&mut self) {}
 }
 
 use std::path::{Path, PathBuf};

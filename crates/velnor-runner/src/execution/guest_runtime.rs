@@ -6,7 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use velnor_model::{GuestJobPlan, JobConclusion, VsockMessage};
+use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMessage};
 
 use super::artifacts::hex_sha256;
 use super::backend::ExecutionEvent;
@@ -59,6 +59,10 @@ impl UnixVsockChannel {
 }
 
 impl VsockChannel for UnixVsockChannel {
+    fn reset(&mut self) {
+        self.stream = None;
+    }
+
     fn set_idle_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
         if let Some(stream) = self.stream.as_mut() {
@@ -86,6 +90,8 @@ pub struct LoopbackVsock {
     pub sent: Vec<VsockMessage>,
     pending: Vec<VsockMessage>,
     ready: Option<VsockMessage>,
+    rebootstrap_ready: Option<VsockMessage>,
+    guest_challenge: Option<String>,
     teardown_ack: Option<(String, String, u64)>,
     teardown_proof: Option<(String, String)>,
 }
@@ -94,13 +100,24 @@ impl LoopbackVsock {
     /// Construct a test channel with a proved guest readiness frame.
     #[must_use]
     pub fn with_ready(isolation_id: impl Into<String>, generation: u64) -> Self {
+        let isolation_id = isolation_id.into();
+        let initial_nonce = "00000000-0000-4000-8000-000000000001".to_string();
         Self {
             ready: Some(VsockMessage::GuestReady {
-                isolation_id: isolation_id.into(),
+                isolation_id: isolation_id.clone(),
                 generation,
                 docker_healthy: true,
                 job_credentials_absent: true,
+                session_challenge: initial_nonce.clone(),
             }),
+            rebootstrap_ready: Some(VsockMessage::GuestReady {
+                isolation_id,
+                generation,
+                docker_healthy: true,
+                job_credentials_absent: true,
+                session_challenge: "00000000-0000-4000-8000-000000000002".into(),
+            }),
+            guest_challenge: Some(initial_nonce),
             ..Self::default()
         }
     }
@@ -131,6 +148,18 @@ impl LoopbackVsock {
 
 impl VsockChannel for LoopbackVsock {
     fn send(&mut self, message: VsockMessage) -> Result<(), String> {
+        if matches!(&message, VsockMessage::PrepareSnapshot) {
+            self.pending.push(VsockMessage::SnapshotReady);
+            if let Some(ready) = self.rebootstrap_ready.take() {
+                if let VsockMessage::GuestReady {
+                    session_challenge, ..
+                } = &ready
+                {
+                    self.guest_challenge = Some(session_challenge.clone());
+                }
+                self.pending.push(ready);
+            }
+        }
         if let VsockMessage::DeliverPlan {
             job_id,
             isolation_id,
@@ -147,6 +176,21 @@ impl VsockChannel for LoopbackVsock {
             if *plan_sha256 != actual_plan_sha256 {
                 return Err(format!(
                     "loopback rejected plan digest {plan_sha256}; expected {actual_plan_sha256}"
+                ));
+            }
+            let session_challenge = self.guest_challenge.as_deref().ok_or_else(|| {
+                "loopback rejected DeliverPlan without a guest readiness challenge".to_string()
+            })?;
+            let expected_nonce = derive_execution_nonce(
+                session_challenge,
+                job_id,
+                isolation_id,
+                *generation,
+                plan_sha256,
+            );
+            if *execution_nonce != expected_nonce {
+                return Err(format!(
+                    "loopback rejected execution nonce {execution_nonce}; expected challenge-bound nonce {expected_nonce}"
                 ));
             }
             let plan = decode_guest_plan(plan_bytes)?;
@@ -809,16 +853,29 @@ mod tests {
 
     #[test]
     fn loopback_vsock_acks_deliver_plan() {
-        let mut vsock = LoopbackVsock::default();
+        let mut vsock = LoopbackVsock::with_ready("job-1", 1);
+        assert!(matches!(
+            vsock.recv().unwrap(),
+            VsockMessage::GuestReady { .. }
+        ));
         let plan = sample_plan();
+        let plan_bytes = plan.encode().unwrap();
+        let plan_sha256 = hex_sha256(&plan_bytes);
+        let execution_nonce = derive_execution_nonce(
+            "00000000-0000-4000-8000-000000000001",
+            &plan.job_id,
+            &plan.isolation_id,
+            plan.generation,
+            &plan_sha256,
+        );
         vsock
             .send(VsockMessage::DeliverPlan {
                 job_id: plan.job_id.clone(),
                 isolation_id: plan.isolation_id.clone(),
                 generation: plan.generation,
-                execution_nonce: "nonce-1".into(),
-                plan_sha256: hex_sha256(&plan.encode().unwrap()),
-                plan_bytes: plan.encode().unwrap(),
+                execution_nonce,
+                plan_sha256: plan_sha256.clone(),
+                plan_bytes,
             })
             .unwrap();
         assert!(matches!(
@@ -837,7 +894,13 @@ mod tests {
                 execution_nonce,
                 plan_sha256,
             } if job_id == "job-1" && isolation_id == "job-1"
-                && execution_nonce == "nonce-1"
+                && execution_nonce == derive_execution_nonce(
+                    "00000000-0000-4000-8000-000000000001",
+                    "job-1",
+                    "job-1",
+                    1,
+                    &hex_sha256(&plan.encode().unwrap()),
+                )
                 && plan_sha256 == hex_sha256(&plan.encode().unwrap())
         ));
         assert!(matches!(vsock.sent[0], VsockMessage::DeliverPlan { .. }));

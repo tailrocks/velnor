@@ -400,7 +400,7 @@ fn snapshot_checksum_mismatch_cold_boots() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
-    let mut vsock = LoopbackVsock::with_ready("job-gold", 1);
+    let mut vsock = LoopbackVsock::with_ready("job-snap", 1);
     {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         world.vsock = Some(&mut vsock);
@@ -477,7 +477,7 @@ fn matching_snapshot_loads_only_after_jailer() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
-    let mut vsock = LoopbackVsock::with_ready("job-gold", 1);
+    let mut vsock = LoopbackVsock::with_ready("job-restore", 1);
     {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         world.allow_inline_guest_plan = false;
@@ -488,6 +488,7 @@ fn matching_snapshot_loads_only_after_jailer() {
         session
             .prepare(&microvm_plan("job-restore"), &mut world)
             .unwrap();
+        session.start(&mut world).unwrap();
     }
     let jailer_at = runner
         .calls
@@ -505,6 +506,10 @@ fn matching_snapshot_loads_only_after_jailer() {
         .calls
         .iter()
         .any(|call| call.starts_with("put_boot_source")));
+    assert!(vsock.sent.iter().any(|message| matches!(
+        message,
+        velnor_model::VsockMessage::GuestIdentity { restored: true, .. }
+    )));
     let _ = jailer_at;
 }
 
@@ -556,6 +561,30 @@ fn golden_snapshot_create_pauses_then_writes_sidecar() {
         "{:?}",
         api.calls
     );
+    let instance_start = api
+        .calls
+        .iter()
+        .position(|call| call == "instance_start")
+        .expect("cold VM must start before readiness");
+    let pause = api
+        .calls
+        .iter()
+        .position(|call| call == "pause_vm")
+        .expect("snapshot must pause after readiness");
+    assert!(instance_start < pause, "{:?}", api.calls);
+    assert!(vsock
+        .sent
+        .iter()
+        .any(|message| matches!(message, velnor_model::VsockMessage::PrepareSnapshot)));
+    let identities: Vec<bool> = vsock
+        .sent
+        .iter()
+        .filter_map(|message| match message {
+            velnor_model::VsockMessage::GuestIdentity { restored, .. } => Some(*restored),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(identities, vec![false, false]);
     let sidecar = fs
         .read(&artifacts.join("snapshot.identity.json"))
         .expect("golden sidecar");
