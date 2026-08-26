@@ -4,7 +4,7 @@
 //! are spawned without kill-on-drop, and packaged units must not use
 //! `PartOf=controller`. Every journal side effect is executed here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -247,7 +247,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
-            drain_children(&mut slots, &mut jobs).await?;
+            drain_children(&mut journal, &mut slots, &mut jobs).await?;
             return Ok(());
         }
         let cycle = reconcile_once(
@@ -281,11 +281,36 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
 /// lost job. The daemon's drain flag lives in the supervisor process, so this
 /// explicit handoff is the process boundary that makes graceful drain real.
 async fn drain_children(
+    journal: &Journal,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
     for child in slots.values() {
         request_child_shutdown(child)?;
+    }
+
+    // Ready-slot broker waiters and real job workers share the `jobs` map.
+    // Waiters have no durable job yet and must exit during a daemon drain;
+    // active workers must survive so an upgrade cannot lose in-flight work.
+    let active_slots: HashSet<String> = journal
+        .materialized_state()?
+        .jobs
+        .into_iter()
+        .filter(|job| {
+            matches!(
+                job.phase,
+                ActorPhase::Assigned
+                    | ActorPhase::Starting
+                    | ActorPhase::Running
+                    | ActorPhase::Completing
+            )
+        })
+        .map(|job| job.slot_id.0)
+        .collect();
+    for (slot_id, child) in jobs.iter() {
+        if !active_slots.contains(slot_id) {
+            request_child_shutdown(child)?;
+        }
     }
 
     loop {
