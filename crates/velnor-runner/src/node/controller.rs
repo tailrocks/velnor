@@ -41,6 +41,8 @@ const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 /// slot/process recovery and registration reconciliation.
 const FULL_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_JOURNAL_INTERVAL: Duration = Duration::from_secs(30);
+const HIGH_CPU_ALERT_PERCENT: f64 = 5.0;
+const ALERT_SUSTAINED_CYCLES: u32 = 3;
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -267,14 +269,25 @@ struct ControllerMetrics {
     broker: crate::runner::BrokerMetricsSnapshot,
     jit: JitMetrics,
     cpu: CpuAttribution,
+    alerts: Vec<ControllerAlert>,
     #[serde(skip)]
     durations_ms: VecDeque<u64>,
     #[serde(skip)]
     last_event_total: u64,
     #[serde(skip)]
     last_durable_event_total: u64,
+    high_cpu_streak: u32,
+    repeated_noop_streak: u32,
+    churn_streak: u32,
     #[serde(skip)]
     last_metrics_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ControllerAlert {
+    code: &'static str,
+    severity: &'static str,
+    message: &'static str,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -365,6 +378,9 @@ impl ControllerMetrics {
         jit: &JitMetrics,
         cpu: &CpuAttribution,
     ) {
+        let previous_cpu = self.cpu.clone();
+        let previous_jit = self.jit.clone();
+        let previous_journal = self.journal.clone();
         self.schema_version = 1;
         self.sequence = self.sequence.saturating_add(1);
         self.published_unix = epoch_now();
@@ -411,6 +427,97 @@ impl ControllerMetrics {
             .values()
             .map(|event| event.durable)
             .sum::<u64>();
+        let no_op_total = journal
+            .events
+            .values()
+            .map(|event| event.no_op)
+            .sum::<u64>();
+        let previous_no_op_total = previous_journal
+            .events
+            .values()
+            .map(|event| event.no_op)
+            .sum::<u64>();
+        let jit_churn = self
+            .jit
+            .create_attempts
+            .saturating_sub(previous_jit.create_attempts)
+            + self
+                .jit
+                .delete_attempts
+                .saturating_sub(previous_jit.delete_attempts);
+        let cpu_us = self
+            .cpu
+            .journal
+            .user_us
+            .saturating_add(self.cpu.journal.system_us)
+            .saturating_add(self.cpu.filesystem.user_us)
+            .saturating_add(self.cpu.filesystem.system_us)
+            .saturating_add(self.cpu.github.user_us)
+            .saturating_add(self.cpu.github.system_us)
+            .saturating_add(self.cpu.broker.user_us)
+            .saturating_add(self.cpu.broker.system_us)
+            .saturating_add(self.cpu.child_supervision.user_us)
+            .saturating_add(self.cpu.child_supervision.system_us);
+        let previous_cpu_us = previous_cpu
+            .journal
+            .user_us
+            .saturating_add(previous_cpu.journal.system_us)
+            .saturating_add(previous_cpu.filesystem.user_us)
+            .saturating_add(previous_cpu.filesystem.system_us)
+            .saturating_add(previous_cpu.github.user_us)
+            .saturating_add(previous_cpu.github.system_us)
+            .saturating_add(previous_cpu.broker.user_us)
+            .saturating_add(previous_cpu.broker.system_us)
+            .saturating_add(previous_cpu.child_supervision.user_us)
+            .saturating_add(previous_cpu.child_supervision.system_us);
+        let interval = self
+            .last_metrics_at
+            .map(|at| at.elapsed().as_secs_f64())
+            .unwrap_or_default();
+        let cpu_percent = if interval > 0.0 {
+            cpu_us.saturating_sub(previous_cpu_us) as f64 / (interval * 1_000_000.0) * 100.0
+        } else {
+            0.0
+        };
+        self.high_cpu_streak = if jobs == 0 && cpu_percent > HIGH_CPU_ALERT_PERCENT {
+            self.high_cpu_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.repeated_noop_streak = if no_op_total > previous_no_op_total
+            && durable_event_total == self.last_durable_event_total
+        {
+            self.repeated_noop_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.churn_streak = if jit_churn > 0 {
+            self.churn_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.alerts.clear();
+        if self.high_cpu_streak >= ALERT_SUSTAINED_CYCLES {
+            self.alerts.push(ControllerAlert {
+                code: "idle_high_cpu",
+                severity: "critical",
+                message: "zero-job controller CPU exceeds the idle budget",
+            });
+        }
+        if self.repeated_noop_streak >= ALERT_SUSTAINED_CYCLES {
+            self.alerts.push(ControllerAlert {
+                code: "repeated_noop_events",
+                severity: "warning",
+                message: "identical observations are being accepted without durable change",
+            });
+        }
+        if self.churn_streak >= ALERT_SUSTAINED_CYCLES {
+            self.alerts.push(ControllerAlert {
+                code: "registration_jit_churn",
+                severity: "critical",
+                message: "registration or JIT mutations are recurring across idle cycles",
+            });
+        }
         if let Some(previous) = self.last_metrics_at {
             let elapsed = previous.elapsed().as_secs_f64();
             if elapsed > 0.0 {
@@ -1955,6 +2062,84 @@ mod tests {
         assert_eq!(value["job_processes"], 0);
         assert_eq!(value["reconcile_overlap_count"], 0);
         assert_eq!(value["events_per_second"], 0.0);
+    }
+
+    #[test]
+    fn repeated_noop_events_raise_a_bounded_control_alert() {
+        let health = velnor_model::HealthDocument::empty();
+        let mut metrics = ControllerMetrics::default();
+        let mut journal = JournalStats::default();
+        for count in 1..=3 {
+            journal.events.insert(
+                "routing".to_owned(),
+                velnor_control::journal::JournalEventStats {
+                    accepted: count,
+                    no_op: count,
+                    ..Default::default()
+                },
+            );
+            metrics.record(
+                Duration::from_millis(4),
+                &health,
+                1,
+                0,
+                &journal,
+                &crate::runner::BrokerMetricsSnapshot::default(),
+                &JitMetrics::default(),
+                &CpuAttribution::default(),
+            );
+        }
+        let value = serde_json::to_value(metrics).unwrap();
+        assert_eq!(value["alerts"][0]["code"], "repeated_noop_events");
+    }
+
+    #[test]
+    fn sustained_zero_job_cpu_raises_an_idle_budget_alert() {
+        let health = velnor_model::HealthDocument::empty();
+        let mut metrics = ControllerMetrics {
+            last_metrics_at: Some(Instant::now() - Duration::from_secs(1)),
+            ..Default::default()
+        };
+        for count in 1..=3 {
+            let mut cpu = CpuAttribution::default();
+            cpu.journal.user_us = count * 100_000;
+            metrics.record(
+                Duration::from_millis(4),
+                &health,
+                1,
+                0,
+                &JournalStats::default(),
+                &crate::runner::BrokerMetricsSnapshot::default(),
+                &JitMetrics::default(),
+                &cpu,
+            );
+        }
+        let value = serde_json::to_value(metrics).unwrap();
+        assert_eq!(value["alerts"][0]["code"], "idle_high_cpu");
+    }
+
+    #[test]
+    fn recurring_jit_mutations_raise_a_churn_alert() {
+        let health = velnor_model::HealthDocument::empty();
+        let mut metrics = ControllerMetrics::default();
+        for count in 1..=3 {
+            let jit = JitMetrics {
+                create_attempts: count,
+                ..Default::default()
+            };
+            metrics.record(
+                Duration::from_millis(4),
+                &health,
+                1,
+                0,
+                &JournalStats::default(),
+                &crate::runner::BrokerMetricsSnapshot::default(),
+                &jit,
+                &CpuAttribution::default(),
+            );
+        }
+        let value = serde_json::to_value(metrics).unwrap();
+        assert_eq!(value["alerts"][0]["code"], "registration_jit_churn");
     }
 
     fn dummy_exec(url: &str) -> DaemonArgs {

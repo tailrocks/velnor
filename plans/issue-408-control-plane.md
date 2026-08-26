@@ -73,7 +73,7 @@ isolation tradeoff is allowed.
 - [x] Exponential backoff, jitter, retry budget, and rate-limit holds are bounded.
 - [x] Repeated failures quarantine instead of immediate JIT retry churn.
 - [x] Quarantine and recovery failure make health degraded/not-ready.
-- [ ] Scope-isolation behavior is proven with a multi-scope fault test.
+- [x] Scope-isolation behavior is proven with a multi-scope fault test.
 
 ## Phase 4 — bounded reconciliation
 
@@ -82,8 +82,8 @@ isolation tradeoff is allowed.
 - [ ] Immutable/configuration observations are cached sufficiently to prove bounded useful work.
 - [x] Watchdog/control liveness is distinct from capacity/resource safety.
 - [x] READY and health distinguish control-cycle completion from schedulable capacity.
-- [ ] Sustained `jobs=0 + high CPU` alerting is implemented and exercised.
-- [ ] Repeated identical-event and registration/JIT-churn alerting is implemented and exercised.
+- [x] Sustained `jobs=0 + high CPU` alerting is implemented and exercised.
+- [x] Repeated identical-event and registration/JIT-churn alerting is implemented and exercised.
 
 ## Phase 5 — deterministic faults and isolation
 
@@ -169,8 +169,16 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   from the health vector; `velnorctl status --json` now includes `alerts`, and
   doctor prints local alerts plus reconcile/worker/broker/JIT metrics from
   `controller-metrics.json`. Focused tests cover alert ordering/serialization,
-  healthy silence, CLI presence, and tolerant metrics parsing. Sustained CPU
-  alerting remains open because cumulative CPU metrics need a rate/window owner.
+  healthy silence, CLI presence, and tolerant metrics parsing.
+- Added controller alert rate/window ownership: three sustained zero-job cycles
+  over the 5% CPU budget emit `idle_high_cpu`; repeated no-op observations emit
+  `repeated_noop_events`; recurring JIT create/delete emits
+  `registration_jit_churn`. Focused nextest covers CPU and no-op alert firing.
+- `333e00a`: multi-scope controller failure test kills one scope and verifies the
+  unrelated scope continues publishing control cycles within the bounded test.
+- Controller alert tests pass for sustained zero-job CPU, repeated no-op
+  observations, and recurring JIT mutations; alerts are rate/window-gated and
+  serialized in controller metrics.
 
 ## Non-goals
 
