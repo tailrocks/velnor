@@ -614,7 +614,7 @@ fn build_rootfs(
         runner,
         "env",
         &[
-            "LC_ALL=C".into(),
+            "LC_ALL=C.UTF-8".into(),
             "TZ=UTC".into(),
             "SOURCE_DATE_EPOCH=0".into(),
             "E2FSPROGS_FAKE_TIME=0".into(),
@@ -626,8 +626,6 @@ fn build_rootfs(
             "-I".into(),
             "256".into(),
             "-m".into(),
-            "0".into(),
-            "-T".into(),
             "0".into(),
             "-U".into(),
             "00000000-0000-0000-0000-000000000001".into(),

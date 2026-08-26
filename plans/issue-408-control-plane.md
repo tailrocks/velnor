@@ -304,6 +304,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   epoch tar stream with xattrs excluded, and uses explicit ext4 layout/defaults
   plus UTC locale settings. Candidate advances to `0.1.227` because
   `v0.1.226` is immutable.
+- Release run `33022904410` failed in the canonical rootfs builder because
+  `mke2fs -T 0` was incorrectly treated as a usage type and `LC_ALL=C` could
+  not decode UTF-8 tar headers. Both issues are corrected; candidate advances
+  to `0.1.228` because `v0.1.227` is immutable.
 
 ## Non-goals
 
