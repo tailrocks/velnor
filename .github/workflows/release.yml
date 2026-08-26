@@ -439,7 +439,7 @@ jobs:
           cargo-deb --version
 
       - name: Build (release-build embeds source SHA + tag; fails on drift)
-        run: cargo zigbuild -p velnor-runner -p velnorctl --release --locked --features release-build --target ${{ matrix.target }}
+        run: cargo zigbuild -p velnor-runner -p velnorctl -p velnor-tools --release --locked --features release-build --target ${{ matrix.target }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -542,6 +542,7 @@ jobs:
           dpkg-deb -c "$src" > "$manifest"
           grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
           grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
+          grep -q "usr/bin/velnor-tools" "$manifest" || { echo "::error::deb missing usr/bin/velnor-tools" >&2; exit 1; }
           grep -q "usr/bin/velnor-guest-agent" "$manifest" || { echo "::error::deb missing usr/bin/velnor-guest-agent" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/firecracker" "$manifest" || { echo "::error::deb missing firecracker" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/jailer" "$manifest" || { echo "::error::deb missing jailer" >&2; exit 1; }
