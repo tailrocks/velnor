@@ -17,6 +17,18 @@ runs.
   why tests missed it, structural fix, regression proof, and live proof.
 - [ ] Implement missing capability in Velnor, never with repository-local
   workflow workarounds.
+- [ ] Do not leave legacy code, legacy protocols, compatibility aliases,
+  shims, dual implementations, fallback paths, or a transition period. When a
+  modern replacement exists, remove the old path completely in the same
+  campaign.
+- [ ] Refactor continuously when the current structure enables bugs,
+  instability, performance loss, or migration debt. Breaking changes are
+  allowed and preferred when they produce the correct final architecture.
+- [ ] Deliberately blocking changes may be deployed when they are required to
+  remove legacy behavior or establish the final architecture. After each such
+  deployment, immediately repair every resulting failure, re-run all affected
+  gates, and continue until production is green. Never preserve a bad design
+  merely to maintain a transition period.
 - [ ] Use current `actions/runner` behavior and latest protocol paths as the
   source of truth. Remove deprecated protocols, aliases, shims, and silent
   fallbacks completely.
