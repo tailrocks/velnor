@@ -237,12 +237,9 @@ fn guardian_completes_a_cycle_without_job_execution() {
 fn packaged_units_have_no_controller_partof_to_workers() {
     let controller = include_str!("../debian/velnor-controller@.service");
     let slot = include_str!("../debian/velnor-slot@.service");
-    let job = include_str!("../debian/velnor-job@.service");
     assert!(!controller.lines().any(|line| line.starts_with("PartOf=")));
     assert!(!slot.lines().any(|line| line.starts_with("PartOf=")));
-    assert!(!job.lines().any(|line| line.starts_with("PartOf=")));
     assert!(slot.contains("velnor-runner slot"));
-    assert!(job.contains("KillMode=control-group"));
     assert!(include_str!("../debian/velnor-guardian.service").contains("velnor-runner guardian"));
     assert!(!include_str!("../debian/velnor-guardian.service")
         .lines()
@@ -267,15 +264,8 @@ fn packaged_units_have_no_controller_partof_to_workers() {
         "slot process must not spawn jobs or claim ownership"
     );
     let job_src = include_str!("../src/node/job.rs");
-    assert!(
-        job_src.contains("run_daemon_slot"),
-        "job process is the transitional executor"
-    );
+    assert!(job_src.contains("run_transient_job"));
     assert!(!daemon_src_has_args_json());
-    assert!(
-        !job.contains("--once"),
-        "packaged job unit must not pass --once: {job}"
-    );
     let postinst = include_str!("../debian/postinst");
     assert!(
         postinst.contains("NEVER") && postinst.contains("restart"),
@@ -699,85 +689,6 @@ fn controller_applies_dependency_false_without_github() {
         .unwrap();
     assert!(!state.github_reachable, "{state:?}");
     assert!(state.jobs.is_empty(), "{:?}", state.jobs);
-    std::fs::remove_dir_all(dir).ok();
-}
-
-#[test]
-fn job_once_without_ownership_fails() {
-    let dir = scratch("job-noown");
-    Journal::open(dir.join("journal.db")).unwrap();
-    let output = Command::new(runner())
-        .args([
-            "job",
-            "--state-dir",
-            dir.to_str().unwrap(),
-            "--job-id",
-            "missing",
-            "--generation",
-            "1",
-            "--once",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "unowned job must not run: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    std::fs::remove_dir_all(dir).ok();
-}
-
-#[test]
-fn job_once_without_exec_persists_only_after_ownership() {
-    let dir = scratch("job-own-once");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
-    prime_named_ready(&mut journal, "jobown");
-    use velnor_model::JobId;
-    journal
-        .apply(Event::Assigned {
-            slot_id: SlotId("jobown-1".into()),
-            job_id: JobId("slot-1-worker".into()),
-            generation: Generation::INITIAL,
-        })
-        .unwrap();
-    journal
-        .apply(Event::JobOwned {
-            job_id: JobId("slot-1-worker".into()),
-            slot_id: SlotId("jobown-1".into()),
-            attempt: 1,
-            generation: Generation::INITIAL,
-            worker: "velnor-job@slot-1-worker".into(),
-            accepted_unix: 0,
-        })
-        .unwrap();
-    drop(journal);
-    let output = Command::new(runner())
-        .args([
-            "job",
-            "--state-dir",
-            dir.to_str().unwrap(),
-            "--job-id",
-            "slot-1-worker",
-            "--generation",
-            "1",
-            "--once",
-            "--scope",
-            "jobown",
-            "--slot-index",
-            "1",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let state = Journal::open(dir.join("journal.db"))
-        .unwrap()
-        .load_state()
-        .unwrap();
-    assert_eq!(state.jobs[0].phase, velnor_model::ActorPhase::Running);
     std::fs::remove_dir_all(dir).ok();
 }
 

@@ -883,11 +883,7 @@ pub(crate) async fn run_transient_job(
 ) -> Result<()> {
     let handoff = crate::node::handoff::read_and_remove(handoff_path)?;
     let journal = velnor_control::journal::Journal::open(job_args.state_dir.join("journal.db"))?;
-    let expected_slot = format!(
-        "{}-{}",
-        job_args.scope.as_deref().unwrap_or("default"),
-        job_args.slot_index.unwrap_or(handoff.slot_index)
-    );
+    let expected_slot = format!("{}-{}", job_args.scope, job_args.slot_index);
     handoff.validate_identity(
         &expected_slot,
         Generation(job_args.generation),

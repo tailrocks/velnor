@@ -3,13 +3,9 @@
 //! executor, not the Build L3 availability boundary.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use clap::Args;
-use velnor_control::journal::{Event, Journal};
-use velnor_model::{Generation, JobId};
-
-use super::watchdog::{feed_after_cycle, LocalCycle};
+use velnor_model::Generation;
 
 #[derive(Debug, Clone, Args)]
 pub struct JobArgs {
@@ -20,85 +16,30 @@ pub struct JobArgs {
     #[arg(long, default_value_t = 1)]
     pub generation: u64,
     #[arg(long)]
-    pub slot_index: Option<usize>,
+    pub slot_index: usize,
     #[arg(long)]
-    pub scope: Option<String>,
-    /// One GitHub job then persist completion. Never skips the worker.
-    #[arg(long)]
-    pub once: bool,
+    pub scope: String,
     /// Secure broker assignment envelope produced by the controller.
     #[arg(long)]
-    pub handoff: Option<PathBuf>,
+    pub handoff: PathBuf,
     /// Completion marker consumed by the broker manager.
     #[arg(long)]
-    pub done: Option<PathBuf>,
+    pub done: PathBuf,
 }
 
 pub async fn run(args: JobArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.state_dir)?;
-    if let Some(handoff) = args.handoff.as_deref() {
-        let result = crate::runner::run_transient_job(&args, handoff).await;
-        if let Some(done) = args.done.as_deref() {
-            let status = if result.is_ok() {
-                super::handoff::CompletionStatus::Finished
-            } else {
-                super::handoff::CompletionStatus::Failed
-            };
-            super::handoff::write_completion(
-                done,
-                &args.job_id,
-                Generation(args.generation),
-                status,
-            )?;
-        }
-        return result;
-    }
-    let mut journal = Journal::open(args.state_dir.join("journal.db"))?;
-    let job_id = JobId(args.job_id.clone());
-    let generation = Generation(args.generation);
-    let started = journal.apply(Event::JobStarted {
-        job_id: job_id.clone(),
-        generation,
-    })?;
-    let owned = !started.rejected;
-    if !owned && args.once && super::exec::load_exec_config(&args.state_dir).is_err() {
-        anyhow::bail!(
-            "job {} is not owned at generation {}",
-            args.job_id,
-            args.generation
-        );
-    }
-    if let Ok(mut daemon) = super::exec::load_exec_config(&args.state_dir) {
-        if args.once {
-            daemon.once = true;
-        }
-        let config_base = daemon
-            .config_dir
-            .clone()
-            .unwrap_or_else(|| args.state_dir.clone());
-        let slot_index = args.slot_index.unwrap_or(1);
-        let slots = daemon.slots.max(1);
-        let mut ready_announced = false;
-        let beat = async {
-            loop {
-                let _ = feed_after_cycle(LocalCycle::finished(), !ready_announced);
-                ready_announced = true;
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        };
-        tokio::select! {
-            () = beat => anyhow::bail!("job heartbeat ended"),
-            result = crate::runner::run_daemon_slot(daemon, config_base, slot_index, slots) => {
-                result
-            }
-        }
-    } else if args.once {
-        let _ = feed_after_cycle(LocalCycle::finished(), true);
-        Ok(())
+    let result = crate::runner::run_transient_job(&args, &args.handoff).await;
+    let status = if result.is_ok() {
+        super::handoff::CompletionStatus::Finished
     } else {
-        loop {
-            let _ = feed_after_cycle(LocalCycle::finished(), true);
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    }
+        super::handoff::CompletionStatus::Failed
+    };
+    super::handoff::write_completion(
+        &args.done,
+        &args.job_id,
+        Generation(args.generation),
+        status,
+    )?;
+    result
 }

@@ -177,7 +177,7 @@ fn shipped_velnor_services_hold_shared_package_lock_across_exec() {
     }
 
     assert_eq!(
-        service_count, 8,
+        service_count, 7,
         "all shipped Velnor service units must be audited"
     );
 }
