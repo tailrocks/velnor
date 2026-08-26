@@ -101,3 +101,22 @@ clear the terminal-run, runner-registration, admission/readiness, dispatch, or
 verification gates. No further mutation occurred after the exact-target
 normal/force cancellation attempts, and no dispatch/rerun/rerequest/deletion/
 runner/workflow/policy mutation occurred.
+
+## Current read-only refresh — 2026-08-26T23:30:38Z
+
+Successful read-only facts captured in this refresh:
+
+- ChainArgos runs `32985134450`, `32984965998`, and `32984867843`, with check
+  suites `89353010038`, `89352428140`, and `89352110318` respectively, remain
+  queued with null conclusions and zero checks; their timestamps remain
+  unchanged.
+- Velnor run `33012336003` and check suite `89435047597` return HTTP 404.
+- Runner group `4` (`velnor-trusted`) policy is unchanged, and its
+  `/runners` endpoint reports `total_count=0`.
+
+A repo-wide runner/noncompleted-run listing was not captured because local
+`rtk` proxy/shell argument parsing failed. Prior runner-registration evidence
+therefore remains historical; no current-state inference is made from it.
+
+No mutation occurred in this refresh. The production-readiness gates remain
+blocked.
