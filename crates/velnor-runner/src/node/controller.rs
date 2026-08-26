@@ -11,7 +11,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use clap::Args;
-use velnor_control::journal::{Event, Journal, SideEffect};
+use velnor_control::journal::{Event, Journal, SideEffect, SlotRecord};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use crate::config;
@@ -349,9 +349,19 @@ async fn reconcile_once(
     let total = args.desired_ready.saturating_add(args.surge).max(1);
     let generation = Generation::INITIAL;
     let mut effects = Vec::new();
+    reap(slots);
+    let state = journal.materialized_state()?;
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
         let surge = index > args.desired_ready;
+        let slot = state.slots.iter().find(|slot| slot.slot_id == id);
+        let process_alive = slots.contains_key(&id.0)
+            || slot
+                .and_then(|slot| slot.pid)
+                .is_some_and(prove::pid_is_alive);
+        if !permit_needs_reconciliation(slot, generation, surge, args.spawn_slots, process_alive) {
+            continue;
+        }
         effects.extend(
             journal
                 .apply(Event::PermitReserved {
@@ -1037,6 +1047,19 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
         .unwrap_or(1)
 }
 
+fn permit_needs_reconciliation(
+    slot: Option<&SlotRecord>,
+    generation: Generation,
+    surge: bool,
+    spawn_slots: bool,
+    process_alive: bool,
+) -> bool {
+    let permit_matches = slot.is_some_and(|slot| {
+        slot.generation == generation && slot.permit_held && slot.surge == surge
+    });
+    !permit_matches || (spawn_slots && !process_alive)
+}
+
 /// Read per-slot liveness files and serialize their durable journal effects in
 /// this controller process. Slot processes must not contend on the shared
 /// SQLite writer just to report liveness.
@@ -1255,6 +1278,55 @@ mod tests {
         assert!(!remote_registration_present(Some(8), "slot-1", &remote));
         assert!(remote_registration_present(None, "slot-1", &remote));
         assert!(!remote_registration_present(None, "slot-2", &remote));
+    }
+
+    fn reserved_slot() -> SlotRecord {
+        SlotRecord {
+            slot_id: SlotId("velnor-1".to_owned()),
+            generation: Generation::INITIAL,
+            phase: ActorPhase::Provisioning,
+            permit_held: true,
+            routing_valid: false,
+            session_live: false,
+            executor_proven: false,
+            registered: false,
+            pid: None,
+            heartbeat_unix: 0,
+            surge: false,
+        }
+    }
+
+    #[test]
+    fn stable_live_slot_suppresses_duplicate_permit() {
+        let slot = reserved_slot();
+
+        assert!(!permit_needs_reconciliation(
+            Some(&slot),
+            Generation::INITIAL,
+            false,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn missing_or_dead_slot_reissues_permit_for_respawn() {
+        let slot = reserved_slot();
+
+        assert!(permit_needs_reconciliation(
+            Some(&slot),
+            Generation::INITIAL,
+            false,
+            true,
+            false,
+        ));
+        assert!(permit_needs_reconciliation(
+            None,
+            Generation::INITIAL,
+            false,
+            true,
+            false,
+        ));
     }
 
     #[tokio::test]
