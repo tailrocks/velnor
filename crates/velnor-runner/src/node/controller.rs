@@ -36,6 +36,7 @@ const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
 /// Reserve time to remove that deterministic-name orphan before the next
 /// controller cycle retries registration.
 const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
+const FENCED_SLOT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -359,11 +360,28 @@ async fn reconcile_once(
         let generation = slot
             .map(|slot| slot.generation)
             .unwrap_or(Generation::INITIAL);
+        let fenced_generation = fenced_slot_recovery_generation(slot);
+        let generation = if let Some(next_generation) = fenced_generation {
+            if args.spawn_slots {
+                terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
+            }
+            next_generation
+        } else {
+            generation
+        };
         let process_alive = slots.contains_key(&id.0)
             || slot.and_then(|slot| slot.pid).is_some_and(|pid| {
                 prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
             });
-        if !permit_needs_reconciliation(slot, generation, surge, args.spawn_slots, process_alive) {
+        if fenced_generation.is_none()
+            && !permit_needs_reconciliation(
+                slot,
+                generation,
+                surge,
+                args.spawn_slots,
+                process_alive,
+            )
+        {
             continue;
         }
         effects.extend(
@@ -1061,6 +1079,81 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
         .unwrap_or(1)
 }
 
+fn fenced_slot_recovery_generation(slot: Option<&SlotRecord>) -> Option<Generation> {
+    slot.filter(|slot| slot.phase == ActorPhase::Fenced)
+        .map(|slot| slot.generation.next())
+}
+
+async fn terminate_fenced_slot_actor(
+    args: &ControllerArgs,
+    slots: &mut HashMap<String, Child>,
+    slot_id: &SlotId,
+    slot: &SlotRecord,
+) -> anyhow::Result<()> {
+    if let Some(mut child) = slots.remove(&slot_id.0) {
+        request_child_shutdown(&child)?;
+        let deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+        loop {
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                while child.try_wait()?.is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    let Some(pid) = slot.pid else {
+        return Ok(());
+    };
+    if !prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+        return Ok(());
+    }
+    send_pid_signal(pid, libc::SIGTERM)?;
+    let deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+    while Instant::now() < deadline {
+        if !prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Re-prove the command line immediately before escalation. If the PID was
+    // reused, leave the unrelated process untouched and still rotate the
+    // durable generation below.
+    if prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+        send_pid_signal(pid, libc::SIGKILL)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_pid_signal(pid: u32, signal: libc::c_int) -> anyhow::Result<()> {
+    if pid == 0 {
+        return Ok(());
+    }
+    // SAFETY: callers prove the PID belongs to the fenced Velnor slot actor
+    // immediately before signaling it; SIGTERM is followed by a re-proof
+    // before SIGKILL.
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_pid_signal(_pid: u32, _signal: i32) -> anyhow::Result<()> {
+    anyhow::bail!("fenced slot recovery requires Unix process signaling")
+}
+
 fn permit_needs_reconciliation(
     slot: Option<&SlotRecord>,
     generation: Generation,
@@ -1348,6 +1441,19 @@ mod tests {
             true,
             false,
         ));
+    }
+
+    #[test]
+    fn fenced_slot_reconciliation_advances_generation() {
+        let mut slot = reserved_slot();
+        assert_eq!(fenced_slot_recovery_generation(Some(&slot)), None);
+
+        slot.phase = ActorPhase::Fenced;
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot)),
+            Some(Generation(slot.generation.0 + 1))
+        );
+        assert_eq!(fenced_slot_recovery_generation(None), None);
     }
 
     #[tokio::test]

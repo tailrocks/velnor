@@ -506,6 +506,17 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             if generation < slot.generation {
                 rejected = true;
             } else {
+                if generation > slot.generation {
+                    // A newer generation is a new actor identity. Never let
+                    // proofs or process metadata from the fenced predecessor
+                    // satisfy this generation's Ready contract.
+                    slot.executor_proven = false;
+                    slot.session_live = false;
+                    slot.registered = false;
+                    slot.pid = None;
+                    slot.heartbeat_unix = 0;
+                    slot.phase = ActorPhase::Provisioning;
+                }
                 slot.generation = generation;
                 slot.permit_held = true;
                 slot.surge = surge;
@@ -1667,6 +1678,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(registration_events, 1);
+    }
+
+    #[test]
+    fn newer_permit_generation_resets_fenced_actor_identity_and_proofs() {
+        let (_dir, mut journal) = open_tmp("new-generation-reset");
+        let slot_id = slot("scope-1");
+        let generation = gen();
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::SlotHeartbeat {
+                    slot_id: slot_id.clone(),
+                    generation,
+                    pid: 123,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::SlotStale {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let outcome = journal
+            .apply(Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation: generation.next(),
+                surge: true,
+            })
+            .unwrap();
+        assert!(!outcome.rejected);
+        assert_eq!(
+            outcome.commands,
+            vec![SideEffect::SpawnSlot {
+                slot_id: slot_id.clone(),
+                generation: generation.next(),
+            }]
+        );
+
+        let slot = journal
+            .load_state()
+            .unwrap()
+            .slots
+            .into_iter()
+            .find(|slot| slot.slot_id == slot_id)
+            .unwrap();
+        assert_eq!(slot.generation, generation.next());
+        assert_eq!(slot.phase, ActorPhase::Provisioning);
+        assert!(slot.permit_held);
+        assert!(slot.surge);
+        assert!(slot.routing_valid);
+        assert!(!slot.executor_proven);
+        assert!(!slot.session_live);
+        assert!(!slot.registered);
+        assert_eq!(slot.pid, None);
+        assert_eq!(slot.heartbeat_unix, 0);
     }
 
     #[test]
