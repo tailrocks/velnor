@@ -325,6 +325,7 @@ fn request_child_shutdown(child: &Child) -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_once(
     args: &ControllerArgs,
     journal: &mut Journal,
