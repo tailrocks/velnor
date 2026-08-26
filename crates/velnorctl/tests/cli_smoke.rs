@@ -274,7 +274,19 @@ fn json_output_placement_is_equivalent_for_nested_help() {
 #[test]
 fn status_json_health_vector_keys_are_stable() {
     let dir = tempfile_dir("health-json");
-    let output = run(&["status", "--json", "--state-dir", &dir]);
+    std::fs::write(
+        std::path::Path::new(&dir).join("execution.toml"),
+        "[execution]\nbackend = \"docker\"\n",
+    )
+    .unwrap();
+    let output = run(&[
+        "status",
+        "--json",
+        "--state-dir",
+        &dir,
+        "--config-dir",
+        &dir,
+    ]);
     assert_eq!(code(&output), 0, "{}", text(&output.stderr));
     let first: serde_json::Value = serde_json::from_str(text(&output.stdout).trim()).unwrap();
     let output2 = run(&["status", "--json", "--state-dir", &dir]);

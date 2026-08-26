@@ -3400,7 +3400,9 @@ dependencies = [
  "noyalib",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "time",
+ "toml",
  "url",
 ]
 

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 
 use serde::{Deserialize, Serialize};
+use velnor_model::ExecutionBackendKind;
 
 use crate::protocol::{
     github_json_request, github_json_request_with_rate_limit, GitHubScope, ListedWorkflowJob,
@@ -23,8 +24,7 @@ pub const ROUTING_POLICY_FILE: &str = "routing-policy.json";
 pub const ROUTING_EVIDENCE_FILE: &str = "routing-evidence.json";
 /// Host-local executor proof written by a real preflight, never by daemon startup.
 pub const EXECUTOR_OK: &str = "executor.ok";
-/// Transitional host Docker socket. Presence is not executor proof.
-#[allow(dead_code)]
+/// Host Docker socket. Executor proof for the docker backend only.
 pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -85,11 +85,11 @@ pub fn observe_document(document: &RoutingDocument) -> RoutingObservation {
     RoutingObservation { valid, group_valid }
 }
 
-/// Executor is proven only by a preflight `executor.ok` file.
-/// A live Docker socket is the transitional backend, not the proof.
+/// Executor proof is backend-specific. MicroVM never treats the host Docker
+/// socket as ready.
 #[must_use]
-pub fn observe_executor(state_dir: &Path) -> bool {
-    state_dir.join(EXECUTOR_OK).is_file()
+pub fn observe_executor(state_dir: &Path, backend: ExecutionBackendKind) -> bool {
+    crate::execution::executor_is_proven(state_dir, backend, Path::new(HOST_DOCKER_SOCKET))
 }
 
 /// Session is live when the slot child is running or its journal pid still exists.
@@ -617,6 +617,20 @@ pub fn write_executor_ok(state_dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Record a microVM executor proof bound to the packaged generation.
+///
+/// # Errors
+/// Directory or write failures.
+pub fn write_microvm_executor_ok(
+    state_dir: &Path,
+    generation: &crate::execution::MicroVmGeneration,
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(state_dir)?;
+    let path = state_dir.join(EXECUTOR_OK);
+    std::fs::write(&path, serde_json::to_vec(generation)?)?;
+    Ok(path)
+}
+
 fn fields_complete(fields: &RoutingFields) -> bool {
     !fields.group.is_empty()
         && !fields.selected_repositories.is_empty()
@@ -730,9 +744,19 @@ mod tests {
     #[test]
     fn executor_ok_file_is_proof() {
         let dir = tmp("exec");
-        assert!(!observe_executor(&dir));
+        assert!(!observe_executor(
+            &dir,
+            velnor_model::ExecutionBackendKind::Docker
+        ));
         write_executor_ok(&dir).unwrap();
-        assert!(observe_executor(&dir));
+        assert!(observe_executor(
+            &dir,
+            velnor_model::ExecutionBackendKind::Docker
+        ));
+        assert!(
+            !observe_executor(&dir, velnor_model::ExecutionBackendKind::MicroVm),
+            "stale ok\\n must not prove microvm"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

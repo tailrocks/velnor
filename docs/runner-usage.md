@@ -40,9 +40,10 @@ continues to name the exact rollback predecessor; daemon `ExecStartPre` rejects
 that temporary mismatch until the operator activates the new signed record.
 
 - Default instance: `/etc/velnor/velnor.env` (URL, name, labels, slots,
-  work dir) + `/etc/velnor/secrets.env` (0600, `GITHUB_TOKEN=...` — never
-  shipped or touched by the package; `postinst` migrates a token out of
-  `velnor.env` automatically).
+  work dir) + `/etc/velnor/execution.toml` (`[execution] backend = "docker"`
+  or `"microvm"`, no fallback) + `/etc/velnor/secrets.env` (0600,
+  `GITHUB_TOKEN=...` — never shipped or touched by the package; `postinst`
+  migrates a token out of `velnor.env` automatically).
 - Additional instances: `/etc/velnor/<name>.env` + `<name>.secrets.env`,
   then `systemctl enable --now velnor-daemon@<name>`.
 - Job container resource caps: package units default to

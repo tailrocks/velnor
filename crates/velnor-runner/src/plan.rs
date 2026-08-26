@@ -180,5 +180,23 @@ mod tests {
             plan.identity.repository.as_deref(),
             Some("ChainArgos/java-monorepo")
         );
+        let validated = crate::execution::ValidatedPlan::from_normalized(&plan);
+        assert_eq!(validated.job_id, "job");
+        assert_eq!(validated.steps[0].id, "check");
+        assert_eq!(validated.steps[0].script, "cargo check");
+        assert!(validated.steps[0].action.is_none());
+        assert!(validated.outputs.is_empty());
+        assert_eq!(validated.job_container_image, "ubuntu:24.04");
+        assert_eq!(validated.workspace, "/__w");
+        assert!(!validated.buildx);
+        assert!(!validated.testcontainers);
+        let guest = validated.to_guest("job", 1);
+        assert_eq!(guest.steps[0].script, "cargo check");
+        assert_eq!(guest.workspace, "/__w");
+        assert!(!guest
+            .encode()
+            .unwrap()
+            .windows(11)
+            .any(|w| w == b"docker.sock"));
     }
 }

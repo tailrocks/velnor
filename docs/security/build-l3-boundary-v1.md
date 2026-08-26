@@ -25,7 +25,9 @@ Every row is design-resolved and implementation-not-implemented. Plans 012 and
 
 Inside the TCB:
 
-- Sentry hardware, firmware, host kernel, KVM, and Firecracker;
+- Sentry hardware, firmware, host kernel, KVM, and Firecracker (started
+  directly through its HTTP API and jailer; not Kata Containers, not
+  firecracker-containerd);
 - Velnor admission, reservation, digester, provenance, signer, finalizer, and
   quarantine control-plane services;
 - immutable, digest-verified guest boot artifacts;
@@ -42,14 +44,39 @@ Outside the TCB:
   claims; and
 - every writable object created during a job.
 
+## Production microVM
+
+Production microVM is **Firecracker**: an open-source Rust VMM on Linux KVM.
+Velnor starts it **directly through its HTTP API and jailer** (cgroup,
+namespace, seccomp, privilege dropping). The five-device model is virtio-net,
+virtio-block, virtio-vsock, serial console, and i8042. Official spec:
+<https://firecracker-microvm.github.io/> and
+<https://github.com/firecracker-microvm/firecracker>. Spec numbers (<125 ms
+boot, <5 MiB overhead) are cited from that page, not measured here.
+
+**Not product orchestration:** Kata Containers and firecracker-containerd.
+**Not a live or silent alternative:** Cloud Hypervisor — fallback only if a
+real estate workflow proves Firecracker's device model cannot support it.
+
+Guest isolation uses **immutable block devices**, **job-local writable
+disks**, and **bounded vsock**. virtio-fs, host directory passthrough, PCI
+passthrough, GPUs, Windows guests, USB, and a legacy device model are
+rejected. Operator selection is `[execution] backend = "docker" | "microvm"`
+with no automatic fallback. Live Build L3 remains Plans 012 and 017.
+
+The shipped selection types are `velnor_model::{ExecutionBackendKind,
+JobExecutorKind, MicroVmKind, MicroVmControl}`.
+
 ## Isolation unit and control flow
 
 Admission validates the complete expanded job and reserves its conservative
 full peak before a runner is advertised. The controller then creates a fresh
-microVM with a copy-on-write encrypted disk and memory-only key, dedicated
-cgroup, process and network namespaces, tap, and vsock. The guest receives no
-host bind mount, host Docker/containerd socket, host PID namespace, device, or
-writable cross-job storage.
+Firecracker microVM (direct API and jailer) with a copy-on-write encrypted
+disk and memory-only key, dedicated cgroup, process and network namespaces,
+tap, and vsock. Isolation is immutable block plus job-local writable disk plus
+bounded vsock — not virtio-fs or host directory passthrough. The guest
+receives no host bind mount, host Docker/containerd socket, host PID
+namespace, device, or writable cross-job storage.
 
 The controller supplies only the admitted job material and brokered inputs.
 Tenant egress defaults deny. Allowed remote inputs pass through a broker that

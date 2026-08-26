@@ -20,6 +20,7 @@ mod compiler_cache;
 mod config;
 mod container;
 mod docker_lease;
+pub mod execution;
 mod executor;
 mod fs_copy;
 pub mod gha_cache;

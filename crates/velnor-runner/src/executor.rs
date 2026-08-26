@@ -20,14 +20,14 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc,
+        mpsc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -67,8 +67,33 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+/// Token for a long-lived child (jailer). Kill uses the retained pid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedProcess {
+    pub pid: u32,
+}
+
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
+
+    /// Spawn without waiting. Default refuses so accidental long waits stay fail-closed.
+    ///
+    /// # Errors
+    /// Spawn unsupported or OS failure.
+    fn spawn(&mut self, program: &str, _args: &[String]) -> Result<SpawnedProcess> {
+        bail!("command runner does not support spawn for {program}")
+    }
+
+    /// Kill a process returned by [`CommandRunner::spawn`].
+    ///
+    /// # Errors
+    /// Kill unsupported or OS failure.
+    fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
+        bail!(
+            "command runner does not support kill of pid {}",
+            process.pid
+        )
+    }
 
     fn run_timeout(
         &mut self,
@@ -205,10 +230,55 @@ fn node_action_image(runtime: &str, fallback: &str) -> String {
     }
 }
 
+fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
+    static CHILDREN: OnceLock<Mutex<HashMap<u32, Child>>> = OnceLock::new();
+    CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
+    fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
+        let child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let pid = child.id();
+        spawned_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pid, child);
+        Ok(SpawnedProcess { pid })
+    }
+
+    fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
+        if let Some(mut child) = spawned_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&process.pid)
+        {
+            child
+                .kill()
+                .with_context(|| format!("kill {}", process.pid))?;
+            child
+                .wait()
+                .with_context(|| format!("wait for {}", process.pid))?;
+            return Ok(());
+        }
+        let status = Command::new("kill")
+            .args(["-TERM", &process.pid.to_string()])
+            .status()
+            .with_context(|| format!("kill {}", process.pid))?;
+        if !status.success() {
+            bail!("kill {} exited {:?}", process.pid, status.code());
+        }
+        Ok(())
+    }
+
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
         self.run_timeout(program, args, DEFAULT_STEP_TIMEOUT)
     }
@@ -748,7 +818,7 @@ struct PostNativeAction {
 }
 
 impl ExecutableStep {
-    fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         match self {
             ExecutableStep::CompositeStart { step_id, .. } => step_id,
             ExecutableStep::CompositeEnd { step_id } => step_id,
@@ -793,7 +863,7 @@ impl ExecutableStep {
         }
     }
 
-    fn timeout_minutes(&self) -> Option<u64> {
+    pub(crate) fn timeout_minutes(&self) -> Option<u64> {
         match self {
             ExecutableStep::Checkout(plan) => plan.timeout_minutes,
             ExecutableStep::Script(step) => step.timeout_minutes,
@@ -843,7 +913,11 @@ impl ExecutableStep {
     }
 }
 
-pub struct DockerScriptExecutor<R> {
+/// Host-Docker step engine owned by the docker backend.
+///
+/// Jobs enter through [`crate::execution::run_validated_job`]. This type is not
+/// a second executor and must not be constructed on the microvm path.
+pub(crate) struct DockerJobEngine<R> {
     runner: R,
     step_start_sender: Option<UnboundedSender<StepStartEvent>>,
     step_log_sender: Option<UnboundedSender<StepLog>>,
@@ -875,7 +949,7 @@ struct LiveStepIdentity {
     started_at: String,
 }
 
-impl<R> DockerScriptExecutor<R>
+impl<R> DockerJobEngine<R>
 where
     R: CommandRunner,
 {
@@ -9666,7 +9740,7 @@ mod tests {
             ports: vec!["5432".into()],
             options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
         });
-        let mut executor = DockerScriptExecutor::new(ServiceContextRunner);
+        let mut executor = DockerJobEngine::new(ServiceContextRunner);
         let context = executor.service_context(&job).unwrap().unwrap();
 
         assert_eq!(context["postgres"]["id"], "container-id");
@@ -10427,7 +10501,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let mut spec = container(&temp);
         spec.verify_bind_mounts = true;
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor.start_job_environment_once(&spec).unwrap();
 
@@ -10446,7 +10520,7 @@ esac
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
@@ -10499,7 +10573,7 @@ esac
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerScriptExecutor::new(ReclaimRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::new(ReclaimRunner { calls: Vec::new() });
         executor.cleanup(&spec).unwrap();
         let calls = &executor.runner().calls;
         assert!(calls
@@ -10530,7 +10604,7 @@ esac
         let temp = root.join("job-scope").join("temp");
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerScriptExecutor::new(BuildkitCleanupRunner::default());
+        let mut executor = DockerJobEngine::new(BuildkitCleanupRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
         // Created + removing of this job's builder must both be force-removed,
@@ -10641,7 +10715,7 @@ esac
             "lease socket must exist before cleanup"
         );
         let spec = container(&temp);
-        let mut executor = DockerScriptExecutor::new(LeaseOrderRunner {
+        let mut executor = DockerJobEngine::new(LeaseOrderRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
             buildkit_saw_dead_lease: false,
@@ -10712,7 +10786,7 @@ esac
         )
         .unwrap();
         let spec = container(&temp);
-        let mut executor = DockerScriptExecutor::new(SkipBuildkitRunner {
+        let mut executor = DockerJobEngine::new(SkipBuildkitRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
             calls: Vec::new(),
@@ -10759,8 +10833,8 @@ esac
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default())
-            .with_job_environment_started(true);
+        let mut executor =
+            DockerJobEngine::new(RecordingRunner::default()).with_job_environment_started(true);
 
         executor
             .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
@@ -10784,7 +10858,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let mut spec = container(&temp);
         spec.verify_bind_mounts = true;
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -10825,7 +10899,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let result = executor
             .execute_step(&container(&temp), &step, &temp)
@@ -10860,7 +10934,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -10905,7 +10979,7 @@ esac
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_steps(&container(&temp), &steps, &temp)
@@ -10942,7 +11016,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -11060,7 +11134,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(GitDiffRunner {
+        let mut executor = DockerJobEngine::new(GitDiffRunner {
             calls: Vec::new(),
             stdout: "docker/construct/Dockerfile\ndocs/index.md\nREADME.md\n".into(),
             missing_refs: true,
@@ -11182,7 +11256,7 @@ esac
         expected_hash.update(Sha256::digest(b"pub fn answer() -> u8 { 42 }\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -11330,7 +11404,7 @@ esac
         fs::create_dir_all(root.join("partial-job/home")).unwrap();
         fs::create_dir_all(root.join("miss-job/home")).unwrap();
 
-        let exact_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let exact_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&exact_temp),
                 &cache_step("linux-rust-exact", ""),
@@ -11338,7 +11412,7 @@ esac
                 &exact_temp,
             )
             .unwrap();
-        let partial_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let partial_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&partial_temp),
                 &cache_step("linux-rust-prefix-miss", "linux-rust-prefix-\n"),
@@ -11346,7 +11420,7 @@ esac
                 &partial_temp,
             )
             .unwrap();
-        let miss_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let miss_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&miss_temp),
                 &cache_step("linux-rust-total-miss", "linux-rust-missing-\n"),
@@ -11389,7 +11463,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -11457,7 +11531,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -11491,7 +11565,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -11532,7 +11606,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -11573,7 +11647,7 @@ esac
 
         let mut spec = container(&temp);
         spec.cargo_target_host = Some(temp.join("target-store"));
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -11608,7 +11682,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -11653,7 +11727,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerScriptExecutor::new(RecordingRunner::default())
+        DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -11677,7 +11751,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -11721,7 +11795,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let save_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -11760,7 +11834,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -11960,7 +12034,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let save_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -11993,7 +12067,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -12046,7 +12120,7 @@ esac
             timeout_minutes: None,
         }];
 
-        DockerScriptExecutor::new(RecordingRunner::default())
+        DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -12070,7 +12144,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let lookup_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let lookup_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&lookup_temp), &lookup, &env, &lookup_temp)
             .unwrap();
 
@@ -12125,7 +12199,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -12185,7 +12259,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-miss")],
         )];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -12215,7 +12289,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-save-only")],
         )];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -12259,7 +12333,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-existing")],
         )];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -12288,7 +12362,7 @@ esac
                 source_path,
                 &[("path", "~/.cache/rust-script"), ("key", "some-key")],
             )];
-            let results = DockerScriptExecutor::new(RecordingRunner::default())
+            let results = DockerJobEngine::new(RecordingRunner::default())
                 .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
                 .unwrap();
             let keys: std::collections::BTreeSet<String> =
@@ -12365,7 +12439,7 @@ esac
             Some("save"),
             &[("path", "~/.cache/rust-script"), ("key", "shared-key")],
         )];
-        DockerScriptExecutor::new(RecordingRunner::default())
+        DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &save_env, &save_temp)
             .unwrap();
 
@@ -12379,7 +12453,7 @@ esac
         let win_temp = root.join("win/temp");
         fs::create_dir_all(root.join("win/home")).unwrap();
         let win_env = vec![repo.clone(), ("RUNNER_OS".into(), "Windows".into())];
-        let win_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let win_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&win_temp), &restore, &win_env, &win_temp)
             .unwrap();
         assert_eq!(win_results[0].state.outputs["cache-hit"], "false");
@@ -12389,7 +12463,7 @@ esac
         let lin_temp = root.join("lin/temp");
         fs::create_dir_all(root.join("lin/home")).unwrap();
         let lin_env = vec![repo, ("RUNNER_OS".into(), "Linux".into())];
-        let lin_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let lin_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&lin_temp), &restore, &lin_env, &lin_temp)
             .unwrap();
         assert_eq!(lin_results[0].state.outputs["cache-hit"], "true");
@@ -12632,7 +12706,7 @@ type=sha,format=long,prefix=,enable=true"
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -12760,7 +12834,7 @@ type=sha,format=long,prefix=,enable=true"
     fn docker_login_refused_outside_trusted_scope() {
         let temp = temp_dir();
         let mut executor =
-            DockerScriptExecutor::new(RecordingRunner::default()).with_trust_scope("public-forks");
+            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("public-forks");
         let error = executor
             .native_docker_login(
                 &container(&temp),
@@ -12980,7 +13054,7 @@ type=sha,format=long,prefix=,enable=true"
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -13041,7 +13115,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -13265,7 +13339,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -13367,7 +13441,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
@@ -13403,7 +13477,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor.execute_step(&container, &step, &temp).unwrap();
 
@@ -13429,7 +13503,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ports: Vec::new(),
             options: Vec::new(),
         });
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor.cleanup_services(&spec).unwrap();
 
@@ -13465,7 +13539,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             options: Vec::new(),
         });
 
-        DockerScriptExecutor::new(ContainerRemovalRaceRunner)
+        DockerJobEngine::new(ContainerRemovalRaceRunner)
             .cleanup_services(&spec)
             .unwrap();
     }
@@ -13485,7 +13559,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -13508,7 +13582,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     fn start_job_double_failure_cleans_up_retry_resources() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -13643,7 +13717,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(CheckoutOutputRunner::default());
+        let mut executor = DockerJobEngine::new(CheckoutOutputRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -14128,7 +14202,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -14200,7 +14274,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -14269,7 +14343,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 }
             }),
         )];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
@@ -14312,7 +14386,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14424,7 +14498,7 @@ fi"#
                 }),
             ),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14485,7 +14559,7 @@ fi"#
             "fallback": "${{ steps.missing.outputs.value || 'default' }}",
             "empty": "${{ steps.missing.outputs.value }}"
         });
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14527,7 +14601,7 @@ fi"#
             "type": "String",
             "value": "${{ steps.deployment.outputs.page_url }}"
         });
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14582,7 +14656,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14656,7 +14730,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14729,7 +14803,7 @@ fi"#
                 }
             ]
         });
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14772,7 +14846,7 @@ fi"#
             "bitcoin-processor": "${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.bitcoin-processor }}",
             "bake-targets": "${{ steps.targets.outputs.list }}"
         });
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14812,7 +14886,7 @@ fi"#
         let job_outputs = serde_json::json!({
             "docs": "${{ steps.dispatch.outputs.docs || steps.filter.outputs.docs }}"
         });
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14856,7 +14930,7 @@ fi"#
             "x86_linux": "${{ steps.shas.outputs.x86_linux }}",
             "x86_macos": "${{ steps.shas.outputs.x86_macos }}"
         });
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14921,7 +14995,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -14999,7 +15073,7 @@ fi"#
                 step_id: "composite".into(),
             },
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -15075,7 +15149,7 @@ fi"#
             }),
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
@@ -15129,7 +15203,7 @@ fi"#
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut executor =
-            DockerScriptExecutor::new(StdoutCommandRunner::default()).with_step_log_sender(sender);
+            DockerJobEngine::new(StdoutCommandRunner::default()).with_step_log_sender(sender);
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -15164,7 +15238,7 @@ fi"#
         })];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut executor =
-            DockerScriptExecutor::new(StreamingMaskRunner::default()).with_step_log_sender(sender);
+            DockerJobEngine::new(StreamingMaskRunner::default()).with_step_log_sender(sender);
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -15212,7 +15286,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(SilentCommandRunner::default());
+        let mut executor = DockerJobEngine::new(SilentCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -15276,7 +15350,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(StdoutCommandRunner::default());
+        let mut executor = DockerJobEngine::new(StdoutCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -15337,7 +15411,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(StderrCommandRunner::default());
+        let mut executor = DockerJobEngine::new(StderrCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -15447,7 +15521,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -15580,7 +15654,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -15654,7 +15728,7 @@ fi"#
                 "test-bitcoin-processor": { "result": "cancelled" }
             }),
         )];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -15732,7 +15806,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -15795,7 +15869,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(FailingCheckoutRunner::default());
+        let mut executor = DockerJobEngine::new(FailingCheckoutRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_completion(
@@ -15860,7 +15934,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_completion(
@@ -15928,7 +16002,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -16138,7 +16212,7 @@ fi"#
                 ),
             ],
         };
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let result = executor
             .execute_javascript_action(&container(&temp), "action1", &action, &temp)
@@ -16198,7 +16272,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -16278,7 +16352,7 @@ fi"#
                 serde_json::json!({ "DOCKER_TOKEN": "secret-token" }),
             ),
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -16327,7 +16401,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -16410,7 +16484,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -16573,7 +16647,7 @@ fi"#
         expected_hash.update(Sha256::digest(b"build:\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -16688,7 +16762,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        DockerScriptExecutor::new(RecordingRunner::default())
+        DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -16696,7 +16770,7 @@ fi"#
                 &upload_temp,
             )
             .unwrap();
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -16754,7 +16828,7 @@ fi"#
                 continue_on_error: false,
                 timeout_minutes: None,
             }];
-            DockerScriptExecutor::new(RecordingRunner::default())
+            DockerJobEngine::new(RecordingRunner::default())
                 .execute_ordered_steps(
                     &container(&upload_temp),
                     &upload,
@@ -16779,7 +16853,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -16836,7 +16910,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerScriptExecutor::new(RecordingRunner::default())
+        DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -16864,7 +16938,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -16921,7 +16995,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerScriptExecutor::new(RecordingRunner::default())
+        DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -16949,7 +17023,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        DockerScriptExecutor::new(RecordingRunner::default())
+        DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -17012,7 +17086,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -17071,7 +17145,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -17123,10 +17197,10 @@ fi"#
             }]
         };
 
-        let default_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let default_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload(None, "default"), &[], &temp)
             .unwrap();
-        let explicit_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let explicit_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &upload(Some("true"), "explicit"),
@@ -17183,7 +17257,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -17254,10 +17328,10 @@ fi"#
             }]
         };
 
-        let first_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let first_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("first.txt", None), &[], &temp)
             .unwrap();
-        let duplicate_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let duplicate_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("second.txt", None), &[], &temp)
             .unwrap();
 
@@ -17269,7 +17343,7 @@ fi"#
                 .unwrap(),
             "second\n"
         );
-        let overwrite_results = DockerScriptExecutor::new(RecordingRunner::default())
+        let overwrite_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &upload("second.txt", Some("true")),
@@ -17322,7 +17396,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -17370,7 +17444,7 @@ fi"#
             ),
         ];
 
-        let results = DockerScriptExecutor::new(RecordingRunner::default())
+        let results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
             .unwrap();
 
@@ -17470,7 +17544,7 @@ fi"#
             ("GITHUB_TOKEN".into(), "ghs_token".into()),
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -17625,7 +17699,7 @@ fi"#
                 "id-token-request-token".into(),
             ),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -17774,7 +17848,7 @@ fi"#
         spec.mount_docker_socket = true;
         spec.docker_cli_host_path = Some("/usr/bin/docker".into());
         spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -17853,7 +17927,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -17919,7 +17993,7 @@ fi"#
                 continue_on_error: false,
                 timeout_minutes: None,
             }];
-            let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+            let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
             executor
                 .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -18136,7 +18210,7 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
                 }),
             ),
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -18256,7 +18330,7 @@ bitcoin-processor-app.push=true")
             "secrets".into(),
             serde_json::json!({ "RENOVATE_TOKEN": "renovate-token" }),
         )];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -18347,7 +18421,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -18443,7 +18517,7 @@ bitcoin-processor-app.push=true")
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -18581,7 +18655,7 @@ bitcoin-processor-app.push=true")
             ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
             ("RUNNER_OS".into(), "Linux".into()),
         ];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -18667,7 +18741,7 @@ bitcoin-processor-app.push=true")
             },
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
@@ -18747,7 +18821,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -18801,7 +18875,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(PhaseStateRunner {
+        let mut executor = DockerJobEngine::new(PhaseStateRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -18847,7 +18921,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -18917,7 +18991,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+        let mut executor = DockerJobEngine::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -18965,7 +19039,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: true,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(FailingPostRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::new(FailingPostRunner { calls: Vec::new() });
 
         let results = executor
             .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &[], &temp)
@@ -19025,7 +19099,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(FailingPostRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::new(FailingPostRunner { calls: Vec::new() });
 
         let results = executor
             .execute_ordered_steps(
@@ -19121,7 +19195,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerScriptExecutor::new(EnvAndFailureRunner {
+        let mut executor = DockerJobEngine::new(EnvAndFailureRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -19217,7 +19291,7 @@ bitcoin-processor-app.push=true")
             ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
             ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
         ];
-        let mut executor = DockerScriptExecutor::new(EnvAndFailureRunner {
+        let mut executor = DockerJobEngine::new(EnvAndFailureRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -19837,7 +19911,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -19882,7 +19956,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -19939,7 +20013,7 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn setup_qemu_uses_pinned_image() {
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(RecordingRunner::default());
         let mut inputs = BTreeMap::new();
         inputs.insert(
             "image".to_string(),

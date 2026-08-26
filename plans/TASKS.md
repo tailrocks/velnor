@@ -23,6 +23,10 @@ Status legend: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[-]` BLOCKED(re
 
 Progress: 4 / 94 done.
 
+Current product work (not a velnorctl-migration leaf): `[execution] backend
+= "docker" | "microvm"` in `execution.toml`, no fallback, Firecracker+jailer
+microVM backend. See `docs/adr/0001-firecracker-production-microvm.md`.
+
 ## Track A - fleet policy (P0, independent)
 
 - [~] **039** - Reconcile restricted organization JIT fleets (P0) - [fleet-operations/039-org-jit-multi-repo-fleet.md](fleet-operations/039-org-jit-multi-repo-fleet.md)

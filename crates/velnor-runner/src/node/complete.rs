@@ -1,4 +1,5 @@
-//! Persist completion intent before any GitHub `complete_job` send.
+//! Persist completion intent before any GitHub `complete_job` send, then
+//! `RemoteAcked` after send succeeds so the slot leaves Completing.
 //!
 //! The journal directory is a function argument, never thread-local: the
 //! service binary uses a multi-thread Tokio runtime, so TLS set before an
@@ -53,11 +54,9 @@ where
     if started.rejected {
         anyhow::bail!("completion send-started rejected for job {}", job_id.0);
     }
-    let result = send().map_err(Into::into);
-    if result.is_ok() {
-        record_remote_ack(journal, job_id, generation)?;
-    }
-    result
+    let result = send().map_err(Into::into)?;
+    ack_remote(journal, job_id, generation)?;
+    Ok(result)
 }
 
 /// Async GitHub complete path used by `complete_run_service_job`.
@@ -82,29 +81,9 @@ pub async fn guarded_complete_async<T>(
     if started.rejected {
         anyhow::bail!("completion send-started rejected for job {}", job_id.0);
     }
-    let result = send.await;
-    if result.is_ok() {
-        record_remote_ack(journal, job_id, generation)?;
-    }
-    result
-}
-
-fn record_remote_ack(
-    journal: &mut Journal,
-    job_id: &JobId,
-    generation: Generation,
-) -> anyhow::Result<()> {
-    let acked = journal.apply(Event::RemoteAcked {
-        job_id: job_id.clone(),
-        generation,
-    })?;
-    if acked.rejected {
-        anyhow::bail!(
-            "remote completion acknowledged but journal transition rejected for job {}",
-            job_id.0
-        );
-    }
-    Ok(())
+    let result = send.await?;
+    ack_remote(journal, job_id, generation)?;
+    Ok(result)
 }
 
 /// Return the generation that already owns `job_id`. Never creates ownership.
@@ -238,6 +217,19 @@ fn commit_intent(
     Ok(true)
 }
 
+/// GitHub accepted `complete_job`. Commit that before the worker exits so
+/// crash recovery does not replay Completing forever.
+fn ack_remote(journal: &mut Journal, job_id: &JobId, generation: Generation) -> anyhow::Result<()> {
+    let outcome = journal.apply(Event::RemoteAcked {
+        job_id: job_id.clone(),
+        generation,
+    })?;
+    if outcome.rejected {
+        anyhow::bail!("remote ack rejected for job {}", job_id.0);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,10 +337,105 @@ mod tests {
         )
         .unwrap();
         assert!(sent);
+        assert!(
+            journal.pending_outbox().unwrap().is_empty(),
+            "successful complete_job must RemoteAcked so the outbox is not replayed"
+        );
         let state = journal.load_state().unwrap();
-        assert!(state.jobs.is_empty(), "remote ack must release the job");
+        assert!(state.jobs.is_empty(), "{:?}", state.jobs);
         assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn successful_complete_leaves_slot_ready_for_the_next_assign() {
+        let dir = tmp("ack-ready");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let first = JobId("job-1".into());
+        let generation = prime_owned(&mut journal, &first);
+        guarded_complete(
+            &mut journal,
+            &dir,
+            &first,
+            generation,
+            b"conclusion=success",
+            || Ok::<(), anyhow::Error>(()),
+        )
+        .unwrap();
+        let second = accept_job(
+            &mut journal,
+            &JobId("job-2".into()),
+            &SlotId("scope-1".into()),
+        );
+        assert!(
+            second.is_ok(),
+            "Ready slot must accept the next job after RemoteAcked, got {second:?}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn failed_send_does_not_ack_or_restore_the_slot() {
+        let dir = tmp("ack-fail");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-1".into());
+        let generation = prime_owned(&mut journal, &job_id);
+        let error = guarded_complete(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"conclusion=success",
+            || Err::<(), anyhow::Error>(anyhow::anyhow!("complete_job 503")),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("complete_job 503"), "{error}");
+        let pending = journal.pending_outbox().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].send_started);
+        assert!(!pending[0].remote_acked);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs[0].phase, ActorPhase::Completing);
+        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+        let rejected = accept_job(
+            &mut journal,
+            &JobId("job-2".into()),
+            &SlotId("scope-1".into()),
+        )
+        .unwrap_err();
+        assert!(
+            rejected.to_string().contains("Assigned rejected"),
+            "{rejected}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn async_complete_job_success_applies_remote_acked() {
+        let dir = tmp("ack-async");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-async".into());
+        let generation = prime_owned(&mut journal, &job_id);
+        guarded_complete_async(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"conclusion=success",
+            async { Ok(()) },
+        )
+        .await
+        .unwrap();
         assert!(journal.pending_outbox().unwrap().is_empty());
+        let state = journal.load_state().unwrap();
+        assert!(state.jobs.is_empty(), "{:?}", state.jobs);
+        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        accept_job(
+            &mut journal,
+            &JobId("job-next".into()),
+            &SlotId("scope-1".into()),
+        )
+        .expect("slot must leave Completing after async complete_job");
         std::fs::remove_dir_all(dir).ok();
     }
 

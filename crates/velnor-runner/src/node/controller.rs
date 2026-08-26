@@ -366,7 +366,8 @@ async fn reconcile_once(
     }
 
     let mut proof_effects = Vec::new();
-    let executor = prove::observe_executor(&args.state_dir);
+    let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
+    let executor = prove::observe_executor(&args.state_dir, execution.backend());
     let snapshot = journal.load_state()?;
     let now = tokio::time::Instant::now();
     for index in 1..=total {
@@ -438,7 +439,8 @@ async fn reconcile_once(
 
     reap(slots);
     reap(jobs);
-    let health = journal.load_state()?.health();
+    let mut health = journal.load_state()?.health();
+    health.execution_backend = execution.backend();
     server.publish(&health)?;
     Ok(LocalCycle::finished())
 }

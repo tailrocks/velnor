@@ -26,9 +26,19 @@ implementation detail lives in [roadmap.md](roadmap.md).
 Velnor is a **GitHub Actions-compatible, self-hosted runner built for Rust
 projects** — not a generic CI runner. It appears to GitHub as a self-hosted
 runner (V2 JIT / broker / run-service / Results Service only), runs assigned
-Linux jobs in Docker containers, and executes the known action surface through
+Linux jobs through a dual backend, and executes the known action surface through
 **native Rust adapters** instead of marketplace JavaScript or Docker action
-bundles.
+bundles. Operator selection is `[execution] backend = "docker"` or `"microvm"` with
+no fallback. The **Docker backend** is Velnor → host Docker → job container +
+service containers. The **MicroVM backend** is Velnor → Firecracker/KVM →
+guest Linux → guest-local Docker. Firecracker is the production microVM: an open-source
+Rust VMM on Linux KVM, started through its HTTP API and jailer (namespaces,
+cgroups, seccomp, privilege dropping). Guest isolation uses immutable block
+devices, job-local writable disks, and bounded vsock — not virtio-fs, host
+directory passthrough, PCI, GPUs, Windows guests, USB, or a legacy device
+model. Cloud Hypervisor is fallback-only if a real estate workflow proves
+Firecracker's five-device model insufficient. Kata Containers and
+firecracker-containerd are not the product orchestration path.
 
 Because it is self-hosted on owned hardware and Velnor authors its own
 execution and output, it is **faster, cheaper, nicer, and more informative**

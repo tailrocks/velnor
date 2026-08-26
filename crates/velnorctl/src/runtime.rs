@@ -275,6 +275,10 @@ impl From<DoctorArgs> for rt::DoctorArgs {
 
 #[derive(Debug, Args)]
 pub struct PreflightArgs {
+    /// Directory containing execution.toml (`[execution] backend`).
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+
     /// Host work directory for Docker job state. Defaults to ./.velnor-work.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
@@ -287,23 +291,28 @@ pub struct PreflightArgs {
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
 
-    /// Require /var/run/docker.sock to exist on the host.
-    #[arg(long)]
-    pub require_docker_socket: bool,
-
-    /// Require docker buildx to be available on the host.
+    /// Require docker buildx to be available on the host Docker backend.
     #[arg(long, default_value_t = true)]
     pub require_buildx: bool,
 }
 
 impl From<PreflightArgs> for rt::PreflightArgs {
     fn from(args: PreflightArgs) -> Self {
+        let backend = args
+            .config_dir
+            .as_ref()
+            .and_then(|dir| velnor_runner::execution::load_execution_file(dir, None).ok())
+            .map(|file| file.backend());
         Self {
             work_dir: args.work_dir,
             docker_host_work_dir: args.docker_host_work_dir,
             docker_image: args.docker_image,
-            require_docker_socket: args.require_docker_socket,
+            require_docker_socket: backend
+                .map(velnor_model::ExecutionBackendKind::uses_host_docker_socket)
+                .unwrap_or(true),
             require_buildx: args.require_buildx,
+            execution_backend: backend,
+            config_dir: args.config_dir,
         }
     }
 }

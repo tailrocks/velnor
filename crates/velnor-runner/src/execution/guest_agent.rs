@@ -1,0 +1,292 @@
+//! Guest-side vsock session. Production binds AF_VSOCK inside the microVM.
+
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+use velnor_model::{GuestJobPlan, JobConclusion, VsockCodecError, VsockMessage, PROTOCOL_VERSION};
+
+use super::guest_runtime::{guest_capability_error, validate_guest_plan};
+
+/// Guest identity announced on `GuestReady`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestSessionEnv {
+    pub isolation_id: String,
+    pub generation: u64,
+    pub docker_healthy: bool,
+}
+
+impl GuestSessionEnv {
+    /// Read isolation labels from the guest environment.
+    #[must_use]
+    pub fn from_guest_env() -> Self {
+        Self {
+            isolation_id: std::env::var("VELNOR_ISOLATION_ID").unwrap_or_default(),
+            generation: std::env::var("VELNOR_ISOLATION_GENERATION")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            docker_healthy: PathBuf::from("/var/run/docker.sock").exists(),
+        }
+    }
+}
+
+/// Serve one host connection: ready, plan delivery, teardown.
+///
+/// # Errors
+/// Protocol or plan-execution failures.
+pub fn serve_guest_session<S, F>(
+    stream: &mut S,
+    env: &GuestSessionEnv,
+    mut run_plan: F,
+) -> Result<(), String>
+where
+    S: Read + Write,
+    F: FnMut(&[u8]) -> Result<i32, String>,
+{
+    VsockMessage::GuestReady {
+        isolation_id: env.isolation_id.clone(),
+        generation: env.generation,
+        docker_healthy: env.docker_healthy,
+    }
+    .write_to(stream)
+    .map_err(|error| format!("write ready: {error}"))?;
+    loop {
+        match VsockMessage::read_from(&mut *stream) {
+            Ok(VsockMessage::Cancel | VsockMessage::TeardownAck { .. }) => break,
+            Ok(VsockMessage::DeliverPlan {
+                isolation_id,
+                generation,
+                plan_bytes,
+            }) => {
+                let plan = GuestJobPlan::decode(&plan_bytes).map_err(|error| {
+                    format!(
+                        "{} ({error})",
+                        guest_capability_error(
+                            "guest.plan",
+                            "malformed",
+                            "valid serialized GuestJobPlan",
+                        )
+                    )
+                })?;
+                validate_guest_plan(&plan)?;
+                if !plan.command_files.is_empty() {
+                    return Err(guest_capability_error(
+                        "guest.command_files",
+                        "non-empty",
+                        "empty until guest result-file transfer is implemented",
+                    ));
+                }
+                let (conclusion, code) = if let Some(planned) = plan.planned_conclusion() {
+                    planned
+                } else {
+                    let code = run_plan(&plan_bytes)?;
+                    (
+                        if code == 0 {
+                            JobConclusion::Success
+                        } else {
+                            JobConclusion::Failure
+                        },
+                        code,
+                    )
+                };
+                VsockMessage::JobCompleted {
+                    conclusion,
+                    exit_code: code,
+                }
+                .write_to(stream)
+                .map_err(|error| format!("write conclusion: {error}"))?;
+                VsockMessage::TeardownAck {
+                    isolation_id,
+                    generation,
+                }
+                .write_to(stream)
+                .map_err(|error| format!("write ack: {error}"))?;
+            }
+            Ok(_) => {}
+            Err(VsockCodecError::Io { .. }) => break,
+            Err(error) => return Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
+        }
+    }
+    Ok(())
+}
+
+/// Bind `VMADDR_CID_ANY` on `port`. Firecracker delivers host connections here.
+///
+/// # Errors
+/// Socket, bind, or listen failure.
+#[cfg(target_os = "linux")]
+pub fn bind_af_vsock(port: u32) -> Result<std::os::fd::OwnedFd, String> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    // SAFETY: `socket` returns a new file descriptor or -1.
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(format!(
+            "AF_VSOCK socket: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+    addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+    addr.svm_port = port;
+    addr.svm_cid = libc::VMADDR_CID_ANY;
+    let bind_rc = unsafe {
+        libc::bind(
+            fd,
+            std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_vm>() as u32,
+        )
+    };
+    if bind_rc != 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(format!("AF_VSOCK bind port {port}: {error}"));
+    }
+    let listen_rc = unsafe { libc::listen(fd, 1) };
+    if listen_rc != 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(format!("AF_VSOCK listen: {error}"));
+    }
+    // SAFETY: `fd` is an open socket owned uniquely here.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Accept one host connection on a bound AF_VSOCK listener.
+///
+/// # Errors
+/// Accept failure.
+#[cfg(target_os = "linux")]
+pub fn accept_af_vsock(
+    listener: &std::os::fd::OwnedFd,
+) -> Result<std::os::unix::net::UnixStream, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::net::UnixStream;
+
+    let fd = unsafe {
+        libc::accept(
+            listener.as_raw_fd(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "AF_VSOCK accept: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `accept` returned a new connected SOCK_STREAM fd.
+    Ok(unsafe { UnixStream::from_raw_fd(fd) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use velnor_model::GuestJobPlan;
+
+    #[test]
+    fn session_delivers_plan_and_acks_without_unix_listener() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let env = GuestSessionEnv {
+            isolation_id: "job-1".into(),
+            generation: 7,
+            docker_healthy: true,
+        };
+        let plan = GuestJobPlan {
+            isolation_id: "job-1".into(),
+            generation: 7,
+            job_id: "job-1".into(),
+            image: "velnor/job-ubuntu:26.04".into(),
+            services: Vec::new(),
+            steps: Vec::new(),
+            timeout_ms: 1000,
+            cancel_requested: false,
+            fail: false,
+            cache_digest: None,
+            command_files: Vec::new(),
+            outputs: Vec::new(),
+            env: Vec::new(),
+            workspace: "/__w".into(),
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
+        };
+        let bytes = plan.encode().unwrap();
+        let guest_env = env.clone();
+        let plan_bytes = bytes.clone();
+        let thread = std::thread::spawn(move || {
+            serve_guest_session(&mut guest, &guest_env, |delivered| {
+                assert_eq!(delivered, plan_bytes.as_slice());
+                Ok(0)
+            })
+        });
+        let ready = VsockMessage::read_from(&mut host).unwrap();
+        assert_eq!(
+            ready,
+            VsockMessage::GuestReady {
+                isolation_id: "job-1".into(),
+                generation: 7,
+                docker_healthy: true,
+            }
+        );
+        VsockMessage::DeliverPlan {
+            isolation_id: "job-1".into(),
+            generation: 7,
+            plan_bytes: bytes,
+        }
+        .write_to(&mut host)
+        .unwrap();
+        assert!(matches!(
+            VsockMessage::read_from(&mut host).unwrap(),
+            VsockMessage::JobCompleted {
+                conclusion: velnor_model::JobConclusion::Success,
+                exit_code: 0
+            }
+        ));
+        assert!(matches!(
+            VsockMessage::read_from(&mut host).unwrap(),
+            VsockMessage::TeardownAck { generation: 7, .. }
+        ));
+        VsockMessage::Cancel.write_to(&mut host).unwrap();
+        thread.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn malformed_plan_fails_closed_without_running_plan() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let env = GuestSessionEnv {
+            isolation_id: "job-malformed".into(),
+            generation: 1,
+            docker_healthy: true,
+        };
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_by_guest = called.clone();
+        let thread = std::thread::spawn(move || {
+            serve_guest_session(&mut guest, &env, move |_| {
+                called_by_guest.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(0)
+            })
+        });
+        assert!(matches!(
+            VsockMessage::read_from(&mut host).unwrap(),
+            VsockMessage::GuestReady { .. }
+        ));
+        VsockMessage::DeliverPlan {
+            isolation_id: "job-malformed".into(),
+            generation: 1,
+            plan_bytes: b"not a GuestJobPlan".to_vec(),
+        }
+        .write_to(&mut host)
+        .unwrap();
+        let error = thread.join().unwrap().unwrap_err();
+        assert!(error.contains("guest.plan"), "{error}");
+        assert!(error.contains("received 'malformed'"), "{error}");
+        assert!(error.contains("manifest version"), "{error}");
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}

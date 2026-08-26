@@ -40,8 +40,8 @@ use crate::{
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        condition_is_statically_false, DockerScriptExecutor, ExecutableStep, ProcessCommandRunner,
-        StepLog, StepStartEvent,
+        condition_is_statically_false, CommandRunner, DockerJobEngine, ExecutableStep,
+        JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -2172,7 +2172,7 @@ fn daemon_preflight_args(
                 Ok(None)
             } else {
                 let config_dir = run_args.config_dir.as_deref().unwrap_or(config_base);
-                Ok(Some(preflight_args_for_run(&run_args, config_dir)))
+                Ok(Some(preflight_args_for_run(&run_args, config_dir)?))
             }
         })
         .filter_map(Result::transpose)
@@ -2401,12 +2401,18 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
         return Ok(());
     }
 
-    crate::preflight::preflight(preflight_args_for_run(args, config_dir))
+    crate::preflight::preflight(preflight_args_for_run(args, config_dir)?)
         .context("Docker preflight failed before polling GitHub for jobs")
 }
 
-fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
-    PreflightArgs {
+fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> Result<PreflightArgs> {
+    // Fail closed: an unreadable execution.toml must not silently degrade the
+    // preflight to the docker branch (and only die at job time) — it stops
+    // the run here, exactly like the execute path.
+    let execution_backend = crate::execution::load_execution_file(config_dir, None)
+        .context("execution backend selection failed before preflight")
+        .map(|file| file.backend())?;
+    Ok(PreflightArgs {
         work_dir: Some(
             args.work_dir
                 .clone()
@@ -2416,7 +2422,9 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
         docker_image: args.docker_image.clone(),
         require_docker_socket: args.require_docker_socket,
         require_buildx: true,
-    }
+        execution_backend: Some(execution_backend),
+        config_dir: Some(config_dir.to_path_buf()),
+    })
 }
 
 fn job_resource_options(cpus: &str, memory: &str) -> Vec<String> {
@@ -5069,6 +5077,9 @@ fn execute_script_job(
     daemon_id: String,
     reserved_bytes: u64,
 ) -> Result<ScriptJobResult> {
+    let execution_backend = crate::execution::load_execution_file(config_dir, None)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+        .backend();
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let result = execute_script_job_inner(
         &job_dir,
@@ -5086,6 +5097,7 @@ fn execute_script_job(
         step_log_sender,
         daemon_id,
         reserved_bytes,
+        execution_backend,
     );
     if result.is_err() {
         if let Err(e) = fs::remove_dir_all(&job_dir) {
@@ -5096,6 +5108,180 @@ fn execute_script_job(
         }
     }
     result
+}
+
+struct RunnerDockerEngine<'a, R: CommandRunner> {
+    executor: &'a mut DockerJobEngine<R>,
+    plan: &'a crate::plan::NormalizedJobPlan,
+    job_outputs: Option<&'a Value>,
+    environment_url: Option<&'a Value>,
+    summary: Option<JobExecutionSummary>,
+}
+
+impl<R: CommandRunner> crate::execution::ProductionDockerEngine for RunnerDockerEngine<'_, R> {
+    fn execute_github_job(
+        &mut self,
+        events: &mut Vec<crate::execution::ExecutionEvent>,
+    ) -> Result<(), crate::execution::ExecutionError> {
+        let summary = self
+            .executor
+            .execute_ordered_steps_without_cleanup(
+                &self.plan.execution.job_container,
+                &self.plan.steps,
+                &self.plan.execution.env,
+                &self.plan.execution.context_data,
+                self.job_outputs,
+                self.environment_url,
+                &self.plan.execution.temp_host,
+            )
+            .map_err(|error| crate::execution::ExecutionError::DockerExecute(error.to_string()))?;
+        for log in &summary.step_logs {
+            for line in &log.lines {
+                events.push(crate::execution::ExecutionEvent::Log {
+                    stream: 1,
+                    line: line.clone(),
+                });
+            }
+        }
+        for (name, value) in &summary.job_outputs {
+            events.push(crate::execution::ExecutionEvent::Output {
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+        let failed = summary
+            .step_results
+            .iter()
+            .any(|result| result.exit_code != 0 && !result.failure_ignored);
+        events.push(crate::execution::ExecutionEvent::JobCompleted {
+            conclusion: if failed {
+                velnor_model::JobConclusion::Failure
+            } else {
+                velnor_model::JobConclusion::Success
+            },
+            exit_code: if failed { 1 } else { 0 },
+        });
+        self.summary = Some(summary);
+        Ok(())
+    }
+}
+
+fn execute_microvm_script_job(
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+    docker_image: &str,
+    node_action_image: &str,
+    trust_scope: &str,
+    run_service_url: &str,
+    billing_owner_id: Option<String>,
+) -> Result<ScriptJobResult> {
+    let run_root = std::path::PathBuf::from("/run/velnor");
+    let container = crate::github_adapter::github_job_container_spec(
+        job,
+        crate::github_adapter::GitHubJobContainerPaths {
+            workspace_host: run_root.join("workspace"),
+            temp_host: run_root.join("temp"),
+            home_host: run_root.join("home"),
+            actions_host: run_root.join("actions"),
+            tools_host: run_root.join("tools"),
+            docker_host_work_dir: None,
+            execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+        },
+        docker_image,
+        Vec::new(),
+        node_action_image,
+        "microvm".into(),
+        trust_scope,
+    );
+    if container.mount_docker_socket {
+        return Err(microvm_capability_error(
+            "execution.container.mount_docker_socket",
+            "true",
+            "false",
+        ));
+    }
+    let steps = script_steps
+        .iter()
+        .cloned()
+        .map(crate::executor::ExecutableStep::Script)
+        .collect();
+    let normalized = crate::github_adapter::github_normalized_job_plan(
+        job,
+        run_service_url,
+        billing_owner_id,
+        container,
+        steps,
+        crate::runtime_env::job_environment_variables(job),
+        job_context_data(job),
+    );
+    reject_incomplete_microvm_plan(job, script_steps, &normalized)
+}
+
+fn microvm_capability_error(field: &str, received: &str, accepted: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "unsupported capability: field '{field}' received '{received}'; accepted '{accepted}'; manifest version {}",
+        crate::manifest::MANIFEST_VERSION
+    )
+}
+
+fn reject_incomplete_microvm_plan(
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+    plan: &crate::plan::NormalizedJobPlan,
+) -> Result<ScriptJobResult> {
+    if plan.execution.job_container.image.trim().is_empty() {
+        return Err(microvm_capability_error(
+            "execution.job_container.image",
+            "<empty>",
+            "non-empty guest image",
+        ));
+    }
+    if let Some((index, step)) = job.steps.iter().enumerate().find(|(_, step)| {
+        step.enabled
+            && !matches!(
+                step.reference_type(),
+                Some(crate::job_message::ActionReferenceType::Script)
+            )
+    }) {
+        let received = step
+            .reference_type()
+            .map_or_else(|| "absent".to_string(), |kind| format!("{kind:?}"));
+        return Err(microvm_capability_error(
+            &format!("jobs.steps[{index}].reference.type"),
+            &received,
+            "Script until native guest action execution is complete",
+        ));
+    }
+    if plan.steps.len() != script_steps.len() {
+        return Err(microvm_capability_error(
+            "execution.steps",
+            "script-only projection",
+            "complete ordered normalized job steps",
+        ));
+    }
+    if plan
+        .github_report
+        .as_ref()
+        .is_none_or(|report| report.run_service_url.trim().is_empty())
+    {
+        return Err(microvm_capability_error(
+            "github_report.run_service_url",
+            "<empty>",
+            "non-empty GitHub run-service URL",
+        ));
+    }
+    if plan.execution.context_data.is_empty() {
+        return Err(microvm_capability_error(
+            "execution.context_data",
+            "<empty>",
+            "complete GitHub context data",
+        ));
+    }
+    Err(microvm_capability_error(
+        "execution.microvm.result_bridge",
+        "unimplemented",
+        "complete guest command-file bytes, outputs, environment URL, logs, and teardown result",
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5115,7 +5301,19 @@ fn execute_script_job_inner(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
+    execution_backend: velnor_model::ExecutionBackendKind,
 ) -> Result<ScriptJobResult> {
+    if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
+        return execute_microvm_script_job(
+            job,
+            script_steps,
+            docker_image,
+            node_action_image,
+            trust_scope,
+            run_service_url,
+            billing_owner_id,
+        );
+    }
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here
     // starts at zero and only increments after the closure was admitted.
@@ -5159,6 +5357,7 @@ fn execute_script_job_inner(
             actions_host: actions.clone(),
             tools_host: tools.clone(),
             docker_host_work_dir,
+            execution_backend,
         },
         docker_image,
         resource_options,
@@ -5433,7 +5632,7 @@ fn execute_script_job_inner(
         }
         log
     });
-    let mut executor = DockerScriptExecutor::new(command_runner)
+    let mut executor = DockerJobEngine::new(command_runner)
         .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
@@ -5453,17 +5652,45 @@ fn execute_script_job_inner(
     }
     let steps_started = Instant::now();
     let first_step_ms = duration_ms(execution_started.elapsed());
+    let mut docker_engine = RunnerDockerEngine {
+        executor: &mut executor,
+        plan: &plan,
+        job_outputs: job.job_outputs.as_ref(),
+        environment_url: actions_environment_url(job),
+        summary: None,
+    };
+    let execution_file = velnor_model::ExecutionFile {
+        execution: velnor_model::ExecutionSection {
+            backend: velnor_model::ExecutionBackendKind::Docker,
+        },
+    };
+    let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
+    let mut fs = crate::execution::RealHostFs;
+    let mut preflight_runner = ProcessCommandRunner;
+    let mut firecracker_api = crate::execution::RecordingFirecracker::default();
+    let kvm = std::path::PathBuf::from("/dev/kvm");
+    let artifact_root = plan.execution.temp_host.clone();
+    let docker_sock = std::path::PathBuf::from("/var/run/docker.sock");
+    let validated = crate::execution::ValidatedPlan::from_normalized(&plan);
     let summary_result = {
         let _span = tracing::info_span!("job-steps").entered();
-        executor.execute_ordered_steps_without_cleanup(
-            &plan.execution.job_container,
-            &plan.steps,
-            &plan.execution.env,
-            &plan.execution.context_data,
-            job.job_outputs.as_ref(),
-            actions_environment_url(job),
-            &plan.execution.temp_host,
-        )
+        let mut world = crate::execution::ExecutionWorld {
+            kvm: &kvm,
+            artifact_root: &artifact_root,
+            host_docker_socket: &docker_sock,
+            runner: &mut preflight_runner,
+            firecracker: &mut firecracker_api,
+            host_fs: &mut fs,
+            vsock: None,
+            docker_engine: Some(&mut docker_engine),
+            allow_inline_guest_plan: false,
+        };
+        crate::execution::run_validated_job(&execution_file, isolation, &validated, &mut world)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        docker_engine
+            .summary
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("docker backend produced no job summary"))
     };
     let steps_ms = duration_ms(steps_started.elapsed());
     println!(
@@ -5588,7 +5815,7 @@ fn execute_script_job_inner(
                 order: post_order,
             });
         }
-        let mut service_executor = DockerScriptExecutor::new(command_runner);
+        let mut service_executor = DockerJobEngine::new(command_runner);
         service_executor.cleanup_services(&plan.execution.job_container)?;
         let stop_log = StepLog {
             step_id: stop_step_id,
@@ -5776,7 +6003,7 @@ impl TeardownHandle {
             job_dir,
             services_removed,
         } = self;
-        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
         let cleanup = if services_removed {
             executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
@@ -5808,7 +6035,7 @@ impl TeardownHandle {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 worker_forensics.lifecycle("buildkit-teardown-deferred-start");
-                let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+                let mut executor = DockerJobEngine::new(ProcessCommandRunner);
                 match executor.cleanup_job_buildkit(&worker_container) {
                     Ok(()) => worker_forensics.lifecycle("buildkit-teardown-deferred-done"),
                     Err(error) => worker_forensics.lifecycle(&format!(
@@ -5824,7 +6051,7 @@ impl TeardownHandle {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
-            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
             if let Err(error) = executor.cleanup_job_buildkit(&container) {
                 eprintln!("Warning: deferred BuildKit teardown fallback failed: {error:#}");
             }
@@ -5913,7 +6140,7 @@ struct PrecreatedJobEnvironment {
 impl PrecreatedJobEnvironment {
     fn spawn(container: crate::container::JobContainerSpec) -> Self {
         Self::spawn_with(container, |container| {
-            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
             let result = executor.start_job_environment(container);
             // Hand the guard out of the thread-local executor BEFORE it is
             // dropped; the running container keeps using the proxied socket.
@@ -5986,7 +6213,7 @@ impl Drop for PrecreatedJobEnvironment {
         if self.claimed || !self.join() {
             return;
         }
-        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
         // Hand the pre-create thread's guard to the cleanup executor: its
         // cleanup drops the guard only AFTER the abandoned environment's
         // container is removed, so the proxy never dies under a live mount.
@@ -8956,6 +9183,25 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    /// Temp config dir holding a docker `execution.toml` for preflight tests.
+    fn execution_config_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-preflight-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+        dir
+    }
+
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
             config_dir: None,
@@ -8994,6 +9240,26 @@ mod tests {
             "variables": variables
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn microvm_job_rejects_incomplete_plan_before_backend_side_effects() {
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let error = execute_microvm_script_job(
+            &job,
+            &[],
+            "ubuntu:24.04",
+            "node:24",
+            "trusted",
+            "https://run.service/jobs/1",
+            None,
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("unsupported capability"), "{text}");
+        assert!(text.contains("execution.context_data"), "{text}");
+        assert!(text.contains("received '<empty>'"), "{text}");
+        assert!(text.contains("manifest version 9"), "{text}");
     }
 
     #[test]
@@ -9685,7 +9951,8 @@ jobs:
         args.docker_image = "velnor/job-ubuntu:26.04".into();
         args.require_docker_socket = true;
 
-        let preflight = preflight_args_for_run(&args, Path::new("/config"));
+        let config_dir = execution_config_dir("run-preflight-targets");
+        let preflight = preflight_args_for_run(&args, &config_dir).unwrap();
 
         assert_eq!(
             preflight.work_dir,
@@ -9703,12 +9970,10 @@ jobs:
     #[test]
     fn run_preflight_args_default_work_dir_under_config() {
         let args = run_args(false, false, false);
-        let preflight = preflight_args_for_run(&args, Path::new("/config"));
+        let config_dir = execution_config_dir("run-preflight-defaults");
+        let preflight = preflight_args_for_run(&args, &config_dir).unwrap();
 
-        assert_eq!(
-            preflight.work_dir,
-            Some(Path::new("/config/_work").to_path_buf())
-        );
+        assert_eq!(preflight.work_dir, Some(config_dir.join("_work")));
         assert_eq!(preflight.docker_host_work_dir, None);
         assert!(!preflight.require_docker_socket);
         assert!(preflight.require_buildx);
@@ -10007,7 +10272,20 @@ jobs:
         args.docker_image = "velnor/job-ubuntu:26.04".into();
         args.require_docker_socket = true;
 
-        let preflight = daemon_preflight_args(&args, Path::new("/config"), 2).unwrap();
+        // Each slot selects its backend from its own config dir; the packaged
+        // /etc/velnor fallback answers when a slot file is absent.
+        let base = unique_temp_dir("daemon-preflight-args");
+        for slot in 1..=2 {
+            let slot_dir = daemon_slot_config_dir(&base, slot, 2);
+            fs::create_dir_all(&slot_dir).unwrap();
+            fs::write(
+                slot_dir.join("execution.toml"),
+                "[execution]\nbackend = \"docker\"\n",
+            )
+            .unwrap();
+        }
+
+        let preflight = daemon_preflight_args(&args, &base, 2).unwrap();
 
         assert_eq!(preflight.len(), 2);
         assert_eq!(

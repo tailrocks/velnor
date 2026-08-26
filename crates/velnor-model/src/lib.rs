@@ -12,8 +12,11 @@
 pub mod cli_meta;
 pub mod condition;
 pub mod error_envelope;
+pub mod execution;
+pub mod guest_plan;
 pub mod job_summary;
 pub mod lifecycle;
+pub mod microvm;
 pub mod node;
 pub mod phase;
 pub mod resources;
@@ -22,15 +25,28 @@ pub mod scheduler;
 pub mod since;
 pub mod source;
 pub mod time;
+pub mod vsock_protocol;
 
 pub use cli_meta::{CommandMetadata, FlagMetadata, SchemaDocument};
 pub use condition::{Condition, ConditionStatus, Labels, ResourceMeta};
 pub use error_envelope::{exit_code_for_class, ExitClass, MachineErrorEnvelope};
+pub use execution::{
+    ExecutionBackendKind, ExecutionBackendRejected, ExecutionConfigError, ExecutionFile,
+    ExecutionSection, MicroVmPreflightFailure,
+};
+pub use guest_plan::{
+    GuestArtifactOp, GuestCacheOp, GuestEnvVar, GuestJobPlan, GuestOutput, GuestService, GuestStep,
+};
 pub use job_summary::{
     InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobSummary,
     NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
 };
 pub use lifecycle::{transition_target, EventReason, InvalidLifecycleToken, JobState};
+pub use microvm::{
+    GuestIsolation, IsolationRejected, JobExecutorKind, MicroVmControl, MicroVmControlRejected,
+    MicroVmKind, MicroVmNotProven, FIRECRACKER_DEVICES, FIRECRACKER_REPO_URL, FIRECRACKER_SPEC_URL,
+    JAILER_CONTROLS,
+};
 pub use node::{
     ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthDocument, JobId,
     NotReady, ReadyProof, SliDimension, SlotId,
@@ -49,6 +65,10 @@ pub use scheduler::{
 pub use since::{InvalidSince, Since};
 pub use source::Source;
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};
+pub use vsock_protocol::{
+    VsockCodecError, VsockMessage, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION, STDERR_STREAM,
+    STDOUT_STREAM,
+};
 
 /// Crate version reported by `velnorctl --version`.
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
