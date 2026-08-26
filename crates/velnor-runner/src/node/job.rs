@@ -39,10 +39,17 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
     if let Some(handoff) = args.handoff.as_deref() {
         let result = crate::runner::run_transient_job(&args, handoff).await;
         if let Some(done) = args.done.as_deref() {
-            if let Some(parent) = done.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(done, b"done")?;
+            let status = if result.is_ok() {
+                super::handoff::CompletionStatus::Finished
+            } else {
+                super::handoff::CompletionStatus::Failed
+            };
+            super::handoff::write_completion(
+                done,
+                &args.job_id,
+                Generation(args.generation),
+                status,
+            )?;
         }
         return result;
     }

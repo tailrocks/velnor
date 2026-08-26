@@ -327,6 +327,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     })?;
     let mut slots: HashMap<String, Child> = HashMap::new();
     let mut jobs: HashMap<String, Child> = HashMap::new();
+    let mut job_generations: HashMap<String, u64> = HashMap::new();
     let mut heartbeats: HashMap<String, (u32, u64)> = HashMap::new();
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
     let mut pacing = GithubPacing::default();
@@ -342,7 +343,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             for manager in managers {
                 let _ = manager.await;
             }
-            drain_children(&args.state_dir, &mut slots, &mut jobs).await?;
+            drain_children(&args.state_dir, &mut slots, &mut jobs, &mut job_generations).await?;
             return Ok(());
         }
         let started = Instant::now();
@@ -353,19 +354,32 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             assignment_tx.clone(),
             recovery.clone(),
         )?;
-        drain_broker_assignments(&args, &journal, &mut jobs, &mut assignment_rx)?;
+        drain_broker_assignments(
+            &args,
+            &journal,
+            &mut jobs,
+            &mut job_generations,
+            &mut assignment_rx,
+        )?;
         let (cycle, health) = reconcile_once(
             &args,
             &mut journal,
             &server,
             &mut slots,
             &mut jobs,
+            &mut job_generations,
             &mut heartbeats,
             &mut last_registration_reconcile,
             &mut pacing,
         )
         .await?;
-        drain_broker_assignments(&args, &journal, &mut jobs, &mut assignment_rx)?;
+        drain_broker_assignments(
+            &args,
+            &journal,
+            &mut jobs,
+            &mut job_generations,
+            &mut assignment_rx,
+        )?;
         metrics.record(
             started.elapsed(),
             &health,
@@ -505,6 +519,7 @@ fn drain_broker_assignments(
     args: &ControllerArgs,
     journal: &Journal,
     jobs: &mut HashMap<String, Child>,
+    job_generations: &mut HashMap<String, u64>,
     receiver: &mut mpsc::Receiver<crate::runner::BrokerAssignment>,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(args.state_dir.join("handoffs"))?;
@@ -526,7 +541,12 @@ fn drain_broker_assignments(
                 })
         });
         if !valid {
-            std::fs::write(&assignment.done_path, b"stale")?;
+            crate::node::handoff::write_completion(
+                &assignment.done_path,
+                &assignment.handoff.nonce,
+                assignment.handoff.generation,
+                crate::node::handoff::CompletionStatus::Stale,
+            )?;
             continue;
         }
         crate::node::handoff::write_atomic(&assignment.handoff_path, &assignment.handoff)?;
@@ -534,7 +554,12 @@ fn drain_broker_assignments(
         let key = assignment.handoff.nonce.clone();
         if jobs.contains_key(&key) {
             let _ = std::fs::remove_file(&assignment.handoff_path);
-            let _ = std::fs::write(&assignment.done_path, b"duplicate");
+            let _ = crate::node::handoff::write_completion(
+                &assignment.done_path,
+                &assignment.handoff.nonce,
+                assignment.handoff.generation,
+                crate::node::handoff::CompletionStatus::Duplicate,
+            );
             continue;
         }
         let child = match Command::new(exe)
@@ -558,7 +583,12 @@ fn drain_broker_assignments(
             Ok(child) => child,
             Err(error) => {
                 let _ = std::fs::remove_file(&assignment.handoff_path);
-                let _ = std::fs::write(&assignment.done_path, b"spawn-failed");
+                let _ = crate::node::handoff::write_completion(
+                    &assignment.done_path,
+                    &assignment.handoff.nonce,
+                    assignment.handoff.generation,
+                    crate::node::handoff::CompletionStatus::SpawnFailed,
+                );
                 eprintln!(
                     "broker assignment {} worker spawn failed; manager released: {error}",
                     assignment.handoff.nonce
@@ -566,6 +596,7 @@ fn drain_broker_assignments(
                 continue;
             }
         };
+        job_generations.insert(key.clone(), assignment.handoff.generation.0);
         jobs.insert(key, child);
     }
     Ok(())
@@ -580,6 +611,7 @@ async fn drain_children(
     state_dir: &std::path::Path,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
+    job_generations: &mut HashMap<String, u64>,
 ) -> anyhow::Result<()> {
     for child in slots.values() {
         request_child_shutdown(child)?;
@@ -587,7 +619,7 @@ async fn drain_children(
 
     loop {
         reap(slots);
-        reap_jobs(state_dir, jobs);
+        reap_jobs(state_dir, jobs, job_generations);
         if slots.is_empty() && jobs.is_empty() {
             return Ok(());
         }
@@ -629,6 +661,7 @@ async fn reconcile_once(
     server: &HealthServer,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
+    job_generations: &mut HashMap<String, u64>,
     heartbeats: &mut HashMap<String, (u32, u64)>,
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
@@ -750,7 +783,7 @@ async fn reconcile_once(
     }
 
     reap(slots);
-    reap_jobs(&args.state_dir, jobs);
+    reap_jobs(&args.state_dir, jobs, job_generations);
     let mut health = journal.materialized_state()?.health();
     health.execution_backend = execution.backend();
     server.publish(&health)?;
@@ -1301,7 +1334,11 @@ fn reap(children: &mut HashMap<String, Child>) {
 /// Wake the broker manager when a transient worker exits without publishing
 /// its normal completion marker. This covers pre-acquisition crashes, where
 /// no durable job record exists for `reclaim_orphaned_jobs` to recover.
-fn reap_jobs(state_dir: &std::path::Path, children: &mut HashMap<String, Child>) {
+fn reap_jobs(
+    state_dir: &std::path::Path,
+    children: &mut HashMap<String, Child>,
+    generations: &mut HashMap<String, u64>,
+) {
     let mut dead = Vec::new();
     for (id, child) in children.iter_mut() {
         if let Ok(Some(_)) = child.try_wait() {
@@ -1309,9 +1346,12 @@ fn reap_jobs(state_dir: &std::path::Path, children: &mut HashMap<String, Child>)
         }
     }
     for id in dead {
-        let _ = std::fs::write(
-            crate::node::handoff::completion_path(state_dir, &id),
-            b"exited",
+        let generation = generations.remove(&id).unwrap_or_default();
+        let _ = crate::node::handoff::write_completion(
+            &crate::node::handoff::completion_path(state_dir, &id),
+            &id,
+            Generation(generation),
+            crate::node::handoff::CompletionStatus::Exited,
         );
         children.remove(&id);
     }

@@ -43,6 +43,57 @@ pub struct AssignmentHandoff {
     pub task_agent_message: TaskAgentMessage,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CompletionStatus {
+    Finished,
+    Failed,
+    Exited,
+    Stale,
+    Duplicate,
+    SpawnFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletionRecord {
+    pub schema_version: u32,
+    pub nonce: String,
+    pub generation: Generation,
+    pub status: CompletionStatus,
+}
+
+pub fn write_completion(
+    path: &Path,
+    nonce: &str,
+    generation: Generation,
+    status: CompletionStatus,
+) -> Result<()> {
+    write_private_atomic(
+        path,
+        &serde_json::to_vec(&CompletionRecord {
+            schema_version: HANDOFF_SCHEMA_VERSION,
+            nonce: nonce.to_owned(),
+            generation,
+            status,
+        })?,
+    )
+}
+
+pub fn read_completion(
+    path: &Path,
+    nonce: &str,
+    generation: Generation,
+) -> Result<CompletionRecord> {
+    reject_non_regular(path)?;
+    let record: CompletionRecord = serde_json::from_slice(&fs::read(path)?)?;
+    if record.schema_version != HANDOFF_SCHEMA_VERSION
+        || record.nonce != nonce
+        || record.generation != generation
+    {
+        anyhow::bail!("completion record identity mismatch")
+    }
+    Ok(record)
+}
+
 impl AssignmentHandoff {
     /// Construct a current-schema handoff envelope.
     #[must_use]
@@ -120,6 +171,11 @@ pub enum HandoffValidationError {
 
 /// Atomically write a handoff with mode `0600` and durable file/directory metadata.
 pub fn write_atomic(path: &Path, handoff: &AssignmentHandoff) -> Result<()> {
+    let bytes = serde_json::to_vec(handoff).context("serialize assignment handoff")?;
+    write_private_atomic(path, &bytes)
+}
+
+fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -132,7 +188,6 @@ pub fn write_atomic(path: &Path, handoff: &AssignmentHandoff) -> Result<()> {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("chmod 0700 {}", parent.display()))?;
     }
-    let bytes = serde_json::to_vec(handoff).context("serialize assignment handoff")?;
     let temporary = parent.join(format!(".{}.{}.tmp", path_name(path), Uuid::new_v4()));
 
     let result = (|| -> Result<()> {
@@ -146,7 +201,7 @@ pub fn write_atomic(path: &Path, handoff: &AssignmentHandoff) -> Result<()> {
         let mut file = options
             .open(&temporary)
             .with_context(|| format!("create handoff temp file {}", temporary.display()))?;
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .with_context(|| format!("write handoff temp file {}", temporary.display()))?;
         set_private_mode(&temporary)?;
         file.sync_all()

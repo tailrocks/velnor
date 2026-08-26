@@ -1070,7 +1070,7 @@ pub(crate) async fn run_broker_manager(
             let handoff = crate::node::handoff::AssignmentHandoff::new(
                 slot_id.clone(),
                 generation,
-                nonce,
+                nonce.clone(),
                 session_id.clone(),
                 current_broker_url.clone(),
                 slot_index,
@@ -1084,7 +1084,10 @@ pub(crate) async fn run_broker_manager(
             })
             .await
             .context("deliver broker assignment to controller")?;
-            while !done_path.is_file() {
+            let completion_nonce = nonce;
+            while crate::node::handoff::read_completion(&done_path, &completion_nonce, generation)
+                .is_err()
+            {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             let _ = std::fs::remove_file(done_path);
