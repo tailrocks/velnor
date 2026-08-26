@@ -436,39 +436,62 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
 
 /// One scope-owned authority for all broker sessions. Session records remain
 /// per slot for protocol isolation, but creation, retry budget, assignment
-/// delivery, and drain are coordinated by this single task.
+/// delivery, and drain are coordinated by this single state machine.
+struct ScopeBrokerManager {
+    sessions: HashMap<String, (Generation, tokio::task::JoinHandle<()>)>,
+}
+
+impl ScopeBrokerManager {
+    fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+        }
+    }
+
+    async fn run(
+        &mut self,
+        args: ControllerArgs,
+        assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
+        recovery: Arc<Mutex<RecoveryCoordinator>>,
+        reconcile_notify: Arc<Notify>,
+    ) {
+        loop {
+            if crate::runner::draining() {
+                for (_, (_, task)) in self.sessions.drain() {
+                    let _ = task.await;
+                }
+                return;
+            }
+            self.sessions.retain(|_, (_, task)| !task.is_finished());
+            let journal_path = args.state_dir.join("journal.db");
+            let Ok(journal) = Journal::open(journal_path) else {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            };
+            if let Err(error) = ensure_broker_managers(
+                &args,
+                &journal,
+                &mut self.sessions,
+                assignments.clone(),
+                recovery.clone(),
+                reconcile_notify.clone(),
+            ) {
+                eprintln!("scope broker manager reconcile failed: {error:#}");
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
 async fn run_scope_broker_manager(
     args: ControllerArgs,
     assignments: mpsc::Sender<crate::runner::BrokerAssignment>,
     recovery: Arc<Mutex<RecoveryCoordinator>>,
     reconcile_notify: Arc<Notify>,
 ) {
-    let mut sessions: HashMap<String, (Generation, tokio::task::JoinHandle<()>)> = HashMap::new();
-    loop {
-        if crate::runner::draining() {
-            for (_, (_, task)) in sessions.drain() {
-                let _ = task.await;
-            }
-            return;
-        }
-        sessions.retain(|_, (_, task)| !task.is_finished());
-        let journal_path = args.state_dir.join("journal.db");
-        let Ok(journal) = Journal::open(journal_path) else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        };
-        if let Err(error) = ensure_broker_managers(
-            &args,
-            &journal,
-            &mut sessions,
-            assignments.clone(),
-            recovery.clone(),
-            reconcile_notify.clone(),
-        ) {
-            eprintln!("scope broker manager reconcile failed: {error:#}");
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    ScopeBrokerManager::new()
+        .run(args, assignments, recovery, reconcile_notify)
+        .await;
 }
 
 fn ensure_broker_managers(
