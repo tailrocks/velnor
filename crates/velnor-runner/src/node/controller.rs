@@ -694,10 +694,14 @@ fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow
         ) {
             continue;
         }
-        // Waiters spawned by this controller are not journal jobs; a journal
-        // job always has an owned pid file written at spawn time. A missing
-        // or dead pid means no worker can ever complete this job.
+        // A ready-slot waiter is spawned before GitHub assigns a job, so its
+        // durable ownership marker is keyed by the waiter identity rather
+        // than the later journal job id. Check both markers: otherwise a
+        // controller restart sees the live waiter as an orphan immediately
+        // after it accepts a job and reclaims the slot underneath it.
+        let waiter_id = format!("wait-{}", job.slot_id.0);
         let worker_live = cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
+            .or_else(|| cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0))
             .is_some_and(prove::pid_is_alive);
         if worker_live {
             continue;
