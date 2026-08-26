@@ -5,6 +5,7 @@
 //! `PartOf=controller`. Every journal side effect is executed here.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -27,6 +28,10 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Keep remote reconciliation below the daemon's 180s systemd watchdog. A
+/// stalled GitHub request must skip this observation pass, not starve the
+/// completed-cycle heartbeat and kill active job children.
+const REGISTRATION_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -362,7 +367,11 @@ async fn reconcile_once(
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
-        reconcile_remote_registrations(args, journal, jobs).await?;
+        run_bounded_remote_reconciliation(
+            reconcile_remote_registrations(args, journal, jobs),
+            REGISTRATION_RECONCILE_TIMEOUT,
+        )
+        .await?;
     }
 
     let mut proof_effects = Vec::new();
@@ -443,6 +452,24 @@ async fn reconcile_once(
     health.execution_backend = execution.backend();
     server.publish(&health)?;
     Ok(LocalCycle::finished())
+}
+
+/// Remote registration state is advisory. Keep a slow or wedged GitHub API
+/// from preventing the controller from completing its local supervision cycle.
+async fn run_bounded_remote_reconciliation<F>(operation: F, timeout: Duration) -> anyhow::Result<()>
+where
+    F: Future<Output = anyhow::Result<()>>,
+{
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => {
+            eprintln!(
+                "registration reconciliation timed out after {}s; keeping local state and retrying later",
+                timeout.as_secs()
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn execute_effect(
@@ -1239,6 +1266,20 @@ mod tests {
         assert!(!slot.registered);
         assert_eq!(slot.phase, ActorPhase::Provisioning);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stalled_remote_reconciliation_does_not_block_local_cycle() {
+        let result = run_bounded_remote_reconciliation(
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(())
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

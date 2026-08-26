@@ -19,7 +19,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     sync::OnceLock,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 use uuid::Uuid;
@@ -34,6 +34,8 @@ pub fn velnor_runner_display() -> String {
     format!("Velnor Runner/{VELNOR_VERSION} (protocol: {RUNNER_VERSION})")
 }
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
+const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 10;
+const GITHUB_CURL_MAX_TIME_SECS: u64 = 30;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
@@ -884,7 +886,7 @@ impl RegistrationClient {
             .use_native_tls()
             .tcp_keepalive(None)
             .connection_verbose(false)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(Duration::from_secs(GITHUB_CURL_MAX_TIME_SECS))
             .build()
             .context("build GitHub runner HTTP client")?;
         Ok(Self { http })
@@ -936,6 +938,8 @@ impl RegistrationClient {
                      header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
                      header = \"Content-Type: application/json\"\n\
                      request = POST\n\
+                     connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+                     max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
                      location\n\
                      silent\n\
                      write-out = \"\\n%{{http_code}}\"\n"
@@ -1326,6 +1330,8 @@ impl RegistrationClient {
                  header = \"Accept: application/vnd.github+json\"\n\
                  header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
                  request = DELETE\n\
+                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
                  silent\n\
                  write-out = \"\\n%{{http_code}}\"\n"
             );
