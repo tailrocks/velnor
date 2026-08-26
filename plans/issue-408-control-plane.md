@@ -38,7 +38,7 @@ isolation tradeoff is allowed.
 - [x] Registration/session generation, retry streak/deadline, budget, and quarantine are observable.
 - [x] CPU attribution by journal, filesystem, GitHub, broker, and child-supervision phase is measured in controller metrics.
 - [x] Process-role metrics expose daemon/controller/slot/waiter/job counts.
-- [x] Health exposes jobs, idle slots, recovery state, and resource safety; doctor/status integration still needs proof.
+- [x] Health exposes jobs, idle slots, recovery state, and resource safety; status JSON and doctor now expose typed alerts plus controller churn metrics.
 - [ ] Deterministic zero-job/high-CPU reproduction harness is run and recorded.
 - [ ] Fixed-hardware baseline is recorded before final behavior comparison.
 
@@ -135,7 +135,7 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [ ] Idle journal/reconciliation amplification is removed.
 - [ ] Idle waiters are gone; workers spawn only after assignment.
 - [ ] Broker/session recovery is coordinated, generation-fenced, bounded, and observable.
-- [ ] Health/doctor expose useful capacity, resource safety, and churn.
+- [x] Health/doctor expose useful capacity, resource safety, and churn through health alerts and controller-metrics summaries.
 - [ ] Process-isolation guarantees remain intact or have stronger proof.
 - [ ] Zero-job idle budgets pass for 15+ minutes.
 - [ ] Broker/JIT fault tests pass without retry storms.
@@ -165,6 +165,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - `cargo nextest run --workspace`: 1,387/1,387 passed after final attribution
   boundary correction; `cargo clippy --workspace --all-targets -- -D warnings`
   and `cargo fmt --all -- --check` passed.
+- Follow-up audit: added typed, stable `HealthAlertCode`/severity values derived
+  from the health vector; `velnorctl status --json` now includes `alerts`, and
+  doctor prints local alerts plus reconcile/worker/broker/JIT metrics from
+  `controller-metrics.json`. Focused tests cover alert ordering/serialization,
+  healthy silence, CLI presence, and tolerant metrics parsing. Sustained CPU
+  alerting remains open because cumulative CPU metrics need a rate/window owner.
 
 ## Non-goals
 

@@ -49,6 +49,83 @@ pub enum RecoveryHealthState {
     Quarantined,
 }
 
+impl RecoveryHealthState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::MissingSession => "missing_session",
+            Self::Backoff => "backoff",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
+/// Operator-actionable condition derived from the health vector.
+///
+/// Alerts are deliberately derived, bounded, and deterministic. They do not
+/// replace the underlying fields, and callers can safely key automation on
+/// `code` rather than parsing human text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthAlertCode {
+    ControlNotLive,
+    JournalNotWritable,
+    GithubUnreachable,
+    RoutingInvalid,
+    RunnerGroupInvalid,
+    ResourceUnsafe,
+    RecoveryMissingSession,
+    RecoveryBackoff,
+    RecoveryQuarantined,
+    CapacityShortfall,
+    NoSchedulableCapacity,
+}
+
+impl HealthAlertCode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlNotLive => "control_not_live",
+            Self::JournalNotWritable => "journal_not_writable",
+            Self::GithubUnreachable => "github_unreachable",
+            Self::RoutingInvalid => "routing_invalid",
+            Self::RunnerGroupInvalid => "runner_group_invalid",
+            Self::ResourceUnsafe => "resource_unsafe",
+            Self::RecoveryMissingSession => "recovery_missing_session",
+            Self::RecoveryBackoff => "recovery_backoff",
+            Self::RecoveryQuarantined => "recovery_quarantined",
+            Self::CapacityShortfall => "capacity_shortfall",
+            Self::NoSchedulableCapacity => "no_schedulable_capacity",
+        }
+    }
+}
+
+/// Severity and stable identity for one derived health alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthAlertSeverity {
+    Warning,
+    Critical,
+}
+
+impl HealthAlertSeverity {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct HealthAlert {
+    pub code: HealthAlertCode,
+    pub severity: HealthAlertSeverity,
+    pub message: &'static str,
+}
+
 impl CanaryStatus {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -184,6 +261,95 @@ impl HealthDocument {
             return FleetHealthState::NotReady;
         }
         FleetHealthState::Ready
+    }
+
+    /// Return at most one stable alert for each failed health-vector
+    /// dimension, in a fixed order suitable for CLI output and automation.
+    #[must_use]
+    pub fn alerts(&self) -> Vec<HealthAlert> {
+        let mut alerts = Vec::with_capacity(4);
+        let mut push = |code, severity, message| {
+            alerts.push(HealthAlert {
+                code,
+                severity,
+                message,
+            });
+        };
+        if !self.control_live {
+            push(
+                HealthAlertCode::ControlNotLive,
+                HealthAlertSeverity::Critical,
+                "control cycle is not live",
+            );
+        }
+        if !self.journal_writable {
+            push(
+                HealthAlertCode::JournalNotWritable,
+                HealthAlertSeverity::Critical,
+                "durable journal is not writable",
+            );
+        }
+        if !self.github_reachable {
+            push(
+                HealthAlertCode::GithubUnreachable,
+                HealthAlertSeverity::Warning,
+                "GitHub is not reachable",
+            );
+        }
+        if !self.routing_valid {
+            push(
+                HealthAlertCode::RoutingInvalid,
+                HealthAlertSeverity::Critical,
+                "routing proof is invalid",
+            );
+        }
+        if !self.runner_group_valid {
+            push(
+                HealthAlertCode::RunnerGroupInvalid,
+                HealthAlertSeverity::Critical,
+                "runner group proof is invalid",
+            );
+        }
+        if !self.resource_safe {
+            push(
+                HealthAlertCode::ResourceUnsafe,
+                HealthAlertSeverity::Critical,
+                "resource safety is not proven",
+            );
+        }
+        match self.recovery_state {
+            RecoveryHealthState::Backoff => push(
+                HealthAlertCode::RecoveryBackoff,
+                HealthAlertSeverity::Warning,
+                "broker recovery is backing off",
+            ),
+            RecoveryHealthState::Quarantined => push(
+                HealthAlertCode::RecoveryQuarantined,
+                HealthAlertSeverity::Critical,
+                "broker recovery is quarantined",
+            ),
+            RecoveryHealthState::MissingSession => push(
+                HealthAlertCode::RecoveryMissingSession,
+                HealthAlertSeverity::Warning,
+                "broker session is missing",
+            ),
+            RecoveryHealthState::Healthy => {}
+        }
+        if self.actual_ready_slots < self.desired_ready_slots {
+            push(
+                HealthAlertCode::CapacityShortfall,
+                HealthAlertSeverity::Warning,
+                "ready capacity is below the desired floor",
+            );
+        }
+        if self.actual_ready_slots == 0 || self.capacity_permits == 0 {
+            push(
+                HealthAlertCode::NoSchedulableCapacity,
+                HealthAlertSeverity::Critical,
+                "no schedulable capacity is available",
+            );
+        }
+        alerts
     }
 }
 
@@ -423,5 +589,70 @@ mod tests {
         }
         assert_eq!(obj["state"], "not_ready");
         assert_eq!(obj["external_canary"], "unknown");
+    }
+
+    #[test]
+    fn health_alerts_are_stable_and_actionable() {
+        let mut document = HealthDocument::empty();
+        document.control_live = true;
+        document.journal_writable = true;
+        document.recovery_state = RecoveryHealthState::Quarantined;
+        document.recovery_retry_streak = 10;
+        document.desired_ready_slots = 2;
+        document.actual_ready_slots = 0;
+        let alerts = document.alerts();
+        assert_eq!(
+            alerts
+                .iter()
+                .map(|alert| alert.code.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "github_unreachable",
+                "routing_invalid",
+                "runner_group_invalid",
+                "resource_unsafe",
+                "recovery_quarantined",
+                "capacity_shortfall",
+                "no_schedulable_capacity",
+            ]
+        );
+        assert_eq!(alerts[4].severity.as_str(), "critical");
+        assert_eq!(alerts[4].message, "broker recovery is quarantined");
+        assert_eq!(
+            serde_json::to_value(alerts[4]).unwrap()["code"],
+            "recovery_quarantined"
+        );
+    }
+
+    #[test]
+    fn healthy_document_has_no_alerts() {
+        let document = HealthDocument {
+            control_live: true,
+            journal_writable: true,
+            github_reachable: true,
+            routing_valid: true,
+            runner_group_valid: true,
+            desired_ready_slots: 1,
+            actual_ready_slots: 1,
+            surge_ready_slots: 0,
+            registered_slots: 1,
+            capacity_permits: 1,
+            executor_ready_slots: 1,
+            jobs: 0,
+            idle_slots: 1,
+            recovery_state: RecoveryHealthState::Healthy,
+            recovery_retry_streak: 0,
+            recovery_budget_used: 0,
+            recovery_retry_at_seconds: 0,
+            recovery_quarantine_until_seconds: None,
+            recovery_affected_slots: 0,
+            resource_safe: true,
+            oldest_queued_job_seconds: 0,
+            oldest_outbox_entry_seconds: 0,
+            external_canary: CanaryStatus::Unknown,
+            execution_backend: ExecutionBackendKind::Docker,
+            state: FleetHealthState::Ready,
+        };
+        assert!(document.alerts().is_empty());
     }
 }

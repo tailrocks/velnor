@@ -9706,6 +9706,100 @@ fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
     runner.status.as_deref() == Some("online")
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct DoctorBrokerMetrics {
+    #[serde(default)]
+    requests: u64,
+    #[serde(default)]
+    errors: u64,
+    #[serde(default)]
+    latency_ms: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DoctorJitMetrics {
+    #[serde(default)]
+    create_attempts: u64,
+    #[serde(default)]
+    delete_attempts: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DoctorControllerMetrics {
+    #[serde(default)]
+    reconcile_cycles: u64,
+    #[serde(default)]
+    reconcile_overlap_count: u64,
+    #[serde(default)]
+    events_per_second: f64,
+    #[serde(default)]
+    durable_events_per_second: f64,
+    #[serde(default)]
+    jobs: u32,
+    #[serde(default)]
+    idle_slots: u32,
+    #[serde(default)]
+    waiter_processes: u32,
+    #[serde(default)]
+    job_processes: u32,
+    #[serde(default)]
+    broker: DoctorBrokerMetrics,
+    #[serde(default)]
+    jit: DoctorJitMetrics,
+}
+
+fn parse_controller_metrics(bytes: &[u8]) -> Option<DoctorControllerMetrics> {
+    serde_json::from_slice(bytes).ok()
+}
+
+fn print_local_observability(config_base: &Path) {
+    if let Ok(health) = crate::node::health::fetch(config_base) {
+        let alerts = health.alerts();
+        println!(
+            "local health: state={} jobs={} idle_slots={} recovery={} resource_safe={} alerts={}",
+            health.state.as_str(),
+            health.jobs,
+            health.idle_slots,
+            health.recovery_state.as_str(),
+            health.resource_safe,
+            alerts.len()
+        );
+        for alert in alerts {
+            eprintln!(
+                "HEALTH ALERT [{}] {}: {}",
+                alert.severity.as_str(),
+                alert.code.as_str(),
+                alert.message
+            );
+        }
+    }
+
+    let metrics_path = config_base.join("controller-metrics.json");
+    let Ok(bytes) = fs::read(metrics_path) else {
+        return;
+    };
+    let Some(metrics) = parse_controller_metrics(&bytes) else {
+        eprintln!("doctor: controller metrics are malformed; observability is incomplete");
+        return;
+    };
+    println!(
+        "control metrics: cycles={} overlap={} jobs={} idle_slots={} waiter_processes={} job_processes={} events/s={:.3} durable_events/s={:.3} broker_requests={} broker_errors={} broker_latency_ms={} jit_create={} jit_delete={}",
+        metrics.reconcile_cycles,
+        metrics.reconcile_overlap_count,
+        metrics.jobs,
+        metrics.idle_slots,
+        metrics.waiter_processes,
+        metrics.job_processes,
+        metrics.events_per_second,
+        metrics.durable_events_per_second,
+        metrics.broker.requests,
+        metrics.broker.errors,
+        metrics.broker.latency_ms,
+        metrics.jit.create_attempts,
+        metrics.jit.delete_attempts,
+    );
+}
+
 /// Fleet health probe: list this daemon's registered runners on GitHub and
 /// fail (non-zero exit) when none are healthy, so a systemd timer surfaces a
 /// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
@@ -9813,6 +9907,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let backend = crate::execution::load_execution_file(&config_base, None)
         .ok()
         .map(|file| file.backend());
+    print_local_observability(&config_base);
     doctor_host_docker_reclaim(backend, crate::docker_lease::run_host_docker);
     let sample_size = usize::try_from(env_u64(
         "VELNOR_SLO_SAMPLE_SIZE",
@@ -14770,6 +14865,18 @@ runs:
     fn doctor_timing_slo_marks_pass_and_breach() {
         assert_eq!(timing_slo_state(3_000, 3_000), "PASS");
         assert_eq!(timing_slo_state(3_001, 3_000), "WARN");
+    }
+
+    #[test]
+    fn doctor_reads_controller_metrics_without_requiring_new_fields() {
+        let metrics = parse_controller_metrics(
+            br#"{"reconcile_cycles":4,"reconcile_overlap_count":0,"jobs":0,"idle_slots":2,"broker":{"requests":3,"errors":1,"latency_ms":44},"jit":{"create_attempts":2,"delete_attempts":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(metrics.reconcile_cycles, 4);
+        assert_eq!(metrics.idle_slots, 2);
+        assert_eq!(metrics.broker.errors, 1);
+        assert_eq!(metrics.jit.delete_attempts, 1);
     }
 
     #[test]
