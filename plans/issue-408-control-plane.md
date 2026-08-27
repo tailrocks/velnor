@@ -126,7 +126,7 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [ ] Idle soak, one fixture job, and one forced broker-fault sequence pass.
 - [ ] Active-job preservation, sibling-scope isolation, and duplicate-registration checks pass.
 - [ ] Promotion occurs only after every gate passes.
-- [ ] Exact rollback package/version and drain procedure are documented.
+- [x] Exact rollback package/version and drain procedure are documented.
 - [ ] Signed-APT rollback preserves active jobs and blocks stale-generation mutation.
 - [ ] Idle soak and fixture proof pass after rollback validation.
 
@@ -463,6 +463,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   suppressed, and broker/JIT counters showed no JIT churn; however, repeated
   registration-loss recovery and `routing_valid=false` occurred, so canary
   health and full idle proof are intentionally not marked complete.
+- Rollback procedure is documented in `docs/debian-apt-repo.md`: exact signed
+  predecessor through the locked APT wrapper, scoped drain, immutable record
+  activation, verification, and forward re-install. Rollback execution remains
+  open because the canary has not yet reached a safe drained idle state.
 
 ## Non-goals
 
