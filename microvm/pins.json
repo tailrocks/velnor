@@ -2,7 +2,7 @@
   "firecracker_version": "1.16.1",
   "jailer_version": "1.16.1",
   "kernel_version": "6.1.102",
-  "kernel_tarball": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.102.tar.xz",
+  "kernel_tarball": "https://mirrors.edge.kernel.org/pub/linux/kernel/v6.x/linux-6.1.102.tar.xz",
   "kernel_tarball_sha256": "1ba5f93b411ead7587fe48b2eec6c656f6796d31f5e406d236913c77512497ec",
   "tarballs": {
     "x86_64": {
