@@ -15,7 +15,10 @@
 - **Depends on**: Plan 065
 - **Category**: architecture, migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
-- **Progress** (2026-08-25): DONE. Steps 1–5 shipped through v0.1.186–
+- **Status**: IN PROGRESS (authority and current-SHA evidence reconciliation,
+  2026-08-27). Historical implementation evidence below does not satisfy the
+  current-SHA campaign gate.
+- **Historical progress** (2026-08-25): Steps 1–5 shipped through v0.1.186–
   v0.1.188 (PRs #308, #312): store schema v3, sanitized admission wired at
   the daemon acquisition boundary as a required fail-close write,
   idempotent transitions/events from real boundaries, bounded retention
@@ -29,6 +32,18 @@
   any page; no orphan registration. Production also surfaced and fixed two
   defects (summary replay regressing machine phase; skipped waiting edge on
   immediate capacity reservation).
+
+### Current-SHA evidence — 2026-08-27
+
+- `92bddf2f174652b775123f925734b6fb67a9e182`: `rtk cargo nextest run
+  -p velnor-control` passed, exit 0, 71 tests, captured
+  `2026-08-27T16:13:35Z`.
+- Same SHA: `rtk cargo nextest run -p velnor-runner ops` passed, exit 0, 12
+  tests, captured `2026-08-27T16:13:35Z–16:13:37Z`.
+- These local gates support implementation-level criteria only. The required
+  current-SHA fixture hold/cancel proof, target-repository evidence, and
+  independent verifier/reviewer sign-off are not present. Plan remains
+  IN PROGRESS; no dependent plan may be marked DONE.
 
 ## Why this matters
 
@@ -138,13 +153,13 @@ registration remains.
 
 ## Done criteria
 
-- [ ] Schema and migrations are idempotent and transactional.
-- [ ] Active and completed fixture jobs have sanitized summaries.
-- [ ] Required event reasons are emitted from real boundaries.
-- [ ] Store failure behavior is explicit and tested.
-- [ ] Row/time/byte retention and WAL accounting are bounded and preserve all
+- [ ] **PRD-066-01** — Schema and migrations are idempotent and transactional.
+- [ ] **PRD-066-02** — Active and completed fixture jobs have sanitized summaries.
+- [ ] **PRD-066-03** — Required event reasons are emitted from real boundaries.
+- [ ] **PRD-066-04** — Store failure behavior is explicit and tested.
+- [ ] **PRD-066-05** — Row/time/byte retention and WAL accounting are bounded and preserve all
       active/protected history.
-- [ ] `rtk mise run check` and fresh fixture hold/cancel run pass.
+- [ ] **PRD-066-06** — `rtk mise run check` and fresh fixture hold/cancel run pass.
 
 ## STOP conditions
 
