@@ -269,18 +269,14 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T20:29:44Z
+### Current baseline — 2026-08-27T22:00:57Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `72322e739d318902b52f88962bd2bd2d29ca0336`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 242 commits ahead
+  `46f79c2f9babd4bc2db43ada7ad124f31c78f14f`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
   of `origin/main` and equal to its pushed branch tip.
-- Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
-  (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
-  successful CI/Release/Guest image for tag `v0.1.243` (run IDs
-  `33092968591`, `33092968450`, `33092967555`); older `v0.1.242` CI/Release/
-  Guest image runs also succeeded (run IDs `33086166306`, `33086166265`,
-  `33086165280`). These are tag-release evidence, not green-main evidence.
+- Open Velnor PR: #411 at this HEAD. CI run `33120362766` and Guest image run
+  `33120361722` were in progress at the snapshot; this is not green-main proof.
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
@@ -298,13 +294,13 @@ evidence and requires a fresh baseline.
   `ee7ecca`. Current remote #408 behavior `eaf772d` was ported as bounded
   kernel-download retry/timeout hardening at `8f660ad`; its forced HTTP/1.1
   downgrade was intentionally omitted under the modern-protocol rule.
-- Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T20:29:44Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1496/1496` passed with zero
-  skipped tests. Focused cleanup nextest passed `24/24`; commit `72322e7`
-  prevents empty or partial ownership markers, validates marker identifiers,
-  preserves newer-generation job state, and kills/reaps children when marker
-  publication fails.
+- Current-SHA local evidence: `rtk mise run check` passed, exit 0, with
+  actionlint, cargo deny, cargo fmt, fleet generation, clippy `-D warnings`,
+  and workspace nextest `1505/1505` (nextest run ID
+  `2a1d95ca-2d58-4272-8a5d-5a8d674e8f49`). Focused Plan 066 tests passed
+  `84/84`; package nextest passed `1180/1180` before the final remote merge.
+  Code commits `61605e6` and merge `46f79c2` preserve canonical job identity,
+  migration history, and branch-side remote changes.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
