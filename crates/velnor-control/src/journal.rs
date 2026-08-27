@@ -24,7 +24,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 
 /// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
 /// must not apply events (N-1 must not clobber an N writer's log).
-pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE TABLE IF NOT EXISTS outbox (
     job_id TEXT PRIMARY KEY,
+    slot_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     payload_sha256 TEXT NOT NULL,
     intended INTEGER NOT NULL DEFAULT 0,
@@ -182,6 +183,44 @@ fn job_occupies_slot(phase: ActorPhase) -> bool {
         phase,
         ActorPhase::Assigned | ActorPhase::Starting | ActorPhase::Running | ActorPhase::Completing
     )
+}
+
+/// A pending outbox row is an admission barrier for its exact slot identity.
+/// An owner that cannot be proven from durable state is a global barrier: it
+/// must never be guessed or silently reassigned to another slot.
+fn pending_outbox_blocks_admission(
+    state: &FleetState,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    state.outbox.iter().any(|row| {
+        if !row.intended || row.remote_acked {
+            return false;
+        }
+        if row.slot_id == *slot_id && row.generation == generation {
+            return true;
+        }
+        !outbox_owner_is_proven(state, row)
+    })
+}
+
+fn outbox_owner_is_proven(state: &FleetState, row: &OutboxRecord) -> bool {
+    state
+        .slots
+        .iter()
+        .any(|slot| slot.slot_id == row.slot_id && slot.generation == row.generation)
+        && state.jobs.iter().any(|job| {
+            job.job_id == row.job_id
+                && job.slot_id == row.slot_id
+                && job.generation == row.generation
+        })
+}
+
+fn slot_has_active_job(state: &FleetState, slot_id: &SlotId) -> bool {
+    state
+        .jobs
+        .iter()
+        .any(|job| job.slot_id == *slot_id && job_occupies_slot(job.phase))
 }
 
 fn restore_slot_after_terminal_job(
@@ -308,6 +347,7 @@ pub struct JobRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboxRecord {
     pub job_id: JobId,
+    pub slot_id: SlotId,
     pub generation: Generation,
     pub payload_sha256: String,
     pub intended: bool,
@@ -506,13 +546,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let routing = state.routing_valid && state.runner_group_valid;
-            let active_job = state
-                .jobs
-                .iter()
-                .any(|job| job.slot_id == slot_id && job_occupies_slot(job.phase));
+            let admission_blocked = slot_has_active_job(&state, &slot_id)
+                || pending_outbox_blocks_admission(&state, &slot_id, generation);
             let slot = state.slot_mut(&slot_id);
             if generation < slot.generation
-                || (generation > slot.generation && active_job)
+                || admission_blocked
                 || (generation == slot.generation && slot.phase == ActorPhase::Fenced)
             {
                 rejected = true;
@@ -566,9 +604,12 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
+            let admission_blocked = slot_has_active_job(&state, &slot_id)
+                || pending_outbox_blocks_admission(&state, &slot_id, generation);
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
                 || slot.phase == ActorPhase::Fenced
+                || admission_blocked
                 || slot.ready_proof().is_err()
             {
                 rejected = true;
@@ -583,8 +624,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
+            let admission_blocked = slot_has_active_job(&state, &slot_id)
+                || pending_outbox_blocks_admission(&state, &slot_id, generation);
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
+            if generation != slot.generation
+                || slot.phase == ActorPhase::Fenced
+                || admission_blocked
+            {
                 rejected = true;
             } else {
                 slot.registered = true;
@@ -595,22 +641,42 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
+            let draining = slot_has_active_job(&state, &slot_id)
+                || pending_outbox_blocks_admission(&state, &slot_id, generation);
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation || slot.phase == ActorPhase::Fenced || !slot.registered
             {
                 rejected = true;
             } else {
                 slot.registered = false;
-                slot.phase = ActorPhase::Provisioning;
+                // The remote runner identity and broker session are gone.
+                // Release admission atomically, but leave any active job and
+                // outbox rows untouched until their normal teardown path.
+                slot.permit_held = false;
+                slot.session_live = false;
+                if draining {
+                    slot.phase = ActorPhase::Fenced;
+                    commands.push(SideEffect::FenceSlot {
+                        slot_id,
+                        generation,
+                    });
+                } else {
+                    slot.phase = ActorPhase::Provisioning;
+                }
             }
         }
         Event::ReadyAttempt {
             slot_id,
             generation,
         } => {
+            let admission_blocked = slot_has_active_job(&state, &slot_id)
+                || pending_outbox_blocks_admission(&state, &slot_id, generation);
             {
                 let slot = state.slot_mut(&slot_id);
-                if generation != slot.generation || slot.phase == ActorPhase::Fenced {
+                if generation != slot.generation
+                    || slot.phase == ActorPhase::Fenced
+                    || admission_blocked
+                {
                     rejected = true;
                 } else if slot.ready_proof().is_ok() && slot.registered {
                     slot.phase = ActorPhase::Ready;
@@ -712,6 +778,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     state.outbox.retain(|row| row.job_id != job_id);
                     state.outbox.push(OutboxRecord {
                         job_id: job_id.clone(),
+                        slot_id: state
+                            .jobs
+                            .iter()
+                            .find(|job| job.job_id == job_id)
+                            .expect("completion job was validated")
+                            .slot_id
+                            .clone(),
                         generation,
                         payload_sha256: payload_sha256.clone(),
                         intended: true,
@@ -730,11 +803,15 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             }
         }
         Event::CompletionSendStarted { job_id, generation } => {
-            if let Some(row) = state.outbox.iter_mut().find(|row| row.job_id == job_id) {
-                if row.generation != generation {
-                    rejected = true;
+            if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
+                let valid = {
+                    let row = &state.outbox[index];
+                    row.generation == generation && outbox_owner_is_proven(&state, row)
+                };
+                if valid {
+                    state.outbox[index].send_started = true;
                 } else {
-                    row.send_started = true;
+                    rejected = true;
                 }
             } else {
                 rejected = true;
@@ -742,16 +819,20 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         }
         Event::RemoteAcked { job_id, generation }
         | Event::RemoteObservedTerminal { job_id, generation } => {
-            if let Some(row) = state.outbox.iter_mut().find(|row| row.job_id == job_id) {
-                if row.generation != generation {
-                    rejected = true;
-                } else {
-                    row.remote_acked = true;
+            if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
+                let valid = {
+                    let row = &state.outbox[index];
+                    row.generation == generation && outbox_owner_is_proven(&state, row)
+                };
+                if valid {
+                    state.outbox[index].remote_acked = true;
                     commands.push(SideEffect::DeleteOutbox {
                         job_id: job_id.clone(),
                         generation,
                     });
                     restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                } else {
+                    rejected = true;
                 }
             } else {
                 rejected = true;
@@ -762,9 +843,17 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             match job {
                 Some(job) if job.generation == generation => {
                     // A completing job may still have an outbox payload to
-                    // send; the outbox row survives so the send path can
-                    // retry — only the lost worker is dropped.
-                    restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                    // send; preserve its slot ownership until remote
+                    // terminal acknowledgement supplies the second proof.
+                    let pending_outbox = state.outbox.iter().any(|row| {
+                        row.job_id == job_id
+                            && row.generation == generation
+                            && row.intended
+                            && !row.remote_acked
+                    });
+                    if !pending_outbox {
+                        restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                    }
                 }
                 _ => rejected = true,
             }
@@ -849,8 +938,6 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
 pub struct Journal {
     conn: Connection,
     path: PathBuf,
-    /// True when on-disk `user_version` is newer than this binary (N-1 vs N).
-    write_blocked: bool,
 }
 
 impl Journal {
@@ -881,6 +968,7 @@ impl Journal {
         // stable and must never reach `persist_state`.
         let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let stored = u32::try_from(stored).unwrap_or(0);
+        let outbox_shape = outbox_schema_shape(&conn)?;
         if stored == 1 {
             return Err(StoreError::new(
                 velnor_model::ExitClass::Conflict,
@@ -889,6 +977,12 @@ impl Journal {
             .with_remediation(
                 "preserve the schema-v1 journal unchanged for forensics and perform an explicit verified migration",
             ));
+        }
+        if stored > JOURNAL_SCHEMA_VERSION {
+            return Err(journal_schema_newer());
+        }
+        if stored == 2 && matches!(outbox_shape, OutboxSchema::V3) {
+            return Err(outbox_schema_mismatch(stored, outbox_shape));
         }
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         if !wal.eq_ignore_ascii_case("wal") {
@@ -901,25 +995,22 @@ impl Journal {
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         assert_sqlite_version(&conn)?;
         conn.execute_batch(SCHEMA)?;
-        let write_blocked = stored > JOURNAL_SCHEMA_VERSION;
-        if stored == 0 {
-            conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+        if matches!(outbox_shape, OutboxSchema::V2) {
+            migrate_v2_to_v3(&mut conn)?;
         }
         let journal = Self {
             conn,
             path: path.to_path_buf(),
-            write_blocked,
         };
         // Verify all existing event checksums once. The controller's steady
         // state must not replay an ever-growing log every two seconds.
         journal.load_state()?;
+        if stored == 0 {
+            journal
+                .conn
+                .pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+        }
         Ok(journal)
-    }
-
-    /// Whether apply is refused because a newer writer owns the schema.
-    #[must_use]
-    pub fn write_blocked(&self) -> bool {
-        self.write_blocked
     }
 
     #[must_use]
@@ -964,15 +1055,6 @@ impl Journal {
     where
         I: IntoIterator<Item = Event>,
     {
-        if self.write_blocked {
-            return Err(StoreError::new(
-                velnor_model::ExitClass::Conflict,
-                "journal.schema.newer",
-            )
-            .with_remediation(
-                "N-1 must not write a journal whose PRAGMA user_version is newer than this binary",
-            ));
-        }
         // Lock before reading materialized state. Controller, job, guardian,
         // and completion processes can overlap; a snapshot taken before the
         // write lock could otherwise clobber a concurrent committed event.
@@ -1192,24 +1274,26 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
     }
 
     let mut statement = conn.prepare(
-        "SELECT job_id, generation, payload_sha256, intended, send_started,
+        "SELECT job_id, slot_id, generation, payload_sha256, intended, send_started,
                 remote_acked, created_unix
          FROM outbox ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
             row.get::<_, i64>(4)?,
             row.get::<_, i64>(5)?,
             row.get::<_, i64>(6)?,
+            row.get::<_, i64>(7)?,
         ))
     })?;
     for row in rows {
         let (
             job_id,
+            slot_id,
             generation,
             payload_sha256,
             intended,
@@ -1217,8 +1301,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             remote_acked,
             created_unix,
         ) = row?;
+        let slot_id = slot_id.ok_or_else(|| outbox_owner_unknown(&job_id, generation))?;
         state.outbox.push(OutboxRecord {
             job_id: JobId(job_id),
+            slot_id: SlotId(slot_id),
             generation: Generation(i64_u64(generation, "outbox generation")?),
             payload_sha256,
             intended: sqlite_bool(intended, "outbox intended")?,
@@ -1306,6 +1392,16 @@ fn invalid_materialized(field: &str, value: &str) -> StoreError {
     ))
 }
 
+fn outbox_owner_unknown(job_id: &str, generation: i64) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.outbox.owner.unknown",
+    )
+    .with_remediation(format!(
+        "outbox row for job {job_id} generation {generation} has no exact slot owner; preserve it and recover the matching job before retrying"
+    ))
+}
+
 fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreResult<()> {
     tx.execute("DELETE FROM slots", [])?;
     tx.execute("DELETE FROM jobs", [])?;
@@ -1353,10 +1449,11 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         }
         tx.execute(
             "INSERT INTO outbox (
-                job_id, generation, payload_sha256, intended, send_started, remote_acked, created_unix
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                job_id, slot_id, generation, payload_sha256, intended, send_started, remote_acked, created_unix
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 row.job_id.0,
+                row.slot_id.0,
                 row.generation.0 as i64,
                 row.payload_sha256,
                 row.intended as i64,
@@ -1397,6 +1494,197 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         )?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboxSchema {
+    Missing,
+    V2,
+    V3,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OutboxIndexShape {
+    unique: bool,
+    columns: Vec<String>,
+}
+
+fn outbox_schema_shape(conn: &Connection) -> StoreResult<OutboxSchema> {
+    let mut statement = conn.prepare("PRAGMA table_info(outbox)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.is_empty() {
+        return Ok(OutboxSchema::Missing);
+    }
+
+    let v3_columns = [
+        ("job_id", "TEXT", 0, None, 1),
+        ("slot_id", "TEXT", 1, None, 0),
+        ("generation", "INTEGER", 1, None, 0),
+        ("payload_sha256", "TEXT", 1, None, 0),
+        ("intended", "INTEGER", 1, Some("0"), 0),
+        ("send_started", "INTEGER", 1, Some("0"), 0),
+        ("remote_acked", "INTEGER", 1, Some("0"), 0),
+        ("created_unix", "INTEGER", 1, None, 0),
+    ];
+    let v2_columns = [
+        ("job_id", "TEXT", 0, None, 1),
+        ("generation", "INTEGER", 1, None, 0),
+        ("payload_sha256", "TEXT", 1, None, 0),
+        ("intended", "INTEGER", 1, Some("0"), 0),
+        ("send_started", "INTEGER", 1, Some("0"), 0),
+        ("remote_acked", "INTEGER", 1, Some("0"), 0),
+        ("created_unix", "INTEGER", 1, None, 0),
+    ];
+    let matches_columns = |expected: &[(&str, &str, i64, Option<&str>, i64)]| {
+        columns.len() == expected.len()
+            && columns.iter().zip(expected).all(
+                |(
+                    (name, ty, not_null, default, pk),
+                    (expected_name, expected_ty, expected_not_null, expected_default, expected_pk),
+                )| {
+                    name.eq_ignore_ascii_case(expected_name)
+                        && ty.eq_ignore_ascii_case(expected_ty)
+                        && *not_null == *expected_not_null
+                        && default.as_deref() == *expected_default
+                        && *pk == *expected_pk
+                },
+            )
+    };
+    let mut statement = conn.prepare("PRAGMA index_list(outbox)")?;
+    let indexes = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? == 1))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut index_shapes = Vec::with_capacity(indexes.len());
+    for (name, unique) in indexes {
+        let mut info = conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")?;
+        let columns = info
+            .query_map([name], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        index_shapes.push(OutboxIndexShape { unique, columns });
+    }
+    let canonical_indexes = [OutboxIndexShape {
+        unique: true,
+        columns: vec!["job_id".to_owned()],
+    }];
+    if index_shapes != canonical_indexes {
+        return Err(outbox_schema_invalid("index set"));
+    }
+    if matches_columns(&v3_columns) {
+        Ok(OutboxSchema::V3)
+    } else if matches_columns(&v2_columns) {
+        Ok(OutboxSchema::V2)
+    } else {
+        Err(outbox_schema_invalid("column set"))
+    }
+}
+
+fn outbox_schema_invalid(part: &str) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.outbox.schema.invalid",
+    )
+    .with_remediation(format!(
+        "preserve the outbox and repair its canonical v3 {part} before reopening the journal"
+    ))
+}
+
+fn journal_schema_newer() -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.newer")
+        .with_remediation(
+            "preserve the journal unchanged and reopen it with a binary that supports its PRAGMA user_version",
+        )
+}
+
+fn outbox_schema_mismatch(version: u32, shape: OutboxSchema) -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch")
+        .with_remediation(format!(
+            "preserve the journal unchanged: PRAGMA user_version={version} is incompatible with physical outbox shape {shape:?}"
+        ))
+}
+
+/// Upgrade a v2 materialized outbox without inventing ownership. Every row is
+/// backfilled from exactly one matching job and exactly one matching slot into
+/// a rebuilt table whose `slot_id` is NOT NULL. Owner mismatches fail before
+/// any schema mutation; the transaction is retryable if the process dies
+/// mid-upgrade.
+fn migrate_v2_to_v3(conn: &mut Connection) -> StoreResult<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let inconsistent_owner: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT outbox.job_id, outbox.generation
+             FROM outbox
+             WHERE (SELECT COUNT(*)
+                    FROM jobs
+                    WHERE jobs.job_id = outbox.job_id
+                      AND jobs.generation = outbox.generation) != 1
+                OR (SELECT COUNT(*)
+                    FROM jobs
+                    JOIN slots
+                      ON slots.slot_id = jobs.slot_id
+                     AND slots.generation = jobs.generation
+                    WHERE jobs.job_id = outbox.job_id
+                      AND jobs.generation = outbox.generation) != 1
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((job_id, generation)) = inconsistent_owner {
+        return Err(outbox_owner_inconsistent(&job_id, generation));
+    }
+    tx.execute_batch(
+        "CREATE TABLE outbox_v3 (
+             job_id TEXT PRIMARY KEY,
+             slot_id TEXT NOT NULL,
+             generation INTEGER NOT NULL,
+             payload_sha256 TEXT NOT NULL,
+             intended INTEGER NOT NULL DEFAULT 0,
+             send_started INTEGER NOT NULL DEFAULT 0,
+             remote_acked INTEGER NOT NULL DEFAULT 0,
+             created_unix INTEGER NOT NULL
+         );
+         INSERT INTO outbox_v3 (
+             job_id, slot_id, generation, payload_sha256, intended,
+             send_started, remote_acked, created_unix
+         )
+         SELECT outbox.job_id, jobs.slot_id, outbox.generation,
+                outbox.payload_sha256, outbox.intended, outbox.send_started,
+                outbox.remote_acked, outbox.created_unix
+         FROM outbox
+         JOIN jobs
+           ON jobs.job_id = outbox.job_id
+          AND jobs.generation = outbox.generation
+         JOIN slots
+           ON slots.slot_id = jobs.slot_id
+          AND slots.generation = jobs.generation;
+         DROP TABLE outbox;
+         ALTER TABLE outbox_v3 RENAME TO outbox;",
+    )?;
+    tx.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn outbox_owner_inconsistent(job_id: &str, generation: i64) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.outbox.owner.inconsistent",
+    )
+    .with_remediation(format!(
+        "outbox row for job {job_id} generation {generation} must match exactly one job and one slot; preserve it and repair durable ownership before retrying"
+    ))
 }
 
 /// Detect schema and materialized-state shapes owned by the retired implicit
@@ -1525,6 +1813,7 @@ pub fn payload_checksum(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
 
     fn open_tmp(label: &str) -> (PathBuf, Journal) {
         let nanos = unix_now();
@@ -1770,7 +2059,17 @@ mod tests {
         // N+1 materialization directly so the test exercises forensic safety.
         let seed = Connection::open(&path).unwrap();
         seed.execute_batch(
-            "INSERT INTO meta (key, value) VALUES
+            "DROP TABLE outbox;
+             CREATE TABLE outbox (
+                 job_id TEXT PRIMARY KEY,
+                 generation INTEGER NOT NULL,
+                 payload_sha256 TEXT NOT NULL,
+                 intended INTEGER NOT NULL DEFAULT 0,
+                 send_started INTEGER NOT NULL DEFAULT 0,
+                 remote_acked INTEGER NOT NULL DEFAULT 0,
+                 created_unix INTEGER NOT NULL
+             );
+             INSERT INTO meta (key, value) VALUES
                  ('control_live', '1'),
                  ('github_reachable', '1'),
                  ('routing_valid', '1'),
@@ -1882,6 +2181,19 @@ mod tests {
                 event_count,
             )
         };
+        // Migrate the explicit v2 fixture before taking the forensic baseline;
+        // the failed-reconcile assertion covers v3 state, not migration.
+        drop(Journal::open(&path).unwrap());
+        let migrated = Connection::open(&path).unwrap();
+        let slot_id_not_null: Option<i64> = migrated
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('outbox') WHERE name = 'slot_id'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(slot_id_not_null, Some(1));
         let before = snapshot();
 
         for _ in 0..2 {
@@ -1921,6 +2233,217 @@ mod tests {
                 "failed reconcile must preserve all forensic state"
             );
         }
+    }
+
+    fn seed_v2_outbox(path: &Path, version: i64) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE outbox;
+             CREATE TABLE outbox (
+                 job_id TEXT PRIMARY KEY,
+                 generation INTEGER NOT NULL,
+                 payload_sha256 TEXT NOT NULL,
+                 intended INTEGER NOT NULL DEFAULT 0,
+                 send_started INTEGER NOT NULL DEFAULT 0,
+                 remote_acked INTEGER NOT NULL DEFAULT 0,
+                 created_unix INTEGER NOT NULL
+             );
+             INSERT INTO slots (
+                 slot_id, generation, phase, permit_held, routing_valid,
+                 session_live, executor_proven, registered, pid, heartbeat_unix
+             ) VALUES ('scope-1', 1, 'ready', 1, 1, 1, 1, 1, NULL, 1);
+             INSERT INTO jobs (
+                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix
+             ) VALUES ('job-1', 'scope-1', 1, 1, 'worker-1', 'assigned', 1);
+             INSERT INTO outbox (
+                 job_id, generation, payload_sha256, intended, send_started,
+                 remote_acked, created_unix
+             ) VALUES ('job-1', 1, 'payload', 1, 0, 0, 1);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", version).unwrap();
+    }
+
+    #[test]
+    fn future_version_v2_outbox_is_rejected_without_mutation() {
+        let (dir, journal) = open_tmp("future-version-v2-outbox");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 99);
+        let conn = Connection::open(&path).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.newer");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let check = Connection::open(&path).unwrap();
+        assert_eq!(
+            check
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            99
+        );
+    }
+
+    #[test]
+    fn v2_marker_with_v3_outbox_shape_is_rejected_without_mutation() {
+        let (dir, journal) = open_tmp("v2-marker-v3-outbox");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 2u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let check = Connection::open(&path).unwrap();
+        assert_eq!(
+            check
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn version_zero_v2_outbox_migrates_from_physical_shape() {
+        let (dir, journal) = open_tmp("version-zero-v2-outbox");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+
+        let migrated = Journal::open(&path).unwrap();
+        let state = migrated.materialized_state().unwrap();
+        assert_eq!(state.outbox[0].slot_id, slot("scope-1"));
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let slot_id_not_null: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('outbox') WHERE name = 'slot_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(slot_id_not_null, 1);
+    }
+
+    #[test]
+    fn malformed_outbox_shape_is_rejected_before_version_advance() {
+        let (dir, journal) = open_tmp("malformed-outbox-shape");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE outbox;
+             CREATE TABLE outbox (
+                 job_id TEXT PRIMARY KEY,
+                 slot_id TEXT,
+                 generation TEXT NOT NULL,
+                 payload_sha256 TEXT NOT NULL,
+                 intended INTEGER NOT NULL DEFAULT 0,
+                 send_started INTEGER NOT NULL DEFAULT 0,
+                 remote_acked INTEGER NOT NULL DEFAULT 0,
+                 created_unix INTEGER NOT NULL
+             );
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.outbox.schema.invalid");
+        let check = Connection::open(&path).unwrap();
+        assert_eq!(
+            check
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(check
+            .query_row(
+                "SELECT type FROM sqlite_master WHERE name = 'outbox'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn v2_outbox_duplicate_slot_owner_is_rejected_before_ddl() {
+        let (dir, journal) = open_tmp("duplicate-v2-outbox-owner");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE slots RENAME TO slots_valid;
+             CREATE TABLE slots (
+                 slot_id TEXT,
+                 generation INTEGER,
+                 phase TEXT,
+                 permit_held INTEGER,
+                 routing_valid INTEGER,
+                 session_live INTEGER,
+                 executor_proven INTEGER,
+                 registered INTEGER,
+                 pid INTEGER,
+                 heartbeat_unix INTEGER
+             );
+             INSERT INTO slots SELECT * FROM slots_valid;
+             INSERT INTO slots SELECT * FROM slots_valid;
+             DROP TABLE slots_valid;",
+        )
+        .unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.outbox.owner.inconsistent");
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        assert!(check
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox_v3'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn v2_outbox_inconsistent_owner_rolls_back_without_version_advance() {
+        let (dir, journal) = open_tmp("inconsistent-v2-outbox-owner");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 2);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DELETE FROM slots", []).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.outbox.owner.inconsistent");
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert!(check
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox_v3'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2464,7 +2987,170 @@ mod tests {
             .find(|row| row.slot_id == slot("scope-1"))
             .unwrap();
         assert!(!slot.registered);
+        assert!(!slot.permit_held);
+        assert!(!slot.session_live);
         assert_eq!(slot.phase, ActorPhase::Provisioning);
+    }
+
+    #[test]
+    fn active_registration_loss_preserves_teardown_state_and_re_admits() {
+        let (dir, mut journal) = open_tmp("active-registration-lost");
+        let slot_id = slot("scope-1");
+        let job_id = job("job-1");
+        let generation = gen();
+        prime_ready(&mut journal, "scope-1");
+        for event in [
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Assigned {
+                slot_id: slot_id.clone(),
+                job_id: job_id.clone(),
+                generation,
+            },
+            Event::JobOwned {
+                job_id: job_id.clone(),
+                slot_id: slot_id.clone(),
+                attempt: 1,
+                generation,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_234,
+            },
+            Event::JobStarted {
+                job_id: job_id.clone(),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+
+        let lost = journal
+            .apply(Event::RegistrationLost {
+                slot_id: slot_id.clone(),
+                generation,
+            })
+            .unwrap();
+        assert!(!lost.rejected);
+        let state = journal.load_state().unwrap();
+        let slot_state = state
+            .slots
+            .iter()
+            .find(|row| row.slot_id == slot_id)
+            .unwrap();
+        assert!(!slot_state.registered);
+        assert!(!slot_state.permit_held);
+        assert!(!slot_state.session_live);
+        assert_eq!(slot_state.phase, ActorPhase::Fenced);
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job_id);
+
+        // A completion intent remains durable even after registration loss;
+        // teardown owns the job and outbox until remote acknowledgement.
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job_id.clone(),
+                    generation,
+                    payload_sha256: payload_checksum(b"result"),
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+        let mut recovered = Journal::open(dir.join("journal.db")).unwrap();
+        let recovered_state = recovered.load_state().unwrap();
+        assert_eq!(recovered_state.jobs.len(), 1);
+        assert_eq!(recovered_state.outbox.len(), 1);
+        assert!(!recovered_state.slots[0].registered);
+        assert!(!recovered_state.slots[0].permit_held);
+        assert!(!recovered_state.slots[0].session_live);
+
+        assert!(
+            !recovered
+                .apply(Event::RemoteObservedTerminal {
+                    job_id: job_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        let torn_down = recovered.load_state().unwrap();
+        assert!(torn_down.jobs.is_empty());
+        assert!(torn_down.outbox[0].remote_acked);
+        assert!(!torn_down.slots[0].permit_held);
+        assert_eq!(torn_down.slots[0].phase, ActorPhase::Fenced);
+
+        // The old generation remains fenced; recovery must rotate only after
+        // the durable job and outbox teardown proof.
+        assert!(
+            recovered
+                .apply(Event::PermitReserved {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        let generation = generation.next();
+        assert!(
+            !recovered
+                .apply(Event::PermitReserved {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !recovered
+                .apply(Event::ExecutorProven {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !recovered
+                .apply(Event::SessionLive {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !recovered
+                .apply(Event::RegistrationIntended {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !recovered
+                .apply(Event::Registered {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !recovered
+                .apply(Event::ReadyAttempt {
+                    slot_id,
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert_eq!(
+            recovered.load_state().unwrap().slots[0].phase,
+            ActorPhase::Ready
+        );
     }
 
     #[test]
@@ -2849,11 +3535,20 @@ mod tests {
         drop(journal);
         let conn = Connection::open(&path).unwrap();
         conn.pragma_update(None, "user_version", 99u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
         drop(conn);
-        let mut older = Journal::open(&path).unwrap();
-        assert!(older.write_blocked());
-        assert!(older.apply(Event::ControlLive).is_err());
-        assert!(older.load_state().unwrap().journal_writable);
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.newer");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let check = Connection::open(&path).unwrap();
+        assert_eq!(
+            check
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            99
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

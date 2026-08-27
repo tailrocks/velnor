@@ -37,6 +37,7 @@ const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
 /// controller cycle retries registration.
 const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
 const FENCED_SLOT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROLLER_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -273,10 +274,10 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
         ready_announced = true;
         if args.once {
             // Leave children running: a controller restart (or --once exit)
-            // must not stop slot or job processes.
-            for (_id, child) in slots.drain().chain(jobs.drain()) {
-                std::mem::forget(child);
-            }
+            // must not stop slot or job processes. Reap completed children
+            // through the same ownership path used by the normal loop.
+            reap(&mut slots);
+            reap(&mut jobs);
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -294,11 +295,26 @@ async fn drain_children(
         request_child_shutdown(child)?;
     }
 
+    let mut deadline = Instant::now() + CONTROLLER_CHILD_DRAIN_TIMEOUT;
+    let mut escalated = false;
     loop {
-        reap(slots);
-        reap(jobs);
+        reap_draining(slots, "slot")?;
+        reap_draining(jobs, "job")?;
         if slots.is_empty() && jobs.is_empty() {
             return Ok(());
+        }
+        if Instant::now() >= deadline {
+            if escalated {
+                anyhow::bail!(
+                    "controller child drain timed out after SIGKILL; {} handles retained",
+                    slots.len() + jobs.len()
+                );
+            }
+            kill_draining(slots, "slot")?;
+            kill_draining(jobs, "job")?;
+            eprintln!("controller child drain escalated to SIGKILL");
+            escalated = true;
+            deadline = Instant::now() + CONTROLLER_CHILD_DRAIN_TIMEOUT;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -357,21 +373,23 @@ async fn reconcile_once(
         let generation = slot
             .map(|slot| slot.generation)
             .unwrap_or(Generation::INITIAL);
-        let fenced_generation = fenced_slot_recovery_generation(slot);
-        let generation = if let Some(next_generation) = fenced_generation {
-            if args.spawn_slots {
-                terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
-            }
-            next_generation
-        } else {
-            generation
-        };
+        let fenced = slot.is_some_and(|slot| slot.phase == ActorPhase::Fenced);
+        if fenced && args.spawn_slots {
+            terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
+        }
+        let fenced_generation = fenced_slot_recovery_generation(slot, &state, jobs);
+        let generation = fenced_generation.unwrap_or(generation);
         let process_alive = slots.contains_key(&id.0)
             || slot.and_then(|slot| slot.pid).is_some_and(|pid| {
                 prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
             });
+        if fenced && fenced_generation.is_none() {
+            continue;
+        }
         if fenced_generation.is_none()
-            && !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive)
+            && (slot_has_admission_block(&state, &id, generation)
+                || child_owns_slot(&state, jobs, &id)
+                || !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive))
         {
             continue;
         }
@@ -491,6 +509,7 @@ async fn reconcile_once(
     register_runners(args, journal, pacing, registrations, remote_deadline).await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
+    reap(jobs);
     reclaim_orphaned_jobs(args, journal)?;
 
     for row in journal.pending_outbox()? {
@@ -779,23 +798,15 @@ async fn reconcile_remote_registrations(
             .map(|stored| stored.settings.agent_name.as_str())
             .unwrap_or_default();
         if !remote_registration_present(local_id, local_name, &remote) {
-            let active_job = state.jobs.iter().any(|job| {
-                job.slot_id == slot.slot_id
-                    && matches!(
-                        job.phase,
-                        ActorPhase::Assigned
-                            | ActorPhase::Starting
-                            | ActorPhase::Running
-                            | ActorPhase::Completing
-                    )
-            });
-            if !active_job {
-                lost.push((slot.slot_id.clone(), slot.generation));
-            }
+            // Registration loss invalidates the broker worker even while it
+            // owns a job. The durable event releases admission first; the
+            // worker remains journal-owned until normal teardown reconciles it.
+            lost.push((slot.slot_id.clone(), slot.generation));
         }
     }
 
     for (slot_id, generation) in lost {
+        let state = journal.materialized_state()?;
         let outcome = journal.apply(Event::RegistrationLost {
             slot_id: slot_id.clone(),
             generation,
@@ -803,8 +814,10 @@ async fn reconcile_remote_registrations(
         if outcome.rejected {
             continue;
         }
-        if let Some(child) = jobs.remove(&slot_id.0) {
-            request_child_shutdown(&child)?;
+        for key in job_child_keys_for_slot(jobs, &state, &slot_id) {
+            if let Some(child) = jobs.get(&key) {
+                request_child_shutdown(child)?;
+            }
         }
         eprintln!(
             "registration lost for {}; local claim cleared for fresh JIT recovery",
@@ -823,6 +836,25 @@ fn remote_registration_present(
         local_id.is_some_and(|id| runner.id == Some(id))
             || (local_id.is_none() && runner.name.as_deref() == Some(local_name))
     })
+}
+
+fn job_child_keys_for_slot(
+    jobs: &HashMap<String, Child>,
+    state: &velnor_control::journal::FleetState,
+    slot_id: &SlotId,
+) -> Vec<String> {
+    let mut keys = state
+        .jobs
+        .iter()
+        .filter(|job| job.slot_id == *slot_id)
+        .filter(|job| jobs.contains_key(&job.job_id.0))
+        .map(|job| job.job_id.0.clone())
+        .collect::<Vec<_>>();
+    let waiter_key = format!("wait-{}", slot_id.0);
+    if jobs.contains_key(&waiter_key) {
+        keys.push(waiter_key);
+    }
+    keys
 }
 
 async fn observe_github_and_routing(
@@ -1087,9 +1119,49 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
         .unwrap_or(1)
 }
 
-fn fenced_slot_recovery_generation(slot: Option<&SlotRecord>) -> Option<Generation> {
-    slot.filter(|slot| slot.phase == ActorPhase::Fenced)
-        .map(|slot| slot.generation.next())
+fn fenced_slot_recovery_generation(
+    slot: Option<&SlotRecord>,
+    state: &velnor_control::journal::FleetState,
+    jobs: &HashMap<String, Child>,
+) -> Option<Generation> {
+    let slot = slot.filter(|slot| slot.phase == ActorPhase::Fenced)?;
+    if slot_has_admission_block(state, &slot.slot_id, slot.generation)
+        || child_owns_slot(state, jobs, &slot.slot_id)
+    {
+        return None;
+    }
+    Some(slot.generation.next())
+}
+
+fn slot_has_admission_block(
+    state: &velnor_control::journal::FleetState,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    state.jobs.iter().any(|job| {
+        job.slot_id == *slot_id
+            && matches!(
+                job.phase,
+                ActorPhase::Assigned
+                    | ActorPhase::Starting
+                    | ActorPhase::Running
+                    | ActorPhase::Completing
+            )
+    }) || state.outbox.iter().any(|row| {
+        row.intended && !row.remote_acked && row.slot_id == *slot_id && row.generation == generation
+    })
+}
+
+fn child_owns_slot(
+    state: &velnor_control::journal::FleetState,
+    jobs: &HashMap<String, Child>,
+    slot_id: &SlotId,
+) -> bool {
+    jobs.contains_key(&slot_id.0)
+        || state
+            .jobs
+            .iter()
+            .any(|job| job.slot_id == *slot_id && jobs.contains_key(&job.job_id.0))
 }
 
 async fn terminate_fenced_slot_actor(
@@ -1098,19 +1170,40 @@ async fn terminate_fenced_slot_actor(
     slot_id: &SlotId,
     slot: &SlotRecord,
 ) -> anyhow::Result<()> {
-    if let Some(mut child) = slots.remove(&slot_id.0) {
-        request_child_shutdown(&child)?;
-        let deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+    if slots.contains_key(&slot_id.0) {
+        request_child_shutdown(slots.get(&slot_id.0).expect("child still present"))?;
+        let mut deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+        let mut escalated = false;
         loop {
-            if child.try_wait()?.is_some() {
+            if slots
+                .get_mut(&slot_id.0)
+                .expect("child retained until reap")
+                .try_wait()?
+                .is_some()
+            {
+                slots.remove(&slot_id.0);
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                child.kill()?;
-                while child.try_wait()?.is_none() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                if escalated {
+                    anyhow::bail!(
+                        "fenced slot {:?} child failed to reap after SIGKILL; handle retained",
+                        slot_id
+                    );
                 }
-                return Ok(());
+                slots
+                    .get_mut(&slot_id.0)
+                    .expect("child retained until escalation")
+                    .kill()
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "fenced slot {:?} SIGKILL escalation failed; handle retained: {error}",
+                            slot_id
+                        )
+                    })?;
+                eprintln!("fenced slot {:?} shutdown escalated to SIGKILL", slot_id);
+                escalated = true;
+                deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -1312,13 +1405,49 @@ fn maybe_spawn_job(
 fn reap(children: &mut HashMap<String, Child>) {
     let mut dead = Vec::new();
     for (id, child) in children.iter_mut() {
-        if let Ok(Some(_)) = child.try_wait() {
+        match child.try_wait() {
+            Ok(Some(_)) => dead.push(id.clone()),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("process-reap error for child {id}; handle retained for retry: {error}");
+            }
+        }
+    }
+    for id in dead {
+        children.remove(&id);
+    }
+}
+
+fn reap_draining(children: &mut HashMap<String, Child>, kind: &str) -> anyhow::Result<()> {
+    let mut dead = Vec::new();
+    for (id, child) in children.iter_mut() {
+        if child
+            .try_wait()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "process-reap error while draining {kind} child {id}; handle retained: {error}"
+                )
+            })?
+            .is_some()
+        {
             dead.push(id.clone());
         }
     }
     for id in dead {
         children.remove(&id);
     }
+    Ok(())
+}
+
+fn kill_draining(children: &mut HashMap<String, Child>, kind: &str) -> anyhow::Result<()> {
+    for (id, child) in children.iter_mut() {
+        child.kill().map_err(|error| {
+            anyhow::anyhow!(
+                "process-reap escalation failed for {kind} child {id}; handle retained: {error}"
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Daemon production path: spawn one OS process per configured slot instead
@@ -1345,6 +1474,7 @@ mod tests {
     use crate::args::DaemonArgs;
     use crate::node::exec::write_exec_config;
     use serde_json::json;
+    use velnor_control::journal::FleetState;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1444,14 +1574,53 @@ mod tests {
     #[test]
     fn fenced_slot_reconciliation_advances_generation() {
         let mut slot = reserved_slot();
-        assert_eq!(fenced_slot_recovery_generation(Some(&slot)), None);
+        let state = FleetState::default();
+        let children = HashMap::new();
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &state, &children),
+            None
+        );
 
         slot.phase = ActorPhase::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot)),
+            fenced_slot_recovery_generation(Some(&slot), &state, &children),
             Some(Generation(slot.generation.0 + 1))
         );
-        assert_eq!(fenced_slot_recovery_generation(None), None);
+        assert_eq!(
+            fenced_slot_recovery_generation(None, &state, &children),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_outbox_blocks_only_its_slot_and_generation() {
+        let mut state = FleetState::default();
+        state.outbox.push(velnor_control::journal::OutboxRecord {
+            job_id: JobId("job-1".into()),
+            slot_id: SlotId("velnor-1".into()),
+            generation: Generation::INITIAL,
+            payload_sha256: "checksum".into(),
+            intended: true,
+            send_started: false,
+            remote_acked: false,
+            created_unix: 0,
+        });
+
+        assert!(slot_has_admission_block(
+            &state,
+            &SlotId("velnor-1".into()),
+            Generation::INITIAL,
+        ));
+        assert!(!slot_has_admission_block(
+            &state,
+            &SlotId("velnor-2".into()),
+            Generation::INITIAL,
+        ));
+        assert!(!slot_has_admission_block(
+            &state,
+            &SlotId("velnor-1".into()),
+            Generation(2),
+        ));
     }
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
@@ -1533,6 +1702,27 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
+            Event::ReadyAttempt {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Assigned {
+                slot_id: SlotId("velnor-1".to_owned()),
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::JobOwned {
+                job_id: JobId("job-1".to_owned()),
+                slot_id: SlotId("velnor-1".to_owned()),
+                attempt: 1,
+                generation: Generation::INITIAL,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_234,
+            },
+            Event::JobStarted {
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
@@ -1560,7 +1750,12 @@ mod tests {
             .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
             .unwrap();
         assert!(!slot.registered);
-        assert_eq!(slot.phase, ActorPhase::Provisioning);
+        assert!(!slot.permit_held);
+        assert!(!slot.session_live);
+        assert_eq!(slot.phase, ActorPhase::Fenced);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, JobId("job-1".to_owned()));
         std::env::remove_var("GITHUB_TOKEN");
         std::fs::remove_dir_all(dir).ok();
     }

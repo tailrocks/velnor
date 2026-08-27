@@ -14253,16 +14253,16 @@ runs:
     }
 
     #[tokio::test]
-    async fn next_slot_run_waits_for_detached_teardown() {
+    async fn next_slot_run_waits_for_detached_teardown() -> Result<()> {
         let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
         let (release_sender, release_receiver) = std::sync::mpsc::channel::<anyhow::Result<()>>();
         register_slot_teardown_task(
             &key,
             std::thread::spawn(move || -> Result<()> {
-                release_receiver.recv().unwrap();
+                release_receiver.recv()??;
                 Ok(())
             }),
-        );
+        )?;
 
         let mut waiter = tokio::spawn(async move { wait_for_prior_slot_teardown(&key).await });
         assert!(
@@ -14271,12 +14271,11 @@ runs:
                 .is_err(),
             "the next run crossed the teardown ownership boundary"
         );
-        release_sender.send(Ok(())).unwrap();
+        release_sender.send(Ok(()))?;
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+            .map_err(anyhow::Error::from)???;
+        Ok(())
     }
 
     #[tokio::test]
@@ -14292,18 +14291,18 @@ runs:
     }
 
     #[tokio::test]
-    async fn completed_teardown_is_consumed_once() {
+    async fn completed_teardown_is_consumed_once() -> Result<()> {
         let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
-        register_slot_teardown_task(&key, std::thread::spawn(|| -> Result<()> { Ok(()) }));
+        register_slot_teardown_task(&key, std::thread::spawn(|| -> Result<()> { Ok(()) }))?;
 
-        wait_for_prior_slot_teardown(&key).await.unwrap();
+        wait_for_prior_slot_teardown(&key).await?;
         tokio::time::timeout(
             Duration::from_millis(25),
             wait_for_prior_slot_teardown(&key),
         )
         .await
-        .unwrap()
-        .unwrap();
+        .map_err(anyhow::Error::from)??;
+        Ok(())
     }
 
     #[tokio::test]

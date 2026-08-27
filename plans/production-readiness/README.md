@@ -214,3 +214,29 @@ For each representative workflow in each repository:
   cache proof and rollback proof pass.
 - [ ] Check every checkbox in this document. Only then declare the campaign
   complete.
+
+## Progress ledger — 2026-08-27
+
+- Branch: `fix/watchdog-registration-deadline`.
+- HEAD/remote: local `HEAD` and
+  `origin/fix/watchdog-registration-deadline` both point to
+  `3dbc086cda36c13d35b33ad3ad0de0a835b068d3`.
+- Committed artifact fix: `3dbc086` (`fix(artifacts): isolate download temp
+  directory`).
+- Current dirty work before delivery: five intended lifecycle/schema/lease
+  files — `crates/velnor-control/src/journal.rs`,
+  `crates/velnor-runner/src/capacity.rs`,
+  `crates/velnor-runner/src/node/controller.rs`,
+  `crates/velnor-runner/src/protocol.rs`, and
+  `crates/velnor-runner/src/runner.rs`.
+- Verified green: `rtk mise run check`; fmt, clippy `-D warnings`, deny,
+  actionlint, fleet generation, and `cargo nextest` 1450/1450 passed.
+- Latest reviewer blockers remain OPEN/UNPROVEN:
+  - full legacy-schema preflight;
+  - quarantine/recovery for unknown outbox owner;
+  - atomic re-read before permit;
+  - `--once` supervision;
+  - normal reap bounded escalation/health;
+  - durable registration-loss termination intent;
+  - scope/registration identity;
+  - Sentry/Actions/fixture/perf/deploy/rollback.
