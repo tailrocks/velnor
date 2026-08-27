@@ -396,6 +396,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   downloads now resume partial files with `--continue-at -` and use a bounded
   30-minute retry window. Candidate `v0.1.235` is committed as `62acc44`,
   tagged, and pushed; GitHub-lane release run `33052574451` is queued.
+- Release run `33052574451` confirmed repeated CDN 503 responses despite
+  resumable retries. The verified pinned kernel artifact responds from the
+  official `mirrors.edge.kernel.org` endpoint with the same SHA-256. Candidate
+  `v0.1.236` is committed as `8948d43`, tagged, and pushed; the failed run was
+  cancelled before the next standard GitHub-lane release dispatch.
 
 ## Non-goals
 
