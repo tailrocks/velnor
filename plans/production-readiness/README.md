@@ -275,9 +275,9 @@ evidence and requires a fresh baseline.
   `1741c7f50c53f8ad363f9a00db1cfc20bb024ea6`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
   of `origin/main` and equal to its pushed branch tip.
-- Open Velnor PR: #411 at this HEAD. CI run `33124814942` passed; Guest image
-  run `33124814538` was cancelled after repeated owned-run stalls during
-  package/kernel setup, so this is not green-main proof.
+- Open Velnor PR: #411 at this HEAD. CI run `33125763967` and Guest image run
+  `33125763452` were cancelled after owned-run stalls; prior CI run
+  `33124814942` passed. This is not green-main proof.
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
