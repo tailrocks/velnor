@@ -120,9 +120,9 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 
 ## Phase 7 — canary and release
 
-- [ ] Candidate is built and published through signed Debian APT.
-- [ ] One isolated Sentry scope is drained and upgraded.
-- [ ] Unrelated scopes remain on the previous version during canary.
+- [x] Candidate is built and published through signed Debian APT.
+- [x] One isolated Sentry scope is drained and upgraded.
+- [x] Unrelated scopes remain on the previous version during canary.
 - [ ] Idle soak, one fixture job, and one forced broker-fault sequence pass.
 - [ ] Active-job preservation, sibling-scope isolation, and duplicate-registration checks pass.
 - [ ] Promotion occurs only after every gate passes.
@@ -436,6 +436,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   Publish run `33061090394` completed successfully through GitHub Actions:
   repository build, deployment, and required publish gates all passed. The
   signed APT repository now publishes candidate `velnor-runner=0.1.237`.
+- Sentry’s isolated `velnor-daemon.service` was drained and upgraded only via
+  the exact locked APT transaction to `0.1.237`; unrelated daemon units and
+  their running containers were left untouched. The active release pointer was
+  then atomically activated from the checksum-verified `v0.1.237` record.
 
 ## Non-goals
 
