@@ -458,4 +458,14 @@ mod tests {
         assert_eq!(doctor_dir, PathBuf::from("/var/lib/velnor/runner"));
         assert!(!doctor_dir.starts_with("/root/.velnor"));
     }
+
+    #[test]
+    fn packaged_env_explicitly_selects_native_github_transport() {
+        let env = include_str!("../debian/velnor.env");
+        let assignments: Vec<_> = env
+            .lines()
+            .filter(|line| line.starts_with("VELNOR_GITHUB_HTTP_TRANSPORT="))
+            .collect();
+        assert_eq!(assignments, ["VELNOR_GITHUB_HTTP_TRANSPORT=native"]);
+    }
 }

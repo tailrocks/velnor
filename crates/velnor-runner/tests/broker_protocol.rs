@@ -1,8 +1,9 @@
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, LazyLock,
     },
 };
 
@@ -20,9 +21,38 @@ use wiremock::{
 };
 
 const TOKEN: &str = "test-token";
+const GITHUB_HTTP_TRANSPORT_ENV: &str = "VELNOR_GITHUB_HTTP_TRANSPORT";
+
+static GITHUB_HTTP_TRANSPORT_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+struct NativeTransportGuard {
+    previous: Option<OsString>,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+async fn native_transport_guard() -> NativeTransportGuard {
+    let lock = GITHUB_HTTP_TRANSPORT_ENV_LOCK.lock().await;
+    let previous = std::env::var_os(GITHUB_HTTP_TRANSPORT_ENV);
+    std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "native");
+    NativeTransportGuard {
+        previous,
+        _lock: lock,
+    }
+}
+
+impl Drop for NativeTransportGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, value),
+            None => std::env::remove_var(GITHUB_HTTP_TRANSPORT_ENV),
+        }
+    }
+}
 
 #[tokio::test]
 async fn broker_run_service_happy_path_acquires_and_completes_job() {
+    let _transport_guard = native_transport_guard().await;
     let server = MockServer::start().await;
     let broker = BrokerClient::new(&format!("{}/broker", server.uri()), TOKEN).unwrap();
     let run_service = RunServiceClient::new(TOKEN).unwrap();
@@ -152,6 +182,7 @@ async fn broker_run_service_happy_path_acquires_and_completes_job() {
 
 #[tokio::test]
 async fn broker_poll_auth_failure_is_error_not_idle() {
+    let _transport_guard = native_transport_guard().await;
     let server = MockServer::start().await;
     let broker = BrokerClient::new(&format!("{}/broker", server.uri()), TOKEN).unwrap();
 
@@ -174,6 +205,7 @@ async fn broker_poll_auth_failure_is_error_not_idle() {
 
 #[tokio::test]
 async fn broker_poll_empty_non_success_body_is_error_not_idle() {
+    let _transport_guard = native_transport_guard().await;
     let server = MockServer::start().await;
     let broker = BrokerClient::new(&format!("{}/broker", server.uri()), TOKEN).unwrap();
 
@@ -193,6 +225,7 @@ async fn broker_poll_empty_non_success_body_is_error_not_idle() {
 
 #[tokio::test]
 async fn acquire_job_classifies_non_retriable_statuses() {
+    let _transport_guard = native_transport_guard().await;
     let server = MockServer::start().await;
     let run_service = RunServiceClient::new(TOKEN).unwrap();
     let run_service_url = format!("{}/run/jobs/123", server.uri());
@@ -239,6 +272,7 @@ async fn acquire_job_classifies_non_retriable_statuses() {
 
 #[tokio::test]
 async fn complete_job_retries_5xx_and_succeeds() {
+    let _transport_guard = native_transport_guard().await;
     let server = MockServer::start().await;
     let run_service = RunServiceClient::new(TOKEN).unwrap();
     let run_service_url = format!("{}/run/jobs/123", server.uri());
@@ -268,6 +302,7 @@ async fn complete_job_retries_5xx_and_succeeds() {
 
 #[tokio::test]
 async fn complete_job_does_not_retry_non_retryable_4xx() {
+    let _transport_guard = native_transport_guard().await;
     let server = MockServer::start().await;
     let run_service = RunServiceClient::new(TOKEN).unwrap();
     let run_service_url = format!("{}/run/jobs/123", server.uri());

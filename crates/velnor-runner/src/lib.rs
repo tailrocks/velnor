@@ -47,6 +47,43 @@ mod storage;
 mod telemetry;
 mod workflow_command;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{ffi::OsString, sync::LazyLock};
+
+    static GITHUB_HTTP_TRANSPORT_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    pub(crate) struct GithubHttpTransportEnvGuard {
+        previous: Option<OsString>,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    pub(crate) async fn github_http_transport_env() -> GithubHttpTransportEnvGuard {
+        let lock = GITHUB_HTTP_TRANSPORT_ENV_LOCK.lock().await;
+        let previous = std::env::var_os(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV);
+        GithubHttpTransportEnvGuard {
+            previous,
+            _lock: lock,
+        }
+    }
+
+    impl GithubHttpTransportEnvGuard {
+        pub(crate) fn set_native(&self) {
+            std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        }
+    }
+
+    impl Drop for GithubHttpTransportEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, value),
+                None => std::env::remove_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV),
+            }
+        }
+    }
+}
+
 /// Temporary migration scaffold (Plan 064).
 ///
 /// Exposes the legacy binary's exact bootstrap sequence so `velnorctl` can

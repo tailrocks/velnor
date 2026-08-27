@@ -125,10 +125,8 @@ impl GithubPacing {
                 // Nearly exhausted: keep the remaining budget for
                 // DELETE traffic until the window resets. Do not spend it
                 // on new JIT registrations.
-                if let Some(hold) = until_epoch_with_jitter(reset_epoch, salt) {
-                    let hold = hold.max(GITHUB_PROBE_MIN_INTERVAL);
-                    self.next_probe = now + hold;
-                    self.rest_hold_until = Some(now + hold);
+                if until_epoch_with_jitter(reset_epoch, salt).is_some() {
+                    self.hold_rest_until(now, Some(reset_epoch));
                     return;
                 }
             }
@@ -173,8 +171,12 @@ impl GithubPacing {
             .and_then(|epoch| until_epoch_with_jitter(epoch, salt))
             .unwrap_or(GITHUB_PROBE_MAX_BACKOFF)
             .max(GITHUB_PROBE_MIN_INTERVAL);
-        self.next_probe = now + hold;
-        self.rest_hold_until = Some(now + hold);
+        let deadline = now + hold;
+        let deadline = self
+            .rest_hold_until
+            .map_or(deadline, |existing| existing.max(deadline));
+        self.next_probe = self.next_probe.max(deadline);
+        self.rest_hold_until = Some(deadline);
     }
 
     /// Failed JIT: per-slot backoff always. Quota 403/429 also parks every
@@ -412,7 +414,7 @@ async fn reconcile_once(
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
         run_bounded_remote_reconciliation(
-            reconcile_remote_registrations(args, journal, jobs),
+            reconcile_remote_registrations(args, journal, jobs, pacing),
             remaining_remote_budget(remote_deadline),
         )
         .await?;
@@ -706,9 +708,7 @@ async fn register_runners(
                 pacing
                     .registration_retry
                     .get(&slot_id.0)
-                    .map_or(0, |(deadline, _)| deadline
-                        .duration_since(now)
-                        .as_secs())
+                    .map_or(0, |(deadline, _)| deadline.duration_since(now).as_secs())
             );
             continue;
         }
@@ -745,6 +745,7 @@ async fn reconcile_remote_registrations(
     args: &ControllerArgs,
     journal: &mut Journal,
     jobs: &mut HashMap<String, Child>,
+    pacing: &mut GithubPacing,
 ) -> anyhow::Result<()> {
     let exec = match load_exec_config(&args.state_dir) {
         Ok(exec) => exec,
@@ -763,6 +764,12 @@ async fn reconcile_remote_registrations(
     let remote = match RegistrationClient::new()?.list_runners(&scope, pat).await {
         Ok(remote) => remote,
         Err(error) => {
+            if let Some(quota) = crate::protocol::github_api_quota_status(&error) {
+                pacing.hold_rest_until(
+                    tokio::time::Instant::now(),
+                    quota.reset_epoch_or_retry_after(epoch_now()),
+                );
+            }
             eprintln!("registration reconciliation lookup failed: {error:#}");
             return Ok(());
         }
@@ -843,7 +850,7 @@ async fn observe_github_and_routing(
             .pool_name
             .clone()
             .or_else(|| exec.name.clone())
-            .unwrap_or_else(|| "default".to_owned());
+            .unwrap_or_default();
         let trust = prove::runtime_trust_scope(&exec.trust_scope);
         // Repo-scoped fleets derive policy from the URL (operator override
         // on disk wins). Org-scoped fleets load the generated
@@ -892,6 +899,7 @@ async fn observe_github_and_routing(
                         url,
                         token,
                         policy: policy.as_ref(),
+                        configured_group: (!group.is_empty()).then_some(group.as_str()),
                         pool_id: exec.pool_id,
                         configured_labels: &exec.labels,
                         configured_trust: &exec.trust_scope,
@@ -902,7 +910,13 @@ async fn observe_github_and_routing(
                     Ok(probe) => probe,
                     Err(_) => {
                         eprintln!("GitHub probe timed out before controller remote budget expired");
-                        prove::GitHubProbe::default()
+                        prove::GitHubProbe {
+                            diagnostic: Some(
+                                "GitHub routing probe timed out before controller remote budget expired"
+                                    .to_owned(),
+                            ),
+                            ..prove::GitHubProbe::default()
+                        }
                     }
                 };
                 if probe.rate_limited {
@@ -932,8 +946,15 @@ async fn observe_github_and_routing(
                 }
                 reachable = probe.reachable;
                 dependency_observed = true;
-                if let Some(evidence) = probe.evidence {
-                    prove::write_evidence(&args.state_dir, &evidence)?;
+                match (probe.diagnostic.as_deref(), probe.evidence) {
+                    (Some(diagnostic), _) => {
+                        eprintln!("GitHub routing probe failed closed: {diagnostic}");
+                        prove::invalidate_routing_evidence(&args.state_dir)?;
+                    }
+                    (None, Some(evidence)) => {
+                        prove::write_evidence(&args.state_dir, &evidence)?;
+                    }
+                    (None, None) => {}
                 }
             }
             // Probe skipped for pacing: keep the last observed dependency
@@ -1455,6 +1476,8 @@ mod tests {
     }
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1544,9 +1567,14 @@ mod tests {
             once: true,
             spawn_slots: false,
         };
-        reconcile_remote_registrations(&args, &mut journal, &mut HashMap::new())
-            .await
-            .unwrap();
+        reconcile_remote_registrations(
+            &args,
+            &mut journal,
+            &mut HashMap::new(),
+            &mut GithubPacing::default(),
+        )
+        .await
+        .unwrap();
         let slot = journal
             .load_state()
             .unwrap()
@@ -1556,6 +1584,7 @@ mod tests {
             .unwrap();
         assert!(!slot.registered);
         assert_eq!(slot.phase, ActorPhase::Provisioning);
+        std::env::remove_var("GITHUB_TOKEN");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1573,6 +1602,87 @@ mod tests {
         assert!(matches!(result, Ok(Ok(()))));
     }
 
+    async fn reconciliation_lookup_error_pacing(
+        status: u16,
+        headers: &[(&'static str, String)],
+    ) -> GithubPacing {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let response = headers
+            .iter()
+            .fold(ResponseTemplate::new(status), |response, (name, value)| {
+                response.insert_header(*name, value.clone())
+            });
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-registration-error-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("{}/tailrocks", server.uri());
+        write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".into(),
+            desired_ready: 1,
+            surge: 0,
+            once: true,
+            spawn_slots: false,
+        };
+        let mut pacing = GithubPacing::default();
+        reconcile_remote_registrations(&args, &mut journal, &mut HashMap::new(), &mut pacing)
+            .await
+            .unwrap();
+        std::env::remove_var("GITHUB_TOKEN");
+        std::fs::remove_dir_all(dir).ok();
+        pacing
+    }
+
+    #[tokio::test]
+    async fn reconciliation_quota_errors_hold_fleet_until_absolute_deadline() {
+        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let reset = epoch_now() + 3600;
+        let pacing = reconciliation_lookup_error_pacing(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0".to_owned()),
+                ("x-ratelimit-reset", reset.to_string()),
+            ],
+        )
+        .await;
+        assert!(!pacing.registration_due("unregistered", tokio::time::Instant::now()));
+
+        let pacing =
+            reconciliation_lookup_error_pacing(429, &[("retry-after", "30".to_owned())]).await;
+        assert!(!pacing.registration_due("unregistered", tokio::time::Instant::now()));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_permission_error_does_not_hold_fleet() {
+        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let pacing = reconciliation_lookup_error_pacing(
+            403,
+            &[
+                ("x-ratelimit-remaining", "4200".to_owned()),
+                ("x-ratelimit-reset", (epoch_now() + 3600).to_string()),
+            ],
+        )
+        .await;
+        assert!(pacing.registration_due("unregistered", tokio::time::Instant::now()));
+    }
+
     #[test]
     fn remote_budget_leaves_controller_watchdog_margin() {
         assert!(CONTROLLER_REMOTE_BUDGET < Duration::from_secs(30));
@@ -1580,6 +1690,8 @@ mod tests {
 
     #[tokio::test]
     async fn org_url_probe_bootstraps_policy_from_generated_allowlist() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1643,8 +1755,9 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("GITHUB_TOKEN", "ghs_test");
-        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        journal.apply(Event::ControlLive).unwrap();
+        journal.apply(Event::JournalWritable).unwrap();
         let args = ControllerArgs {
             state_dir: dir.clone(),
             scope: "velnor".into(),
@@ -1653,6 +1766,12 @@ mod tests {
             once: true,
             spawn_slots: false,
         };
+        journal
+            .apply(Event::DesiredCapacity {
+                ready: args.desired_ready,
+                surge: args.surge,
+            })
+            .unwrap();
         let mut pacing = GithubPacing::default();
         observe_github_and_routing(
             &args,
@@ -1729,6 +1848,37 @@ mod tests {
         pacing.record_probe(now, false, Some(40), Some(epoch_now() + 120));
         assert!(!pacing.probe_due(now + Duration::from_secs(119)));
         assert!(pacing.probe_due(now + Duration::from_secs(140)));
+    }
+
+    #[test]
+    fn pacing_rest_hold_does_not_shorten_on_decreasing_deadline() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        pacing.hold_rest_until(now, Some(epoch_now() + 3600));
+        let first_deadline = pacing.rest_hold_until.unwrap();
+        pacing.hold_rest_until(now, Some(epoch_now() + 120));
+
+        assert_eq!(pacing.rest_hold_until, Some(first_deadline));
+        assert_eq!(pacing.next_probe, first_deadline);
+        assert!(!pacing.registration_due("velnor-1", first_deadline - Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn pacing_low_remaining_update_does_not_shorten_rest_hold() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        pacing.record_probe(now, false, Some(40), Some(epoch_now() + 3600));
+        let first_deadline = pacing.rest_hold_until.unwrap();
+        pacing.record_probe(
+            now + Duration::from_secs(1),
+            false,
+            Some(40),
+            Some(epoch_now() + 120),
+        );
+
+        assert_eq!(pacing.rest_hold_until, Some(first_deadline));
+        assert_eq!(pacing.next_probe, first_deadline);
+        assert!(!pacing.registration_due("velnor-1", first_deadline - Duration::from_secs(1)));
     }
 
     #[test]
@@ -1843,6 +1993,8 @@ mod tests {
     /// one per 2s reconcile tick.
     #[tokio::test]
     async fn rate_limited_probe_parks_instead_of_retrying_per_tick() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         let reset_epoch = epoch_now() + 3600;
@@ -1868,9 +2020,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        let fields = prove::RoutingFields {
+            group: "velnor".into(),
+            selected_repositories: vec!["tailrocks/velnor".into()],
+            labels: vec!["velnor".into()],
+            trust_scope: "trusted".into(),
+        };
+        prove::write_routing_document(&dir, fields.clone(), fields).unwrap();
         std::env::set_var("GITHUB_TOKEN", "ghs_test");
-        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        journal.apply(Event::ControlLive).unwrap();
+        journal.apply(Event::JournalWritable).unwrap();
         let args = ControllerArgs {
             state_dir: dir.clone(),
             scope: "velnor".into(),
@@ -1879,6 +2039,12 @@ mod tests {
             once: true,
             spawn_slots: false,
         };
+        journal
+            .apply(Event::DesiredCapacity {
+                ready: args.desired_ready,
+                surge: args.surge,
+            })
+            .unwrap();
         let mut pacing = GithubPacing::default();
 
         // First tick: the 403 is observed, health degrades honestly.
@@ -1892,6 +2058,18 @@ mod tests {
         .unwrap();
         let state = journal.load_state().unwrap();
         assert!(!state.github_reachable, "{state:?}");
+        assert!(!dir.join(prove::ROUTING_FILE).exists());
+        assert!(!dir.join(prove::ROUTING_EVIDENCE_FILE).exists());
+        assert_eq!(
+            prove::observe_routing(&dir),
+            prove::RoutingObservation::invalid()
+        );
+        assert!(!state.routing_valid, "{state:?}");
+        assert!(!state.runner_group_valid, "{state:?}");
+        assert_eq!(
+            state.health().state,
+            velnor_model::FleetHealthState::Degraded
+        );
 
         // Simulate a burst of reconcile ticks inside the reset window: the
         // pacer must not send another request (Mock::expect(1) enforces it).

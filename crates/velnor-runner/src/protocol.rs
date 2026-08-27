@@ -18,7 +18,6 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fmt,
-    path::PathBuf,
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,120 +34,12 @@ pub fn velnor_runner_display() -> String {
     format!("Velnor Runner/{VELNOR_VERSION} (protocol: {RUNNER_VERSION})")
 }
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
-const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
-const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
+const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 2;
+const GITHUB_MAX_TIME_SECS: u64 = 5;
 const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
-const PRIVATE_CURL_STALE_AFTER: Duration = Duration::from_secs(600);
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
-/// Private curl inputs are removed even when an async caller is cancelled.
-/// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
-/// running with secrets or mutate GitHub after its owning operation ended.
-struct PrivateTempFiles {
-    dir: PathBuf,
-    paths: Vec<PathBuf>,
-}
-impl PrivateTempFiles {
-    fn new(_prefix: &str) -> Result<Self> {
-        let dir = std::env::temp_dir().join("velnor-curl");
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create private curl directory {}", dir.display()))?;
-        let mut permissions = std::fs::metadata(&dir)
-            .with_context(|| format!("stat private curl directory {}", dir.display()))?
-            .permissions();
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&dir, permissions)
-            .with_context(|| format!("protect private curl directory {}", dir.display()))?;
-
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let stale = entry.file_type().is_ok_and(|file_type| file_type.is_file())
-                    && entry.file_name().to_string_lossy().starts_with("velnor-")
-                    && entry
-                        .metadata()
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                        .is_some_and(|age| age > PRIVATE_CURL_STALE_AFTER);
-                if stale {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        }
-
-        Ok(Self {
-            dir,
-            paths: Vec::new(),
-        })
-    }
-
-    fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let path = self
-            .dir
-            .join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
-        self.paths.push(path.clone());
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("create private curl file {}", path.display()))?;
-        file.write_all(content)
-            .with_context(|| format!("write private curl file {}", path.display()))?;
-        Ok(path)
-    }
-}
-
-impl Drop for PrivateTempFiles {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-async fn run_private_curl(
-    prefix: &str,
-    config: &str,
-    body: Option<&[u8]>,
-    url: &str,
-    capture_headers: bool,
-) -> Result<(std::process::Output, Vec<u8>)> {
-    let mut files = PrivateTempFiles::new(prefix)?;
-    let config_path = files.write(prefix, "cfg", config.as_bytes())?;
-    let body_path = body
-        .map(|body| files.write(prefix, "body", body))
-        .transpose()?;
-    let headers_path = capture_headers
-        // Header output is not secret, but keep it mode-0600 and clean it via
-        // the same guard so cancellation cannot leave request metadata behind.
-        .then(|| files.write(prefix, "headers", &[]))
-        .transpose()?;
-
-    let mut command = tokio::process::Command::new("curl");
-    command.kill_on_drop(true).arg("--config").arg(&config_path);
-    if let Some(path) = &headers_path {
-        command.arg("--dump-header").arg(path);
-    }
-    if let Some(path) = &body_path {
-        command.arg("--data").arg(format!("@{}", path.display()));
-    }
-    let output = command.arg(url).output().await.context("run curl")?;
-    let headers = headers_path
-        .as_deref()
-        .map(std::fs::read)
-        .transpose()
-        .context("read curl response headers")?
-        .unwrap_or_default();
-    Ok((output, headers))
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
@@ -276,17 +167,22 @@ impl GitHubRateLimitStatus {
 
 impl GitHubRetryHint {
     fn delay(self, now_epoch: u64) -> Option<std::time::Duration> {
-        let retry_after = self.retry_after_seconds.unwrap_or(0);
-        let until_reset = self
+        let seconds = self
             .rate_limit_reset_epoch
             .map(|reset| reset.saturating_sub(now_epoch))
-            .unwrap_or(0);
-        let seconds = retry_after.max(until_reset);
+            .unwrap_or_else(|| self.retry_after_seconds.unwrap_or(0));
         (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
     }
 }
 
-fn parse_github_retry_headers(headers: &[u8]) -> GitHubRetryHint {
+fn unix_epoch_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn parse_github_retry_headers(headers: &[u8], response_epoch: u64) -> GitHubRetryHint {
     let mut hint = GitHubRetryHint::default();
     for line in String::from_utf8_lossy(headers).lines() {
         let Some((name, value)) = line.split_once(':') else {
@@ -301,21 +197,32 @@ fn parse_github_retry_headers(headers: &[u8]) -> GitHubRetryHint {
             hint.remaining = value.parse().ok();
         }
     }
+    if let Some(retry_after) = hint.retry_after_seconds {
+        let retry_until = response_epoch.saturating_add(retry_after);
+        hint.rate_limit_reset_epoch =
+            Some(hint.rate_limit_reset_epoch.unwrap_or(0).max(retry_until));
+    }
     hint
 }
 
-fn github_retry_hint_from_header_map(headers: &HeaderMap) -> GitHubRetryHint {
+fn github_retry_hint_from_header_map(headers: &HeaderMap, response_epoch: u64) -> GitHubRetryHint {
     let parse = |name: &'static str| {
         headers
             .get(name)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse().ok())
     };
-    GitHubRetryHint {
+    let mut hint = GitHubRetryHint {
         retry_after_seconds: parse("retry-after"),
         rate_limit_reset_epoch: parse("x-ratelimit-reset"),
         remaining: parse("x-ratelimit-remaining"),
+    };
+    if let Some(retry_after) = hint.retry_after_seconds {
+        let retry_until = response_epoch.saturating_add(retry_after);
+        hint.rate_limit_reset_epoch =
+            Some(hint.rate_limit_reset_epoch.unwrap_or(0).max(retry_until));
     }
+    hint
 }
 
 fn github_api_error_with_retry(
@@ -347,10 +254,10 @@ impl GitHubApiError {
 }
 
 pub fn github_api_retry_delay(error: &anyhow::Error) -> Option<std::time::Duration> {
-    let now_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    github_api_retry_delay_at(error, unix_epoch_now())
+}
+
+fn github_api_retry_delay_at(error: &anyhow::Error, now_epoch: u64) -> Option<std::time::Duration> {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
@@ -844,8 +751,9 @@ impl OAuthClient {
         &self,
         credentials: &OAuthJwtCredentials,
     ) -> Result<OAuthAccessToken> {
+        github_http_transport()?;
         let assertion = build_client_assertion(credentials)?;
-        // Build URL-encoded form body for curl --data
+        // Build the URL-encoded OAuth form body.
         let body: String = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "client_credentials")
             .append_pair(
@@ -855,24 +763,21 @@ impl OAuthClient {
             .append_pair("client_assertion", &assertion)
             .finish();
         let url = credentials.authorization_url.clone();
-        let ua = RUNNER_USER_AGENT.to_string();
-
-        let cfg = format!(
-            "header = \"User-Agent: {ua}\"\n\
-             header = \"Accept: application/json\"\n\
-             header = \"Content-Type: application/x-www-form-urlencoded\"\n\
-             request = POST\n\
-             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let (output, _) =
-            run_private_curl("velnor-oauth", &cfg, Some(body.as_bytes()), &url, false).await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (text, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        let response = native_http_client()?
+            .post(url)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS))
+            .body(body)
+            .send()
+            .await
+            .context("send OAuth token request")?;
+        let status = response.status().as_u16();
+        let text = response
+            .text()
+            .await
+            .context("read OAuth token response body")?;
         let ok = (200..300).contains(&status);
         if !ok && status != 400 {
             return Err(github_api_error("OAuth token request", status, text));
@@ -957,21 +862,94 @@ impl RunnerKeyPair {
 }
 
 #[derive(Clone)]
-pub struct RegistrationClient {
-    http: Client,
+pub struct RegistrationClient;
+
+struct GithubHttpResponse {
+    status: u16,
+    body: String,
+    headers: HeaderMap,
+}
+
+fn github_error_from_response(action: &str, response: GithubHttpResponse) -> anyhow::Error {
+    github_api_error_with_retry(
+        action,
+        response.status,
+        response.body,
+        github_retry_hint_from_header_map(&response.headers, unix_epoch_now()),
+    )
+}
+
+fn github_transport_error(action: &str, error: impl fmt::Display) -> anyhow::Error {
+    github_api_error(action, 0, error.to_string())
+}
+
+fn github_json_body<T>(action: &str, response: GithubHttpResponse) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if !(200..300).contains(&response.status) {
+        return Err(github_error_from_response(action, response));
+    }
+    serde_json::from_str(&response.body).map_err(|error| {
+        github_api_error_with_retry(
+            action,
+            response.status,
+            format!("{}; parse error: {error}", response.body),
+            github_retry_hint_from_header_map(&response.headers, unix_epoch_now()),
+        )
+    })
+}
+
+async fn github_http_request(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<GithubHttpResponse> {
+    github_http_transport()?;
+    let method_name = method.to_owned();
+    let method = Method::from_bytes(method.as_bytes()).map_err(|error| {
+        github_transport_error(&format!("parse GitHub HTTP method '{method}'"), error)
+    })?;
+    let client = native_http_client()
+        .map_err(|error| github_transport_error("build GitHub HTTP client", error))?;
+    let mut request = client
+        .request(method, url)
+        .bearer_auth(bearer_token)
+        .header(USER_AGENT, RUNNER_USER_AGENT)
+        .header(ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(max_time_secs));
+    if let Some(body) = json_body {
+        request = request
+            .header("Content-Type", "application/json")
+            .body(body);
+    }
+    let response = request.send().await.map_err(|error| {
+        github_transport_error(
+            &format!("send native GitHub request {method_name} {url}"),
+            error,
+        )
+    })?;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response.text().await.map_err(|error| {
+        github_transport_error(
+            &format!("read native GitHub response body {method_name} {url}"),
+            error,
+        )
+    })?;
+    Ok(GithubHttpResponse {
+        status,
+        body,
+        headers,
+    })
 }
 
 impl RegistrationClient {
     pub fn new() -> Result<Self> {
-        let http = Client::builder()
-            .user_agent(RUNNER_USER_AGENT)
-            .use_native_tls()
-            .tcp_keepalive(None)
-            .connection_verbose(false)
-            .timeout(Duration::from_secs(10))
-            .build()
-            .context("build GitHub runner HTTP client")?;
-        Ok(Self { http })
+        Ok(Self)
     }
 
     pub async fn generate_jit_config(
@@ -980,15 +958,9 @@ impl RegistrationClient {
         pat: &str,
         request: &GitHubJitConfigRequest,
     ) -> Result<GitHubJitConfigResponse> {
-        // Use curl for runner registration. GitHub's infrastructure applies
-        // TLS-fingerprint-based throttling to reqwest/hyper connections while
-        // libcurl (LibreSSL) succeeds reliably. The subprocess is time-bounded
-        // because registration runs inside a watchdog-supervised controller.
         let url = scope.jit_config_url.to_string();
         let body = serde_json::to_string(request).context("serialize JIT config request")?;
         let pat = pat.to_string();
-        let ua = RUNNER_USER_AGENT.to_string();
-
         let mut last_err = anyhow::anyhow!("no attempts made");
         let mut retry_delay = None;
         for attempt in 0..3u32 {
@@ -1004,21 +976,9 @@ impl RegistrationClient {
                 );
                 tokio::time::sleep(backoff).await;
             }
-            let cfg = format!(
-                "header = \"User-Agent: {ua}\"\n\
-                 header = \"Authorization: Bearer {pat}\"\n\
-                 header = \"Accept: application/vnd.github+json\"\n\
-                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-                 header = \"Content-Type: application/json\"\n\
-                 request = POST\n\
-                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-                 location\n\
-                 silent\n\
-                 write-out = \"\\n%{{http_code}}\"\n"
-            );
             let result =
-                run_private_curl("velnor-jit", &cfg, Some(body.as_bytes()), &url, true).await;
+                github_http_request("POST", &url, &pat, Some(body.clone()), GITHUB_MAX_TIME_SECS)
+                    .await;
 
             match result {
                 Err(e) => {
@@ -1026,23 +986,14 @@ impl RegistrationClient {
                     self.cleanup_named_jit_orphans(scope, &pat, &request.name)
                         .await;
                 }
-                Ok((output, headers)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let (json_part, status_str) =
-                        stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-                    let status: u16 = status_str.trim().parse().unwrap_or(0);
+                Ok(response) => {
+                    let status = response.status;
                     if status == 201 {
-                        return serde_json::from_str::<GitHubJitConfigResponse>(json_part.trim())
-                            .context("parse JIT runner config response");
+                        return github_json_body("parse JIT runner config response", response);
                     }
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let hint = parse_github_retry_headers(&headers);
-                    last_err = github_api_error_with_retry(
-                        "JIT runner config request",
-                        status,
-                        format!("{json_part}, stderr={stderr}"),
-                        hint,
-                    );
+                    let hint =
+                        github_retry_hint_from_header_map(&response.headers, unix_epoch_now());
+                    last_err = github_error_from_response("JIT runner config request", response);
                     // Permission and quota failures cannot recover during
                     // this attempt. Return immediately so controller pacing
                     // owns the retry schedule; never sleep for an hour on a
@@ -1081,31 +1032,10 @@ impl RegistrationClient {
             url.query_pairs_mut()
                 .append_pair("per_page", "100")
                 .append_pair("page", &page_number.to_string());
-            let response = self
-                .http
-                .get(url)
-                .bearer_auth(pat)
-                .header(USER_AGENT, RUNNER_USER_AGENT)
-                .header(ACCEPT, "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await
-                .context("send list runners request")?;
-            let status = response.status();
-            if !status.is_success() {
-                let hint = github_retry_hint_from_header_map(response.headers());
-                let body = response.text().await.unwrap_or_default();
-                return Err(github_api_error_with_retry(
-                    "list runners request",
-                    status.as_u16(),
-                    body,
-                    hint,
-                ));
-            }
-            let page: Page = response
-                .json()
-                .await
-                .context("parse list runners response")?;
+            let page: Page = github_json_body(
+                "list runners response",
+                github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            )?;
             let fetched = page.runners.len();
             all.extend(page.runners);
             let total = page.total_count.unwrap_or(all.len() as u64);
@@ -1140,7 +1070,7 @@ impl RegistrationClient {
             }
             Ok::<(), anyhow::Error>(())
         };
-        match tokio::time::timeout(Duration::from_secs(GITHUB_CURL_MAX_TIME_SECS), cleanup).await {
+        match tokio::time::timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS), cleanup).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 eprintln!("JIT retry orphan cleanup failed for '{agent_name}': {error:#}");
@@ -1160,32 +1090,11 @@ impl RegistrationClient {
         struct Response {
             runner_groups: Vec<RunnerGroup>,
         }
-        let response = self
-            .http
-            .get(scope.runner_groups_url()?)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .context("send list runner groups request")?;
-        let status = response.status();
-        if !status.is_success() {
-            let hint = github_retry_hint_from_header_map(response.headers());
-            let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error_with_retry(
-                "list runner groups request",
-                status.as_u16(),
-                body,
-                hint,
-            ));
-        }
-        response
-            .json::<Response>()
-            .await
-            .map(|response| response.runner_groups)
-            .context("parse list runner groups response")
+        let response: Response = github_json_body(
+            "list runner groups response",
+            github_http_request("GET", scope.runner_groups_url()?.as_str(), pat, None, 30).await?,
+        )?;
+        Ok(response.runner_groups)
     }
 
     /// Queued (unassigned) jobs in this org/repo whose labels wait on Velnor.
@@ -1202,10 +1111,7 @@ impl RegistrationClient {
                 .await
             {
                 Ok(runs) => runs,
-                Err(error) => {
-                    eprintln!("list queued runs for {repository} failed: {error:#}");
-                    continue;
-                }
+                Err(error) => return Err(error),
             };
             for run_id in runs {
                 match self
@@ -1213,9 +1119,7 @@ impl RegistrationClient {
                     .await
                 {
                     Ok(run_jobs) => jobs.extend(run_jobs),
-                    Err(error) => {
-                        eprintln!("list jobs for {repository} run {run_id} failed: {error:#}");
-                    }
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -1242,26 +1146,12 @@ impl RegistrationClient {
                 .append_pair("per_page", "100")
                 .append_pair("page", &page_number.to_string())
                 .append_pair("type", "all");
-            let response = self
-                .http
-                .get(url)
-                .bearer_auth(pat)
-                .header(USER_AGENT, RUNNER_USER_AGENT)
-                .header(ACCEPT, "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await
-                .with_context(|| format!("list repositories for org {org}"))?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(github_api_error(
-                    "list org repositories",
-                    status.as_u16(),
-                    body,
-                ));
-            }
-            let page: Vec<Repo> = response.json().await.context("parse org repositories")?;
+            let page: Vec<Repo> = github_json_body(
+                "list org repositories response",
+                github_http_request("GET", url.as_str(), pat, None, 30)
+                    .await
+                    .with_context(|| format!("list repositories for org {org}"))?,
+            )?;
             let fetched = page.len();
             all.extend(page.into_iter().filter_map(|repo| repo.full_name));
             if fetched < 100 {
@@ -1289,29 +1179,12 @@ impl RegistrationClient {
         url.query_pairs_mut()
             .append_pair("status", "queued")
             .append_pair("per_page", "100");
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("list queued runs for {repository}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error(
-                "list queued workflow runs",
-                status.as_u16(),
-                body,
-            ));
-        }
-        let runs: Runs = response
-            .json()
-            .await
-            .context("parse queued workflow runs")?;
+        let runs: Runs = github_json_body(
+            "list queued workflow runs response",
+            github_http_request("GET", url.as_str(), pat, None, 30)
+                .await
+                .with_context(|| format!("list queued runs for {repository}"))?,
+        )?;
         Ok(runs.workflow_runs.into_iter().map(|run| run.id).collect())
     }
 
@@ -1330,26 +1203,12 @@ impl RegistrationClient {
             .api_base_url
             .join(&format!("repos/{repository}/actions/runs/{run_id}/jobs"))
             .context("build workflow run jobs URL")?;
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("list jobs for {repository} run {run_id}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error(
-                "list workflow run jobs",
-                status.as_u16(),
-                body,
-            ));
-        }
-        let jobs: Jobs = response.json().await.context("parse workflow run jobs")?;
+        let jobs: Jobs = github_json_body(
+            "list workflow run jobs response",
+            github_http_request("GET", url.as_str(), pat, None, 30)
+                .await
+                .with_context(|| format!("list jobs for {repository} run {run_id}"))?,
+        )?;
         Ok(jobs.jobs)
     }
 
@@ -1361,28 +1220,16 @@ impl RegistrationClient {
         run_id: u64,
     ) -> Result<()> {
         let url = scope.workflow_run_cancel_url(repository, run_id)?;
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("cancel workflow run {repository}/{run_id}"))?;
-        let status = response.status().as_u16();
-        if classify_workflow_cancel(status) {
+        let response = github_http_request("POST", url.as_str(), pat, None, 30).await?;
+        if classify_workflow_cancel(response.status) {
             return Ok(());
         }
-        let body = response.text().await.unwrap_or_default();
-        Err(github_api_error("cancel workflow run", status, body))
+        Err(github_error_from_response("cancel workflow run", response))
     }
 
     /// Look up one runner registration by id. `Ok(None)` means GitHub no
-    /// longer knows the runner (404). Curl is the production default because
-    /// reqwest/hyper has drawn TLS-fingerprint throttling under idle-slot load;
-    /// `VELNOR_GITHUB_HTTP_TRANSPORT=native` enables the pooled canary path.
+    /// longer knows the runner (404). The transport is selected by
+    /// `VELNOR_GITHUB_HTTP_TRANSPORT`; the native path uses pooled requests.
     pub async fn get_runner(
         &self,
         scope: &GitHubScope,
@@ -1390,8 +1237,7 @@ impl RegistrationClient {
         runner_id: i64,
     ) -> Result<Option<ListedRunner>> {
         let url = scope.runner_url(runner_id)?;
-        let (status, body) = github_json_request("GET", url.as_str(), pat, None, 30).await?;
-        parse_runner_lookup(status, &body)
+        parse_runner_lookup_response(github_http_request("GET", url.as_str(), pat, None, 30).await?)
     }
 
     pub async fn delete_runner(
@@ -1400,33 +1246,16 @@ impl RegistrationClient {
         pat: &str,
         runner_id: i64,
     ) -> Result<()> {
-        let url = scope.runner_url(runner_id)?.to_string();
-        let cfg = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             header = \"Authorization: Bearer {pat}\"\n\
-             header = \"Accept: application/vnd.github+json\"\n\
-             header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-             request = DELETE\n\
-             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let (output, headers) = run_private_curl("velnor-del", &cfg, None, &url, true).await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-        let status: u16 = status_str.trim().parse().unwrap_or(0);
-        match classify_runner_delete(status, body) {
+        let url = scope.runner_url(runner_id)?;
+        let response = github_http_request("DELETE", url.as_str(), pat, None, 30).await?;
+        match classify_runner_delete(response.status, &response.body) {
             Some(RunnerDeleteOutcome::Gone) => Ok(()),
             Some(RunnerDeleteOutcome::BusyConflict) => {
-                Err(RunnerBusyConflict(body.trim().to_string()).into())
+                Err(RunnerBusyConflict(response.body.trim().to_string()).into())
             }
-            None => Err(github_api_error_with_retry(
+            None => Err(github_error_from_response(
                 "delete runner request",
-                status,
-                body,
-                parse_github_retry_headers(&headers),
+                response,
             )),
         }
     }
@@ -1434,22 +1263,24 @@ impl RegistrationClient {
 
 /// Transport selector for GitHub JSON requests.
 ///
-/// Curl remains the production default because GitHub has historically
-/// throttled the native TLS fingerprint under concurrent Velnor load. The
-/// native path is an explicit canary so it can be measured and rolled back by
-/// removing one daemon environment value, without changing workflow behavior.
+/// Native HTTP is the only supported GitHub JSON transport. The selector is
+/// explicit so a missing or unsupported configuration cannot silently choose
+/// a legacy transport.
 pub const GITHUB_HTTP_TRANSPORT_ENV: &str = "VELNOR_GITHUB_HTTP_TRANSPORT";
 
-pub fn github_http_transport() -> &'static str {
-    match std::env::var(GITHUB_HTTP_TRANSPORT_ENV)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "native" | "reqwest" => "native",
-        _ => "curl",
+fn parse_github_http_transport(configured: &str) -> Result<&'static str> {
+    match configured.trim() {
+        "native" => Ok("native"),
+        value => bail!(
+            "unsupported {GITHUB_HTTP_TRANSPORT_ENV} value '{value}'; accepted values: native"
+        ),
     }
+}
+
+pub fn github_http_transport() -> Result<&'static str> {
+    let configured = std::env::var(GITHUB_HTTP_TRANSPORT_ENV)
+        .with_context(|| format!("{GITHUB_HTTP_TRANSPORT_ENV} must be set to 'native'"))?;
+    parse_github_http_transport(&configured)
 }
 
 /// Make an authenticated JSON request using the selected GitHub transport.
@@ -1461,11 +1292,8 @@ pub async fn github_json_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String)> {
-    if github_http_transport() == "native" {
-        native_json_request(method, url, bearer_token, json_body, max_time_secs).await
-    } else {
-        curl_json_request(method, url, bearer_token, json_body, max_time_secs).await
-    }
+    github_http_transport()?;
+    native_json_request(method, url, bearer_token, json_body, max_time_secs).await
 }
 
 /// Like [`github_json_request`] but also returns the rate-limit telemetry
@@ -1479,12 +1307,8 @@ pub async fn github_json_request_with_rate_limit(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String, GitHubRateLimitStatus)> {
-    if github_http_transport() == "native" {
-        native_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs)
-            .await
-    } else {
-        curl_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs).await
-    }
+    github_http_transport()?;
+    native_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs).await
 }
 
 fn native_http_client() -> Result<Client> {
@@ -1565,87 +1389,12 @@ async fn native_json_request_with_rate_limit(
         .await
         .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
     let status = response.status().as_u16();
-    let rate_limit = github_retry_hint_from_header_map(response.headers()).into();
+    let rate_limit = github_retry_hint_from_header_map(response.headers(), unix_epoch_now()).into();
     let body = response
         .text()
         .await
         .context("read native GitHub response body")?;
     Ok((status, body, rate_limit))
-}
-
-/// Make an HTTP request via the curl subprocess. GitHub's infrastructure
-/// applies TLS-fingerprint-based throttling to reqwest/hyper connections;
-/// curl (LibreSSL) is the proven production fallback.
-/// Returns `(http_status_code, response_body_string)`.
-///
-/// The Authorization header and request body are written to mode-0600 temp files
-/// and passed via `--config` / `--data @file` so they do not appear on argv
-/// (which is visible in `ps aux` and audit logs).
-async fn curl_json_request(
-    method: &str,
-    url: &str,
-    bearer_token: &str,
-    json_body: Option<String>,
-    max_time_secs: u64,
-) -> Result<(u16, String)> {
-    let (status, body, _) =
-        curl_json_request_impl(method, url, bearer_token, json_body, max_time_secs, false).await?;
-    Ok((status, body))
-}
-
-/// Curl transport variant that also reports rate-limit telemetry via a
-/// `--dump-header` temp file (parsed and removed before returning).
-async fn curl_json_request_with_rate_limit(
-    method: &str,
-    url: &str,
-    bearer_token: &str,
-    json_body: Option<String>,
-    max_time_secs: u64,
-) -> Result<(u16, String, GitHubRateLimitStatus)> {
-    let (status, body, hint) =
-        curl_json_request_impl(method, url, bearer_token, json_body, max_time_secs, true).await?;
-    Ok((status, body, hint.unwrap_or_default().into()))
-}
-
-async fn curl_json_request_impl(
-    method: &str,
-    url: &str,
-    bearer_token: &str,
-    json_body: Option<String>,
-    max_time_secs: u64,
-    capture_headers: bool,
-) -> Result<(u16, String, Option<GitHubRetryHint>)> {
-    let mut cfg = format!(
-        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-         header = \"Authorization: Bearer {bearer_token}\"\n\
-         header = \"Accept: application/json\"\n\
-         max-time = {max_time_secs}\n\
-         connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-         request = {method}\n\
-         location\n\
-         silent\n\
-         write-out = \"\\n%{{http_code}}\"\n"
-    );
-    if json_body.is_some() {
-        cfg.push_str("header = \"Content-Type: application/json\"\n");
-    }
-    let (output, headers) = run_private_curl(
-        "velnor-curl",
-        &cfg,
-        json_body.as_deref().map(str::as_bytes),
-        url,
-        capture_headers,
-    )
-    .await?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-    let status: u16 = status_str.trim().parse().unwrap_or(0);
-    Ok((
-        status,
-        body.to_string(),
-        capture_headers.then(|| parse_github_retry_headers(&headers)),
-    ))
 }
 
 pub fn decode_jit_config(encoded_jit_config: &str) -> Result<DecodedJitConfig> {
@@ -1800,6 +1549,18 @@ pub fn parse_runner_lookup(status: u16, body: &str) -> Result<Option<ListedRunne
         return Err(github_api_error("runner lookup", status, body.trim()));
     }
     serde_json::from_str(body.trim())
+        .map(Some)
+        .context("parse runner lookup response")
+}
+
+fn parse_runner_lookup_response(response: GithubHttpResponse) -> Result<Option<ListedRunner>> {
+    if response.status == 404 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&response.status) {
+        return Err(github_error_from_response("runner lookup", response));
+    }
+    serde_json::from_str(response.body.trim())
         .map(Some)
         .context("parse runner lookup response")
 }
@@ -3809,7 +3570,7 @@ impl TwirpResultsClient {
         // Route through the selected transport: GitHub has throttled
         // reqwest/hyper by TLS fingerprint (native-tls/OpenSSL) under heavy
         // concurrent load, which silently dropped step records (the job's step
-        // list went incomplete in the UI). Curl remains the default fallback.
+        // list went incomplete in the UI).
         // Retry a couple times so a transient blip never loses a step record.
         let body_json = serde_json::to_string(&body).context("serialize WorkflowStepsUpdate")?;
         let mut last_err = String::new();
@@ -4651,6 +4412,52 @@ pub fn download_artifacts_blocking(
 mod tests {
     use super::*;
 
+    #[test]
+    fn github_http_transport_accepts_only_explicit_native_value() {
+        assert_eq!(parse_github_http_transport("native").unwrap(), "native");
+        for value in ["", "curl", "reqwest", "unknown"] {
+            let error = parse_github_http_transport(value).unwrap_err();
+            assert!(error.to_string().contains("accepted values: native"));
+        }
+    }
+
+    #[tokio::test]
+    async fn public_github_requests_validate_transport_before_io() {
+        let _transport_guard = crate::test_support::github_http_transport_env().await;
+        std::env::remove_var(GITHUB_HTTP_TRANSPORT_ENV);
+
+        let error = github_json_request("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("must be set to 'native'"),
+            "{error:#}"
+        );
+        let error = github_json_request_with_rate_limit("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("must be set to 'native'"),
+            "{error:#}"
+        );
+
+        std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "unsupported");
+        let error = github_json_request("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("accepted values: native"),
+            "{error:#}"
+        );
+        let error = github_json_request_with_rate_limit("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("accepted values: native"),
+            "{error:#}"
+        );
+    }
+
     #[tokio::test]
     async fn native_json_request_reuses_reqwest_transport_shape() {
         use wiremock::{
@@ -4685,82 +4492,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn curl_json_request_sets_content_type_for_json_bodies() {
-        use wiremock::matchers::{body_string, header, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/github"))
-            .and(header("authorization", "Bearer test-token"))
-            .and(header("content-type", "application/json"))
-            .and(body_string(r#"{"hello":"world"}"#))
-            .respond_with(
-                ResponseTemplate::new(201)
-                    .insert_header("content-type", "application/json")
-                    .set_body_string(r#"{"ok":true}"#),
-            )
-            .mount(&server)
-            .await;
-
-        let result = curl_json_request(
-            "POST",
-            &format!("{}/github", server.uri()),
-            "test-token",
-            Some(r#"{"hello":"world"}"#.to_string()),
-            5,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
-    }
-
-    #[tokio::test]
-    async fn canceled_curl_kills_child_and_cleans_private_inputs() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("delayed")
-                    .set_delay(Duration::from_secs(30)),
-            )
-            .mount(&server)
-            .await;
-
-        let prefix = format!("velnor-cancel-test-{}", Uuid::new_v4());
-        let result = tokio::time::timeout(
-            Duration::from_millis(250),
-            run_private_curl(
-                &prefix,
-                "max-time = 30\nconnect-timeout = 2\nsilent\n",
-                None,
-                &server.uri(),
-                false,
-            ),
-        )
-        .await;
-        assert!(
-            result.is_err(),
-            "curl unexpectedly completed before cancellation"
-        );
-
-        let temp_dir = std::env::temp_dir().join("velnor-curl");
-        let leaked = std::fs::read_dir(temp_dir)
-            .unwrap()
-            .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
-        assert!(!leaked, "canceled curl left private input files behind");
-    }
-
-    #[tokio::test]
     async fn jit_rate_limit_returns_without_waiting_for_reset() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path(
@@ -5618,6 +5355,8 @@ mod tests {
         };
         use wiremock::{matchers::method, Mock, MockServer, Request, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         let attempts = Arc::new(AtomicUsize::new(0));
         let responder_attempts = Arc::clone(&attempts);
@@ -5659,6 +5398,8 @@ mod tests {
     async fn acquire_job_rejects_malformed_success_without_retrying_or_swallowing() {
         use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/run/jobs/123/acquirejob"))
@@ -6067,6 +5808,7 @@ mod tests {
     fn github_retry_headers_drive_reset_aware_delay() {
         let hint = parse_github_retry_headers(
             b"HTTP/2 403\r\nRetry-After: 17\r\nX-RateLimit-Reset: 1060\r\nX-RateLimit-Remaining: 0\r\n\r\n",
+            1_000,
         );
         assert_eq!(hint.retry_after_seconds, Some(17));
         assert_eq!(hint.rate_limit_reset_epoch, Some(1060));
@@ -6074,10 +5816,43 @@ mod tests {
         assert_eq!(hint.delay(1000), Some(std::time::Duration::from_secs(60)));
 
         let error = github_api_error_with_retry("quota", 403, "exhausted", hint);
-        assert!(github_api_retry_delay(&error).is_some());
+        assert_eq!(
+            github_api_retry_delay_at(&error, 1_000),
+            Some(std::time::Duration::from_secs(60))
+        );
         assert_eq!(
             github_api_quota_status(&error).and_then(|status| status.remaining),
             Some(0)
+        );
+
+        let reset_only = github_api_error_with_retry(
+            "quota",
+            403,
+            "reset",
+            GitHubRetryHint {
+                retry_after_seconds: None,
+                rate_limit_reset_epoch: Some(1060),
+                remaining: Some(0),
+            },
+        );
+        assert_eq!(
+            github_api_retry_delay_at(&reset_only, 1_000),
+            Some(std::time::Duration::from_secs(60))
+        );
+
+        let retry_after_only = github_api_error_with_retry(
+            "quota",
+            403,
+            "retry",
+            GitHubRetryHint {
+                retry_after_seconds: Some(17),
+                rate_limit_reset_epoch: None,
+                remaining: Some(0),
+            },
+        );
+        assert_eq!(
+            github_api_retry_delay_at(&retry_after_only, 1_000),
+            Some(std::time::Duration::from_secs(17))
         );
     }
 
@@ -6098,7 +5873,7 @@ mod tests {
             "permission 403 with remaining>0 must not fleet-hold"
         );
         assert!(
-            github_api_retry_delay(&permission).is_some(),
+            github_api_retry_delay_at(&permission, 1_700_000_000).is_some(),
             "reset headers may still delay the failing slot"
         );
 
@@ -6133,7 +5908,7 @@ mod tests {
         headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
 
         assert_eq!(
-            github_retry_hint_from_header_map(&headers),
+            github_retry_hint_from_header_map(&headers, 1_000),
             GitHubRetryHint {
                 retry_after_seconds: Some(29),
                 rate_limit_reset_epoch: Some(123456),
@@ -6181,6 +5956,7 @@ mod tests {
     fn malformed_retry_headers_are_ignored_without_exposing_values() {
         let hint = parse_github_retry_headers(
             b"Retry-After: later\r\nX-RateLimit-Reset: invalid\r\nAuthorization: secret\r\n",
+            1_000,
         );
         assert_eq!(hint, GitHubRetryHint::default());
         assert_eq!(hint.delay(1000), None);

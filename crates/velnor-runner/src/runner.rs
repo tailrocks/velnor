@@ -11747,6 +11747,8 @@ jobs:
     async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200))
@@ -11787,6 +11789,8 @@ jobs:
     async fn journal_acceptance_failure_preserves_retry_record_after_failed_completion() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(400))
@@ -12412,6 +12416,8 @@ jobs:
     async fn transient_acquire_failure_keeps_broker_session_alive() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wiremock::matchers::path("/run/jobs/123/acquirejob"))
