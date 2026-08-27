@@ -297,6 +297,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   process creation. Fixture was not changed.
 - Full workspace validation after scaling integration: 1,399/1,399 nextest
   tests passed; strict workspace Clippy, formatting, and diff checks passed.
+- 2026-08-28 local macOS recheck: serialized `idle_scaling` completed all
+  1,425 tests with only the scaling assertion failing (`1-slot controller_cpu_us`
+  1,753; `16-slot` 7,428; 4.24x). This does not replace the prior Linux/Sentry
+  proof (`1.367x`), but the local reproducibility discrepancy is recorded and
+  the gate is not re-marked from this run.
 - Process-isolation evidence combines slot sibling survival, independent
   multi-scope controller survival, transient-worker-only topology assertions,
   and packaged systemd boundary checks.
