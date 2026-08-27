@@ -277,10 +277,10 @@ evidence and requires a fresh baseline.
   of its remote-tracking counterpart.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
-  in-progress CI/Release and successful Guest image for tag `v0.1.243` (run IDs
+  successful CI/Release/Guest image for tag `v0.1.243` (run IDs
   `33092968591`, `33092968450`, `33092967555`); older `v0.1.242` CI/Release/
-  Guest image runs succeeded (run IDs `33086166306`, `33086166265`,
-  `33086165280`).
+  Guest image runs also succeeded (run IDs `33086166306`, `33086166265`,
+  `33086165280`). These are tag-release evidence, not green-main evidence.
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
