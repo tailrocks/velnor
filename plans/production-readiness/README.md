@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T20:17:55Z
+### Current baseline — 2026-08-27T20:29:44Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `70a86d5a2785768c826d0d9e525d7563d7eb36e7`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 240 commits ahead
+  `72322e739d318902b52f88962bd2bd2d29ca0336`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 242 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -299,12 +299,12 @@ evidence and requires a fresh baseline.
   kernel-download retry/timeout hardening at `8f660ad`; its forced HTTP/1.1
   downgrade was intentionally omitted under the modern-protocol rule.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T19:57:39Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1493/1493` passed with zero
-  skipped tests. Focused `velnor-runner` nextest passed `1099/1099`; commit
-  `ee7ecca` preserves live waiter ownership when stale job markers coexist,
-  while retaining the canonical-storage and corrupt-identity fail-closed
-  behavior from `28c9300`.
+  `2026-08-27T20:29:44Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1496/1496` passed with zero
+  skipped tests. Focused cleanup nextest passed `24/24`; commit `72322e7`
+  prevents empty or partial ownership markers, validates marker identifiers,
+  preserves newer-generation job state, and kills/reaps children when marker
+  publication fails.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
