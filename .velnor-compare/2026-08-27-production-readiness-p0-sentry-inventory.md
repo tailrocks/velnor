@@ -9,8 +9,11 @@ deleted, cancelled, restarted, drained, or otherwise mutated.
 `/var/lib/velnor/health.json`:
 
 ```json
-{"control_live":true,"journal_writable":true,"github_reachable":false,"routing_valid":false,"runner_group_valid":false,"desired_ready_slots":0,"actual_ready_slots":0,"surge_ready_slots":0,"registered_slots":0,"capacity_permits":0,"executor_ready_slots":0,"oldest_queued_job_seconds":0,"oldest_outbox_entry_seconds":0,"external_canary":"unknown","execution_backend":"docker","state":"degraded"}
+{"control_live":true,"journal_writable":true,"github_reachable":false,"routing_valid":false,"runner_group_valid":false,"desired_ready_slots":0,"actual_ready_slots":0,"registered_slots":0,"capacity_permits":0,"executor_ready_slots":0,"oldest_queued_job_seconds":0,"oldest_outbox_entry_seconds":0,"external_canary":"unknown","execution_backend":"docker","state":"degraded"}
 ```
+
+The obsolete `surge_ready_slots` health field was removed by the exact-capacity
+migration; the remaining captured fields and values are unchanged.
 
 - Root filesystem: 919G total, 773G used, 147G free, 85% used.
 - Backend config: `/etc/velnor/execution.toml` selects exactly `backend = "docker"`.

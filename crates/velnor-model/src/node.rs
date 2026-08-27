@@ -61,7 +61,6 @@ pub struct HealthDocument {
     pub runner_group_valid: bool,
     pub desired_ready_slots: u32,
     pub actual_ready_slots: u32,
-    pub surge_ready_slots: u32,
     pub registered_slots: u32,
     pub capacity_permits: u32,
     pub executor_ready_slots: u32,
@@ -74,7 +73,7 @@ pub struct HealthDocument {
 
 impl HealthDocument {
     /// Every JSON object key the health contract requires, in document order.
-    pub const REQUIRED_KEYS: [&'static str; 16] = [
+    pub const REQUIRED_KEYS: [&'static str; 15] = [
         "control_live",
         "journal_writable",
         "github_reachable",
@@ -82,7 +81,6 @@ impl HealthDocument {
         "runner_group_valid",
         "desired_ready_slots",
         "actual_ready_slots",
-        "surge_ready_slots",
         "registered_slots",
         "capacity_permits",
         "executor_ready_slots",
@@ -105,7 +103,6 @@ impl HealthDocument {
             runner_group_valid: false,
             desired_ready_slots: 0,
             actual_ready_slots: 0,
-            surge_ready_slots: 0,
             registered_slots: 0,
             capacity_permits: 0,
             executor_ready_slots: 0,
@@ -285,7 +282,6 @@ pub struct CapacityPermit {
     pub slot_id: SlotId,
     pub generation: Generation,
     pub held: bool,
-    pub surge: bool,
 }
 
 /// End-to-end vs component SLI dimensions. Numerical SLAs are not published
@@ -320,9 +316,8 @@ mod tests {
             runner_group_valid: true,
             desired_ready_slots: 4,
             actual_ready_slots: 4,
-            surge_ready_slots: 1,
             registered_slots: 4,
-            capacity_permits: 5,
+            capacity_permits: 4,
             executor_ready_slots: 4,
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,

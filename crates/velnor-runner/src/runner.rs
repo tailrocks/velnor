@@ -1340,13 +1340,8 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
-    let surge: u32 = if resolved_args.dry_run_registration || resolved_args.once {
-        0
-    } else {
-        1
-    };
-    let total_slots = slots.saturating_add(surge as usize);
-    reserve_capacity_permits(&config_base, &resolved_args, slots as u32, surge)?;
+    let total_slots = slots;
+    reserve_capacity_permits(&config_base, &resolved_args, slots as u32)?;
     if !daemon_should_poll_after_jit_config(&resolved_args) {
         let _usable_slots =
             configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
@@ -1361,7 +1356,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     }
     notify_daemon_ready(total_slots, total_slots);
     if let Some(sink) = crate::ops::global() {
-        // Current instance state row: identity, version, and slot counts.
+        // Current instance state row: identity, version, and exact slot count.
         let _ = sink.upsert_instance(
             &instance_slug_for_store(),
             env!("CARGO_PKG_VERSION"),
@@ -1378,7 +1373,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         });
     }
     println!(
-        "Starting Velnor controller with {total_slots} runner slot process{} (M={slots}, surge={surge}).",
+        "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
         if total_slots == 1 { "" } else { "es" }
     );
     if total_slots > 1 {
@@ -1393,7 +1388,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     daemon_forensic_log(
         &config_base,
         &format!(
-            "supervising {total_slots} slot process(es) M={slots} surge={surge} version={}",
+            "supervising {total_slots} slot process(es) slots={slots} version={}",
             env!("CARGO_PKG_VERSION")
         ),
     );
@@ -1406,7 +1401,6 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         config_base.clone(),
         scope,
         slots as u32,
-        surge,
         resolved_args.once,
     )
     .await;
@@ -2152,12 +2146,7 @@ async fn configure_daemon_slots(
     Ok(usable_slots)
 }
 
-fn reserve_capacity_permits(
-    config_base: &Path,
-    args: &DaemonArgs,
-    desired: u32,
-    surge: u32,
-) -> Result<()> {
+fn reserve_capacity_permits(config_base: &Path, args: &DaemonArgs, desired: u32) -> Result<()> {
     use velnor_control::journal::{Event, Journal};
     use velnor_model::{Generation, SlotId};
     std::fs::create_dir_all(config_base)?;
@@ -2170,19 +2159,15 @@ fn reserve_capacity_permits(
         .apply(Event::JournalWritable)
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     journal
-        .apply(Event::DesiredCapacity {
-            ready: desired,
-            surge,
-        })
+        .apply(Event::DesiredCapacity { ready: desired })
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let scope = args.name.clone().unwrap_or_else(|| "velnor".to_owned());
-    let total = desired.saturating_add(surge).max(1);
+    let total = desired;
     for index in 1..=total {
         journal
             .apply(Event::PermitReserved {
                 slot_id: SlotId(format!("{scope}-{index}")),
                 generation: Generation::INITIAL,
-                surge: index > desired,
             })
             .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     }
@@ -2424,7 +2409,7 @@ fn persist_executor_proof_after_preflight(config_base: &Path, slots: usize) -> R
 
 fn persist_microvm_probe_proof(config_base: &Path, slots: usize) -> Result<()> {
     let proof = crate::node::prove::EXECUTOR_OK;
-    let slot_count = slots.max(1);
+    let slot_count = slots;
     let mut candidates = vec![config_base.join(proof)];
     for slot in 1..=slot_count {
         candidates.push(daemon_slot_config_dir(config_base, slot, slot_count).join(proof));

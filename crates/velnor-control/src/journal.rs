@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use velnor_model::{
@@ -46,8 +46,7 @@ CREATE TABLE IF NOT EXISTS slots (
     executor_proven INTEGER NOT NULL DEFAULT 0,
     registered INTEGER NOT NULL DEFAULT 0,
     pid INTEGER,
-    heartbeat_unix INTEGER NOT NULL DEFAULT 0,
-    surge INTEGER NOT NULL DEFAULT 0
+    heartbeat_unix INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS jobs (
     job_id TEXT PRIMARY KEY,
@@ -82,11 +81,18 @@ pub struct FleetState {
     pub routing_valid: bool,
     pub runner_group_valid: bool,
     pub desired_ready: u32,
-    pub surge: u32,
     pub canary: CanaryStatus,
     pub package_generation: u64,
     pub package_apt_version: String,
     pub execution_backend: ExecutionBackendKind,
+    /// Whether the journal has received and materialized an explicit
+    /// capacity declaration. A zero value before that declaration is the
+    /// reducer's initialization state, not an observed zero-capacity fleet.
+    capacity_declared: bool,
+    /// Existing state was written by the retired surge-capacity model or is
+    /// otherwise larger than the declared capacity.  It is forensic-only:
+    /// no capacity-affecting event may be applied while this is set.
+    pub capacity_invalid: bool,
     pub slots: Vec<SlotRecord>,
     pub jobs: Vec<JobRecord>,
     pub outbox: Vec<OutboxRecord>,
@@ -101,12 +107,13 @@ impl Default for FleetState {
             routing_valid: false,
             runner_group_valid: false,
             desired_ready: 0,
-            surge: 0,
             canary: CanaryStatus::Unknown,
             package_generation: 0,
             package_apt_version: String::new(),
             // Packaged default until journal load; not a live fallback.
             execution_backend: ExecutionBackendKind::Docker,
+            capacity_declared: false,
+            capacity_invalid: false,
             slots: Vec::new(),
             jobs: Vec::new(),
             outbox: Vec::new(),
@@ -129,20 +136,14 @@ impl FleetState {
             .iter()
             .filter(|slot| slot.executor_proven)
             .count() as u32;
-        let surge_ready = self
-            .slots
-            .iter()
-            .filter(|slot| slot.surge && slot.phase.counts_as_ready())
-            .count() as u32;
         HealthDocument {
-            control_live: self.control_live,
+            control_live: self.control_live && !self.capacity_invalid,
             journal_writable: self.journal_writable,
             github_reachable: self.github_reachable,
             routing_valid: self.routing_valid,
             runner_group_valid: self.runner_group_valid,
             desired_ready_slots: self.desired_ready,
             actual_ready_slots: actual_ready,
-            surge_ready_slots: surge_ready,
             registered_slots: registered,
             capacity_permits: permits,
             executor_ready_slots: executor_ready,
@@ -166,6 +167,9 @@ impl FleetState {
 
     #[must_use]
     pub fn advertised_capacity(&self) -> u32 {
+        if self.capacity_invalid {
+            return 0;
+        }
         self.slots
             .iter()
             .filter(|slot| slot.permit_held && slot.phase.counts_as_ready())
@@ -262,7 +266,6 @@ pub struct SlotRecord {
     pub registered: bool,
     pub pid: Option<u32>,
     pub heartbeat_unix: u64,
-    pub surge: bool,
 }
 
 impl SlotRecord {
@@ -278,7 +281,6 @@ impl SlotRecord {
             registered: false,
             pid: None,
             heartbeat_unix: 0,
-            surge: false,
         }
     }
 
@@ -329,12 +331,10 @@ pub enum Event {
     },
     DesiredCapacity {
         ready: u32,
-        surge: u32,
     },
     PermitReserved {
         slot_id: SlotId,
         generation: Generation,
-        surge: bool,
     },
     ExecutorProven {
         slot_id: SlotId,
@@ -497,14 +497,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 slot.routing_valid = valid && group_valid;
             }
         }
-        Event::DesiredCapacity { ready, surge } => {
+        Event::DesiredCapacity { ready } => {
             state.desired_ready = ready;
-            state.surge = surge;
+            state.capacity_declared = true;
         }
         Event::PermitReserved {
             slot_id,
             generation,
-            surge,
         } => {
             let routing = state.routing_valid && state.runner_group_valid;
             let active_job = state
@@ -531,7 +530,6 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 }
                 slot.generation = generation;
                 slot.permit_held = true;
-                slot.surge = surge;
                 slot.routing_valid = routing;
                 if slot.phase == ActorPhase::Absent {
                     slot.phase = ActorPhase::Provisioning;
@@ -877,6 +875,21 @@ impl Journal {
         }
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
+        // A v1 database is still owned by the retired capacity model.  Inspect
+        // it before enabling WAL, creating missing tables, or starting the
+        // migration transaction: contaminated evidence must remain byte
+        // stable and must never reach `persist_state`.
+        let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let stored = u32::try_from(stored).unwrap_or(0);
+        if stored == 1 {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.legacy.unsafe",
+            )
+            .with_remediation(
+                "preserve the schema-v1 journal unchanged for forensics and perform an explicit verified migration",
+            ));
+        }
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         if !wal.eq_ignore_ascii_case("wal") {
             return Err(StoreError::new(
@@ -888,34 +901,9 @@ impl Journal {
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         assert_sqlite_version(&conn)?;
         conn.execute_batch(SCHEMA)?;
-        let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let stored = u32::try_from(stored).unwrap_or(0);
-        let mut write_blocked = stored > JOURNAL_SCHEMA_VERSION;
-        let mut verified_during_migration = false;
+        let write_blocked = stored > JOURNAL_SCHEMA_VERSION;
         if stored == 0 {
             conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
-        } else if stored == 1 {
-            let transaction =
-                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let current: i64 =
-                transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            let current = u32::try_from(current).unwrap_or(0);
-            if current == 1 {
-                transaction.execute(
-                    "ALTER TABLE jobs ADD COLUMN accepted_unix INTEGER NOT NULL DEFAULT 0",
-                    [],
-                )?;
-                transaction.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
-                // Keep checksum verification and materialization under the
-                // same write lock. Another process cannot commit an event
-                // between the replay and the v1 rebuild.
-                let verified_state = load_state_from_conn(&transaction)?;
-                persist_state(&transaction, &verified_state)?;
-                verified_during_migration = true;
-            } else {
-                write_blocked = current > JOURNAL_SCHEMA_VERSION;
-            }
-            transaction.commit()?;
         }
         let journal = Self {
             conn,
@@ -924,9 +912,7 @@ impl Journal {
         };
         // Verify all existing event checksums once. The controller's steady
         // state must not replay an ever-growing log every two seconds.
-        if !verified_during_migration {
-            journal.load_state()?;
-        }
+        journal.load_state()?;
         Ok(journal)
     }
 
@@ -994,6 +980,15 @@ impl Journal {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut state = load_materialized_state(&transaction)?;
+        if state.capacity_invalid {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.capacity.invalid",
+            )
+            .with_remediation(
+                "preserve the legacy journal for forensics and perform an explicit verified migration before writing capacity state",
+            ));
+        }
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
         for mut event in events {
@@ -1083,6 +1078,7 @@ fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
         let outcome = reduce(state, event);
         state = outcome.state;
     }
+    state.capacity_invalid = state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
     Ok(state)
 }
 
@@ -1109,14 +1105,18 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
     state.routing_valid = meta_bool(&meta, "routing_valid")?;
     state.runner_group_valid = meta_bool(&meta, "runner_group_valid")?;
     state.desired_ready = meta_u32(&meta, "desired_ready")?;
-    state.surge = meta_u32(&meta, "surge")?;
+    // `desired_ready` is serialized for every materialized snapshot, including
+    // the reducer's initial zero. Only the explicit marker written after a
+    // DesiredCapacity event is authoritative.
+    state.capacity_declared = meta_bool(&meta, "capacity_declared")?;
     state.canary = meta_canary(&meta)?;
     state.package_generation = meta_u64(&meta, "package_generation")?;
     state.package_apt_version = meta.get("package_apt_version").cloned().unwrap_or_default();
+    state.capacity_invalid = meta_bool(&meta, "capacity_invalid")?;
 
     let mut statement = conn.prepare(
         "SELECT slot_id, generation, phase, permit_held, routing_valid,
-                session_live, executor_proven, registered, pid, heartbeat_unix, surge
+                session_live, executor_proven, registered, pid, heartbeat_unix
          FROM slots ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |row| {
@@ -1131,7 +1131,6 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             row.get::<_, i64>(7)?,
             row.get::<_, Option<i64>>(8)?,
             row.get::<_, i64>(9)?,
-            row.get::<_, i64>(10)?,
         ))
     })?;
     for row in rows {
@@ -1146,7 +1145,6 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             registered,
             pid,
             heartbeat_unix,
-            surge,
         ) = row?;
         state.slots.push(SlotRecord {
             slot_id: SlotId(slot_id),
@@ -1159,9 +1157,11 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             registered: sqlite_bool(registered, "slot registered")?,
             pid: pid.map(|value| i64_u32(value, "slot pid")).transpose()?,
             heartbeat_unix: i64_u64(heartbeat_unix, "slot heartbeat_unix")?,
-            surge: sqlite_bool(surge, "slot surge")?,
         });
     }
+
+    state.capacity_invalid =
+        state.capacity_invalid || state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
 
     let mut statement = conn.prepare(
         "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix
@@ -1315,8 +1315,8 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         tx.execute(
             "INSERT INTO slots (
                 slot_id, generation, phase, permit_held, routing_valid, session_live,
-                executor_proven, registered, pid, heartbeat_unix, surge
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                executor_proven, registered, pid, heartbeat_unix
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 slot.slot_id.0,
                 slot.generation.0 as i64,
@@ -1328,7 +1328,6 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 slot.registered as i64,
                 slot.pid.map(i64::from),
                 slot.heartbeat_unix as i64,
-                slot.surge as i64,
             ],
         )?;
     }
@@ -1379,10 +1378,17 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
             (state.runner_group_valid as u8).to_string(),
         ),
         ("desired_ready", state.desired_ready.to_string()),
-        ("surge", state.surge.to_string()),
         ("canary", state.canary.as_str().to_owned()),
         ("package_generation", state.package_generation.to_string()),
         ("package_apt_version", state.package_apt_version.clone()),
+        (
+            "capacity_invalid",
+            (state.capacity_invalid as u8).to_string(),
+        ),
+        (
+            "capacity_declared",
+            (state.capacity_declared as u8).to_string(),
+        ),
     ];
     for (key, value) in meta {
         tx.execute(
@@ -1391,6 +1397,27 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         )?;
     }
     Ok(())
+}
+
+/// Detect schema and materialized-state shapes owned by the retired implicit
+/// surge model.  The rows are deliberately not rewritten or deleted: opening
+/// such a journal must preserve evidence and make the instance not-ready.
+fn legacy_slots_schema(conn: &Connection) -> StoreResult<bool> {
+    let mut statement = conn.prepare("PRAGMA table_info(slots)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column?.eq_ignore_ascii_case("surge") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn state_capacity_invalid(state: &FleetState) -> bool {
+    // Materialized slot rows are the authoritative capacity-bearing set.
+    // Count every row: stale state must not evade detection through an
+    // unheld permit, non-ready phase, or malformed/non-numeric slot ID.
+    state.capacity_declared && state.slots.len() > state.desired_ready as usize
 }
 
 fn event_generation(event: &Event) -> Generation {
@@ -1543,11 +1570,10 @@ mod tests {
                 valid: true,
                 group_valid: true,
             },
-            Event::DesiredCapacity { ready: 1, surge: 1 },
+            Event::DesiredCapacity { ready: 1 },
             Event::PermitReserved {
                 slot_id: s.clone(),
                 generation: g,
-                surge: false,
             },
             Event::ExecutorProven {
                 slot_id: s.clone(),
@@ -1650,7 +1676,6 @@ mod tests {
             Event::PermitReserved {
                 slot_id: s.clone(),
                 generation: g,
-                surge: false,
             },
             Event::ExecutorProven {
                 slot_id: s.clone(),
@@ -1697,6 +1722,445 @@ mod tests {
     }
 
     #[test]
+    fn legacy_extra_capacity_is_preserved_but_blocks_restart_reconcile() {
+        let (dir, mut journal) = open_tmp("legacy-extra-capacity");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        for slot_id in ["scope-1", "scope-2", "scope-3"] {
+            let outcome = journal
+                .apply(Event::PermitReserved {
+                    slot_id: slot(slot_id),
+                    generation: gen(),
+                })
+                .unwrap();
+            assert!(!outcome.rejected);
+        }
+        drop(journal);
+
+        let mut reopened = Journal::open(dir.join("journal.db")).unwrap();
+        let state = reopened.load_state().unwrap();
+        assert!(state.capacity_invalid);
+        assert_eq!(state.advertised_capacity(), 0);
+        assert_eq!(state.health().state, FleetHealthState::NotReady);
+        assert_eq!(state.slots.len(), 3, "forensic rows must survive restart");
+        assert_eq!(
+            reopened
+                .conn
+                .query_row("SELECT COUNT(*) FROM slots", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        let error = reopened
+            .apply(Event::DesiredCapacity { ready: 2 })
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.capacity.invalid");
+    }
+
+    #[test]
+    fn current_schema_zero_capacity_rejects_without_mutating_forensics() {
+        let (dir, journal) = open_tmp("current-schema-stale-capacity");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        // Journal::apply must reject this state. Seed the intentionally stale
+        // N+1 materialization directly so the test exercises forensic safety.
+        let seed = Connection::open(&path).unwrap();
+        seed.execute_batch(
+            "INSERT INTO meta (key, value) VALUES
+                 ('control_live', '1'),
+                 ('github_reachable', '1'),
+                 ('routing_valid', '1'),
+                 ('runner_group_valid', '1'),
+                 ('desired_ready', '0'),
+                 ('canary', 'passing'),
+                 ('package_generation', '1'),
+                 ('package_apt_version', '0.1.215'),
+                 ('capacity_invalid', '0'),
+                 ('capacity_declared', '1');
+             INSERT INTO slots (
+                 slot_id, generation, phase, permit_held, routing_valid,
+                 session_live, executor_proven, registered, pid, heartbeat_unix
+             ) VALUES
+                 ('scope-1', 1, 'ready', 1, 1, 1, 1, 1, NULL, 101),
+                 ('scope-2', 1, 'ready', 1, 1, 1, 1, 1, NULL, 102),
+                 ('scope-3', 1, 'ready', 1, 1, 1, 1, 1, NULL, 103);
+             INSERT INTO jobs (
+                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix
+             ) VALUES ('job-3', 'scope-3', 1, 1, 'worker-3', 'assigned', 123);
+             INSERT INTO outbox (
+                 job_id, generation, payload_sha256, intended, send_started,
+                 remote_acked, created_unix
+             ) VALUES ('job-3', 1, 'payload-checksum', 1, 0, 0, 123);
+             ",
+        )
+        .unwrap();
+        seed.execute(
+            "INSERT INTO events (generation, kind, payload, checksum)
+             VALUES (1, 'stale_capacity_fixture', '{}', ?1)",
+            [sha256_hex(b"{}")],
+        )
+        .unwrap();
+        seed.execute("PRAGMA user_version = 2", []).unwrap();
+        drop(seed);
+
+        let checkpoint = Connection::open(&path).unwrap();
+        checkpoint
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(checkpoint);
+
+        let snapshot = || {
+            let bytes = std::fs::read(&path).unwrap();
+            let checksum = sha256_hex(&bytes);
+            let conn = Connection::open(&path).unwrap();
+            let schema: Vec<String> = conn
+                .prepare(
+                    "SELECT name || ':' || COALESCE(sql, '')
+                     FROM sqlite_master WHERE type IN ('table', 'index')
+                     ORDER BY name",
+                )
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let mut columns = Vec::new();
+            for table in ["events", "slots", "jobs", "outbox", "meta"] {
+                let mut statement = conn
+                    .prepare("SELECT cid, name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?1)")
+                    .unwrap();
+                let table_columns: Vec<String> = statement
+                    .query_map([table], |row| {
+                        Ok(format!(
+                            "{table}:{}:{}:{}:{}:{}:{}",
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                            row.get::<_, i64>(5)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                columns.extend(table_columns);
+            }
+            let forensic_rows: Vec<String> = conn
+                .prepare(
+                    "SELECT 'slot:' || slot_id || ':' || generation || ':' || phase || ':' ||
+                            permit_held || ':' || routing_valid || ':' || session_live || ':' ||
+                            executor_proven || ':' || registered || ':' || COALESCE(pid, '') || ':' ||
+                            heartbeat_unix FROM slots ORDER BY slot_id",
+                )
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let events: Vec<String> = conn
+                .prepare("SELECT kind || ':' || payload || ':' || checksum FROM events ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let event_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            (
+                bytes,
+                checksum,
+                schema,
+                columns,
+                forensic_rows,
+                events,
+                event_count,
+            )
+        };
+        let before = snapshot();
+
+        for _ in 0..2 {
+            let mut reopened = Journal::open(&path).unwrap();
+            // This fixture intentionally corrupts only the materialized
+            // tables. Event replay is an integrity/recovery view and must
+            // not infer materialized-only rows; the controller's hot path
+            // uses materialized_state(), which is the authoritative view for
+            // capacity safety and must detect the stale N+1 slot.
+            let replayed = reopened.load_state().unwrap();
+            assert!(!replayed.capacity_invalid);
+            assert!(replayed.slots.is_empty());
+
+            let state = reopened.materialized_state().unwrap();
+            assert!(state.capacity_invalid);
+            assert_eq!(state.advertised_capacity(), 0);
+            assert_eq!(state.slots.len(), 3);
+            assert_eq!(state.health().actual_ready_slots, 3);
+            let error = reopened
+                .apply_many([
+                    Event::ControlLive,
+                    Event::DesiredCapacity { ready: 2 },
+                    Event::SlotHeartbeat {
+                        slot_id: slot("scope-3"),
+                        generation: gen(),
+                        pid: 123,
+                    },
+                ])
+                .unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.capacity.invalid");
+            assert!(reopened.materialized_state().unwrap().capacity_invalid);
+            drop(reopened);
+
+            let after = snapshot();
+            assert_eq!(
+                after, before,
+                "failed reconcile must preserve all forensic state"
+            );
+        }
+    }
+
+    #[test]
+    fn current_schema_rejects_unpermitted_nonnumeric_extra_slot() {
+        let (dir, mut journal) = open_tmp("current-schema-extra-slot-shape");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        for slot_id in ["scope-1", "scope-2"] {
+            assert!(
+                !journal
+                    .apply(Event::PermitReserved {
+                        slot_id: slot(slot_id),
+                        generation: gen(),
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let seed = Connection::open(&path).unwrap();
+        seed.execute(
+            "INSERT INTO slots (
+                 slot_id, generation, phase, permit_held, routing_valid,
+                 session_live, executor_proven, registered, pid, heartbeat_unix
+             ) VALUES ('scope-extra', 1, 'provisioning', 0, 0, 0, 0, 0, NULL, 0)",
+            [],
+        )
+        .unwrap();
+        seed.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(seed);
+
+        let before = std::fs::read(&path).unwrap();
+        let mut reopened = Journal::open(&path).unwrap();
+        let state = reopened.materialized_state().unwrap();
+        assert!(state.capacity_invalid);
+        assert_eq!(state.slots.len(), 3);
+        assert_eq!(state.advertised_capacity(), 0);
+        assert_eq!(state.health().state, FleetHealthState::NotReady);
+
+        let error = reopened
+            .apply(Event::SlotHeartbeat {
+                slot_id: slot("scope-extra"),
+                generation: gen(),
+                pid: 123,
+            })
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.capacity.invalid");
+        drop(reopened);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let forensic = Connection::open(&path).unwrap();
+        assert_eq!(
+            forensic
+                .query_row("SELECT COUNT(*) FROM slots", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            forensic
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn schema_v1_contaminated_open_preserves_forensic_database() {
+        let (dir, mut journal) = open_tmp("legacy-surge-schema");
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::PermitReserved {
+                    slot_id: slot("scope-1"),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "ALTER TABLE slots ADD COLUMN surge INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE slots SET surge = 1", []).unwrap();
+        conn.execute("PRAGMA user_version = 1", []).unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        for _ in 0..2 {
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.legacy.unsafe");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        let forensic = Connection::open(&path).unwrap();
+        let version: i64 = forensic
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let surge: i64 = forensic
+            .query_row(
+                "SELECT surge FROM slots WHERE slot_id = 'scope-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(surge, 1);
+        let slot_count: i64 = forensic
+            .query_row("SELECT COUNT(*) FROM slots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(slot_count, 1);
+        let event_count: i64 = forensic
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(event_count, 2);
+    }
+
+    #[test]
+    fn realistic_schema_v1_fails_closed_before_migration() {
+        let (dir, mut journal) = open_tmp("clean-schema-v1-migration");
+        prime_ready(&mut journal, "scope-1");
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot("scope-1"),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let job_id = job("worker-1");
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot("scope-1"),
+                    job_id: job_id.clone(),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id,
+                    slot_id: slot("scope-1"),
+                    attempt: 1,
+                    generation: gen(),
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 1_234,
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE jobs RENAME TO jobs_v2;
+             CREATE TABLE jobs (
+                 job_id TEXT PRIMARY KEY,
+                 slot_id TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 attempt INTEGER NOT NULL,
+                 worker TEXT NOT NULL,
+                 phase TEXT NOT NULL
+             );
+             INSERT INTO jobs (job_id, slot_id, generation, attempt, worker, phase)
+             SELECT job_id, slot_id, generation, attempt, worker, phase FROM jobs_v2;
+             DROP TABLE jobs_v2;
+             ALTER TABLE slots ADD COLUMN surge INTEGER NOT NULL DEFAULT 0;
+             UPDATE slots SET surge = 1;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        // The fixture above is a committed direct mutation while the journal
+        // normally runs in WAL mode. Checkpoint it before taking the exact
+        // database-file snapshot; otherwise the snapshot omits committed WAL
+        // pages and cannot prove whether Journal::open wrote anything.
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let expected_events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        drop(conn);
+
+        for _ in 0..2 {
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.legacy.unsafe");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        let forensic = Connection::open(&path).unwrap();
+        let version: i64 = forensic
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let surge: i64 = forensic
+            .query_row(
+                "SELECT surge FROM slots WHERE slot_id = 'scope-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(surge, 1);
+        let accepted_column: Option<String> = forensic
+            .query_row(
+                "SELECT name FROM pragma_table_info('jobs') WHERE name = 'accepted_unix'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(accepted_column, None);
+        let actual_events: i64 = forensic
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(actual_events, expected_events);
+    }
+
+    #[test]
     fn newer_permit_generation_resets_fenced_actor_identity_and_proofs() {
         let (_dir, mut journal) = open_tmp("new-generation-reset");
         let slot_id = slot("scope-1");
@@ -1726,7 +2190,6 @@ mod tests {
             .apply(Event::PermitReserved {
                 slot_id: slot_id.clone(),
                 generation,
-                surge: true,
             })
             .unwrap();
         assert!(same_generation.rejected);
@@ -1736,7 +2199,6 @@ mod tests {
             .apply(Event::PermitReserved {
                 slot_id: slot_id.clone(),
                 generation: generation.next(),
-                surge: true,
             })
             .unwrap();
         assert!(!outcome.rejected);
@@ -1758,7 +2220,6 @@ mod tests {
         assert_eq!(slot.generation, generation.next());
         assert_eq!(slot.phase, ActorPhase::Provisioning);
         assert!(slot.permit_held);
-        assert!(slot.surge);
         assert!(slot.routing_valid);
         assert!(!slot.executor_proven);
         assert!(!slot.session_live);
@@ -1868,7 +2329,6 @@ mod tests {
             .apply(Event::PermitReserved {
                 slot_id: slot_id.clone(),
                 generation: generation.next(),
-                surge: true,
             })
             .unwrap();
         assert!(outcome.rejected);
@@ -1941,7 +2401,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_journal_migration_adds_materialized_queue_timestamp_column() {
+    fn v1_journal_is_preserved_and_rejected_without_migration() {
         let dir = std::env::temp_dir().join(format!(
             "velnor-journal-v1-migration-{}-{}",
             std::process::id(),
@@ -1965,21 +2425,23 @@ mod tests {
             .unwrap();
         }
 
-        let journal = Journal::open(&path).unwrap();
-        let version: u32 = journal
-            .conn
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.legacy.unsafe");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let conn = Connection::open(&path).unwrap();
+        let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, JOURNAL_SCHEMA_VERSION);
-        let has_timestamp: bool = journal
-            .conn
+        assert_eq!(version, 1);
+        let has_timestamp: bool = conn
             .prepare("PRAGMA table_info(jobs)")
             .unwrap()
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap()
             .map(|name| name.unwrap())
             .any(|name| name == "accepted_unix");
-        assert!(has_timestamp);
+        assert!(!has_timestamp);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2016,7 +2478,6 @@ mod tests {
             .apply(Event::PermitReserved {
                 slot_id: s.clone(),
                 generation: g,
-                surge: false,
             })
             .unwrap();
         let outcome = journal
@@ -2057,7 +2518,6 @@ mod tests {
             .apply(Event::PermitReserved {
                 slot_id: s.clone(),
                 generation: g,
-                surge: false,
             })
             .unwrap();
         let outcome = journal
@@ -2088,7 +2548,6 @@ mod tests {
             Event::PermitReserved {
                 slot_id: s.clone(),
                 generation: g,
-                surge: false,
             },
             Event::ExecutorProven {
                 slot_id: s.clone(),
@@ -2348,7 +2807,6 @@ mod tests {
             .apply(Event::PermitReserved {
                 slot_id: slot("scope-1"),
                 generation: newer,
-                surge: false,
             })
             .unwrap();
         let complete = journal

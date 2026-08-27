@@ -54,7 +54,10 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
             .clone()
             .unwrap_or_else(|| args.state_dir.clone());
         let slot_index = args.slot_index.unwrap_or(1);
-        let slots = daemon.slots.max(1);
+        let slots = daemon.slots;
+        if slots == 0 {
+            anyhow::bail!("cannot execute job with zero configured daemon slots");
+        }
         let mut ready_announced = false;
         let beat = async {
             loop {

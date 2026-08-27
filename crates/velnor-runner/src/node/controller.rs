@@ -231,9 +231,6 @@ pub struct ControllerArgs {
     /// Operator-declared minimum ready capacity `M`.
     #[arg(long, default_value_t = 1)]
     pub desired_ready: u32,
-    /// Extra fully reserved slots so `M` survives one replace.
-    #[arg(long, default_value_t = 1)]
-    pub surge: u32,
     #[arg(long)]
     pub once: bool,
     /// Spawn slot OS processes (production and isolation tests).
@@ -249,7 +246,6 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     journal.apply(Event::JournalWritable)?;
     journal.apply(Event::DesiredCapacity {
         ready: args.desired_ready,
-        surge: args.surge,
     })?;
     let mut slots: HashMap<String, Child> = HashMap::new();
     let mut jobs: HashMap<String, Child> = HashMap::new();
@@ -347,7 +343,7 @@ async fn reconcile_once(
     pacing: &mut GithubPacing,
 ) -> anyhow::Result<LocalCycle> {
     let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
-    let total = args.desired_ready.saturating_add(args.surge).max(1);
+    let total = args.desired_ready;
     let mut effects = Vec::new();
     reap(slots);
     // Ingest a surviving slot's heartbeat before deciding whether its permit
@@ -357,7 +353,6 @@ async fn reconcile_once(
     let state = journal.materialized_state()?;
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
-        let surge = index > args.desired_ready;
         let slot = state.slots.iter().find(|slot| slot.slot_id == id);
         let generation = slot
             .map(|slot| slot.generation)
@@ -376,13 +371,7 @@ async fn reconcile_once(
                 prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
             });
         if fenced_generation.is_none()
-            && !permit_needs_reconciliation(
-                slot,
-                generation,
-                surge,
-                args.spawn_slots,
-                process_alive,
-            )
+            && !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive)
         {
             continue;
         }
@@ -391,7 +380,6 @@ async fn reconcile_once(
                 .apply(Event::PermitReserved {
                     slot_id: id,
                     generation,
-                    surge,
                 })?
                 .commands,
         );
@@ -630,7 +618,7 @@ async fn register_runners(
         .config_dir
         .clone()
         .unwrap_or_else(|| args.state_dir.clone());
-    let slot_count = exec.slots.max(1);
+    let slot_count = exec.slots;
     use futures_util::stream::{self, StreamExt as _};
     let concurrency = registrations.len().clamp(1, JIT_REGISTRATION_CONCURRENCY);
     let mut outcomes = stream::iter(registrations)
@@ -779,7 +767,7 @@ async fn reconcile_remote_registrations(
         .config_dir
         .clone()
         .unwrap_or_else(|| args.state_dir.clone());
-    let slot_count = exec.slots.max(1);
+    let slot_count = exec.slots;
     let mut lost = Vec::new();
     for slot in state.slots.iter().filter(|slot| slot.registered) {
         let index = slot_index_from_id(&slot.slot_id);
@@ -1176,13 +1164,10 @@ fn send_pid_signal(_pid: u32, _signal: i32) -> anyhow::Result<()> {
 fn permit_needs_reconciliation(
     slot: Option<&SlotRecord>,
     generation: Generation,
-    surge: bool,
     spawn_slots: bool,
     process_alive: bool,
 ) -> bool {
-    let permit_matches = slot.is_some_and(|slot| {
-        slot.generation == generation && slot.permit_held && slot.surge == surge
-    });
+    let permit_matches = slot.is_some_and(|slot| slot.generation == generation && slot.permit_held);
     !permit_matches || (spawn_slots && !process_alive)
 }
 
@@ -1342,14 +1327,12 @@ pub async fn supervise_from_daemon(
     state_dir: PathBuf,
     scope: String,
     desired_ready: u32,
-    surge: u32,
     once: bool,
 ) -> anyhow::Result<()> {
     run(ControllerArgs {
         state_dir,
         scope,
         desired_ready,
-        surge,
         once,
         spawn_slots: true,
     })
@@ -1425,7 +1408,6 @@ mod tests {
             registered: false,
             pid: None,
             heartbeat_unix: 0,
-            surge: false,
         }
     }
 
@@ -1438,7 +1420,6 @@ mod tests {
             Generation::INITIAL,
             false,
             true,
-            true,
         ));
     }
 
@@ -1449,14 +1430,12 @@ mod tests {
         assert!(permit_needs_reconciliation(
             Some(&slot),
             Generation::INITIAL,
-            false,
             true,
             false,
         ));
         assert!(permit_needs_reconciliation(
             None,
             Generation::INITIAL,
-            false,
             true,
             false,
         ));
@@ -1533,11 +1512,10 @@ mod tests {
                 valid: true,
                 group_valid: true,
             },
-            Event::DesiredCapacity { ready: 1, surge: 0 },
+            Event::DesiredCapacity { ready: 1 },
             Event::PermitReserved {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
-                surge: false,
             },
             Event::ExecutorProven {
                 slot_id: SlotId("velnor-1".to_owned()),
@@ -1563,7 +1541,6 @@ mod tests {
             state_dir: dir.clone(),
             scope: "velnor".to_owned(),
             desired_ready: 1,
-            surge: 0,
             once: true,
             spawn_slots: false,
         };
@@ -1637,7 +1614,6 @@ mod tests {
             state_dir: dir.clone(),
             scope: "velnor".into(),
             desired_ready: 1,
-            surge: 0,
             once: true,
             spawn_slots: false,
         };
@@ -1762,14 +1738,12 @@ mod tests {
             state_dir: dir.clone(),
             scope: "velnor".into(),
             desired_ready: 1,
-            surge: 0,
             once: true,
             spawn_slots: false,
         };
         journal
             .apply(Event::DesiredCapacity {
                 ready: args.desired_ready,
-                surge: args.surge,
             })
             .unwrap();
         let mut pacing = GithubPacing::default();
@@ -2035,14 +2009,12 @@ mod tests {
             state_dir: dir.clone(),
             scope: "velnor".into(),
             desired_ready: 1,
-            surge: 0,
             once: true,
             spawn_slots: false,
         };
         journal
             .apply(Event::DesiredCapacity {
                 ready: args.desired_ready,
-                surge: args.surge,
             })
             .unwrap();
         let mut pacing = GithubPacing::default();
