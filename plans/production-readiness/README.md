@@ -1,9 +1,54 @@
-# Velnor production-readiness execution prompt
+# Velnor production-readiness acceptance plan
 
-Use this document as the single execution prompt for the production-readiness
-campaign. The campaign is complete only when every checkbox is checked and
-each check has attached evidence. Never claim completion from partial green
-runs.
+This is the acceptance ledger for `PRD-001`. The active `/goal` authority is
+`docs/prompt.md`, the tracked goal graph, `plans/TASKS.md`, and the normative
+direction documents. `/goal` must execute this plan, but this file must not
+silently override those authorities.
+
+The campaign is complete only when every atomic item is `DONE` with current
+evidence. `TODO`, `RUNNING`, `BLOCKED`, `WAITING`, `UNKNOWN`, `UNPROVEN`, and
+historical evidence never count as complete. Never infer completion from a
+green local test, a shared commit, or partial workflow success.
+
+## Execution order
+
+1. Reconcile authority, scope, status, approvals, branch state, and external
+   state. Regenerate the stale progress ledger before mutation.
+2. Capture baseline evidence. Cancel or delete only explicitly authorized,
+   owned, inactive validation resources; unresolved ownership is `BLOCKED`.
+3. Resolve lifecycle and correctness blockers in Velnor. Do not work around
+   Velnor gaps in repositories or in `velnor-actions-fixture`.
+4. Execute Track A read-only fleet reconciliation and Track B migration in
+   dependency order. Execute each C leaf only after its named dependencies are
+   `DONE`; never batch-complete siblings.
+5. Run protocol, capability, storage, executor, lifecycle, fixture, workflow,
+   parity, and security gates at the current source SHA.
+6. Run defined cold/warm/rerun performance campaigns, fault injection, and
+   multi-repository soak. Missing telemetry fails the gate.
+7. Finish Plan 079 and remove the legacy `velnor-runner` product surface.
+8. Integrate unique branch behavior, then merge to `main` and prove green
+   `main` before any release.
+9. Publish, install, verify, roll back, and forward-recover only through the
+   signed APT path. Release and deployment are terminal gates.
+10. Run the independent final audit and generate the evidence index. Only then
+    check the final items and declare completion.
+
+## Atomic checklist and evidence contract
+
+- Assign each checkbox a stable ID: `PRD-<section>-NN`; split bullets that
+  contain multiple claims into separate rows.
+- Each row records status, dependencies, owner, authorization, baseline SHA,
+  final SHA, exact command, exit code, UTC capture time, external run IDs,
+  artifact paths and SHA-256 hashes, verifier, reviewer, and next action.
+- Only an independent verifier may change a row to `DONE`; the implementer
+  and primary orchestrator may not self-approve.
+- Every mutation requires a pre-state and post-state snapshot. Explicit
+  authorization is required for cancellation, runner deletion, drain, restart,
+  merge, tag, publish, install, rollback, policy changes, and re-admission.
+- Evidence must be sanitized. Never commit secrets, credentials, unsanitized
+  logs, or rendered GitHub HTML.
+- Run a final machine check: every row is `DONE`, every dependency is `DONE`,
+  every `DONE` row has valid evidence, and every mirror/index agrees.
 
 ## Mission and operating law
 
@@ -215,28 +260,11 @@ For each representative workflow in each repository:
 - [ ] Check every checkbox in this document. Only then declare the campaign
   complete.
 
-## Progress ledger — 2026-08-27
+## Progress ledger
 
-- Branch: `fix/watchdog-registration-deadline`.
-- HEAD/remote: local `HEAD` and
-  `origin/fix/watchdog-registration-deadline` both point to
-  `25778bc5b05bbfa585b8ea2eeed2884984aa4798`.
-- Committed artifact fix: `25778bc5b05bbfa585b8ea2eeed2884984aa4798` (`fix(artifacts): isolate download temp
-  directory`).
-- Current dirty work before delivery: five intended lifecycle/schema/lease
-  files — `crates/velnor-control/src/journal.rs`,
-  `crates/velnor-runner/src/capacity.rs`,
-  `crates/velnor-runner/src/node/controller.rs`,
-  `crates/velnor-runner/src/protocol.rs`, and
-  `crates/velnor-runner/src/runner.rs`.
-- Verified green: `rtk mise run check`; fmt, clippy `-D warnings`, deny,
-  actionlint, fleet generation, and `cargo nextest` 1450/1450 passed.
-- Latest reviewer blockers remain OPEN/UNPROVEN:
-  - full legacy-schema preflight;
-  - quarantine/recovery for unknown outbox owner;
-  - atomic re-read before permit;
-  - `--once` supervision;
-  - normal reap bounded escalation/health;
-  - durable registration-loss termination intent;
-  - scope/registration identity;
-  - Sentry/Actions/fixture/perf/deploy/rollback.
+The previous dated ledger is historical evidence, not current state. Before
+each iteration, regenerate this section from the repository, GitHub, and
+Sentry. Record the current branch, HEAD, remotes, worktree paths, plan/index
+statuses, open PRs, run IDs, runner registrations, package/backend/health
+state, and all unresolved blockers. Any state change invalidates dependent
+evidence and requires a fresh baseline.

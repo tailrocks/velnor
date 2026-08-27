@@ -4,7 +4,7 @@
 //! are spawned without kill-on-drop, and packaged units must not use
 //! `PartOf=controller`. Every journal side effect is executed here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -256,7 +256,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
-            drain_children(&mut slots, &mut jobs).await?;
+            drain_children(&journal, &mut slots, &mut jobs).await?;
             return Ok(());
         }
         let cycle = reconcile_once(
@@ -288,13 +288,37 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
 /// receives SIGTERM. Each worker has its own drain listener, so it can cancel
 /// an in-flight acquire or finish an active job through the normal boundary.
 async fn drain_children(
+    journal: &Journal,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
-    for child in slots.values().chain(jobs.values()) {
+    for child in slots.values() {
         request_child_shutdown(child)?;
     }
 
+    // Ready-slot broker waiters and real job workers share the `jobs` map.
+    // Waiters have no durable job yet and must exit during a daemon drain;
+    // active workers must survive so an upgrade cannot lose in-flight work.
+    let active_job_ids: HashSet<String> = journal
+        .materialized_state()?
+        .jobs
+        .into_iter()
+        .filter(|job| {
+            matches!(
+                job.phase,
+                ActorPhase::Assigned
+                    | ActorPhase::Starting
+                    | ActorPhase::Running
+                    | ActorPhase::Completing
+            )
+        })
+        .map(|job| job.job_id.0)
+        .collect();
+    for (job_id, child) in jobs.iter() {
+        if job_id.starts_with("wait-") || !active_job_ids.contains(job_id) {
+            request_child_shutdown(child)?;
+        }
+    }
     let mut deadline = Instant::now() + CONTROLLER_CHILD_DRAIN_TIMEOUT;
     let mut escalated = false;
     loop {
