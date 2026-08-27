@@ -29,6 +29,10 @@ fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
     for configured in [1_usize, 4] {
         let config_dir = unique_temp_dir(&format!("daemon-cli-{configured}"));
         let output = Command::new(env!("CARGO_BIN_EXE_velnor-runner"))
+            .env(
+                "VELNOR_STATE_DB",
+                config_dir.join("state.db").to_str().unwrap(),
+            )
             .args([
                 "daemon",
                 "--url",

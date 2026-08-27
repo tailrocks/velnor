@@ -50,24 +50,11 @@ fn install_global(sink: Arc<OpsSink>) {
     let _ = OPS.set(sink);
 }
 
-/// Single entry point: `strict` classifies open failure as a readiness
-/// failure (daemon); otherwise the store degrades observability only
-/// (standalone run).
-pub fn init(instance_slug: String, strict: bool) -> Result<(), velnor_control::store::StoreError> {
-    match OpsSink::open(state_db_path(), instance_slug) {
-        Ok(sink) => {
-            install_global(Arc::new(sink));
-            Ok(())
-        }
-        Err(error) if strict => Err(error),
-        Err(error) => {
-            eprintln!(
-                "operational store unavailable at {} ({error:#}); continuing without durable lifecycle records",
-                state_db_path().display()
-            );
-            Ok(())
-        }
-    }
+/// Open the operational store as a mandatory readiness gate.
+pub fn init(instance_slug: String) -> Result<(), velnor_control::store::StoreError> {
+    let sink = OpsSink::open(state_db_path(), instance_slug)?;
+    install_global(Arc::new(sink));
+    Ok(())
 }
 
 /// Host text projected onto the slug charset for instance identity; empty

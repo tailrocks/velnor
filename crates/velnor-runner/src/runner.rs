@@ -1041,10 +1041,9 @@ async fn run_with_jit_prewarmer(
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
-    // Standalone/one-shot runs degrade observability only; supervised daemon
-    // startup uses strict init so store failures classify as readiness
-    // failures.
-    let _ = crate::ops::init(instance_slug_for_store(), false);
+    // Operational-store open/migration is mandatory before one-shot work.
+    crate::ops::init(instance_slug_for_store())
+        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     if let Some(sink) = crate::ops::global() {
         sink.emit(
             velnor_model::EventReason::ReadinessReady,
@@ -1210,9 +1209,8 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 
     // Plan 066 step 4: open/migration failure of the operational store is a
-    // daemon readiness failure. Supervised mode surfaces it through the
-    // never-exit retry loop below; one-shot modes already fail fast.
-    crate::ops::init(instance_slug_for_store(), supervised)
+    // daemon readiness failure. No execution path may continue without it.
+    crate::ops::init(instance_slug_for_store())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     if let Some(sink) = crate::ops::global() {
         sink.emit(
