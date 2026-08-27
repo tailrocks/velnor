@@ -799,6 +799,7 @@ impl ScopeBrokerManager {
                 broker_metrics: broker_metrics.clone(),
             };
             let stopped = Arc::new(Mutex::new(Vec::<String>::new()));
+            let completed = Arc::new(Mutex::new(Vec::<String>::new()));
             let failed = Arc::new(Mutex::new(Vec::<(String, Duration)>::new()));
             use futures_util::stream::{self, StreamExt as _};
             stream::iter(self.sessions.values_mut())
@@ -807,11 +808,15 @@ impl ScopeBrokerManager {
                     let assignments = assignments.clone();
                     let signals = signals.clone();
                     let stopped = stopped.clone();
+                    let completed = completed.clone();
                     let failed = failed.clone();
                     async move {
                         match session.poll(&state_dir, &assignments, &signals).await {
                             Ok(crate::runner::ScopeBrokerPoll::Stopped) => {
                                 stopped.lock().await.push(session.slot_id.clone());
+                            }
+                            Ok(crate::runner::ScopeBrokerPoll::Completed) => {
+                                completed.lock().await.push(session.slot_id.clone());
                             }
                             Ok(crate::runner::ScopeBrokerPoll::Idle) => {}
                             Err(error) => {
@@ -843,6 +848,14 @@ impl ScopeBrokerManager {
                     let _ = tokio::time::timeout(Duration::from_secs(5), session.close()).await;
                 }
             }
+            for id in completed.lock().await.drain(..) {
+                if let Some(session) = self.sessions.remove(&id) {
+                    let generation = session.generation();
+                    let config_dir = session.config_dir().to_owned();
+                    let _ = tokio::time::timeout(Duration::from_secs(5), session.close()).await;
+                    retire_consumed_registration(&args, &id, generation, &config_dir);
+                }
+            }
             for (id, wait) in failed.lock().await.drain(..) {
                 if let Some(session) = self.sessions.remove(&id) {
                     let _ = tokio::time::timeout(Duration::from_secs(5), session.close()).await;
@@ -858,6 +871,39 @@ impl ScopeBrokerManager {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    }
+}
+
+/// Retire a consumed JIT identity before the next manager pass. The remote
+/// runner is ephemeral and is already gone after its one assignment; keeping
+/// the durable claim/config around makes the next pass reopen a dead broker
+/// session and amplifies 404/409 recovery.
+fn retire_consumed_registration(
+    args: &ControllerArgs,
+    slot_id: &str,
+    generation: velnor_model::Generation,
+    config_dir: &std::path::Path,
+) {
+    match Journal::open(args.state_dir.join("journal.db")) {
+        Ok(mut journal) => match journal.apply(Event::RegistrationLost {
+            slot_id: SlotId(slot_id.to_owned()),
+            generation,
+        }) {
+            Ok(outcome) if !outcome.rejected => {
+                if let Err(error) = crate::config::remove(config_dir) {
+                    eprintln!(
+                        "consumed registration {slot_id} retired but local config removal failed: {error:#}"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!(
+                "consumed registration {slot_id} retirement journal update failed: {error:#}"
+            ),
+        },
+        Err(error) => eprintln!(
+            "consumed registration {slot_id} retirement could not open journal: {error:#}"
+        ),
     }
 }
 
@@ -2161,6 +2207,63 @@ mod tests {
             crate::node::handoff::CompletionStatus::Exited
         );
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn consumed_session_retirement_clears_claim_and_local_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-consumed-session-retirement-{}-{}",
+            std::process::id(),
+            epoch_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_dir = dir.join("slot-1");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("runner.json"), b"consumed").unwrap();
+
+        let slot_id = "scope-1";
+        let generation = Generation::INITIAL;
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        assert!(
+            !journal
+                .apply(Event::PermitReserved {
+                    slot_id: SlotId(slot_id.to_owned()),
+                    generation,
+                    surge: false,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::Registered {
+                    slot_id: SlotId(slot_id.to_owned()),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "scope".to_owned(),
+            desired_ready: 1,
+            surge: 0,
+            once: true,
+            spawn_slots: false,
+        };
+        retire_consumed_registration(&args, slot_id, generation, &config_dir);
+
+        let state = journal.load_state().unwrap();
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == SlotId(slot_id.to_owned()))
+            .unwrap();
+        assert!(!slot.registered);
+        assert_eq!(slot.phase, ActorPhase::Provisioning);
+        assert!(!config_dir.join("runner.json").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 

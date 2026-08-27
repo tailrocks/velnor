@@ -599,6 +599,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `33083180030` remains queued, with all Velnor jobs waiting. This is live
   evidence that registration/session churn is still present in another scope;
   parity and full-fleet gates remain open.
+- Forward source fix: completed assignments now retire the consumed
+  scope-owned broker session immediately, clear the durable registration claim,
+  remove the consumed local JIT identity, and wake one fresh registration
+  cycle. This prevents post-completion broker `404` polling and stale
+  config-driven `409`/JIT churn. Added regression coverage for claim/config
+  retirement; focused nextest (2/2) and runner clippy pass. Candidate source
+  version is `0.1.241`; signed APT publication and live validation remain
+  required.
 
 ## Non-goals
 

@@ -973,9 +973,20 @@ pub(crate) struct ScopeBrokerSession {
 pub(crate) enum ScopeBrokerPoll {
     Idle,
     Stopped,
+    /// The ephemeral registration has consumed its one assignment and must
+    /// not be polled or reopened with the same runner identity.
+    Completed,
 }
 
 impl ScopeBrokerSession {
+    pub(crate) fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    pub(crate) fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
     pub(crate) async fn open(
         args: &RunArgs,
         _state_dir: &Path,
@@ -1051,6 +1062,12 @@ impl ScopeBrokerSession {
                 return Ok(ScopeBrokerPoll::Idle);
             }
             let _ = fs::remove_file(path);
+            // GitHub JIT runners are single-use. Once the transient worker
+            // has posted completion, this broker session and its local
+            // identity are consumed. Retiring here prevents a post-job poll
+            // against a server-deleted registration (404) and the resulting
+            // recovery/JIT churn.
+            return Ok(ScopeBrokerPoll::Completed);
         }
         let journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))?;
         let current = journal
