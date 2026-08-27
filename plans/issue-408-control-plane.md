@@ -113,8 +113,15 @@ isolation tradeoff is allowed.
 - [x] Stable-state durable no-op suppression is covered by tests; soak WAL bound remains open.
 - [x] Idle resource cost scaling from 1 to 16 slots is measured and ≤2×.
 - [ ] Fixture readiness and smoke tests pass.
-- [ ] GitHub-hosted/Velnor lane parity passes.
-- [ ] Steps, logs, outputs, artifacts, caches, timings, and resource evidence are compared.
+- [x] GitHub-hosted/Velnor lane parity passes (`velnor-actions-fixture` run
+  `33083180030`; all GitHub and Velnor matrix, provenance, and required
+  aggregation jobs succeeded).
+- [x] Steps, logs, outputs, artifacts, caches, timings, and resource evidence
+  are compared. Run artifacts for `app-a` and `app-b` normalized identically
+  after removing the lane label; five artifact groups downloaded, and the
+  18m55s run/job evidence was captured. The fixture comparator itself skipped
+  because its unchanged script lowercases artifact directory names while the
+  workflow emits `GitHub`/`Velnor`; no fixture mutation was made.
 
 Initial gates: zero-job CPU ≤5% per scope after a recorded baseline; idle CPU
 scaling ≤2× from 1 to 16 slots; overlap 0; stable JIT create/delete 0; durable
@@ -599,6 +606,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `33083180030` remains queued, with all Velnor jobs waiting. This is live
   evidence that registration/session churn is still present in another scope;
   parity and full-fleet gates remain open.
+- The replacement parity run `33083180030` completed successfully on the
+  unchanged fixture: GitHub and Velnor `app-a`/`app-b` results, cache modes,
+  Postgres services, provenance, `compare-results`, and `compat-required` all
+  passed. Downloaded result artifacts were manually normalized and matched
+  for both packages. The fixture comparator's case-sensitive path lookup
+  skipped its own comparison; this external fixture defect is recorded, not
+  worked around in the fixture.
 - Forward source fix: completed assignments now retire the consumed
   scope-owned broker session immediately, clear the durable registration claim,
   remove the consumed local JIT identity, and wake one fresh registration
