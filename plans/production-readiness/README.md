@@ -269,14 +269,14 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T22:00:57Z
+### Current baseline — 2026-08-27T22:05:00Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `46f79c2f9babd4bc2db43ada7ad124f31c78f14f`, clean worktree, remote
+  `28e3dfffd2a6c1fccbd4b0de44a35510ec668d6c`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
   of `origin/main` and equal to its pushed branch tip.
-- Open Velnor PR: #411 at this HEAD. CI run `33120362766` and Guest image run
-  `33120361722` were in progress at the snapshot; this is not green-main proof.
+- Open Velnor PR: #411 at this HEAD. Current CI run `33121768566` and Guest
+  image run `33121768061` are queued; this is not green-main proof.
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
@@ -299,8 +299,9 @@ evidence and requires a fresh baseline.
   and workspace nextest `1505/1505` (nextest run ID
   `2a1d95ca-2d58-4272-8a5d-5a8d674e8f49`). Focused Plan 066 tests passed
   `84/84`; package nextest passed `1180/1180` before the final remote merge.
-  Code commits `61605e6` and merge `46f79c2` preserve canonical job identity,
-  migration history, and branch-side remote changes.
+  Code commits `61605e6` and `28e3dff` preserve canonical job identity,
+  migration history, resource policy, legal no-op lifecycle transitions, and
+  branch-side remote changes.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
