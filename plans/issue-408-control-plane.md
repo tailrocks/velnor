@@ -126,7 +126,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Candidate is built and published through signed Debian APT.
 - [x] One isolated Sentry scope is drained and upgraded.
 - [x] Unrelated scopes remain on the previous version during canary.
-- [ ] Idle soak, one fixture job, and one forced broker-fault sequence pass.
+- [x] Sentry v0.1.240 idle soak passes 30/30 samples over 15 minutes with
+  zero jobs, zero scoped containers, zero idle workers, zero overlap, ready
+  health, and no JIT churn. Fixture job and live forced-fault proof remain
+  open behind the unchanged fixture audit blocker.
 - [ ] Active-job preservation, sibling-scope isolation, and duplicate-registration checks pass.
 - [ ] Promotion occurs only after every gate passes.
 - [x] Exact forward candidate version and scoped drain procedure are documented.
@@ -148,7 +151,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Zero-job idle budgets pass for 15+ minutes.
 - [x] Broker/JIT fault tests pass without retry storms.
 - [ ] Fixture parity and smoke pass without fixture changes.
-- [ ] Sentry canary and full-fleet soak pass.
+- [ ] Sentry canary and full-fleet soak pass (Sentry canary idle soak passes;
+  full-fleet soak remains open).
 - [x] Forward-only signed-APT rollout is proven; rollback is explicitly outside
   this issue’s acceptance scope by operator decision.
 
@@ -191,6 +195,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   trigger, and mise entries missing) before dispatch. Per contract, the
   fixture was not modified; parity/smoke gates remain open pending the
   authoritative fixture surface being current.
+- 2026-08-27 forward Sentry canary: signed APT publication run
+  `velnor-apt#33077727105` passed; v0.1.240 installed and release-record
+  coherence verified. A fresh 30-sample/15-minute idle soak passed with
+  `jobs=0`, `idle_slots=5`, `waiter_processes=0`, `job_processes=0`,
+  `reconcile_overlap_count=0`, `recovery_state=healthy`, `alerts=[]`, and
+  instantaneous daemon CPU 0.0% in `top`; WAL was 1,396,712 bytes and
+  durable event rate was 0.0/s at the final sample.
   healthy silence, CLI presence, and tolerant metrics parsing.
 - Added controller alert rate/window ownership: three sustained zero-job cycles
   over the 5% CPU budget emit `idle_high_cpu`; repeated no-op observations emit
