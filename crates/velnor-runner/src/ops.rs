@@ -230,10 +230,13 @@ impl OpsSink {
     /// execute unrecorded work.
     pub fn record_admission(&self, admission: &JobAdmission) -> bool {
         let Some(job_uid) = admission.job_uid() else {
-            // No GitHub identity: nothing durable to key on. Treated as
-            // recorded-enough because the store contract keys summaries by
-            // (run_id, attempt); the private in-flight record still covers it.
-            return true;
+            // The admission row is the required durable record before a job
+            // can execute. Without both identity fields it has no stable key,
+            // so accepting the job would create unrecorded work.
+            return self.required_failure(
+                "store.admission.identity",
+                "github.run_id and github.run_attempt are required",
+            );
         };
         let summary = match admission.model_summary() {
             Ok(summary) => summary,
@@ -432,6 +435,30 @@ mod tests {
         // sanitized projection.
         let summary = stored.unwrap();
         assert_eq!(summary.workflow(), "control-plane");
+    }
+
+    #[test]
+    fn admission_without_complete_identity_fails_closed() {
+        for missing in ["run_id", "attempt"] {
+            let (_dir, sink) = temp_sink(&format!("missing-{missing}"));
+            let mut adm = admission(111, None);
+            match missing {
+                "run_id" => adm.run_id = None,
+                "attempt" => adm.attempt = None,
+                _ => unreachable!("test only covers required identity fields"),
+            }
+
+            assert!(
+                !sink.record_admission(&adm),
+                "missing {missing} was accepted"
+            );
+            assert!(sink.degraded());
+            assert!(sink
+                .store
+                .job_summaries("test-instance")
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[test]
