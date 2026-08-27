@@ -621,6 +621,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   retirement; focused nextest (2/2) and runner clippy pass. Candidate source
   version is `0.1.241`; signed APT publication and live validation remain
   required.
+- GitHub CI run `33084998831` exposed that the original idle-scaling test
+  measured cumulative one-cycle startup CPU, making the 16-slot process
+  creation dominate the ratio (`14711/3056`) and fail its own steady-state
+  gate. The test now runs two controller cycles and compares second-cycle
+  CPU/transaction deltas; local nextest passes with 16-slot delta `2235` vs
+  one-slot `3173` (`0.70x`). The fix is forward-only candidate `0.1.242`.
 
 ## Non-goals
 

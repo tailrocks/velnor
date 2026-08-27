@@ -40,7 +40,6 @@ fn spawn_controller(state_dir: &Path, slots: u32) -> Child {
             &slots.to_string(),
             "--surge",
             "0",
-            "--once",
         ])
         .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null())
@@ -70,6 +69,24 @@ fn wait_for_metrics(path: &Path) -> Value {
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("controller did not publish metrics: {}", path.display());
+}
+
+fn wait_for_second_cycle(path: &Path, first: &Value) -> Value {
+    let first_sequence = number(first, &["sequence"]);
+    for _ in 0..900 {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                if number(&value, &["sequence"]) > first_sequence {
+                    return value;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "controller did not publish a second metrics cycle: {}",
+        path.display()
+    );
 }
 
 fn number(metrics: &Value, path: &[&str]) -> u64 {
@@ -122,15 +139,17 @@ fn idle_resource_scaling_from_one_to_sixteen_slots_is_bounded() {
         let state_dir = scratch(slots);
         let metrics_path = state_dir.join("controller-metrics.json");
         let mut child = spawn_controller(&state_dir, slots);
-        let metrics = wait_for_metrics(&metrics_path);
+        let first_metrics = wait_for_metrics(&metrics_path);
+        let metrics = wait_for_second_cycle(&metrics_path, &first_metrics);
         let measurement = Measurement {
             slots,
             slot_processes: number(&metrics, &["slot_processes"]),
             job_processes: number(&metrics, &["job_processes"]),
             waiter_processes: number(&metrics, &["waiter_processes"]),
             reconcile_p95_ms: number(&metrics, &["reconcile_duration_ms", "p95"]),
-            controller_cpu_us: cpu_us(&metrics),
-            journal_transactions: number(&metrics, &["journal", "transactions"]),
+            controller_cpu_us: cpu_us(&metrics).saturating_sub(cpu_us(&first_metrics)),
+            journal_transactions: number(&metrics, &["journal", "transactions"])
+                .saturating_sub(number(&first_metrics, &["journal", "transactions"])),
             wal_bytes: number(&metrics, &["journal", "wal_bytes"]),
         };
         stop_process_group(&mut child);
