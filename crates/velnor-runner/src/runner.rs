@@ -1208,27 +1208,6 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         }
     }
 
-    // Plan 066 step 4: open/migration failure of the operational store is a
-    // daemon readiness failure. No execution path may continue without it.
-    crate::ops::init(instance_slug_for_store())
-        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
-    if let Some(sink) = crate::ops::global() {
-        sink.emit(
-            velnor_model::EventReason::ReadinessReady,
-            sink.instance_slug(),
-            Some(format!(
-                "daemon ready pid={} supervised={supervised}",
-                std::process::id()
-            )),
-        );
-    }
-
-    if supervised {
-        if let Ok(config_base) = daemon_config_dir(&args) {
-            start_drain_listener(config_base);
-        }
-    }
-
     // P1: host the GitHub cache contract when the operator enables it. Both
     // the service spawn and the runtime-env injection key off the same two
     // variables, so an enabled fleet serves warm gha-cache traffic to job
@@ -1309,6 +1288,19 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     if draining() {
         return Ok(());
+    }
+    // Store open/migration belongs inside the pass so supervised startup
+    // retries transient filesystem/database failures with the same bounded
+    // loop as registration failures. No pass may preflight or register
+    // without durable lifecycle state.
+    crate::ops::init(instance_slug_for_store())
+        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
+    if let Some(sink) = crate::ops::global() {
+        sink.emit(
+            velnor_model::EventReason::ReadinessReady,
+            sink.instance_slug(),
+            Some(format!("daemon pass ready pid={}", std::process::id())),
+        );
     }
     let config_base = daemon_config_dir(args)?;
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
