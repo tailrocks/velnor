@@ -709,6 +709,15 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   dispatch `33107254562` was canceled while pending behind that stale queued
   run. No active job, sibling scope, runner registration, or package data was
   modified.
+- 2026-08-28 Package update progression: explicit GitHub-lane dispatch
+  `33107695940` passed verification and mutation, producing `velnor-apt` PR
+  #151 at head `c1788dad`. Its required pull-request validation remains
+  blocked by the trusted-runner queue, so signed publication has not occurred.
+  PR #410 head `ff225c7` has green GitHub-lane, contract, and `ci-required`
+  checks in run `33107425149`. Guest-image run `33107424480` reproduced a
+  transient aarch64 download failure, then two failed-job retries reached the
+  same external build/download path and were canceled after the hard progress
+  window; the already-published v0.1.244 release guest run remains green.
 
 ## Non-goals
 
