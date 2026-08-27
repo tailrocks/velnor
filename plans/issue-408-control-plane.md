@@ -657,6 +657,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   Velnor runner; no bypass or direct publication was used. v0.1.243 Sentry
   installation and the post-fix idle soak remain blocked on that signed APT
   publication completing.
+- Because PR #151's pull-request event was pinned to the unavailable Velnor
+  runner, standard GitHub-lane workflow dispatch `33096266101` was run on the
+  exact PR head. It passed `tailrocks / github lane`, `tailrocks / contract`,
+  and `ci-required`. Auto-merge is enabled, but GitHub still reports the
+  original pull-request contract check queued; no branch-protection bypass was
+  used.
 
 ## Non-goals
 
