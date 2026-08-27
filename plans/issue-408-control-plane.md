@@ -350,6 +350,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   Sentry daemon at about 82.7% CPU. `velnorctl doctor` could not query GitHub
   because its token is unset. No Sentry mutation or canary claim is made until
   signed APT publication is unblocked and an isolated scope is selected.
+- The stale APT run was force-cancelled. GitHub-lane package update run
+  `33047460559` succeeded and opened `tailrocks/velnor-apt#144`, containing
+  the exact `v0.1.231` amd64/arm64 package hashes. Its required
+  `tailrocks / validate request` check is queued on the `velnor-trusted`
+  label (`33047526836`); the PR is mergeable but blocked on that check. The
+  current apt package state remains `0.1.215` until the PR is validated and
+  merged by the standard process. Sentry deployment remains gated; no direct
+  `.deb` or `dpkg` path is used.
 
 ## Non-goals
 
