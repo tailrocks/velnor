@@ -490,6 +490,24 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `0.1.239` replaces this with content-aware refresh; explicit operator policy
   files remain authoritative and unchanged policy files are not rewritten.
   Focused nextest (2/2) and strict clippy pass.
+- Release tag `v0.1.239` at commit `2fe621c` completed successfully in GitHub
+  Actions run `33069259220` after one earlier transport-stalled attempt was
+  canceled. Guest images, multi-platform GHCR image, amd64/arm64 packages,
+  coherent release assembly, signatures, and attestations all passed.
+- Standard signed APT publication of `v0.1.239` completed through package
+  update run `33070956065`, merged PR #148 (merge `182e47e`), and publish run
+  `33071304308`. The Sentry host installed the exact version through the
+  locked scoped APT transaction; release-record checksum, coherence, active
+  pointer, and installed-binary verification passed. No rollback was used.
+- Forward Sentry canary after `v0.1.239`: routing became valid, five JIT
+  registrations succeeded, and zero idle waiter processes were present.
+  Real ChainArgos jobs were admitted to transient workers and were preserved.
+  During the canary, reconcile overlap stayed zero, stable observations were
+  no-op, and instantaneous daemon CPU samples were zero despite unrelated
+  host load. Initial inherited session loss produced five coordinated JIT
+  recreations; afterward JIT create failures and delete churn stayed zero.
+  Two active run-service jobs remained in progress at capture time, so the
+  15-minute zero-job soak and final active-job completion proof remain open.
 
 ## Non-goals
 
