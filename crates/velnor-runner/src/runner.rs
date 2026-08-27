@@ -1981,24 +1981,54 @@ async fn cleanup_failed_daemon_slot(
     cycle: u64,
 ) {
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
-    if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
+    let slot_cleanup = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await;
+    if let Err(error) = &slot_cleanup {
         eprintln!(
             "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {error:#}",
             slot_dir.display()
         );
     }
-    if let Err(error) =
-        cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await
-    {
+    let successor_cleanup =
+        cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await;
+    if let Err(error) = &successor_cleanup {
         eprintln!("daemon slot-{slot_index} cycle {cycle} successor cleanup failed: {error:#}");
     }
     if let Some(sink) = crate::ops::global() {
-        sink.emit(
+        let (reason, detail) = daemon_slot_cleanup_event(
+            slot_index,
+            cycle,
+            slot_cleanup.is_ok(),
+            successor_cleanup.is_ok(),
+        );
+        sink.emit(reason, &daemon_slot_name(slot_index), Some(detail));
+    }
+}
+
+fn daemon_slot_cleanup_event(
+    slot_index: usize,
+    cycle: u64,
+    slot_succeeded: bool,
+    successor_succeeded: bool,
+) -> (velnor_model::EventReason, String) {
+    if slot_succeeded && successor_succeeded {
+        return (
             velnor_model::EventReason::SlotStateChanged,
-            &daemon_slot_name(slot_index),
-            Some(format!("cleaned failed slot after cycle {cycle}")),
+            format!("cleaned failed slot after cycle {cycle}"),
         );
     }
+
+    let failed_parts = match (slot_succeeded, successor_succeeded) {
+        (false, false) => "slot and successor cleanup failed",
+        (false, true) => "slot cleanup failed",
+        (true, false) => "successor cleanup failed",
+        (true, true) => unreachable!("successful cleanup handled above"),
+    };
+    (
+        velnor_model::EventReason::ReadinessDegraded,
+        format!(
+            "daemon slot-{slot_index} cleanup degraded after cycle {cycle}: {failed_parts}; local recovery files preserved"
+        ),
+    )
 }
 
 async fn cleanup_daemon_slot_successor_jit_config(
@@ -2016,7 +2046,11 @@ async fn cleanup_daemon_slot_successor_jit_config(
                     "delete successor daemon slot-{slot_index} JIT identity; local identity preserved"
                 )
             })?;
-        let _ = fs::remove_dir(&next_dir);
+        fs::remove_dir(&next_dir).with_context(|| {
+            format!(
+                "remove successor daemon slot-{slot_index} directory after deleting JIT identity; local recovery preserved"
+            )
+        })?;
     }
     Ok(())
 }
@@ -11339,6 +11373,61 @@ jobs:
         assert!(base.join("slots").exists());
 
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_successor_cleanup_surfaces_directory_removal_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/repos/owner/repo/actions/runners/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = unique_temp_dir("daemon-successor-cleanup-failure");
+        let next_dir = daemon_slot_successor_config_dir(&base, 1, 1);
+        let mut stored = stored_config();
+        stored.settings.github_url = format!("{}/owner/repo", server.uri());
+        config::save(&next_dir, &stored).unwrap();
+        let leftover = next_dir.join("leftover-state");
+        fs::write(&leftover, b"preserve for recovery").unwrap();
+
+        let mut args = daemon_args(1);
+        args.pat = Some("token".into());
+        let error = cleanup_daemon_slot_successor_jit_config(&args, &base, 1, 1)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("remove successor daemon slot-1 directory after deleting JIT identity"));
+        assert!(!next_dir.join("runner.json").exists());
+        assert!(leftover.exists());
+        assert!(next_dir.is_dir());
+        server.verify().await;
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn failed_daemon_slot_cleanup_selects_degraded_event() {
+        let (reason, detail) = daemon_slot_cleanup_event(1, 7, true, false);
+
+        assert_eq!(reason, velnor_model::EventReason::ReadinessDegraded);
+        assert!(detail.contains("successor cleanup failed"));
+        assert!(detail.contains("local recovery files preserved"));
+        assert!(!detail.contains("cleaned failed slot"));
+
+        let (reason, detail) = daemon_slot_cleanup_event(1, 7, true, true);
+        assert_eq!(reason, velnor_model::EventReason::SlotStateChanged);
+        assert_eq!(detail, "cleaned failed slot after cycle 7");
     }
 
     #[test]
