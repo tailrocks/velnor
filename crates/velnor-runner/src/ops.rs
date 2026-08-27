@@ -15,12 +15,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use velnor_control::store::{
-    EventRow, InstanceRow, RetentionBudget, Store, Transition, DEFAULT_STATE_DB_PATH,
+    EventRow, InstanceRow, RetentionBudget, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
 use velnor_model::{
     EventReason, JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, Slug,
     Timestamp, TriggerEvent,
 };
+#[cfg(test)]
+use velnor_model::ExitClass;
 
 /// Environment override for the operational database location; tests and
 /// fixture validation runs point this at a temporary file.
@@ -183,6 +185,10 @@ pub struct OpsSink {
     degraded: AtomicBool,
     last_prune_unix: AtomicU64,
     budget: RetentionBudget,
+    #[cfg(test)]
+    injected_write_failure: Mutex<Option<(ExitClass, &'static str)>>,
+    #[cfg(test)]
+    forensic_failures: Mutex<Vec<String>>,
 }
 
 impl OpsSink {
@@ -202,6 +208,10 @@ impl OpsSink {
             degraded: AtomicBool::new(false),
             last_prune_unix: AtomicU64::new(0),
             budget: RetentionBudget::default(),
+            #[cfg(test)]
+            injected_write_failure: Mutex::new(None),
+            #[cfg(test)]
+            forensic_failures: Mutex::new(Vec::new()),
         })
     }
 
@@ -264,6 +274,9 @@ impl OpsSink {
             conclusion: None,
             infrastructure_category: None,
         };
+        if let Err(error) = self.before_store_write() {
+            return self.required_failure("store.admission.persist", &error.to_string());
+        }
         if let Err(error) = self.store.persist_summary_and_transition(
             &summary,
             &self.instance_slug,
@@ -283,6 +296,10 @@ impl OpsSink {
         let subject = sanitize_event_subject(subject, &masks);
         let detail = detail.map(|value| sanitize_event_detail(&value, &masks));
         let correlation = Slug::validate("correlation_id", &subject).ok();
+        if let Err(error) = self.before_store_write() {
+            self.absorb("store.event", &error.to_string());
+            return;
+        }
         if let Err(error) = self.store.append_event(&EventRow {
             instance_slug: self.instance_slug.clone(),
             event_kind: reason.as_str().to_owned(),
@@ -321,6 +338,10 @@ impl OpsSink {
             conclusion,
             infrastructure_category,
         };
+        if let Err(error) = self.before_store_write() {
+            self.absorb("store.transition", &error.to_string());
+            return false;
+        }
         if let Err(error) =
             self.store
                 .record_job_transition(&self.instance_slug, job_uid, &transition)
@@ -403,7 +424,44 @@ impl OpsSink {
     fn required_failure(&self, code: &str, detail: &str) -> bool {
         eprintln!("REQUIRED operational-store write failed ({code}): {detail}");
         self.degraded.store(true, Ordering::Relaxed);
+        self.record_forensic_failure(code, detail);
+        eprintln!("{}", forensic_failure_line(code, detail));
         false
+    }
+
+    fn before_store_write(&self) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if let Ok(mut injected) = self.injected_write_failure.lock() {
+            if let Some((class, reason)) = injected.take() {
+                return Err(
+                    StoreError::new(class, reason).with_remediation("test-injected write failure"),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn fail_next_store_write(&self, class: ExitClass, reason: &'static str) {
+        self.injected_write_failure
+            .lock()
+            .unwrap()
+            .replace((class, reason));
+    }
+
+    #[cfg(test)]
+    fn forensic_failures(&self) -> Vec<String> {
+        self.forensic_failures.lock().unwrap().clone()
+    }
+
+    fn record_forensic_failure(&self, code: &str, detail: &str) {
+        #[cfg(not(test))]
+        let _ = (code, detail);
+        #[cfg(test)]
+        self.forensic_failures
+            .lock()
+            .unwrap()
+            .push(forensic_failure_line(code, detail));
     }
 
     fn remember_masks(&self, values: &[String]) -> bool {
@@ -431,9 +489,14 @@ impl OpsSink {
 
     fn absorb(&self, code: &str, detail: &str) {
         self.degraded.store(true, Ordering::Relaxed);
+        self.record_forensic_failure(code, detail);
         tracing::error!(target: "velnor::ops", code, "{code}: {detail}");
-        eprintln!("forensics.ops event=store-write-failed code={code} error={detail}");
+        eprintln!("{}", forensic_failure_line(code, detail));
     }
+}
+
+fn forensic_failure_line(code: &str, detail: &str) -> String {
+    format!("forensics.ops event=store-write-failed code={code} error={detail}")
 }
 
 fn sanitize_event_subject(raw: &str, masks: &[String]) -> String {
@@ -551,6 +614,123 @@ mod tests {
 
         assert!(!sink.record_admission(&adm));
         assert!(sink.degraded());
+    }
+
+    #[test]
+    fn injected_admission_write_failure_rejects_without_partial_summary() {
+        let (_dir, sink) = temp_sink("injected-admission-failure");
+        sink.fail_next_store_write(ExitClass::Operation, "store.test.disk-full");
+
+        assert!(!sink.record_admission(&admission(122, None)));
+        assert!(sink.degraded());
+        assert!(sink
+            .forensic_failures()
+            .iter()
+            .any(|entry| entry.contains("store.admission.persist") && entry.contains("store.test.disk-full")));
+        assert!(sink
+            .store
+            .job_summaries("test-instance")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn injected_event_write_failure_degrades_without_changing_job_state() {
+        let (_dir, sink) = temp_sink("injected-event-failure");
+        let adm = admission(123, None);
+        assert!(sink.record_admission(&adm));
+        sink.fail_next_store_write(ExitClass::Operation, "store.test.disk-full");
+
+        sink.emit(
+            EventReason::ReadinessDegraded,
+            "readiness-failure-123",
+            Some("injected failure".to_owned()),
+        );
+
+        assert!(sink.degraded());
+        assert!(sink
+            .forensic_failures()
+            .iter()
+            .any(|entry| entry.contains("store.event") && entry.contains("store.test.disk-full")));
+        assert_eq!(
+            sink.store
+                .event_count("test-instance", "readiness-failure-123")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sink.store
+                .fetch_summary("test-instance", 123, 1)
+                .unwrap()
+                .unwrap()
+                .phase(),
+            JobPhase::Running
+        );
+    }
+
+    #[test]
+    fn injected_transition_write_failure_degrades_without_changing_job_state() {
+        let (_dir, sink) = temp_sink("injected-transition-failure");
+        let adm = admission(124, None);
+        assert!(sink.record_admission(&adm));
+        let uid = adm.job_uid().unwrap();
+        sink.fail_next_store_write(ExitClass::Timeout, "store.test.locked");
+
+        assert!(!sink.transition(
+            &uid,
+            "t-started-injected",
+            EventReason::JobStarted,
+            None,
+            None,
+            None,
+        ));
+
+        assert!(sink.degraded());
+        assert!(sink
+            .forensic_failures()
+            .iter()
+            .any(|entry| entry.contains("store.transition") && entry.contains("store.test.locked")));
+        assert_eq!(sink.store.transition_count("test-instance", &uid).unwrap(), 1);
+        assert_eq!(
+            sink.store
+                .fetch_summary("test-instance", 124, 1)
+                .unwrap()
+                .unwrap()
+                .phase(),
+            JobPhase::Running
+        );
+    }
+
+    #[test]
+    fn actual_sqlite_lock_during_event_write_degrades_without_job_mutation() {
+        let (dir, sink) = temp_sink("actual-locked-event");
+        let adm = admission(125, None);
+        assert!(sink.record_admission(&adm));
+
+        let locker = rusqlite::Connection::open(dir.join("state.db")).unwrap();
+        locker.busy_timeout(std::time::Duration::from_millis(1)).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        sink.emit(
+            EventReason::ReadinessDegraded,
+            "actual-lock-125",
+            Some("locked write".to_owned()),
+        );
+
+        assert!(sink.degraded());
+        assert!(sink
+            .forensic_failures()
+            .iter()
+            .any(|entry| entry.contains("store.event") && entry.contains("store.locked")));
+        assert_eq!(
+            sink.store
+                .fetch_summary("test-instance", 125, 1)
+                .unwrap()
+                .unwrap()
+                .phase(),
+            JobPhase::Running
+        );
+        locker.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
