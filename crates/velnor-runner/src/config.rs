@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const SETTINGS_FILE: &str = "runner.json";
+const PREPARED_SETTINGS_DIR: &str = "next";
 
 #[cfg(unix)]
 fn replace_atomically(dir: &Path, path: &Path, bytes: &[u8], temp_path: &Path) -> Result<()> {
@@ -207,7 +208,6 @@ pub fn remove(dir: &Path) -> Result<bool> {
 /// Atomically move a prepared successor identity into the live config path.
 /// Both directories belong to one daemon slot, so the rename preserves the
 /// configless-gap invariant between JIT generations.
-#[cfg(any())]
 pub fn promote_prepared(dir: &Path) -> Result<bool> {
     let prepared = dir.join(PREPARED_SETTINGS_DIR);
     let source = prepared.join(SETTINGS_FILE);

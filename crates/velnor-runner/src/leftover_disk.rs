@@ -11,7 +11,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
 pub const HARD_PRESSURE_PERCENT: u8 = 90;
 pub const LIVE_JOB_NAME_PREFIX: &str = "velnor-job-";
 
@@ -144,7 +143,6 @@ pub fn orphan_job_workspace_paths(
     orphans
 }
 
-#[cfg(test)]
 pub fn disk_usage_percent_from_df(stdout: &str) -> Option<u8> {
     let line = stdout.lines().nth(1)?;
     let cols: Vec<&str> = line.split_whitespace().collect();
@@ -164,7 +162,6 @@ pub fn disk_usage_percent_from_df(stdout: &str) -> Option<u8> {
     None
 }
 
-#[cfg(any())]
 pub fn disk_usage_percent(path: &Path) -> Option<u8> {
     let probe = if path.exists() {
         path
@@ -223,7 +220,6 @@ pub fn reclaim_leftover_after_velnor(
 
 /// Hard-pressure path: at >= 90% used, reclaim leftover-after-Velnor
 /// disposable classes. Warm caches and unowned Docker stay.
-#[cfg(test)]
 pub fn reclaim_if_hard_pressure(
     usage_percent: u8,
     work_roots: &[PathBuf],
@@ -304,7 +300,6 @@ fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
 
 /// Hard-pressure reclaim that skips host Docker when the selected backend is
 /// `microvm` or selection is unknown.
-#[cfg(any())]
 pub fn reclaim_production_if_hard_pressure_for(
     backend: Option<velnor_model::ExecutionBackendKind>,
     usage_percent: u8,
@@ -320,7 +315,6 @@ pub fn reclaim_production_if_hard_pressure_for(
 
 /// Injectable hard-pressure reclaim. Host Docker listing and prune run only
 /// when the selected backend permits host Docker maintenance.
-#[cfg(test)]
 pub fn reclaim_production_if_hard_pressure_with(
     backend: Option<velnor_model::ExecutionBackendKind>,
     usage_percent: u8,

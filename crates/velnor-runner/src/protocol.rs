@@ -1520,6 +1520,31 @@ pub enum BrokerPollClass {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerPollErrorClass {
+    Authentication,
+    Forbidden,
+    MissingSession,
+    Conflict,
+    RateLimited,
+    Client,
+    Server,
+    Transport,
+}
+
+pub fn classify_broker_poll_error(status: u16) -> BrokerPollErrorClass {
+    match status {
+        401 => BrokerPollErrorClass::Authentication,
+        403 => BrokerPollErrorClass::Forbidden,
+        404 => BrokerPollErrorClass::MissingSession,
+        409 => BrokerPollErrorClass::Conflict,
+        429 => BrokerPollErrorClass::RateLimited,
+        400..=499 => BrokerPollErrorClass::Client,
+        500..=599 => BrokerPollErrorClass::Server,
+        _ => BrokerPollErrorClass::Transport,
+    }
+}
+
 pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
     if http_status == 204 {
         return BrokerPollClass::Empty;
@@ -2797,7 +2822,7 @@ pub struct EncryptionKey {
     pub value_base64: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskAgentMessage {
     #[serde(default, rename = "messageId")]
     pub message_id: i64,
