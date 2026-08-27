@@ -5629,7 +5629,7 @@ fn execute_microvm_script_job(
     let outcome =
         crate::execution::run_validated_job(&execution_file, isolation, &validated, &mut world)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(script_job_result_from_outcome(job, outcome))
+    Ok(script_job_result_from_outcome(job, &validated, outcome))
 }
 
 fn microvm_executable_steps(
@@ -5717,6 +5717,7 @@ fn microvm_executable_steps(
 
 fn script_job_result_from_outcome(
     job: &AgentJobRequestMessage,
+    plan: &crate::execution::ValidatedPlan,
     outcome: crate::execution::ExecutionOutcome,
 ) -> ScriptJobResult {
     let result = if outcome.exit_code == 0 {
@@ -5724,28 +5725,59 @@ fn script_job_result_from_outcome(
     } else {
         crate::protocol::TaskResult::Failed
     };
+    let masks = job_secret_mask_values(job);
+    let mut step_logs = vec![StepLog {
+        step_id: "microvm".into(),
+        display_name: "microvm result bridge".into(),
+        order: 1,
+        started_at: unix_now_iso8601(),
+        completed_at: unix_now_iso8601(),
+        lines: outcome.log_lines,
+        masks: masks.clone(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: outcome.exit_code,
+        skipped: false,
+        failure_ignored: false,
+        error_count: i32::from(outcome.exit_code != 0),
+        warning_count: 0,
+        notice_count: 0,
+        // Keep the aggregate bridge log, but never attach step summaries to it.
+        summary: String::new(),
+    }];
+    for (step_id, bytes) in outcome.step_summaries {
+        let (order, display_name) = plan
+            .steps
+            .iter()
+            .enumerate()
+            .find(|(_, step)| step.id == step_id)
+            .map(|(index, step)| ((index + 1) as i32, step.id.clone()))
+            .unwrap_or_else(|| (step_logs.len() as i32 + 1, step_id.clone()));
+        let now = unix_now_iso8601();
+        step_logs.push(StepLog {
+            step_id,
+            display_name,
+            order,
+            started_at: now.clone(),
+            completed_at: now,
+            lines: Vec::new(),
+            masks: masks.clone(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::from_utf8_lossy(&bytes).into_owned(),
+        });
+    }
     ScriptJobResult {
         result,
         outputs: outcome.outputs.into_iter().collect(),
         environment_url: outcome.environment_url,
-        step_logs: vec![StepLog {
-            step_id: "microvm".into(),
-            display_name: "microvm result bridge".into(),
-            order: 1,
-            started_at: unix_now_iso8601(),
-            completed_at: unix_now_iso8601(),
-            lines: outcome.log_lines,
-            masks: job_secret_mask_values(job),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: outcome.exit_code,
-            skipped: false,
-            failure_ignored: false,
-            error_count: i32::from(outcome.exit_code != 0),
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        }],
+        step_logs,
         teardown: None,
         timings: ExecutionTimings {
             first_step_ms: 0,
@@ -5836,7 +5868,71 @@ fn reject_incomplete_microvm_plan(
             "no cache action until key-to-blob transport is admitted",
         ));
     }
+    // Strict capability contract: pairs that reference the host Docker socket
+    // are refused, never silently filtered — the guest must not observe a job
+    // whose inputs were quietly rewritten.
+    reject_unguestable_steps(&plan.steps)?;
     Ok(())
+}
+
+/// Strict-capability gate over normalized steps before any guest side effect.
+///
+/// # Errors
+/// Any native/script pair referencing the host Docker socket, or an explicit
+/// guest-unsupported checkout input.
+fn reject_unguestable_steps(steps: &[crate::executor::ExecutableStep]) -> Result<()> {
+    for (index, step) in steps.iter().enumerate() {
+        let found = match step {
+            crate::executor::ExecutableStep::Native { invocation, .. } => find_socket_pair(
+                invocation
+                    .inputs
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .chain(invocation.env.iter().cloned()),
+            ),
+            crate::executor::ExecutableStep::Script(script) => {
+                find_socket_pair(script.env.iter().cloned())
+            }
+            _ => None,
+        };
+        if let Some((name, value)) = found {
+            return Err(microvm_capability_error(
+                &format!("jobs.steps[{index}].env-or-inputs[{name}]"),
+                &truncate_error_value(&value),
+                "pairs without a host Docker socket reference",
+            ));
+        }
+    }
+    // The guest checkout adapter fetches no LFS objects; an explicit opt-in is
+    // a silent behavior change, so refuse it instead of approximating.
+    for (index, step) in steps.iter().enumerate() {
+        if let crate::executor::ExecutableStep::Checkout(plan) = step {
+            if plan.lfs {
+                return Err(microvm_capability_error(
+                    &format!("jobs.steps[{index}].inputs.lfs"),
+                    "true",
+                    "false (guest checkout downloads no LFS objects)",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_socket_pair(pairs: impl IntoIterator<Item = (String, String)>) -> Option<(String, String)> {
+    pairs
+        .into_iter()
+        .find(|(name, value)| name.contains("docker.sock") || value.contains("docker.sock"))
+}
+
+fn truncate_error_value(value: &str) -> String {
+    if value.chars().count() <= 80 {
+        value.to_string()
+    } else {
+        let mut cut: String = value.chars().take(77).collect();
+        cut.push_str("...");
+        cut
+    }
 }
 
 fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
@@ -14701,5 +14797,100 @@ runs:
                 ExecutableStep::CompositeEnd { .. }
             ] if step_id == "download-ci-xtask" && actual == condition
         ));
+    }
+
+    #[test]
+    fn microvm_rejects_host_docker_socket_pairs() {
+        let step = crate::executor::ExecutableStep::Script(crate::script_step::ScriptStep {
+            id: "leak".into(),
+            display_name: String::new(),
+            script: "true".into(),
+            shell: crate::container::Shell::Bash,
+            working_directory_container: "/__w".into(),
+            env: vec![("DOCKER_HOST".into(), "unix:///var/run/docker.sock".into())],
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        });
+        let error = reject_unguestable_steps(&[step]).unwrap_err().to_string();
+        assert!(
+            error.contains("jobs.steps[0].env-or-inputs[DOCKER_HOST]"),
+            "{error}"
+        );
+        assert!(error.contains("unix:///var/run/docker.sock"), "{error}");
+        assert!(error.contains("manifest version"), "{error}");
+    }
+
+    #[test]
+    fn microvm_rejects_native_input_with_socket_value_without_silent_drop() {
+        let step = crate::executor::ExecutableStep::Native {
+            step_id: "act".into(),
+            display_name: String::new(),
+            invocation: crate::action::NativeActionInvocation {
+                git_ref: "v5".into(),
+                adapter: crate::action::NativeActionAdapter::Mise,
+                cache_kind: None,
+                source_path: None,
+                inputs: std::iter::once((
+                    "socket_path".to_string(),
+                    "/var/run/docker.sock".to_string(),
+                ))
+                .collect(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let error = reject_unguestable_steps(&[step]).unwrap_err().to_string();
+        assert!(
+            error.contains("jobs.steps[0].env-or-inputs[socket_path]"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_checkout_lfs_opt_in() {
+        let plan = crate::checkout::CheckoutPlan {
+            step_id: "co".into(),
+            display_name: "co".into(),
+            clone_url: "https://github.com/tailrocks/velnor".into(),
+            version: None,
+            destination: PathBuf::from("/__w/repo"),
+            token: None,
+            fetch_depth: None,
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: true,
+            lfs: true,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let error = reject_unguestable_steps(&[ExecutableStep::Checkout(plan)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("jobs.steps[0].inputs.lfs"), "{error}");
+    }
+
+    #[test]
+    fn microvm_admits_clean_checkout_without_socket_or_lfs() {
+        let plan = crate::checkout::CheckoutPlan {
+            step_id: "co".into(),
+            display_name: "co".into(),
+            clone_url: "https://github.com/tailrocks/velnor".into(),
+            version: Some("main".into()),
+            destination: PathBuf::from("/__w/repo"),
+            token: Some("secret-token".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        reject_unguestable_steps(&[ExecutableStep::Checkout(plan)]).unwrap();
     }
 }

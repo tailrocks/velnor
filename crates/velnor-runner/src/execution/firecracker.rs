@@ -980,6 +980,12 @@ fn drive_vsock(
             VsockMessage::CommandFile { path, bytes } => {
                 events.push(ExecutionEvent::CommandFile { path, bytes });
             }
+            VsockMessage::StepStarted { step_id } => {
+                events.push(ExecutionEvent::StepStarted { step_id });
+            }
+            VsockMessage::StepCompleted { step_id, exit_code } => {
+                events.push(ExecutionEvent::StepCompleted { step_id, exit_code });
+            }
             VsockMessage::ResultExport {
                 digest_sha256,
                 bytes,
