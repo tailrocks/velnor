@@ -580,6 +580,20 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   preserved. This reduced stale registration drift but did not create fleet
   capacity; Velnor parity remains open until a target runner is free.
 
+- 2026-08-27 forward-convergence audit: idle `velnor-daemon@dogfood.service`
+  was restarted on v0.1.240 through the signed APT path. Its old drain-stuck
+  waiter tree was terminated only after confirming no dogfood container
+  existed; six exact stale offline `velnor-dogfood-slot-*` repository
+  registrations were removed. The new controller started six isolated slot
+  processes, but broker recovery still reports stale/missing identity (`409`/
+  `404`) and needs further live-fleet proof.
+- Fixture parity run `33083180030` was dispatched from unchanged fixture
+  commit `a176d88c8c6ff0d452ea27cb32784bb8544f3a42` with `lanes=both` after
+  canceling prior unfinished runs. It remains queued because no matching
+  Velnor capacity is free; the active `velnor-tailrocks` workload was
+  preserved. The parity checkbox stays open until this run completes and its
+  compare evidence is captured.
+
 ## Non-goals
 
 - Do not remove or simplify fixture content.
