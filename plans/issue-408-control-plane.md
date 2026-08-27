@@ -668,6 +668,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   Sentry `velnor-tailrocks` scope currently reports eight active jobs, so no
   restart, drain, or process kill was used to manufacture capacity; active-job
   preservation takes precedence over release acceleration.
+- 2026-08-28 exact-candidate local verification: `mise exec -- cargo nextest
+  run --workspace` passed 1,407/1,407; `cargo fmt --all -- --check` and strict
+  workspace Clippy passed. The idle-scaling test passed in 201.256s. The
+  unchanged fixture readiness audit still exits 1 before dispatch because the
+  fixture-owned canonical workflow surface is missing required paths-filter,
+  mise, mold, cache, provenance, artifact, Docker, Pages, Renovate,
+  merge-group, and environment-injection entries; fixture content remains
+  unchanged and readiness is not marked complete.
 
 ## Non-goals
 
