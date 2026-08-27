@@ -186,6 +186,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - 2026-08-27 verification: `cargo fmt --all -- --check`, `cargo check
   -p velnor-runner --locked`, and focused `cargo nextest run -p velnor-runner
   -p velnor-control -p velnor-tools` passed (1,231/1,231).
+- 2026-08-27 fixture readiness re-run under `mise exec`: the unchanged
+  public fixture still fails its canonical-surface audit (workflow action,
+  trigger, and mise entries missing) before dispatch. Per contract, the
+  fixture was not modified; parity/smoke gates remain open pending the
+  authoritative fixture surface being current.
   healthy silence, CLI presence, and tolerant metrics parsing.
 - Added controller alert rate/window ownership: three sustained zero-job cycles
   over the 5% CPU budget emit `idle_high_cpu`; repeated no-op observations emit
