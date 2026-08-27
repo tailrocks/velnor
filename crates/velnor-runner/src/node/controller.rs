@@ -1539,7 +1539,15 @@ fn maybe_spawn_job(
         .arg("--scope")
         .arg(&args.scope)
         .spawn()?;
-    cleanup::write_owned_pid(&args.state_dir, job_id, generation, child.id())?;
+    if let Err(error) = cleanup::write_owned_pid(&args.state_dir, job_id, generation, child.id()) {
+        let mut child = child;
+        let kill_result = child.kill();
+        let wait_result = child.wait();
+        let cleanup_result = cleanup::remove_owned(&args.state_dir, job_id, generation);
+        return Err(error.context(format!(
+            "failed to publish ownership marker for job {job_id}; child cleanup: kill={kill_result:?}, wait={wait_result:?}, marker={cleanup_result:?}"
+        )));
+    }
     jobs.insert(key, child);
     Ok(())
 }
