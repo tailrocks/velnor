@@ -373,6 +373,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `ci-required`; no bypass or direct publication was performed. The source
   checkout fix must be installed before the Velnor PR lane can pass, leaving
   signed APT publication externally gated.
+- The Velnor checkout path now handles GitHub pull requests structurally:
+  self-checkout selects the advertised `refs/pull/<number>/{merge,head}` ref
+  instead of fetching the ephemeral `github.sha`; push/tag and explicit
+  checkout refs retain exact-SHA behavior. Three focused regression tests were
+  added, and 40 checkout-related nextest tests pass. This fix requires a new
+  signed release before the Sentry or APT Velnor lane can consume it.
 
 ## Non-goals
 
