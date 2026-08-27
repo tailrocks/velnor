@@ -1201,13 +1201,15 @@ fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow
         }
         // A ready-slot waiter is spawned before GitHub assigns a job, so its
         // durable ownership marker is keyed by the waiter identity rather
-        // than the later journal job id. Check both markers: otherwise a
-        // controller restart sees the live waiter as an orphan immediately
-        // after it accepts a job and reclaims the slot underneath it.
+        // than the later journal job id. Check both markers independently:
+        // a stale job marker must not suppress a live waiter marker.
         let waiter_id = format!("wait-{}", job.slot_id.0);
-        let worker_live = cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
-            .or_else(|| cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0))
+        let job_worker_live =
+            cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
+                .is_some_and(prove::pid_is_alive);
+        let waiter_live = cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0)
             .is_some_and(prove::pid_is_alive);
+        let worker_live = job_worker_live || waiter_live;
         if worker_live {
             continue;
         }
@@ -1762,6 +1764,114 @@ mod tests {
             Generation(2),
         ));
     }
+
+    #[test]
+    fn live_waiter_marker_is_not_hidden_by_stale_job_marker() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-orphan-reclaim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut stale_worker = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stale_pid = stale_worker.id();
+        assert!(stale_worker.wait().unwrap().success());
+        assert!(!prove::pid_is_alive(stale_pid));
+
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ReadyAttempt {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Assigned {
+                slot_id: SlotId("velnor-1".to_owned()),
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::JobOwned {
+                job_id: JobId("job-1".to_owned()),
+                slot_id: SlotId("velnor-1".to_owned()),
+                attempt: 1,
+                generation: Generation::INITIAL,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_234,
+            },
+            Event::JobStarted {
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        cleanup::write_owned_pid(&dir, "job-1", Generation::INITIAL.0, stale_pid).unwrap();
+        cleanup::write_owned_pid(
+            &dir,
+            "wait-velnor-1",
+            Generation::INITIAL.0,
+            std::process::id(),
+        )
+        .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        reclaim_orphaned_jobs(&args, &mut journal).unwrap();
+
+        let state = journal.load_state().unwrap();
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.job_id == JobId("job-1".to_owned()))
+            .unwrap();
+        assert_eq!(job.phase, ActorPhase::Running);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
         let transport_guard = crate::test_support::github_http_transport_env().await;
