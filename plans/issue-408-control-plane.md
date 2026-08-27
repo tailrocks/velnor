@@ -687,6 +687,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `33100587474` has passed validation and is running the GitHub lane; guest
   image run `33100586739` is still running both architecture jobs. These
   checks are not yet final evidence for merge.
+- 2026-08-28 read-only Sentry inspection using explicit
+  `~/.ssh/velnor_sentry`: host binary remains `0.1.242`; the isolated
+  `velnor-sentry` scope reports `jobs=0`, `idle_slots=5`, `waiter_processes=0`,
+  `job_processes=0`, ready health, and zero containers, but its current
+  controller metrics show `broker.cpu_user_us=2782129311`, seven broker
+  errors (`401`×5, `404`×2), 22 registration-loss events, and
+  `jit.create_attempts=30`. This is authoritative pre-candidate churn
+  evidence; no restart, drain, upgrade, or registration mutation was made.
 
 ## Non-goals
 
