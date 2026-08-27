@@ -420,6 +420,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   completed successfully with all builds, package signatures, coherent release
   assembly, and attestations green. The signed release is ready for the next
   standard APT package-update run.
+- APT package-update run `33058766810` correctly fetched and hashed the signed
+  `v0.1.237` packages but rejected their provenance: the release workflow had
+  been dispatched from the work branch, while the immutable release record
+  names `refs/tags/v0.1.237`. The package PR was not mutated. The release will
+  be rerun from the tag ref so attestations bind to the record's exact source
+  ref before APT publication is retried.
 
 ## Non-goals
 
