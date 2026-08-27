@@ -593,6 +593,14 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("GitHub PAT required for JIT config: pass --pat"))?,
         )
     };
+    if let Some(pat) = pat {
+        reap_pending_jit_registration(&dir, &scope, pat).await?;
+    } else if pending_jit_registration_exists(&dir) {
+        bail!(
+            "pending JIT registration at {} requires a GitHub PAT before dry-run configuration",
+            dir.display()
+        );
+    }
     let runner_group_id = match args.pool_name.as_deref() {
         Some(_) if args.dry_run && args.pool_id.is_some() => args.pool_id.expect("checked above"),
         Some(pool_name) => {
@@ -623,6 +631,13 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         None
     } else {
         let pat = pat.expect("live JIT config requires PAT");
+        write_pending_jit_registration(
+            &dir,
+            &PendingJitRegistration {
+                agent_name: agent_name.clone(),
+                runner_id: None,
+            },
+        )?;
         let jit_client = RegistrationClient::new()?;
         let response = match jit_client
             .generate_jit_config(&scope, pat, &jit_request)
@@ -635,19 +650,57 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
                     "JIT 409: deleting orphaned runner '{}' and retrying",
                     agent_name
                 );
-                delete_orphaned_jit_runner_by_name(&scope, pat, &agent_name).await?;
-                jit_client
+                if let Err(error) =
+                    delete_orphaned_jit_runner_by_name(&scope, pat, &agent_name).await
+                {
+                    return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+                }
+                match jit_client
                     .generate_jit_config(&scope, pat, &jit_request)
-                    .await?
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+                    }
+                }
             }
-            Err(e) => return Err(e),
+            Err(error) => {
+                return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+            }
         };
-        Some((
-            response.runner,
-            decode_jit_config(&response.encoded_jit_config)?,
-        ))
+        let runner = response.runner;
+        if let Err(error) = write_pending_jit_registration(
+            &dir,
+            &PendingJitRegistration {
+                agent_name: agent_name.clone(),
+                runner_id: Some(runner.id),
+            },
+        ) {
+            eprintln!(
+                "warning: could not persist JIT runner id {}; name-only recovery marker remains: {error:#}",
+                runner.id
+            );
+        }
+        let decoded = match decode_jit_config(&response.encoded_jit_config) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+            }
+        };
+        Some((runner, decoded))
     };
 
+    let credentials = match &jit_config {
+        Some((_, config)) => match stored_jit_credentials(config) {
+            Ok(credentials) => Some(credentials),
+            Err(error) => {
+                let pat = pat.expect("live JIT config has a PAT");
+                return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+            }
+        },
+        None => None,
+    };
     let stored = StoredRunnerConfig {
         settings: RunnerSettings {
             github_url: jit_config
@@ -677,28 +730,35 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
             agent_name: jit_config
                 .as_ref()
                 .and_then(|(_, config)| config.settings.agent_name.clone())
-                .unwrap_or(agent_name),
+                .unwrap_or_else(|| agent_name.clone()),
             labels,
             use_v2_flow: jit_config
                 .as_ref()
                 .is_some_and(|(_, config)| config.settings.use_v2_flow),
-            ephemeral: jit_config.as_ref().is_some(),
+            ephemeral: jit_config.is_some(),
             disable_update: true,
         },
-        credentials: match &jit_config {
-            Some((_, config)) => Some(stored_jit_credentials(config)?),
-            None => None,
-        },
+        credentials,
     };
     if jit_config.is_some()
         && (!stored.settings.use_v2_flow || stored.settings.server_url_v2.is_none())
     {
-        bail!(
+        let error = anyhow::anyhow!(
             "GitHub JIT config did not return required V2 runner settings (UseV2Flow/ServerUrlV2); Velnor uses the hosted GitHub broker/run-service protocol only"
         );
+        let pat = pat.expect("live JIT config has a PAT");
+        return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
     }
 
-    config::save(&dir, &stored)?;
+    if let Err(error) = config::save(&dir, &stored) {
+        if let Some(pat) = pat {
+            return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+        }
+        return Err(error);
+    }
+    if let Err(error) = clear_pending_jit_registration(&dir) {
+        eprintln!("warning: saved runner config but could not clear pending JIT marker: {error:#}");
+    }
     println!("Wrote local runner config to {}", dir.display());
     println!("GitHub scope API: {}", scope.api_base_url);
     println!("JIT config endpoint: {}", scope.jit_config_url);
@@ -719,6 +779,89 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn pending_jit_registration_path(dir: &Path) -> PathBuf {
+    dir.join(PENDING_JIT_REGISTRATION_FILE)
+}
+
+fn pending_jit_registration_exists(dir: &Path) -> bool {
+    pending_jit_registration_path(dir).is_file()
+}
+
+fn write_pending_jit_registration(dir: &Path, pending: &PendingJitRegistration) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let path = pending_jit_registration_path(dir);
+    let tmp = dir.join(format!("{PENDING_JIT_REGISTRATION_FILE}.tmp"));
+    fs::write(&tmp, serde_json::to_vec(pending)?)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&tmp)?.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&tmp, permissions)?;
+    }
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
+fn read_pending_jit_registration(dir: &Path) -> Result<Option<PendingJitRegistration>> {
+    let path = pending_jit_registration_path(dir);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes =
+        fs::read(&path).with_context(|| format!("read pending JIT marker {}", path.display()))?;
+    let pending = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse pending JIT marker {}", path.display()))?;
+    Ok(Some(pending))
+}
+
+fn clear_pending_jit_registration(dir: &Path) -> Result<()> {
+    match fs::remove_file(pending_jit_registration_path(dir)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn reap_pending_jit_registration(dir: &Path, scope: &GitHubScope, pat: &str) -> Result<()> {
+    let Some(pending) = read_pending_jit_registration(dir)? else {
+        return Ok(());
+    };
+    if pending.agent_name.is_empty() {
+        bail!("pending JIT marker has an empty runner name");
+    }
+
+    if let Some(runner_id) = pending.runner_id {
+        let committed_id = config::load(dir)
+            .ok()
+            .and_then(|stored| stored.settings.agent_id)
+            .is_some_and(|agent_id| agent_id == runner_id);
+        if committed_id {
+            clear_pending_jit_registration(dir)?;
+            return Ok(());
+        }
+        RegistrationClient::new()?
+            .delete_runner(scope, pat, runner_id)
+            .await
+            .with_context(|| format!("reap pending JIT runner id {runner_id}"))?;
+    }
+
+    delete_orphaned_jit_runner_by_name(scope, pat, &pending.agent_name).await?;
+    clear_pending_jit_registration(dir)?;
+    Ok(())
+}
+
+async fn cleanup_failed_jit_registration(
+    dir: &Path,
+    scope: &GitHubScope,
+    pat: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match reap_pending_jit_registration(dir, scope, pat).await {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!("cleanup uncertain JIT registration: {cleanup:#}")),
+    }
 }
 
 fn resolve_runner_group_id(
@@ -790,20 +933,30 @@ pub async fn delete_orphaned_jit_runner_by_name(
     agent_name: &str,
 ) -> Result<()> {
     let client = RegistrationClient::new()?;
-    let agents = client.list_runners(scope, pat).await?;
-    let orphan = agents
-        .iter()
-        .find(|a| a.name.as_deref() == Some(agent_name));
-    if let Some(orphan) = orphan {
-        let id = orphan
-            .id
-            .ok_or_else(|| anyhow::anyhow!("orphaned runner has no id"))?;
-        delete_runner_keeping_busy_identity(scope, pat, id, None)
-            .await
-            .with_context(|| format!("delete orphaned JIT runner '{agent_name}' id {id}"))?;
-        println!("Deleted orphaned JIT runner '{agent_name}' id {id} before retry.");
+    for attempt in 0..3 {
+        let agents = client.list_runners(scope, pat).await?;
+        let matches = agents
+            .iter()
+            .filter(|agent| agent.name.as_deref() == Some(agent_name))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Ok(());
+        }
+        for orphan in matches {
+            let id = orphan
+                .id
+                .ok_or_else(|| anyhow::anyhow!("orphaned runner has no id"))?;
+            client
+                .delete_runner(scope, pat, id)
+                .await
+                .with_context(|| format!("delete orphaned JIT runner '{agent_name}' id {id}"))?;
+            println!("Deleted orphaned JIT runner '{agent_name}' id {id} before retry.");
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
-    Ok(())
+    bail!("orphaned JIT runner '{agent_name}' remains after bounded cleanup")
 }
 
 fn stored_jit_credentials(config: &crate::protocol::DecodedJitConfig) -> Result<StoredCredentials> {
@@ -1449,6 +1602,12 @@ fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
     }
 }
 
+async fn wait_for_drain_signal() {
+    while !draining() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn start_drain_listener(config_base: PathBuf) {
     tokio::spawn(async move {
         let mut term =
@@ -1513,6 +1672,12 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // errors. The packaged long-running daemon (url + not once + not dry-run)
     // must never give up — every failure is retried with backoff forever.
     let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+
+    if supervised {
+        if let Ok(config_base) = daemon_config_dir(&args) {
+            start_drain_listener(config_base);
+        }
+    }
 
     // Plan 066 step 4: open/migration failure of the operational store is a
     // daemon readiness failure. Supervised mode surfaces it through the
@@ -1900,6 +2065,13 @@ pub(crate) async fn run_daemon_slot(
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         return run(slot_args).await;
+    }
+
+    // The controller launches this loop in a separate job-worker process. A
+    // signal listener in the controller alone cannot cancel that process's
+    // acquire retry; install one at the actual runner boundary.
+    if !args.once {
+        start_drain_listener(config_base.clone());
     }
 
     let mut cycle = 1_u64;
@@ -2515,6 +2687,30 @@ pub(crate) async fn jit_configure_one_slot(
     }
     let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slot_count)?;
     configure(configure_args).await
+}
+
+/// Remove a JIT runner whose POST may have succeeded after its caller timed
+/// out before receiving or persisting the response. The name is deterministic
+/// per daemon slot, so cleanup cannot target another slot's registration.
+pub(crate) async fn cleanup_orphaned_jit_one_slot(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Result<()> {
+    validate_daemon_slot_index(slot_index, slot_count)?;
+    let Some(url) = args.url.as_deref() else {
+        return Ok(());
+    };
+    let Some(pat) = args.pat.as_deref() else {
+        return Ok(());
+    };
+    let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slot_count)?;
+    let Some(agent_name) = configure_args.name.as_deref() else {
+        return Ok(());
+    };
+    let scope = GitHubScope::parse(url)?;
+    delete_orphaned_jit_runner_by_name(&scope, pat, agent_name).await
 }
 
 async fn cleanup_configured_daemon_slots(
@@ -3915,15 +4111,49 @@ async fn handle_v2_message(
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
     let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
-    let job_value = run_service
+    let acquire_result = tokio::select! {
+        result = run_service
         .acquire_job(
             run_service_url,
             &reference.runner_request_id,
             std::env::consts::OS,
             reference.billing_owner_id.as_deref(),
         )
-        .instrument(pickup_span)
-        .await?;
+        .instrument(pickup_span) => result,
+        _ = wait_for_drain_signal() => {
+            forensics.lifecycle(&format!(
+                "acquire canceled by daemon drain request={}",
+                reference.runner_request_id
+            ));
+            return Ok(V2MessageAction::Shutdown);
+        }
+    };
+    let job_value = match acquire_result {
+        Ok(job_value) => job_value,
+        Err(error) => {
+            if !is_transient_acquire_error(&error) {
+                forensics.broker(&format!(
+                    "acquire ERROR request={} permanent; closing session: {error:#}",
+                    reference.runner_request_id
+                ));
+                return Err(error).context("permanent run-service acquire failure");
+            }
+            // Match actions/runner: after transient acquire retries are
+            // exhausted, keep the broker session and runner registration.
+            // The request may have committed before the failed response;
+            // recycling the JIT identity here amplifies GitHub outages and
+            // can strand the assigned job as runner-lost.
+            forensics.broker(&format!(
+                "acquire ERROR request={} session retained: {error:#}",
+                reference.runner_request_id
+            ));
+            eprintln!(
+                "Run-service acquire failed for request {}; retaining broker session and runner registration: {error:#}",
+                reference.runner_request_id
+            );
+            return Ok(V2MessageAction::None);
+        }
+    };
     let job_value = match job_value {
         AcquireJobOutcome::Acquired(value) => value,
         AcquireJobOutcome::Skipped {
@@ -12764,6 +12994,56 @@ jobs:
             message_id: 10,
             message_type: "JobCancellation".into(),
             body: serde_json::json!({ "jobId": "job-123" }).to_string(),
+            iv_base64: None,
+        };
+
+        let action = handle_v2_message(
+            &broker,
+            &run_service,
+            "session",
+            &stored,
+            Path::new("/config"),
+            &run_args(false, false, false),
+            true,
+            "velnor",
+            &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
+            &mut prewarm_trigger,
+            message,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(action, V2MessageAction::None);
+    }
+
+    #[tokio::test]
+    async fn transient_acquire_failure_keeps_broker_session_alive() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Actions outage"))
+            .expect(5)
+            .mount(&server)
+            .await;
+
+        let broker =
+            BrokerClient::new("https://broker.actions.githubusercontent.com/", "token").unwrap();
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let stored = stored_config();
+        let mut prewarm_trigger = None;
+        let message = TaskAgentMessage {
+            message_id: 11,
+            message_type: RUNNER_JOB_REQUEST.into(),
+            body: serde_json::json!({
+                "runnerRequestId": "request-1",
+                "shouldAcknowledge": false,
+                "runServiceUrl": format!("{}/run/jobs/123", server.uri())
+            })
+            .to_string(),
             iv_base64: None,
         };
 

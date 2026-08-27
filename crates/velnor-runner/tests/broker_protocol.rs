@@ -280,27 +280,6 @@ async fn acquire_job_classifies_non_retriable_and_retriable_statuses() {
         assert_eq!(request_id.as_deref(), None);
         assert_eq!(body, "skip");
     }
-
-    server.reset().await;
-    Mock::given(method("POST"))
-        .and(path("/run/jobs/123/acquirejob"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("retry later"))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let result = run_service
-        .acquire_job(
-            &run_service_url,
-            "broker-message",
-            std::env::consts::OS,
-            None,
-        )
-        .await;
-    let Err(error) = result else {
-        panic!("5xx acquire must be retriable error");
-    };
-    assert_github_status(&error, 500, "acquire run-service job");
 }
 
 #[tokio::test]

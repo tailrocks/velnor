@@ -123,6 +123,8 @@ fn slot_kill_drops_one_unit_of_capacity() {
                 "iso",
                 "--slot-index",
                 &index.to_string(),
+                "--generation",
+                "1",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::from(std::fs::File::create(&out).unwrap()))
@@ -874,6 +876,8 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
             "--scope",
             "proof",
             "--slot-index",
+            "1",
+            "--generation",
             "1",
         ])
         .stdin(Stdio::null())

@@ -151,6 +151,10 @@ Units (all shipped by the package):
   **never exits** on registration/credential/network failures (it retries
   forever with backoff and shows the precise problem in `systemctl status`,
   e.g. an unexpanded `${...}` token placeholder).
+- `velnor-controller@<name>.service` — `Type=notify` with `WatchdogSec=30`.
+  Its remote GitHub observation and registration work share a 15-second
+  per-cycle budget, leaving margin for local journal/process supervision;
+  timed-out remote work preserves local state and retries on a later cycle.
 - `velnor-doctor.timer` / `velnor-doctor@<name>.timer` — every 10 minutes,
   lists the daemon's registered runners on GitHub and **fails loudly when
   none are online** (`velnor-runner doctor --url ... --name ... --slots N`).
@@ -177,7 +181,8 @@ Units (all shipped by the package):
   drift exits nonzero and stops the remaining organizations. Enable with
   `sudo systemctl enable --now velnor-fleet-policy-audit.timer`. Host
   enablement is an operator action performed only after policy cutover
-  approval (not yet packaged; pending velnor-tools deb wiring).
+  approval. The binary is shipped by the signed `velnor-runner` Debian package
+  at `/usr/bin/velnor-tools`.
 
 Persistent stores use `/var/cache/velnor/v1/<trust-scope>/...`; durable state,
 runtime leases, and logs use `/var/lib/velnor`, `/run/velnor`, and

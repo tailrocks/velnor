@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 
 use serde::{Deserialize, Serialize};
-use velnor_model::ExecutionBackendKind;
+use velnor_model::{ExecutionBackendKind, Generation, SlotId};
 
 use crate::protocol::{
     github_json_request, github_json_request_with_rate_limit, GitHubScope, ListedWorkflowJob,
@@ -103,12 +103,85 @@ pub fn observe_session(child: Option<&mut Child>, pid: Option<u32>) -> bool {
     pid.is_some_and(pid_is_alive)
 }
 
+/// Session proof for a controller-recovered slot. A persisted PID is accepted
+/// only when its procfs command line still identifies the same slot actor.
+#[must_use]
+pub fn observe_slot_session(
+    child: Option<&mut Child>,
+    pid: Option<u32>,
+    state_dir: &std::path::Path,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    if let Some(child) = child {
+        if child.try_wait().ok().flatten().is_none() {
+            return true;
+        }
+    }
+    pid.is_some_and(|pid| slot_process_is_alive(pid, state_dir, slot_id, generation))
+}
+
 /// SIGNAL 0 existence check. Does not deliver a signal.
 #[must_use]
 pub fn pid_is_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) only tests whether `pid` exists.
     let result = unsafe { libc::kill(pid as i32, 0) };
     result == 0
+}
+
+/// Verify that a persisted PID is the slot actor Velnor launched, not merely
+/// an unrelated process that reused the number after a controller restart.
+/// Linux exposes the child argv through procfs; other targets retain the old
+/// existence-only behavior because they do not provide an equivalent stable
+/// argv interface here.
+#[must_use]
+pub fn slot_process_is_alive(
+    pid: u32,
+    state_dir: &std::path::Path,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    if !pid_is_alive(pid) {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
+            return false;
+        };
+        let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(_) => return false,
+        };
+        let args: Vec<&[u8]> = cmdline
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        let state_dir = state_dir.to_string_lossy();
+        let generation = generation.0.to_string();
+        let expected = [
+            b"slot".as_slice(),
+            b"--state-dir".as_slice(),
+            state_dir.as_bytes(),
+            b"--scope".as_slice(),
+            scope.as_bytes(),
+            b"--slot-index".as_slice(),
+            index.as_bytes(),
+            b"--generation".as_slice(),
+            generation.as_bytes(),
+        ];
+        args.get(1..).is_some_and(|args| {
+            args.windows(expected.len())
+                .any(|window| window == expected)
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (state_dir, slot_id, generation);
+        pid_is_alive(pid)
+    }
 }
 
 /// Persist evidence and desired policy. Never a boolean Ready stamp.

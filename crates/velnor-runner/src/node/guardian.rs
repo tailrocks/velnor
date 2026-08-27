@@ -8,6 +8,7 @@ use velnor_control::journal::{Event, Journal};
 use velnor_model::{ActorPhase, Generation, SlotId};
 
 use super::health::HealthServer;
+use super::prove;
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
 /// Stale heartbeat threshold used until measured under pressure.
@@ -62,7 +63,14 @@ fn supervise_once(
         if matches!(slot.phase, ActorPhase::Fenced | ActorPhase::Quarantined) {
             continue;
         }
-        let pid_dead = slot.pid.is_some_and(|pid| !pid_is_alive(pid));
+        let pid_dead = slot.pid.is_some_and(|pid| {
+            !prove::slot_process_is_alive(
+                pid,
+                journal.path().parent().unwrap_or(journal.path()),
+                &slot.slot_id,
+                slot.generation,
+            )
+        });
         let heartbeat_stale =
             slot.heartbeat_unix > 0 && now.saturating_sub(slot.heartbeat_unix) > stale.as_secs();
         if pid_dead || heartbeat_stale {
@@ -75,12 +83,4 @@ fn supervise_once(
     let health = journal.materialized_state()?.health();
     server.publish(&health)?;
     Ok(LocalCycle::finished())
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    // SIGNAL 0: existence check, no delivery. Guardian never signals jobs.
-    // SAFETY: kill(pid, 0) only tests whether `pid` exists; it does not
-    // change the target's state.
-    let result = unsafe { libc::kill(pid as i32, 0) };
-    result == 0
 }
