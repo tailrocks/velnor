@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T16:43:32Z
+### Current baseline — 2026-08-27T16:49:06Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `5fda09d429b10be003791ffd464c9566dacb2ccb`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 146 commits ahead
+  `fe6aa2e7a0f741220917c373fa4342fc915f4f53`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 149 commits ahead
   of its remote-tracking counterpart.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -285,6 +285,11 @@ evidence and requires a fresh baseline.
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
   absent. Root campaign progress remains 4/94 done; 039 remains in progress.
+- Branch integration: all six current remote branch tips with unique commits
+  are ancestors of this branch; immutable recovery refs for all local and
+  remote tips remain under `refs/backup/branch-sync/`. The local-only
+  Firecracker safety fork was not merged wholesale because it conflicts with
+  the active guest/runtime architecture.
 - Current-SHA local evidence: `rtk cargo fmt --check` exit 0 and
   `rtk cargo nextest run -p velnor-model -p velnor-control -p velnor-runner`
   exit 0 (1,251 passed) at `8a36c4a`; after the ledger-only commit,
