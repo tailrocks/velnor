@@ -336,6 +336,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `tailrocks/velnor-apt#33028868347` is pending behind the repository-wide
   `cancel-in-progress: false` concurrency group. No APT or Sentry mutation is
   claimed until that group is clean.
+- Non-mutating fixture readiness was rerun after the signed release. It still
+  fails against the unchanged fixture: the recorded public run
+  `32935294686` is failed, and the audit reports missing canonical paths,
+  mise/mold/cache/provenance/artifact/Docker/Pages/Renovate/merge-group and
+  environment-injection surfaces. The fixture remains unmodified; fixture
+  readiness, smoke, and parity gates stay open.
 
 ## Non-goals
 
