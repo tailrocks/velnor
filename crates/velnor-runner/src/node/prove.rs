@@ -171,10 +171,10 @@ pub fn slot_process_is_alive(
             b"--generation".as_slice(),
             generation.as_bytes(),
         ];
-        return args.get(1..).is_some_and(|args| {
+        args.get(1..).is_some_and(|args| {
             args.windows(expected.len())
                 .any(|window| window == expected)
-        });
+        })
     }
 
     #[cfg(not(target_os = "linux"))]
