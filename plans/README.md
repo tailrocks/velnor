@@ -37,6 +37,7 @@ stale working files were removed; Git history preserves delivery evidence. Plan
 |---|---|---|
 | [`goal-execution`](goal-execution/README.md) | Durable Codex `/goal` and Claude Code controller for every current item | Current orchestration playbook |
 | [`fleet-operations`](fleet-operations/README.md) | Organization runner-group admission, routing, and drift control | Current; Plan 039 TODO |
+| [`production-readiness`](production-readiness/README.md) | Velnor, ChainArgos, Jackin, and Sentry production-readiness campaign | Current; checkbox-complete only |
 | [`velnorctl-migration`](velnorctl-migration/README.md) | Replace every `velnor-runner` product, binary, package, and command surface with `velnorctl` | Planned; Plan 063 first |
 
 The migration category contains one shared-plan index plus

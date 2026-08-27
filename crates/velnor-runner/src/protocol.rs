@@ -18,8 +18,9 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fmt,
+    path::PathBuf,
     sync::OnceLock,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 use uuid::Uuid;
@@ -34,6 +35,121 @@ pub fn velnor_runner_display() -> String {
     format!("Velnor Runner/{VELNOR_VERSION} (protocol: {RUNNER_VERSION})")
 }
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
+const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
+const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
+const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
+const PRIVATE_CURL_STALE_AFTER: Duration = Duration::from_secs(600);
+const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
+const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
+const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
+
+/// Private curl inputs are removed even when an async caller is cancelled.
+/// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
+/// running with secrets or mutate GitHub after its owning operation ended.
+struct PrivateTempFiles {
+    dir: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
+impl PrivateTempFiles {
+    fn new(_prefix: &str) -> Result<Self> {
+        let dir = std::env::temp_dir().join("velnor-curl");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create private curl directory {}", dir.display()))?;
+        let mut permissions = std::fs::metadata(&dir)
+            .with_context(|| format!("stat private curl directory {}", dir.display()))?
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&dir, permissions)
+            .with_context(|| format!("protect private curl directory {}", dir.display()))?;
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let stale = entry.file_type().is_ok_and(|file_type| file_type.is_file())
+                    && entry.file_name().to_string_lossy().starts_with("velnor-")
+                    && entry
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                        .is_some_and(|age| age > PRIVATE_CURL_STALE_AFTER);
+                if stale {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+
+        Ok(Self {
+            dir,
+            paths: Vec::new(),
+        })
+    }
+
+    fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = self
+            .dir
+            .join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
+        self.paths.push(path.clone());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("create private curl file {}", path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("write private curl file {}", path.display()))?;
+        Ok(path)
+    }
+}
+
+impl Drop for PrivateTempFiles {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn run_private_curl(
+    prefix: &str,
+    config: &str,
+    body: Option<&[u8]>,
+    url: &str,
+    capture_headers: bool,
+) -> Result<(std::process::Output, Vec<u8>)> {
+    let mut files = PrivateTempFiles::new(prefix)?;
+    let config_path = files.write(prefix, "cfg", config.as_bytes())?;
+    let body_path = body
+        .map(|body| files.write(prefix, "body", body))
+        .transpose()?;
+    let headers_path = capture_headers
+        // Header output is not secret, but keep it mode-0600 and clean it via
+        // the same guard so cancellation cannot leave request metadata behind.
+        .then(|| files.write(prefix, "headers", &[]))
+        .transpose()?;
+
+    let mut command = tokio::process::Command::new("curl");
+    command.kill_on_drop(true).arg("--config").arg(&config_path);
+    if let Some(path) = &headers_path {
+        command.arg("--dump-header").arg(path);
+    }
+    if let Some(path) = &body_path {
+        command.arg("--data").arg(format!("@{}", path.display()));
+    }
+    let output = command.arg(url).output().await.context("run curl")?;
+    let headers = headers_path
+        .as_deref()
+        .map(std::fs::read)
+        .transpose()
+        .context("read curl response headers")?
+        .unwrap_or_default();
+    Ok((output, headers))
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
@@ -743,48 +859,18 @@ impl OAuthClient {
         let url = credentials.authorization_url.clone();
         let ua = RUNNER_USER_AGENT.to_string();
 
-        let output = tokio::task::spawn_blocking(move || {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let tmp = std::env::temp_dir();
-            let cfg_path = tmp.join(format!("velnor-oauth-{}.cfg", uuid::Uuid::new_v4()));
-            let body_path = tmp.join(format!("velnor-oauth-{}.body", uuid::Uuid::new_v4()));
-            let cfg = format!(
-                "header = \"User-Agent: {ua}\"\n\
-                 header = \"Accept: application/json\"\n\
-                 header = \"Content-Type: application/x-www-form-urlencoded\"\n\
-                 request = POST\n\
-                 silent\n\
-                 write-out = \"\\n%{{http_code}}\"\n"
-            );
-            let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(p)?;
-                f.write_all(c)
-            };
-            write_0600(&cfg_path, cfg.as_bytes())?;
-            if let Err(e) = write_0600(&body_path, body.as_bytes()) {
-                let _ = std::fs::remove_file(&cfg_path);
-                return Err(e);
-            }
-            let out = std::process::Command::new("curl")
-                .arg("--config")
-                .arg(&cfg_path)
-                .arg("--data")
-                .arg(format!("@{}", body_path.display()))
-                .arg(&url)
-                .output();
-            let _ = std::fs::remove_file(&cfg_path);
-            let _ = std::fs::remove_file(&body_path);
-            out
-        })
-        .await
-        .context("spawn_blocking curl oauth")?
-        .context("run curl oauth")?;
+        let cfg = format!(
+            "header = \"User-Agent: {ua}\"\n\
+             header = \"Accept: application/json\"\n\
+             header = \"Content-Type: application/x-www-form-urlencoded\"\n\
+             request = POST\n\
+             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let (output, _) =
+            run_private_curl("velnor-oauth", &cfg, Some(body.as_bytes()), &url, false).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (text, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
@@ -884,7 +970,7 @@ impl RegistrationClient {
             .use_native_tls()
             .tcp_keepalive(None)
             .connection_verbose(false)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(Duration::from_secs(10))
             .build()
             .context("build GitHub runner HTTP client")?;
         Ok(Self { http })
@@ -896,10 +982,10 @@ impl RegistrationClient {
         pat: &str,
         request: &GitHubJitConfigRequest,
     ) -> Result<GitHubJitConfigResponse> {
-        // Use curl for runner registration. GitHub's infrastructure applies TLS-fingerprint-based
-        // throttling that causes reqwest/hyper connections to hang for 120+ seconds without a
-        // response, while libcurl (LibreSSL) succeeds instantly. Using curl as a subprocess is
-        // the reliable workaround.
+        // Use curl for runner registration. GitHub's infrastructure applies
+        // TLS-fingerprint-based throttling to reqwest/hyper connections while
+        // libcurl (LibreSSL) succeeds reliably. The subprocess is time-bounded
+        // because registration runs inside a watchdog-supervised controller.
         let url = scope.jit_config_url.to_string();
         let body = serde_json::to_string(request).context("serialize JIT config request")?;
         let pat = pat.to_string();
@@ -911,7 +997,8 @@ impl RegistrationClient {
             if attempt > 0 {
                 let backoff = retry_delay
                     .take()
-                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5));
+                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5))
+                    .min(GITHUB_RETRY_SLEEP_MAX);
                 eprintln!(
                     "JIT config error (attempt {}/3), retrying in {}s",
                     attempt,
@@ -919,63 +1006,27 @@ impl RegistrationClient {
                 );
                 tokio::time::sleep(backoff).await;
             }
-            let url2 = url.clone();
-            let body2 = body.clone();
-            let pat2 = pat.clone();
-            let ua2 = ua.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                use std::os::unix::fs::OpenOptionsExt;
-                let tmp = std::env::temp_dir();
-                let cfg_path = tmp.join(format!("velnor-jit-{}.cfg", uuid::Uuid::new_v4()));
-                let body_path = tmp.join(format!("velnor-jit-{}.body", uuid::Uuid::new_v4()));
-                let headers_path = tmp.join(format!("velnor-jit-{}.headers", uuid::Uuid::new_v4()));
-                let cfg = format!(
-                    "header = \"User-Agent: {ua2}\"\n\
-                     header = \"Authorization: Bearer {pat2}\"\n\
-                     header = \"Accept: application/vnd.github+json\"\n\
-                     header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-                     header = \"Content-Type: application/json\"\n\
-                     request = POST\n\
-                     location\n\
-                     silent\n\
-                     write-out = \"\\n%{{http_code}}\"\n"
-                );
-                let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
-                    use std::io::Write;
-                    let mut f = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .mode(0o600)
-                        .open(p)?;
-                    f.write_all(c)
-                };
-                write_0600(&cfg_path, cfg.as_bytes())?;
-                if let Err(e) = write_0600(&body_path, body2.as_bytes()) {
-                    let _ = std::fs::remove_file(&cfg_path);
-                    return Err(e);
-                }
-                let out = std::process::Command::new("curl")
-                    .arg("--config")
-                    .arg(&cfg_path)
-                    .arg("--dump-header")
-                    .arg(&headers_path)
-                    .arg("--data")
-                    .arg(format!("@{}", body_path.display()))
-                    .arg(&url2)
-                    .output();
-                let _ = std::fs::remove_file(&cfg_path);
-                let _ = std::fs::remove_file(&body_path);
-                let headers = std::fs::read(&headers_path).unwrap_or_default();
-                let _ = std::fs::remove_file(&headers_path);
-                out.map(|output| (output, headers))
-            })
-            .await
-            .context("spawn_blocking curl")?;
+            let cfg = format!(
+                "header = \"User-Agent: {ua}\"\n\
+                 header = \"Authorization: Bearer {pat}\"\n\
+                 header = \"Accept: application/vnd.github+json\"\n\
+                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+                 header = \"Content-Type: application/json\"\n\
+                 request = POST\n\
+                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
+                 location\n\
+                 silent\n\
+                 write-out = \"\\n%{{http_code}}\"\n"
+            );
+            let result =
+                run_private_curl("velnor-jit", &cfg, Some(body.as_bytes()), &url, true).await;
 
             match result {
                 Err(e) => {
-                    last_err = anyhow::Error::from(e).context("send JIT runner config request");
+                    last_err = e.context("send JIT runner config request");
+                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
+                        .await;
                 }
                 Ok((output, headers)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -994,9 +1045,15 @@ impl RegistrationClient {
                         format!("{json_part}, stderr={stderr}"),
                         hint,
                     );
-                    if status == 409 {
+                    // Permission and quota failures cannot recover during
+                    // this attempt. Return immediately so controller pacing
+                    // owns the retry schedule; never sleep for an hour on a
+                    // GitHub reset header.
+                    if matches!(status, 403 | 429) || status == 409 {
                         return Err(last_err);
                     }
+                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
+                        .await;
                     retry_delay = hint.delay(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -1058,6 +1115,41 @@ impl RegistrationClient {
                 return Ok(all);
             }
             page_number += 1;
+        }
+    }
+
+    async fn cleanup_named_jit_orphans(&self, scope: &GitHubScope, pat: &str, agent_name: &str) {
+        let cleanup = async {
+            let runners = self.list_runners(scope, pat).await?;
+            for runner in runners
+                .iter()
+                .filter(|runner| runner.name.as_deref() == Some(agent_name))
+            {
+                let Some(id) = runner.id else {
+                    continue;
+                };
+                match self.delete_runner(scope, pat, id).await {
+                    Ok(()) => eprintln!(
+                        "deleted uncertain JIT runner '{agent_name}' id {id} before retry"
+                    ),
+                    Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
+                        eprintln!(
+                            "kept busy JIT runner '{agent_name}' id {id} during retry cleanup"
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        match tokio::time::timeout(Duration::from_secs(GITHUB_CURL_MAX_TIME_SECS), cleanup).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                eprintln!("JIT retry orphan cleanup failed for '{agent_name}': {error:#}");
+            }
+            Err(_) => {
+                eprintln!("JIT retry orphan cleanup timed out for '{agent_name}'");
+            }
         }
     }
 
@@ -1311,47 +1403,18 @@ impl RegistrationClient {
         runner_id: i64,
     ) -> Result<()> {
         let url = scope.runner_url(runner_id)?.to_string();
-        let pat = pat.to_string();
-        let ua = RUNNER_USER_AGENT.to_string();
-
-        let (output, headers) = tokio::task::spawn_blocking(move || {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let tmp = std::env::temp_dir();
-            let cfg_path = tmp.join(format!("velnor-del-{}.cfg", uuid::Uuid::new_v4()));
-            let headers_path = tmp.join(format!("velnor-del-{}.headers", uuid::Uuid::new_v4()));
-            let cfg = format!(
-                "header = \"User-Agent: {ua}\"\n\
-                 header = \"Authorization: Bearer {pat}\"\n\
-                 header = \"Accept: application/vnd.github+json\"\n\
-                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-                 request = DELETE\n\
-                 silent\n\
-                 write-out = \"\\n%{{http_code}}\"\n"
-            );
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&cfg_path)?;
-            f.write_all(cfg.as_bytes())?;
-            drop(f);
-            let out = std::process::Command::new("curl")
-                .arg("--config")
-                .arg(&cfg_path)
-                .arg("--dump-header")
-                .arg(&headers_path)
-                .arg(&url)
-                .output();
-            let _ = std::fs::remove_file(&cfg_path);
-            let headers = std::fs::read(&headers_path).unwrap_or_default();
-            let _ = std::fs::remove_file(&headers_path);
-            out.map(|output| (output, headers))
-        })
-        .await
-        .context("spawn_blocking curl delete")?
-        .context("run curl delete")?;
+        let cfg = format!(
+            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+             header = \"Authorization: Bearer {pat}\"\n\
+             header = \"Accept: application/vnd.github+json\"\n\
+             header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+             request = DELETE\n\
+             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let (output, headers) = run_private_curl("velnor-del", &cfg, None, &url, true).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
@@ -1554,92 +1617,37 @@ async fn curl_json_request_impl(
     max_time_secs: u64,
     capture_headers: bool,
 ) -> Result<(u16, String, Option<GitHubRetryHint>)> {
-    let url = url.to_string();
-    let token = bearer_token.to_string();
-    let ua = RUNNER_USER_AGENT.to_string();
-    let method = method.to_string();
-    let max_time = max_time_secs.to_string();
-    let output = tokio::task::spawn_blocking(move || {
-        // Write secrets to a mode-0600 curl config file so they stay off argv.
-        let tmp_dir = std::env::temp_dir();
-        let cfg_path = tmp_dir.join(format!("velnor-curl-{}.cfg", uuid::Uuid::new_v4()));
-        let body_path = tmp_dir.join(format!("velnor-curl-{}.body", uuid::Uuid::new_v4()));
-        let headers_path = tmp_dir.join(format!("velnor-curl-{}.hdrs", uuid::Uuid::new_v4()));
+    let mut cfg = format!(
+        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+         header = \"Authorization: Bearer {bearer_token}\"\n\
+         header = \"Accept: application/json\"\n\
+         max-time = {max_time_secs}\n\
+         connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
+         request = {method}\n\
+         location\n\
+         silent\n\
+         write-out = \"\\n%{{http_code}}\"\n"
+    );
+    if json_body.is_some() {
+        cfg.push_str("header = \"Content-Type: application/json\"\n");
+    }
+    let (output, headers) = run_private_curl(
+        "velnor-curl",
+        &cfg,
+        json_body.as_deref().map(str::as_bytes),
+        url,
+        capture_headers,
+    )
+    .await?;
 
-        let mut cfg = format!(
-            "header = \"User-Agent: {ua}\"\n\
-             header = \"Authorization: Bearer {token}\"\n\
-             header = \"Accept: application/json\"\n\
-             max-time = {max_time}\n\
-             request = {method}\n\
-             location\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        if capture_headers {
-            // Raw response headers land in a private temp file; only the
-            // rate-limit fields are ever parsed out of it.
-            cfg.push_str(&format!("dump-header = \"{}\"\n", headers_path.display()));
-        }
-        let has_body = json_body.is_some();
-        if has_body {
-            cfg.push_str("header = \"Content-Type: application/json\"\n");
-        }
-
-        // Write config file with restricted permissions.
-        use std::os::unix::fs::OpenOptionsExt;
-        let write_secret = |path: &std::path::Path, content: &[u8]| -> std::io::Result<()> {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)?;
-            use std::io::Write;
-            f.write_all(content)
-        };
-
-        write_secret(&cfg_path, cfg.as_bytes())?;
-
-        if has_body {
-            if let Some(body) = json_body {
-                if let Err(e) = write_secret(&body_path, body.as_bytes()) {
-                    let _ = std::fs::remove_file(&cfg_path);
-                    return Err(e);
-                }
-            }
-        }
-
-        let mut cmd = std::process::Command::new("curl");
-        cmd.arg("--config").arg(&cfg_path);
-        if has_body {
-            cmd.arg("--data").arg(format!("@{}", body_path.display()));
-        }
-        cmd.arg(&url);
-        let result = cmd.output();
-
-        let _ = std::fs::remove_file(&cfg_path);
-        if has_body {
-            let _ = std::fs::remove_file(&body_path);
-        }
-        let headers = if capture_headers {
-            let bytes = std::fs::read(&headers_path).unwrap_or_default();
-            let hint = parse_github_retry_headers(&bytes);
-            let _ = std::fs::remove_file(&headers_path);
-            Some(hint)
-        } else {
-            None
-        };
-        result.map(|output| (output, headers))
-    })
-    .await
-    .context("spawn_blocking curl")?
-    .context("run curl")?;
-
-    let stdout = String::from_utf8_lossy(&output.0.stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
     let status: u16 = status_str.trim().parse().unwrap_or(0);
-    Ok((status, body.to_string(), output.1))
+    Ok((
+        status,
+        body.to_string(),
+        capture_headers.then(|| parse_github_retry_headers(&headers)),
+    ))
 }
 
 pub fn decode_jit_config(encoded_jit_config: &str) -> Result<DecodedJitConfig> {
@@ -1891,8 +1899,11 @@ impl BrokerClient {
 pub struct RunServiceClient {
     http: Client,
     bearer_token: String,
+    #[cfg(test)]
+    acquire_retry_delay_override: Option<Duration>,
 }
 
+#[derive(Debug)]
 pub enum AcquireJobOutcome {
     Acquired(Value),
     Skipped {
@@ -1900,6 +1911,25 @@ pub enum AcquireJobOutcome {
         request_id: Option<String>,
         body: String,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AcquireJobError {
+    #[error("permanent run-service acquire failure: {0:#}")]
+    Permanent(#[source] anyhow::Error),
+    #[error("transient run-service acquire failure after retries: {0:#}")]
+    Transient(#[source] anyhow::Error),
+}
+
+/// Whether an acquire failure is safe to absorb while the broker session
+/// remains alive. Permanent protocol/configuration failures must tear down the
+/// session so credentials or malformed payloads cannot spin forever.
+pub(crate) fn is_transient_acquire_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<AcquireJobError>()
+            .is_some_and(|error| matches!(error, AcquireJobError::Transient(_)))
+    })
 }
 
 impl RunServiceClient {
@@ -1911,7 +1941,15 @@ impl RunServiceClient {
         Ok(Self {
             http,
             bearer_token: bearer_token.into(),
+            #[cfg(test)]
+            acquire_retry_delay_override: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_acquire_retry_delay_for_test(mut self, delay: Duration) -> Self {
+        self.acquire_retry_delay_override = Some(delay);
+        self
     }
 
     pub async fn acquire_job(
@@ -1921,29 +1959,86 @@ impl RunServiceClient {
         runner_os: &str,
         billing_owner_id: Option<&str>,
     ) -> Result<AcquireJobOutcome> {
-        let url = run_service_acquire_job_url(run_service_url)?;
+        let url = run_service_acquire_job_url(run_service_url)
+            .map_err(|error| anyhow::Error::from(AcquireJobError::Permanent(error)))?;
         let body = serde_json::to_string(&AcquireJobRequest {
             job_message_id,
             runner_os,
             billing_owner_id,
         })
-        .context("serialize acquire job request")?;
-        let (status, text) =
-            github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
-        let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        if is_non_retriable_acquire_status(status_code) {
-            return Ok(AcquireJobOutcome::Skipped {
-                status: status_code,
-                request_id: None,
-                body: text,
-            });
+        .context("serialize acquire job request")
+        .map_err(|error| anyhow::Error::from(AcquireJobError::Permanent(error)))?;
+        let mut attempt = 1;
+        loop {
+            let outcome = github_json_request(
+                "POST",
+                url.as_str(),
+                &self.bearer_token,
+                Some(body.clone()),
+                30,
+            )
+            .await;
+
+            let retry_error = match outcome {
+                Ok((status, text)) => {
+                    let status_code =
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    if is_non_retriable_acquire_status(status_code) {
+                        return Ok(AcquireJobOutcome::Skipped {
+                            status: status_code,
+                            request_id: None,
+                            body: text,
+                        });
+                    }
+                    if !(200..300).contains(&status) {
+                        Some(github_api_error("acquire run-service job", status, text))
+                    } else {
+                        match serde_json::from_str::<Value>(&text) {
+                            Ok(value) => return Ok(AcquireJobOutcome::Acquired(value)),
+                            Err(error) => {
+                                return Err(AcquireJobError::Permanent(
+                                    anyhow::Error::new(error)
+                                        .context("parse acquire run-service job response"),
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                }
+                Err(error) => Some(error.context("acquire run-service job request")),
+            };
+
+            let Some(error) = retry_error else {
+                unreachable!("successful acquire returns before retry handling");
+            };
+            if attempt >= RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS {
+                let error = if acquire_failure_is_transient(&error) {
+                    AcquireJobError::Transient(error)
+                } else {
+                    AcquireJobError::Permanent(error)
+                };
+                return Err(error.into());
+            }
+
+            let delay = self.acquire_retry_delay(attempt);
+            eprintln!(
+                "acquire run-service job attempt {attempt}/{RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS} failed ({error:#}); retrying in {}s",
+                delay.as_secs()
+            );
+            tokio::time::sleep(delay).await;
+            attempt += 1;
         }
-        if !(200..300).contains(&status) {
-            return Err(github_api_error("acquire run-service job", status, text));
+    }
+
+    fn acquire_retry_delay(&self, attempt: u32) -> Duration {
+        #[cfg(test)]
+        if let Some(delay) = self.acquire_retry_delay_override {
+            return delay;
         }
-        serde_json::from_str::<Value>(&text)
-            .map(AcquireJobOutcome::Acquired)
-            .context("parse acquire run-service job response")
+
+        let span = RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS - RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS;
+        let jitter = (std::process::id() as u64 + u64::from(attempt) * 7) % (span + 1);
+        Duration::from_secs(RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS + jitter)
     }
 
     pub async fn renew_job(
@@ -2014,6 +2109,42 @@ impl RunServiceClient {
             attempt += 1;
         }
     }
+}
+
+fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
+    let Some(api_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+    else {
+        // Native request failures expose a reqwest error; curl failures that
+        // cannot produce an HTTP status expose an I/O error. Filesystem and
+        // executable errors are local faults and must not retain a session
+        // forever as if GitHub were temporarily unavailable.
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.is_timeout() || error.is_connect())
+        }) {
+            return true;
+        }
+        return error.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::Interrupted
+                )
+            })
+        });
+    };
+
+    matches!(api_error.status, 0 | 408 | 429 | 500..=599)
 }
 
 impl DistributedTaskClient {
@@ -4555,6 +4686,124 @@ mod tests {
         assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
     }
 
+    #[tokio::test]
+    async fn curl_json_request_sets_content_type_for_json_bodies() {
+        use wiremock::matchers::{body_string, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/github"))
+            .and(header("authorization", "Bearer test-token"))
+            .and(header("content-type", "application/json"))
+            .and(body_string(r#"{"hello":"world"}"#))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(r#"{"ok":true}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let result = curl_json_request(
+            "POST",
+            &format!("{}/github", server.uri()),
+            "test-token",
+            Some(r#"{"hello":"world"}"#.to_string()),
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
+    }
+
+    #[tokio::test]
+    async fn canceled_curl_kills_child_and_cleans_private_inputs() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("delayed")
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+
+        let prefix = format!("velnor-cancel-test-{}", Uuid::new_v4());
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            run_private_curl(
+                &prefix,
+                "max-time = 30\nconnect-timeout = 2\nsilent\n",
+                None,
+                &server.uri(),
+                false,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "curl unexpectedly completed before cancellation"
+        );
+
+        let temp_dir = std::env::temp_dir().join("velnor-curl");
+        let leaked = std::fs::read_dir(temp_dir)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+        assert!(!leaked, "canceled curl left private input files behind");
+    }
+
+    #[tokio::test]
+    async fn jit_rate_limit_returns_without_waiting_for_reset() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v3/orgs/tailrocks/actions/runners/generate-jitconfig",
+            ))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("retry-after", "3600")
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-reset", "4102444800")
+                    .set_body_string(r#"{"message":"rate limited"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let scope = GitHubScope::parse(&format!("{}/tailrocks", server.uri())).unwrap();
+        let request = GitHubJitConfigRequest {
+            name: "velnor-test".to_owned(),
+            runner_group_id: 1,
+            labels: vec!["velnor".to_owned()],
+            work_folder: None,
+        };
+        let started = std::time::Instant::now();
+        let error = RegistrationClient::new()
+            .unwrap()
+            .generate_jit_config(&scope, "test-token", &request)
+            .await
+            .unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "rate-limit retry waited too long: {error:#}"
+        );
+        assert_eq!(
+            error
+                .downcast_ref::<GitHubApiError>()
+                .map(|error| error.status),
+            Some(403)
+        );
+    }
+
     #[test]
     fn runner_delete_204_and_404_are_gone() {
         assert_eq!(
@@ -5336,6 +5585,105 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         ));
         assert!(!is_non_retriable_acquire_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn acquire_failure_classifies_local_faults_separately_from_transport() {
+        let permission = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private curl directory",
+        ));
+        assert!(!acquire_failure_is_transient(&permission));
+
+        let timeout = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "request timed out",
+        ));
+        assert!(acquire_failure_is_transient(&timeout));
+
+        let unauthorized = anyhow::Error::from(GitHubApiError {
+            status: StatusCode::UNAUTHORIZED.as_u16(),
+            action: "acquire".into(),
+            body: "invalid token".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+            remaining: Some(4999),
+        });
+        assert!(!acquire_failure_is_transient(&unauthorized));
+    }
+
+    #[tokio::test]
+    async fn acquire_job_retries_transient_failure_before_parsing_job() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use wiremock::{matchers::method, Mock, MockServer, Request, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/run/jobs/123/acquirejob"))
+            .respond_with(move |_request: &Request| {
+                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(500).set_body_string("retry later")
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_string(r#"{"plan":{"planId":"plan-1"},"jobId":"job-1"}"#)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let outcome = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let AcquireJobOutcome::Acquired(job) = outcome else {
+            panic!("transient acquire failure must be retried");
+        };
+        assert_eq!(job["jobId"], "job-1");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn acquire_job_rejects_malformed_success_without_retrying_or_swallowing() {
+        use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let error = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect_err("malformed success must be a permanent acquire error");
+
+        assert!(!is_transient_acquire_error(&error));
+        assert!(error.to_string().contains("parse acquire run-service job"));
     }
 
     #[test]

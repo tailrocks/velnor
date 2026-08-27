@@ -5,12 +5,13 @@
 //! `PartOf=controller`. Every journal side effect is executed here.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use clap::Args;
-use velnor_control::journal::{Event, Journal, SideEffect};
+use velnor_control::journal::{Event, Journal, SideEffect, SlotRecord};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use crate::config;
@@ -27,6 +28,15 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Reserve half of the controller's 30s watchdog budget for local journal,
+/// process, and health work. Every remote operation in one cycle shares this
+/// deadline; one slow API cannot consume the budget of later operations.
+const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
+/// A canceled JIT POST may have been accepted by GitHub before curl died.
+/// Reserve time to remove that deterministic-name orphan before the next
+/// controller cycle retries registration.
+const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
+const FENCED_SLOT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -275,16 +285,14 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Stop idle controller-owned slot processes when the daemon receives SIGTERM.
-/// Job workers are deliberately left alone so systemd's stop timeout remains
-/// the outer bound for an in-flight job rather than turning an upgrade into a
-/// lost job. The daemon's drain flag lives in the supervisor process, so this
-/// explicit handoff is the process boundary that makes graceful drain real.
+/// Stop controller-owned slot and job-worker processes when the daemon
+/// receives SIGTERM. Each worker has its own drain listener, so it can cancel
+/// an in-flight acquire or finish an active job through the normal boundary.
 async fn drain_children(
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
-    for child in slots.values() {
+    for child in slots.values().chain(jobs.values()) {
         request_child_shutdown(child)?;
     }
 
@@ -336,12 +344,46 @@ async fn reconcile_once(
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
 ) -> anyhow::Result<LocalCycle> {
+    let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
     let total = args.desired_ready.saturating_add(args.surge).max(1);
-    let generation = Generation::INITIAL;
     let mut effects = Vec::new();
+    reap(slots);
+    // Ingest a surviving slot's heartbeat before deciding whether its permit
+    // needs repair. On controller restart the child handle is gone, so the
+    // heartbeat is the only fresh local proof that prevents a double spawn.
+    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
+    let state = journal.materialized_state()?;
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
         let surge = index > args.desired_ready;
+        let slot = state.slots.iter().find(|slot| slot.slot_id == id);
+        let generation = slot
+            .map(|slot| slot.generation)
+            .unwrap_or(Generation::INITIAL);
+        let fenced_generation = fenced_slot_recovery_generation(slot);
+        let generation = if let Some(next_generation) = fenced_generation {
+            if args.spawn_slots {
+                terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
+            }
+            next_generation
+        } else {
+            generation
+        };
+        let process_alive = slots.contains_key(&id.0)
+            || slot.and_then(|slot| slot.pid).is_some_and(|pid| {
+                prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
+            });
+        if fenced_generation.is_none()
+            && !permit_needs_reconciliation(
+                slot,
+                generation,
+                surge,
+                args.spawn_slots,
+                process_alive,
+            )
+        {
+            continue;
+        }
         effects.extend(
             journal
                 .apply(Event::PermitReserved {
@@ -353,16 +395,27 @@ async fn reconcile_once(
         );
     }
     for command in effects {
-        execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?;
+        execute_effect(
+            args,
+            journal,
+            slots,
+            jobs,
+            &mut *pacing,
+            remote_deadline,
+            command,
+        )
+        .await?;
     }
 
-    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
-
-    observe_github_and_routing(args, journal, pacing).await?;
+    observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
-        reconcile_remote_registrations(args, journal, jobs).await?;
+        run_bounded_remote_reconciliation(
+            reconcile_remote_registrations(args, journal, jobs),
+            remaining_remote_budget(remote_deadline),
+        )
+        .await?;
     }
 
     let mut proof_effects = Vec::new();
@@ -372,6 +425,12 @@ async fn reconcile_once(
     let now = tokio::time::Instant::now();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
+        let generation = snapshot
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == id)
+            .map(|slot| slot.generation)
+            .unwrap_or(Generation::INITIAL);
         if executor {
             proof_effects.extend(
                 journal
@@ -387,7 +446,13 @@ async fn reconcile_once(
             .iter()
             .find(|slot| slot.slot_id == id)
             .and_then(|slot| slot.pid);
-        if prove::observe_session(slots.get_mut(&id.0), journal_pid) {
+        if prove::observe_slot_session(
+            slots.get_mut(&id.0),
+            journal_pid,
+            &args.state_dir,
+            &id,
+            generation,
+        ) {
             proof_effects.extend(
                 journal
                     .apply(Event::SessionLive {
@@ -419,10 +484,21 @@ async fn reconcile_once(
                 slot_id,
                 generation,
             } => registrations.push((slot_id, generation)),
-            command => execute_effect(args, journal, slots, jobs, &mut *pacing, command).await?,
+            command => {
+                execute_effect(
+                    args,
+                    journal,
+                    slots,
+                    jobs,
+                    &mut *pacing,
+                    remote_deadline,
+                    command,
+                )
+                .await?
+            }
         }
     }
-    register_runners(args, journal, pacing, registrations).await?;
+    register_runners(args, journal, pacing, registrations, remote_deadline).await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
     reclaim_orphaned_jobs(args, journal)?;
@@ -445,12 +521,35 @@ async fn reconcile_once(
     Ok(LocalCycle::finished())
 }
 
+/// Remote registration state is advisory. Keep a slow or wedged GitHub API
+/// from preventing the controller from completing its local supervision cycle.
+fn remaining_remote_budget(deadline: tokio::time::Instant) -> Duration {
+    deadline.saturating_duration_since(tokio::time::Instant::now())
+}
+
+async fn run_bounded_remote_reconciliation<F>(operation: F, timeout: Duration) -> anyhow::Result<()>
+where
+    F: Future<Output = anyhow::Result<()>>,
+{
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => {
+            eprintln!(
+                "registration reconciliation timed out after {}s; keeping local state and retrying later",
+                timeout.as_secs()
+            );
+            Ok(())
+        }
+    }
+}
+
 async fn execute_effect(
     args: &ControllerArgs,
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
     pacing: &mut GithubPacing,
+    remote_deadline: tokio::time::Instant,
     command: SideEffect,
 ) -> anyhow::Result<()> {
     match command {
@@ -461,7 +560,7 @@ async fn execute_effect(
         SideEffect::RegisterRunner {
             slot_id,
             generation,
-        } => register_runner(args, journal, pacing, slot_id, generation).await,
+        } => register_runner(args, journal, pacing, slot_id, generation, remote_deadline).await,
         SideEffect::StartJob { job_id, generation } => {
             maybe_spawn_job(args, journal, jobs, &job_id.0, generation.0, None)
         }
@@ -491,8 +590,16 @@ async fn register_runner(
     pacing: &mut GithubPacing,
     slot_id: SlotId,
     generation: Generation,
+    remote_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
-    register_runners(args, journal, pacing, vec![(slot_id, generation)]).await
+    register_runners(
+        args,
+        journal,
+        pacing,
+        vec![(slot_id, generation)],
+        remote_deadline,
+    )
+    .await
 }
 
 /// Configure independent, already-proven slots concurrently, then commit the
@@ -504,6 +611,7 @@ async fn register_runners(
     journal: &mut Journal,
     pacing: &mut GithubPacing,
     registrations: Vec<(SlotId, Generation)>,
+    remote_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
     if registrations.is_empty() {
         return Ok(());
@@ -530,9 +638,54 @@ async fn register_runners(
             let config_base = config_base.clone();
             async move {
                 let index = slot_index_from_id(&slot_id);
-                let result =
-                    crate::runner::jit_configure_one_slot(&exec, &config_base, index, slot_count)
-                        .await;
+                let timeout = remaining_remote_budget(remote_deadline);
+                let jit_timeout = timeout.saturating_sub(JIT_ORPHAN_CLEANUP_BUDGET);
+                let result = if jit_timeout.is_zero() {
+                    Err(anyhow::anyhow!(
+                        "JIT registration skipped: controller remote budget exhausted"
+                    ))
+                } else {
+                    match tokio::time::timeout(
+                        jit_timeout,
+                        crate::runner::jit_configure_one_slot(
+                            &exec,
+                            &config_base,
+                            index,
+                            slot_count,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let cleanup_timeout = remaining_remote_budget(remote_deadline);
+                            if !cleanup_timeout.is_zero() {
+                                match tokio::time::timeout(
+                                    cleanup_timeout,
+                                    crate::runner::cleanup_orphaned_jit_one_slot(
+                                        &exec,
+                                        &config_base,
+                                        index,
+                                        slot_count,
+                                    ),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => eprintln!(
+                                        "JIT timeout orphan cleanup for slot-{index} failed: {error:#}"
+                                    ),
+                                    Err(_) => eprintln!(
+                                        "JIT timeout orphan cleanup for slot-{index} timed out"
+                                    ),
+                                }
+                            }
+                            Err(anyhow::anyhow!(
+                                "JIT registration timed out before controller remote budget expired"
+                            ))
+                        }
+                    }
+                };
                 (slot_id, generation, result)
             }
         })
@@ -682,6 +835,7 @@ async fn observe_github_and_routing(
     args: &ControllerArgs,
     journal: &mut Journal,
     pacing: &mut GithubPacing,
+    remote_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
     let mut reachable = false;
     let mut dependency_observed = false;
@@ -733,15 +887,25 @@ async fn observe_github_and_routing(
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
             let now = tokio::time::Instant::now();
             if pacing.probe_due(now) {
-                let probe = prove::probe_github(prove::GitHubProbeRequest {
-                    url,
-                    token,
-                    policy: policy.as_ref(),
-                    pool_id: exec.pool_id,
-                    configured_labels: &exec.labels,
-                    configured_trust: &exec.trust_scope,
-                })
-                .await;
+                let probe = match tokio::time::timeout(
+                    remaining_remote_budget(remote_deadline),
+                    prove::probe_github(prove::GitHubProbeRequest {
+                        url,
+                        token,
+                        policy: policy.as_ref(),
+                        pool_id: exec.pool_id,
+                        configured_labels: &exec.labels,
+                        configured_trust: &exec.trust_scope,
+                    }),
+                )
+                .await
+                {
+                    Ok(probe) => probe,
+                    Err(_) => {
+                        eprintln!("GitHub probe timed out before controller remote budget expired");
+                        prove::GitHubProbe::default()
+                    }
+                };
                 if probe.rate_limited {
                     let reset = probe
                         .rate_limit_reset_epoch
@@ -915,6 +1079,94 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
         .unwrap_or(1)
 }
 
+fn fenced_slot_recovery_generation(slot: Option<&SlotRecord>) -> Option<Generation> {
+    slot.filter(|slot| slot.phase == ActorPhase::Fenced)
+        .map(|slot| slot.generation.next())
+}
+
+async fn terminate_fenced_slot_actor(
+    args: &ControllerArgs,
+    slots: &mut HashMap<String, Child>,
+    slot_id: &SlotId,
+    slot: &SlotRecord,
+) -> anyhow::Result<()> {
+    if let Some(mut child) = slots.remove(&slot_id.0) {
+        request_child_shutdown(&child)?;
+        let deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+        loop {
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                while child.try_wait()?.is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    let Some(pid) = slot.pid else {
+        return Ok(());
+    };
+    if !prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+        return Ok(());
+    }
+    send_pid_signal(pid, libc::SIGTERM)?;
+    let deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
+    while Instant::now() < deadline {
+        if !prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Re-prove the command line immediately before escalation. If the PID was
+    // reused, leave the unrelated process untouched and still rotate the
+    // durable generation below.
+    if prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+        send_pid_signal(pid, libc::SIGKILL)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_pid_signal(pid: u32, signal: libc::c_int) -> anyhow::Result<()> {
+    if pid == 0 {
+        return Ok(());
+    }
+    // SAFETY: callers prove the PID belongs to the fenced Velnor slot actor
+    // immediately before signaling it; SIGTERM is followed by a re-proof
+    // before SIGKILL.
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_pid_signal(_pid: u32, _signal: i32) -> anyhow::Result<()> {
+    anyhow::bail!("fenced slot recovery requires Unix process signaling")
+}
+
+fn permit_needs_reconciliation(
+    slot: Option<&SlotRecord>,
+    generation: Generation,
+    surge: bool,
+    spawn_slots: bool,
+    process_alive: bool,
+) -> bool {
+    let permit_matches = slot.is_some_and(|slot| {
+        slot.generation == generation && slot.permit_held && slot.surge == surge
+    });
+    !permit_matches || (spawn_slots && !process_alive)
+}
+
 /// Read per-slot liveness files and serialize their durable journal effects in
 /// this controller process. Slot processes must not contend on the shared
 /// SQLite writer just to report liveness.
@@ -939,7 +1191,12 @@ fn ingest_slot_heartbeats(
             continue;
         };
         if slot.generation.0 != heartbeat.generation
-            || !prove::pid_is_alive(heartbeat.pid)
+            || !prove::slot_process_is_alive(
+                heartbeat.pid,
+                &args.state_dir,
+                &id,
+                Generation(heartbeat.generation),
+            )
             || seen.get(&id.0).is_some_and(|(pid, sequence)| {
                 *pid == heartbeat.pid && *sequence >= heartbeat.sequence
             })
@@ -977,7 +1234,9 @@ fn maybe_spawn_slot(
     }
     if let Ok(state) = journal.materialized_state() {
         if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == *slot_id) {
-            if slot.pid.is_some_and(prove::pid_is_alive) {
+            if slot.pid.is_some_and(|pid| {
+                prove::slot_process_is_alive(pid, &args.state_dir, slot_id, generation)
+            }) {
                 return Ok(());
             }
         }
@@ -1135,6 +1394,68 @@ mod tests {
         assert!(!remote_registration_present(None, "slot-2", &remote));
     }
 
+    fn reserved_slot() -> SlotRecord {
+        SlotRecord {
+            slot_id: SlotId("velnor-1".to_owned()),
+            generation: Generation::INITIAL,
+            phase: ActorPhase::Provisioning,
+            permit_held: true,
+            routing_valid: false,
+            session_live: false,
+            executor_proven: false,
+            registered: false,
+            pid: None,
+            heartbeat_unix: 0,
+            surge: false,
+        }
+    }
+
+    #[test]
+    fn stable_live_slot_suppresses_duplicate_permit() {
+        let slot = reserved_slot();
+
+        assert!(!permit_needs_reconciliation(
+            Some(&slot),
+            Generation::INITIAL,
+            false,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn missing_or_dead_slot_reissues_permit_for_respawn() {
+        let slot = reserved_slot();
+
+        assert!(permit_needs_reconciliation(
+            Some(&slot),
+            Generation::INITIAL,
+            false,
+            true,
+            false,
+        ));
+        assert!(permit_needs_reconciliation(
+            None,
+            Generation::INITIAL,
+            false,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn fenced_slot_reconciliation_advances_generation() {
+        let mut slot = reserved_slot();
+        assert_eq!(fenced_slot_recovery_generation(Some(&slot)), None);
+
+        slot.phase = ActorPhase::Fenced;
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot)),
+            Some(Generation(slot.generation.0 + 1))
+        );
+        assert_eq!(fenced_slot_recovery_generation(None), None);
+    }
+
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
@@ -1242,6 +1563,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stalled_remote_reconciliation_does_not_block_local_cycle() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_bounded_remote_reconciliation(
+                std::future::pending::<anyhow::Result<()>>(),
+                Duration::from_millis(1),
+            ),
+        )
+        .await;
+
+        assert!(matches!(result, Ok(Ok(()))));
+    }
+
+    #[test]
+    fn remote_budget_leaves_controller_watchdog_margin() {
+        assert!(CONTROLLER_REMOTE_BUDGET < Duration::from_secs(30));
+    }
+
+    #[tokio::test]
     async fn org_url_probe_bootstraps_policy_from_generated_allowlist() {
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
@@ -1317,9 +1657,14 @@ mod tests {
             spawn_slots: false,
         };
         let mut pacing = GithubPacing::default();
-        observe_github_and_routing(&args, &mut journal, &mut pacing)
-            .await
-            .unwrap();
+        observe_github_and_routing(
+            &args,
+            &mut journal,
+            &mut pacing,
+            tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET,
+        )
+        .await
+        .unwrap();
         let state = journal.load_state().unwrap();
         assert!(state.github_reachable, "{state:?}");
         let evidence: crate::node::prove::RoutingFields =
@@ -1540,18 +1885,28 @@ mod tests {
         let mut pacing = GithubPacing::default();
 
         // First tick: the 403 is observed, health degrades honestly.
-        observe_github_and_routing(&args, &mut journal, &mut pacing)
-            .await
-            .unwrap();
+        observe_github_and_routing(
+            &args,
+            &mut journal,
+            &mut pacing,
+            tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET,
+        )
+        .await
+        .unwrap();
         let state = journal.load_state().unwrap();
         assert!(!state.github_reachable, "{state:?}");
 
         // Simulate a burst of reconcile ticks inside the reset window: the
         // pacer must not send another request (Mock::expect(1) enforces it).
         for _ in 0..10 {
-            observe_github_and_routing(&args, &mut journal, &mut pacing)
-                .await
-                .unwrap();
+            observe_github_and_routing(
+                &args,
+                &mut journal,
+                &mut pacing,
+                tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET,
+            )
+            .await
+            .unwrap();
         }
         server.verify().await;
 
