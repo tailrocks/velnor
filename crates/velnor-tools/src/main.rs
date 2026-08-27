@@ -810,6 +810,9 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                     "weekly schedule both arm",
                     "github.event_name == 'schedule'",
                 ),
+                ("github lane entry", r#""lane":"GitHub""#),
+                ("velnor lane entry", r#""lane":"Velnor""#),
+                ("pinned GitHub runner", "ubuntu-26.04"),
                 ("matrix runner", "matrix.config.runner"),
                 ("bash run defaults", "shell: bash"),
                 ("path filtering", "dorny/paths-filter@"),
@@ -819,6 +822,12 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("sccache local env", "SCCACHE_GHA_ENABLED:"),
                 ("cargo cache", "actions/cache@"),
                 ("cargo cache restore-keys", "restore-keys:"),
+                ("cache off job", "cache-off:"),
+                ("cache sccache job", "cache-sccache:"),
+                ("cache kache job", "cache-kache:"),
+                ("Postgres services job", "services-postgres:"),
+                ("services declaration", "services:"),
+                ("Postgres health check", "pg_isready"),
                 ("provenance attestation job", "attestation:"),
                 (
                     "pinned provenance attestation",
@@ -859,6 +868,8 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ".github/workflows/backend-parity.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
+                ("github lane entry", r#""lane":"GitHub""#),
+                ("velnor lane entry", r#""lane":"Velnor""#),
                 ("matrix runner", "matrix.config.runner"),
                 ("lanes choice velnor", "velnor | github | both"),
                 ("no workflow backend input", "VELNOR_EXECUTION_BACKEND"),
@@ -984,6 +995,10 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("workflow_dispatch packages input", "packages:"),
                 ("merge-multiple artifact download", "merge-multiple:"),
             ],
+        ),
+        (
+            ".github/workflows/compat-public-unmerged.yml",
+            vec![("merge_group trigger", "merge_group:")],
         ),
         (
             ".github/workflows/fixture-rust-check.yml",

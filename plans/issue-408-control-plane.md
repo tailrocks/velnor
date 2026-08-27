@@ -243,6 +243,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   preflight flag and forwards an explicit execution config directory. Local
   readiness reaches the real host-image preflight; this macOS host lacks the
   private `velnor/job-ubuntu:26.04` image, so smoke remains open.
+- 2026-08-28 fixture strengthening authorized by operator: PR
+  `tailrocks/velnor-actions-fixture#111` adds the approved mutually exclusive
+  local Kache canary (`2788578ab4aafba08c12c22539ba50dceefd66de`) without
+  removing or weakening existing cases. Its local workflow-surface and Velnor
+  fixture audits pass; authoritative default-branch adoption and Velnor smoke
+  remain gated on PR checks/merge.
 - 2026-08-27 fleet inspection: the Sentry unit is active on v0.1.240, while
   unrelated daemon scopes remain independently active or inactive according
   to their systemd units; no unrelated scope was restarted or mutated during

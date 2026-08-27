@@ -31,6 +31,14 @@ defaults:
   run:
     shell: bash
 jobs:
+  cache-off:
+  cache-sccache:
+  cache-kache:
+  services-postgres:
+    services:
+      postgres:
+    steps:
+      - run: pg_isready
   attestation:
     permissions:
       attestations: write
@@ -115,6 +123,11 @@ missing-permission:
 no-match:
 unapproved-input:
 push-to-registry: false
+EOF
+
+cat >"$tmp_dir/.github/workflows/compat-public-unmerged.yml" <<'EOF'
+on:
+  merge_group:
 EOF
 
 cat >"$tmp_dir/.github/workflows/backend-parity.yml" <<'EOF'
