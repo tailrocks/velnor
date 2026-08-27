@@ -1948,6 +1948,52 @@ mod tests {
     }
 
     #[test]
+    fn health_distinguishes_active_jobs_from_ready_slots() {
+        let (_dir, mut journal) = open_tmp("health-capacity");
+        prime_ready(&mut journal, "scope-1");
+        let slot_id = slot("scope-1");
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot_id.clone(),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert_eq!(journal.load_state().unwrap().health().actual_ready_slots, 1);
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot_id.clone(),
+                    job_id: job("job-1"),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let assigned = journal.load_state().unwrap();
+        assert_eq!(assigned.health().actual_ready_slots, 0);
+        assert!(assigned.jobs.is_empty());
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("job-1"),
+                    slot_id,
+                    attempt: 1,
+                    generation: gen(),
+                    worker: "worker-1".to_owned(),
+                    accepted_unix: 1,
+                })
+                .unwrap()
+                .rejected
+        );
+        let owned = journal.load_state().unwrap();
+        assert_eq!(owned.health().actual_ready_slots, 0);
+        assert_eq!(owned.jobs.len(), 1);
+    }
+
+    #[test]
     fn apply_many_persists_command_bearing_registration_intent() {
         let (dir, mut journal) = open_tmp("batch-command-bearing");
         let s = slot("scope-1");

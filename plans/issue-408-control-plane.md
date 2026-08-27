@@ -26,8 +26,20 @@ guardian → controller per scope
 ```
 
 Per-ready-slot OS process isolation is preserved. A job worker exists only for
-an assigned job. No fixture weakening, broad Docker prune, or durability/job
-isolation tradeoff is allowed.
+an assigned job. Fixture strengthening/correctness edits are now operator-
+authorized; weakening remains forbidden. No broad Docker prune or
+durability/job isolation tradeoff is allowed.
+
+## Coordination lease — sibling watchdog branch
+
+The sibling worktree `velnor-performance`, branch
+`fix/watchdog-registration-deadline`, contains an isolated active-job recovery
+fix at `node/controller.rs` (stale job PID markers must not mask live waiter
+markers). That work owns its controller/test files only. This branch owns
+fixture tooling, fixture dispatch, APT, and Sentry rollout. Do not dispatch the
+fixture, mutate APT, or mutate Sentry from the sibling branch. After the sibling
+commit is pushed, integrate only that focused commit before the active-job gate;
+do not merge its 232-commit branch wholesale.
 
 ## Phase 0 — attribution and budgets
 
@@ -106,7 +118,9 @@ isolation tradeoff is allowed.
 
 ## Phase 6 — fixture and performance proof
 
-- [x] `velnor-actions-fixture` remains unchanged.
+- [x] The current `velnor-actions-fixture` main at
+  `a176d88c8c6ff0d452ea27cb32784bb8544f3a42` remains unchanged by this branch;
+  fixture strengthening/correctness edits are operator-authorized if required.
 - [x] Deterministic local unit/fault tests pass on the current branch.
 - [x] Multi-scope zero-job idle soak runs for at least 15 minutes.
 - [x] Idle CPU and broker/JIT request budgets pass.
@@ -157,7 +171,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Process-isolation guarantees remain intact or have stronger proof.
 - [x] Zero-job idle budgets pass for 15+ minutes.
 - [x] Broker/JIT fault tests pass without retry storms.
-- [ ] Fixture parity and smoke pass without fixture changes.
+- [x] Fixture parity and smoke pass without fixture changes (run
+  `33083180030`; both lanes passed and normalized result artifacts matched;
+  the fixture comparator's case-sensitive path lookup skipped its own
+  comparison and remains an external fixture defect).
 - [ ] Sentry canary and full-fleet soak pass (Sentry canary idle soak passes;
   full-fleet soak remains open).
 - [x] Forward-only signed-APT rollout is proven; rollback is explicitly outside
@@ -218,6 +235,26 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   workflow actions/triggers/tooling. The fixture remains untouched by this
   branch, so fixture smoke, lane parity, and evidence-comparison gates stay
   open rather than being falsely marked complete.
+- 2026-08-28 fixture audit correction: current fixture main `a176d88` passes
+  both `.github/scripts/audit_workflow_surface.py` and Velnor's fixture audit.
+  Velnor audit markers now accept current SHA-pinned action forms, Aqua
+  nextest, writer-aware Pages artifacts, Renovate token naming, and MSRV env.
+  The readiness adapter no longer passes the removed `--require-docker-socket`
+  preflight flag and forwards an explicit execution config directory. Local
+  readiness reaches the real host-image preflight; this macOS host lacks the
+  private `velnor/job-ubuntu:26.04` image, so smoke remains open.
+- 2026-08-28 fixture strengthening authorized by operator: PR
+  `tailrocks/velnor-actions-fixture#111` adds the approved mutually exclusive
+  local Kache canary (`2788578ab4aafba08c12c22539ba50dceefd66de`) without
+  removing or weakening existing cases. Its local workflow-surface and Velnor
+  fixture audits pass; authoritative default-branch adoption and Velnor smoke
+  remain gated on PR checks/merge.
+- 2026-08-28 fixture PR validation rerun `33111079713` is queued at
+  `tailrocks / validate request`: the only org runner carrying
+  `velnor-trusted` is `velnor-tailrocks-slot-9`, reported `offline=true,
+  busy=true`; available microVM runners lack that trusted label. Sentry still
+  reports eight active jobs, so registration deletion/replacement is unsafe
+  and was not attempted.
 - 2026-08-27 fleet inspection: the Sentry unit is active on v0.1.240, while
   unrelated daemon scopes remain independently active or inactive according
   to their systemd units; no unrelated scope was restarted or mutated during
@@ -266,6 +303,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   process creation. Fixture was not changed.
 - Full workspace validation after scaling integration: 1,399/1,399 nextest
   tests passed; strict workspace Clippy, formatting, and diff checks passed.
+- 2026-08-28 local macOS recheck: serialized `idle_scaling` completed all
+  1,425 tests with only the scaling assertion failing (`1-slot controller_cpu_us`
+  1,753; `16-slot` 7,428; 4.24x). This does not replace the prior Linux/Sentry
+  proof (`1.367x`), but the local reproducibility discrepancy is recorded and
+  the gate is not re-marked from this run.
 - Process-isolation evidence combines slot sibling survival, independent
   multi-scope controller survival, transient-worker-only topology assertions,
   and packaged systemd boundary checks.
@@ -641,6 +683,107 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   per-session journal replay; the controller passes one slot snapshot and
   generation/phase readiness into each poll. Full workspace proof and a new
   signed-APT Sentry soak are required.
+- The corrected idle-scaling proof now waits for four consecutive populated
+  controller cycles before measuring the final steady pair. This avoids both
+  slot-process startup CPU and partially populated snapshots while retaining
+  the required 1-to-16-slot 2x assertion. Focused nextest passed in 201.7s;
+  the remaining full-suite run is still required for this candidate.
+- GitHub release run `33092968450` passed all v0.1.243 build, test, signing,
+  attestation, package, and release assembly jobs. The standard
+  `velnor-apt` package-update run `33095136706` also passed its explicit
+  GitHub-lane verification and mutation jobs, opening PR #151. Its required
+  pull-request validation is currently queued on the repository's trusted
+  Velnor runner; no bypass or direct publication was used. v0.1.243 Sentry
+  installation and the post-fix idle soak remain blocked on that signed APT
+  publication completing.
+- Because PR #151's pull-request event was pinned to the unavailable Velnor
+  runner, standard GitHub-lane workflow dispatch `33096266101` was run on the
+  exact PR head. It passed `tailrocks / github lane`, `tailrocks / contract`,
+  and `ci-required`. Auto-merge is enabled, but GitHub still reports the
+  original pull-request contract check queued; no branch-protection bypass was
+  used.
+- Auto-merge is enabled on PR #151. The original pull-request contract remains
+  unavailable while the trusted Velnor runner pool reports zero runners. The
+  Sentry `velnor-tailrocks` scope currently reports eight active jobs, so no
+  restart, drain, or process kill was used to manufacture capacity; active-job
+  preservation takes precedence over release acceleration.
+- 2026-08-28 exact-candidate local verification: `mise exec -- cargo nextest
+  run --workspace` passed 1,407/1,407; `cargo fmt --all -- --check` and strict
+  workspace Clippy passed. The idle-scaling test passed in 201.256s. The
+  unchanged fixture readiness audit still exits 1 before dispatch because the
+  fixture-owned canonical workflow surface is missing required paths-filter,
+  mise, mold, cache, provenance, artifact, Docker, Pages, Renovate,
+  merge-group, and environment-injection entries; fixture content remains
+  unchanged and readiness is not marked complete.
+- 2026-08-28 merge verification after syncing `origin/main` and preserving
+  its bounded registration recovery: focused runner/control/model nextest
+  passed 1,205/1,205; idle scaling passed with 16-slot controller CPU 2,736µs
+  versus 1-slot 1,181µs; final workspace nextest passed 1,425/1,425;
+  `cargo fmt --all -- --check` and strict workspace Clippy passed. The branch
+  is pushed at `247e0d0` after signed merge `e2f3518`; no external gate is
+  marked complete by these local results.
+- PR #410 now points at `e5c85b1` and is mergeable. Fresh CI run
+  `33100587474` has passed validation and is running the GitHub lane; guest
+  image run `33100586739` is still running both architecture jobs. These
+  checks are not yet final evidence for merge.
+- 2026-08-28 read-only Sentry inspection using explicit
+  `~/.ssh/velnor_sentry`: host binary remains `0.1.242`; the isolated
+  `velnor-sentry` scope reports `jobs=0`, `idle_slots=5`, `waiter_processes=0`,
+  `job_processes=0`, ready health, and zero containers, but its current
+  controller metrics show `broker.cpu_user_us=2782129311`, seven broker
+  errors (`401`×5, `404`×2), 22 registration-loss events, and
+  `jit.create_attempts=30`. This is authoritative pre-candidate churn
+  evidence; no restart, drain, upgrade, or registration mutation was made.
+- 2026-08-28 candidate release gate: signed candidate commit `00331fa` and
+  annotated tag `v0.1.244` passed PR CI `33103874600` (`github lane`, contract,
+  and `ci-required`), guest-image run `33103873105`, and Release run
+  `33104911256` (both architectures, release metadata, GHCR image, both debs,
+  release assembly, and four hosted attestations). GitHub release assets are
+  published at `v0.1.244`; no APT publication or Sentry mutation has occurred.
+- 2026-08-28 APT gate: canonical Package update dispatch `33106970852` was
+  scoped to Velnor but queued because Sentry's only `velnor-target-mvp` runner
+  was busy. Read-only Sentry health showed `velnor-tailrocks` had `jobs=8` and
+  `idle_slots=0`; the matching runner registration then disappeared. The
+  queued run was canceled without starting a job. An explicit GitHub-lane
+  dispatch `33107254562` was canceled while pending behind that stale queued
+  run. No active job, sibling scope, runner registration, or package data was
+  modified.
+- 2026-08-28 Package update progression: explicit GitHub-lane dispatch
+  `33107695940` passed verification and mutation, producing `velnor-apt` PR
+  #151 at head `c1788dad`. Its required pull-request validation remains
+  blocked by the trusted-runner queue, so signed publication has not occurred.
+  PR #410 head `ff225c7` has green GitHub-lane, contract, and `ci-required`
+  checks in run `33107425149`. Guest-image run `33107424480` reproduced a
+  transient aarch64 download failure, then two failed-job retries reached the
+  same external build/download path and were canceled after the hard progress
+  window; the already-published v0.1.244 release guest run remains green.
+- 2026-08-28 guest-image reliability correction: final head `eaf772d` adds
+  bounded HTTP/1.1 retries and connect/transfer timeouts to the pinned kernel
+  download, matching the release workflow's proven transport behavior. Final
+  guest run `33108920045` passed both downloads and reached both architecture
+  builds; final PR CI `33108920851` reached its test gate. The guest and CI
+  runs remain external release evidence until terminal; APT PR #151's required
+  validation rerun `33107782103` remains queued behind the trusted runner.
+- 2026-08-28 protected rollout recheck: APT PR #151 validation rerun
+  `33107782103` again left its trusted `validate request` canceled and its
+  replacement jobs queued; the PR remains blocked and no signed publication
+  exists. Explicit-identity Sentry inspection reports `velnor-tailrocks` at
+  `jobs=8`, `idle_slots=0`, `actual_ready_slots=1`, `registered_slots=9`,
+  `recovery_state=missing_session`, and `state=degraded`; its metrics still
+  show `reconcile_overlap_count=0`, `waiter_processes=0`, and
+  `job_processes=0`. Active jobs and the degraded scope were not restarted,
+  drained, killed, upgraded, or registration-mutated.
+- 2026-08-28 continuation gate recheck: PR #410 head `ebec37f` spawned fresh
+  CI `33113664810` and guest-image `33113664381`; both remain non-terminal
+  while the GitHub lane/guest builds run. Fixture PR #111 remains blocked with
+  `ci-required` queued because the sole `velnor-trusted` runner is offline.
+  Explicit-identity Sentry inspection found the isolated `velnor-sentry`
+  scope healthy and idle (`jobs=0`, `actual_ready_slots=5`, `state=ready`),
+  but the installed host binary is still `0.1.242`; fleet process inspection
+  also shows legacy daemon arguments plus stale waiter/zombie processes.
+  No live scope was restarted, drained, killed, upgraded, or registration-
+  mutated; fixture readiness, active-job proof, promotion, and soak gates stay
+  open.
 
 ## Non-goals
 
