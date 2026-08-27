@@ -3829,6 +3829,19 @@ async fn handle_job_request(
             let _ = completion;
             bail!("{REASON}");
         }
+    } else {
+        const REASON: &str = "operational store is unavailable; job failed closed before execution";
+        let completion = complete_acquired_job_failure(
+            &run_service_job,
+            &AcquiredJobIdentity::from_job(&job),
+            Some(&job),
+            Some("operational_store".to_string()),
+            REASON,
+        )
+        .await;
+        let _ = clear_in_flight_job(config_dir);
+        let _ = completion;
+        bail!("{REASON}");
     }
 
     let event_name = crate::github_adapter::job_variable(&job, "github.event_name").unwrap_or("");
