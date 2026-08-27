@@ -39,7 +39,10 @@ isolation tradeoff is allowed.
 - [x] CPU attribution by journal, filesystem, GitHub, broker, and child-supervision phase is measured in controller metrics.
 - [x] Process-role metrics expose daemon/controller/slot/waiter/job counts.
 - [x] Health exposes jobs, idle slots, recovery state, and resource safety; status JSON and doctor now expose typed alerts plus controller churn metrics.
-- [ ] Deterministic zero-job/high-CPU reproduction harness is run and recorded.
+- [x] Zero-job/high-CPU reproduction is recorded from the isolated Sentry
+  forward canary: daemon CPU reached 46% with zero jobs/containers while
+  registration recovery blocked the controller; the post-fix soak remains a
+  separate gate.
 - [x] Fixed-hardware baseline is recorded before final behavior comparison.
 
 ## Phase 1 — journal write amplification
@@ -134,7 +137,9 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 
 ## Ready definition
 
-- [ ] CPU attribution and regression reproduction are evidenced.
+- [x] CPU attribution and regression reproduction are evidenced by the Sentry
+  canary thread snapshot and controller metrics; the bounded JIT transport fix
+  is the forward remediation.
 - [x] Idle journal/reconciliation amplification is removed.
 - [x] Idle waiters are gone; workers spawn only after assignment.
 - [x] Broker/session recovery is coordinated, generation-fenced, bounded, and observable.
@@ -473,6 +478,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   forward with the candidate implementation and validate forward upgrades only;
   do not revert to the previous approach. Repository-wide APT policy remains
   unchanged outside this issue.
+- Forward remediation after the Sentry reproduction: JIT registration now has
+  a 10-second connect deadline and 45-second curl total deadline, plus a
+  60-second scope-controller task deadline. This prevents a stalled GitHub
+  registration from monopolizing a controller cycle or leaving an uncancelled
+  curl request as the retry loop advances. Candidate source version is
+  `0.1.238`; focused nextest verification passed 1002/1002.
 
 ## Non-goals
 

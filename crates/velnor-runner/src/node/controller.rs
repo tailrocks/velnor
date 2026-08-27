@@ -59,6 +59,10 @@ const RATE_LIMIT_HEADROOM_REMAINING: u64 = 100;
 /// deliberately short (5s doubling) — only sustained failures grow long.
 const REGISTRATION_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
 const BROKER_OPEN_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
+/// A stalled registration request must not monopolize the scope controller.
+/// The curl subprocess has the same bound; this task-level guard also covers
+/// spawn_blocking and any future registration transport implementation.
+const JIT_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Fleet-wide REST pacing for the shared PAT, owned by the controller.
 /// Read-only probes and JIT registration retries draw from the same budget:
@@ -1506,9 +1510,18 @@ async fn register_runners(
             async move {
                 let index = slot_index_from_id(&slot_id);
                 let started = Instant::now();
-                let result =
-                    crate::runner::jit_configure_one_slot(&exec, &config_base, index, slot_count)
-                        .await;
+                let result = tokio::time::timeout(
+                    JIT_REGISTRATION_TIMEOUT,
+                    crate::runner::jit_configure_one_slot(&exec, &config_base, index, slot_count),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "JIT registration timed out after {}s",
+                        JIT_REGISTRATION_TIMEOUT.as_secs()
+                    )
+                })
+                .and_then(|result| result);
                 (slot_id, generation, result, started.elapsed())
             }
         })

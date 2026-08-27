@@ -34,6 +34,8 @@ pub fn velnor_runner_display() -> String {
     format!("Velnor Runner/{VELNOR_VERSION} (protocol: {RUNNER_VERSION})")
 }
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
+const JIT_CURL_CONNECT_TIMEOUT_SECONDS: u64 = 10;
+const JIT_CURL_MAX_TIME_SECONDS: u64 = 45;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
@@ -877,6 +879,22 @@ pub struct RegistrationClient {
     http: Client,
 }
 
+fn jit_curl_config(user_agent: &str, pat: &str) -> String {
+    format!(
+        "header = \"User-Agent: {user_agent}\"\n\
+         header = \"Authorization: Bearer {pat}\"\n\
+         header = \"Accept: application/vnd.github+json\"\n\
+         header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+         header = \"Content-Type: application/json\"\n\
+         request = POST\n\
+         connect-timeout = {JIT_CURL_CONNECT_TIMEOUT_SECONDS}\n\
+         max-time = {JIT_CURL_MAX_TIME_SECONDS}\n\
+         location\n\
+         silent\n\
+         write-out = \"\\n%{{http_code}}\"\n"
+    )
+}
+
 impl RegistrationClient {
     pub fn new() -> Result<Self> {
         let http = Client::builder()
@@ -929,17 +947,7 @@ impl RegistrationClient {
                 let cfg_path = tmp.join(format!("velnor-jit-{}.cfg", uuid::Uuid::new_v4()));
                 let body_path = tmp.join(format!("velnor-jit-{}.body", uuid::Uuid::new_v4()));
                 let headers_path = tmp.join(format!("velnor-jit-{}.headers", uuid::Uuid::new_v4()));
-                let cfg = format!(
-                    "header = \"User-Agent: {ua2}\"\n\
-                     header = \"Authorization: Bearer {pat2}\"\n\
-                     header = \"Accept: application/vnd.github+json\"\n\
-                     header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-                     header = \"Content-Type: application/json\"\n\
-                     request = POST\n\
-                     location\n\
-                     silent\n\
-                     write-out = \"\\n%{{http_code}}\"\n"
-                );
+                let cfg = jit_curl_config(&ua2, &pat2);
                 let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
                     use std::io::Write;
                     let mut f = std::fs::OpenOptions::new()
@@ -5030,6 +5038,14 @@ mod tests {
             classify_registration_error(503, None, None),
             RegistrationErrorClass::Transient
         );
+    }
+
+    #[test]
+    fn jit_curl_config_has_bounded_transport_timeouts() {
+        let config = jit_curl_config("test-agent", "test-pat");
+        assert!(config.contains("connect-timeout = 10"));
+        assert!(config.contains("max-time = 45"));
+        assert!(config.contains("request = POST"));
     }
 
     #[test]
