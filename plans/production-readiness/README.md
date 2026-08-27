@@ -269,7 +269,7 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T22:47:00Z
+### Current baseline — 2026-08-27T23:01:59Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
   `80d1b63e50cb5620388e5e16c8925a49d9b1e4f7`, clean worktree, remote
@@ -306,6 +306,11 @@ evidence and requires a fresh baseline.
   are all `visibility=selected`, `allows_public_repositories=true`,
   `restricted_to_workflows=false`; Tailrocks currently selects 21 repositories
   including `cloudflare-tofu` and `github-terraform`.
+- Current GitHub repository readback shows the 28 canonical repositories are
+  present, but live default branches are not uniform: `master`, `develop`,
+  `staging`, and `port/cross-agent-dry` occur alongside `main`. This conflicts
+  with the 039 release-ref assumption that all 28 resolve to `refs/heads/main`;
+  the ref-shape stop remains active and no policy was changed.
 - Sentry read-only snapshot last captured at `2026-08-27T16:07:53Z` (not a
   current-state proof): Docker 29.7.2 active; `velnor-runner 0.1.242` and
   `/usr/bin/velnorctl` present; `/usr/bin/velnor-tools` absent; exact unit
