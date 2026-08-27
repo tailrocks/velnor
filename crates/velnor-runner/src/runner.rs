@@ -3965,6 +3965,8 @@ async fn handle_job_request(
                 "cannot execute scripts because step mapping failed",
             )
             .await?;
+            clear_in_flight_job(config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             bail!("cannot execute scripts because step mapping failed");
         };
         if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope) {
@@ -3976,6 +3978,8 @@ async fn handle_job_request(
                 &format!("{error:#}"),
             )
             .await?;
+            clear_in_flight_job(config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             return Err(error);
         }
         // Strict capability admission is unconditional: there is no bypass. The
@@ -3991,6 +3995,8 @@ async fn handle_job_request(
                 &format!("{error:#}"),
             )
             .await?;
+            clear_in_flight_job(config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             return Err(error);
         }
         let admission_graph = match admit_job_closure(&job, &early_context) {
@@ -4004,6 +4010,8 @@ async fn handle_job_request(
                     &format!("{error:#}"),
                 )
                 .await?;
+                clear_in_flight_job(config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
                 return Err(error);
             }
         };
@@ -4119,6 +4127,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     bail!("{reason}");
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortCanceled => {
@@ -4134,6 +4144,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     bail!("job canceled while waiting for host disk capacity");
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortCapacityTimeout => {
@@ -4164,6 +4176,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     bail!("{reason}");
                 }
             }
@@ -4182,6 +4196,8 @@ async fn handle_job_request(
                     &format!("{error:#}"),
                 )
                 .await?;
+                clear_in_flight_job(config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
                 return Err(error).context("acquire storage leases for active job");
             }
         };
@@ -4272,6 +4288,8 @@ async fn handle_job_request(
                 .await;
                 renewal.abort();
                 completion?;
+                clear_in_flight_job(&teardown_config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
                 return Err(join_error).context("join Docker job execution task");
             }
         };
@@ -4313,6 +4331,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(&teardown_config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     return Err(error);
                 }
             }
