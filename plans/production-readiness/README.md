@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T18:22:33Z
+### Current baseline — 2026-08-27T18:31:25Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `dac1d9d296bd2d4e6b7486ef9a17a819c0714050`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 221 commits ahead
+  `fba5f12baeff37c8af5e575f62a306a96cdd2745`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 223 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -291,11 +291,11 @@ evidence and requires a fresh baseline.
   Firecracker safety fork was not merged wholesale because it conflicts with
   the active guest/runtime architecture.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T18:22:33Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1479/1479` passed with zero
-  skipped tests. Focused `velnor-runner` nextest passed `1085/1085`; commit
-  `dac1d9d` fails closed when replacement encounters corrupt or unreadable
-  local runner identity, preserving recovery state.
+  `2026-08-27T18:31:25Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1481/1481` passed with zero
+  skipped tests. Focused `velnor-runner` nextest passed `1087/1087`; commit
+  `fba5f12` propagates successor cleanup failures and emits degraded state
+  instead of false cleanup success, preserving local recovery files.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
