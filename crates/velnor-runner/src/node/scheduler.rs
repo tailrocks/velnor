@@ -1,4 +1,4 @@
-//! Explicit GitHub scheduler boundary. Production is Legacy JIT V2.
+//! Explicit GitHub scheduler boundary. Production is per-slot JIT V2.
 
 use velnor_model::{SchedulerKind, SCALESET_ENDPOINT, SCALESET_MAX_CAPACITY_HEADER};
 
@@ -8,20 +8,20 @@ use crate::protocol::{GitHubJitConfigRequest, GitHubScope};
 /// but cannot activate on the live register path.
 #[must_use]
 pub fn production_scheduler() -> SchedulerKind {
-    SchedulerKind::PRODUCTION
+    SchedulerKind::CURRENT
 }
 
-/// Exact JIT register URL used by LegacyJitV2 (shipped `GitHubScope`).
+/// Exact JIT register URL used by per-slot JIT V2 (shipped `GitHubScope`).
 ///
 /// # Errors
 /// Invalid GitHub URL.
-pub fn legacy_jit_v2_register_url(github_url: &str) -> anyhow::Result<String> {
+pub fn per_slot_jit_v2_register_url(github_url: &str) -> anyhow::Result<String> {
     Ok(GitHubScope::parse(github_url)?.jit_config_url.to_string())
 }
 
-/// Exact JIT request body used by LegacyJitV2 (shipped `GitHubJitConfigRequest`).
+/// Exact JIT request body used by per-slot JIT V2 (shipped `GitHubJitConfigRequest`).
 #[must_use]
-pub fn legacy_jit_v2_request(
+pub fn per_slot_jit_v2_request(
     name: String,
     runner_group_id: i64,
     labels: Vec<String>,
@@ -55,20 +55,20 @@ mod tests {
     };
 
     #[test]
-    fn production_scheduler_is_legacy_jit_v2() {
-        assert_eq!(production_scheduler(), SchedulerKind::LegacyJitV2);
-        assert!(production_scheduler().activate_production().is_ok());
-        assert!(SchedulerKind::ScaleSetV2.activate_production().is_err());
+    fn production_scheduler_is_per_slot_jit_v2() {
+        assert_eq!(production_scheduler(), SchedulerKind::PerSlotJitV2);
+        assert!(production_scheduler().ensure_current().is_ok());
+        assert!(SchedulerKind::ScaleSetV2.ensure_current().is_err());
     }
 
     #[test]
-    fn legacy_jit_v2_url_is_generate_jitconfig() {
-        let url = legacy_jit_v2_register_url("https://github.com/tailrocks/velnor").unwrap();
+    fn per_slot_jit_v2_url_is_generate_jitconfig() {
+        let url = per_slot_jit_v2_register_url("https://github.com/tailrocks/velnor").unwrap();
         assert!(
             url.ends_with("/repos/tailrocks/velnor/actions/runners/generate-jitconfig"),
             "{url}"
         );
-        let org = legacy_jit_v2_register_url("https://github.com/tailrocks").unwrap();
+        let org = per_slot_jit_v2_register_url("https://github.com/tailrocks").unwrap();
         assert!(
             org.ends_with("/orgs/tailrocks/actions/runners/generate-jitconfig"),
             "{org}"
@@ -76,8 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_jit_v2_request_fields_are_name_group_labels() {
-        let request = legacy_jit_v2_request("velnor-slot-1".into(), 7, vec!["velnor".into()]);
+    fn per_slot_jit_v2_request_fields_are_name_group_labels() {
+        let request = per_slot_jit_v2_request("velnor-slot-1".into(), 7, vec!["velnor".into()]);
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["name"], "velnor-slot-1");
         assert_eq!(json["runner_group_id"], 7);

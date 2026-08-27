@@ -58,9 +58,9 @@ pub use resources::{
 };
 pub use sanitized::{IdentityRef, RepositoryRef, SanitizedUrl, SecretRef};
 pub use scheduler::{
-    RunnerScaleSetMessageResponse, RunnerScaleSetStatistic, ScaleSetJobMessageType,
-    ScaleSetNotProven, SchedulerKind, SCALESET_API_VERSION, SCALESET_ENDPOINT,
-    SCALESET_MAX_CAPACITY_HEADER, SCALESET_UPSTREAM_COMMIT,
+    RunnerScaleSetMessageResponse, RunnerScaleSetStatistic, ScaleSetJobMessageType, SchedulerKind,
+    SchedulerNotCurrent, SCALESET_API_VERSION, SCALESET_ENDPOINT, SCALESET_MAX_CAPACITY_HEADER,
+    SCALESET_UPSTREAM_COMMIT,
 };
 pub use since::{InvalidSince, Since};
 pub use source::Source;

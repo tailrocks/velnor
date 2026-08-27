@@ -605,7 +605,7 @@ async fn register_runners(
     if registrations.is_empty() {
         return Ok(());
     }
-    super::scheduler::production_scheduler().activate_production()?;
+    super::scheduler::production_scheduler().ensure_current()?;
     let exec = match load_exec_config(&args.state_dir) {
         Ok(exec) => exec,
         Err(error) => {

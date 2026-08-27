@@ -1,5 +1,4 @@
-//! GitHub scheduler backends. Production remains Legacy JIT V2 until
-//! ScaleSetV2 proves exact group/repo/label/YAML equivalence.
+//! GitHub scheduler backends. Production uses per-slot JIT V2.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,54 +18,54 @@ pub const SCALESET_API_VERSION: &str = "6.0-preview";
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerKind {
     /// Current production: per-slot `generate-jitconfig` + V2 broker.
-    LegacyJitV2,
+    PerSlotJitV2,
     /// Public-preview scale-set APIs. Not production until estate proof.
     ScaleSetV2,
 }
 
 impl SchedulerKind {
-    /// The only backend allowed to register or advertise capacity.
-    pub const PRODUCTION: Self = Self::LegacyJitV2;
+    /// The current backend allowed to register or advertise capacity.
+    pub const CURRENT: Self = Self::PerSlotJitV2;
 
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LegacyJitV2 => "legacy_jit_v2",
+            Self::PerSlotJitV2 => "per_slot_jit_v2",
             Self::ScaleSetV2 => "scale_set_v2",
         }
     }
 
-    /// ScaleSetV2 is not an allowed production activate.
+    /// Reject scheduler backends other than the current per-slot JIT path.
     ///
     /// # Errors
-    /// [`ScaleSetNotProven`] when `self` is not [`Self::PRODUCTION`].
-    pub fn activate_production(self) -> Result<(), ScaleSetNotProven> {
-        if self == Self::PRODUCTION {
+    /// [`SchedulerNotCurrent`] when `self` is not [`Self::CURRENT`].
+    pub fn ensure_current(self) -> Result<(), SchedulerNotCurrent> {
+        if self == Self::CURRENT {
             Ok(())
         } else {
-            Err(ScaleSetNotProven { requested: self })
+            Err(SchedulerNotCurrent { requested: self })
         }
     }
 }
 
-/// Why ScaleSetV2 cannot take production traffic yet.
+/// A scheduler backend other than the current per-slot JIT path was requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScaleSetNotProven {
+pub struct SchedulerNotCurrent {
     pub requested: SchedulerKind,
 }
 
-impl std::fmt::Display for ScaleSetNotProven {
+impl std::fmt::Display for SchedulerNotCurrent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "scheduler {} is not production; estate group/repo/label/YAML equivalence is unproven (upstream {})",
+            "scheduler {} is not current; estate group/repo/label/YAML equivalence is unproven (upstream {})",
             self.requested.as_str(),
             SCALESET_UPSTREAM_COMMIT
         )
     }
 }
 
-impl std::error::Error for ScaleSetNotProven {}
+impl std::error::Error for SchedulerNotCurrent {}
 
 /// `RunnerScaleSetStatistic` from `types.go` at [`SCALESET_UPSTREAM_COMMIT`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -114,10 +113,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_is_legacy_jit_v2() {
-        assert_eq!(SchedulerKind::PRODUCTION, SchedulerKind::LegacyJitV2);
-        assert!(SchedulerKind::LegacyJitV2.activate_production().is_ok());
-        assert!(SchedulerKind::ScaleSetV2.activate_production().is_err());
+    fn current_scheduler_is_per_slot_jit_v2() {
+        assert_eq!(SchedulerKind::CURRENT, SchedulerKind::PerSlotJitV2);
+        assert!(SchedulerKind::PerSlotJitV2.ensure_current().is_ok());
+        assert!(SchedulerKind::ScaleSetV2.ensure_current().is_err());
+    }
+
+    #[test]
+    fn removed_snake_case_scheduler_variant_is_rejected() {
+        let removed_variant = ["legacy", "jit", "v2"].join("_");
+        assert!(serde_json::from_str::<SchedulerKind>(&format!("\"{removed_variant}\"")).is_err());
+    }
+
+    #[test]
+    fn removed_pascal_case_scheduler_variant_is_rejected() {
+        let removed_variant = ["Legacy", "Jit", "V2"].concat();
+        assert!(serde_json::from_str::<SchedulerKind>(&format!("\"{removed_variant}\"")).is_err());
     }
 
     #[test]
