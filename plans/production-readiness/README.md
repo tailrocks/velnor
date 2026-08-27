@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T19:01:00Z
+### Current baseline — 2026-08-27T19:36:04Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `86b7df08dc52e457158fd12bf9f721d7164daec9`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 229 commits ahead
+  `28c930025d9e47e4b68d20dd7442bb14efd83a0b`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 231 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -291,12 +291,13 @@ evidence and requires a fresh baseline.
   Firecracker safety fork was not merged wholesale because it conflicts with
   the active guest/runtime architecture.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T19:01:00Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1487/1487` passed with zero
-  skipped tests. Focused `velnor-runner` nextest passed `1093/1093`; commit
-  `86b7df0` makes supervised storage fail closed when canonical storage is
-  absent, keeps explicit local execution config-scoped, and threads the
-  selected layout through capacity/reclaim paths.
+  `2026-08-27T19:36:04Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1492/1492` passed with zero
+  skipped tests. Focused `velnor-runner` nextest passed `1098/1098`; commit
+  `28c9300` makes supervised storage fail closed when canonical storage is
+  absent, keeps explicit local execution config-scoped, threads the selected
+  layout through capacity/reclaim paths, and preserves durable state when
+  runner identity config is corrupt, unreadable, or symlink-invalid.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
