@@ -15,6 +15,7 @@ use rsa::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::{
     collections::BTreeMap,
     fmt,
@@ -1511,7 +1512,7 @@ pub enum BrokerPollClass {
     Empty,
     /// 2xx with a message body to decode.
     Message,
-    /// Transport failure (curl could not produce a status) or non-2xx. An
+    /// Transport failure without an HTTP status or non-2xx. An
     /// expired/unauthorized/deleted session typically answers 401/403/404 with
     /// an EMPTY body — this MUST classify as an error, never as "no message",
     /// or an idle slot turns into a zombie that polls forever while GitHub's
@@ -1532,7 +1533,7 @@ pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
     BrokerPollClass::Error
 }
 
-/// Completion must retry transport failures, 5xx, and curl status-0; other
+/// Completion must retry transport failures, 5xx, and status-less failures; other
 /// 4xx (auth, validation, conflict) will not change on retry.
 pub fn is_retriable_completion_status(status: u16) -> bool {
     !(400..500).contains(&status) || status == 408 || status == 429
@@ -1875,8 +1876,8 @@ fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
     else {
-        // Native request failures expose a reqwest error; curl failures that
-        // cannot produce an HTTP status expose an I/O error. Filesystem and
+        // Native request failures expose a reqwest error; status-less failures
+        // expose an I/O error. Filesystem and
         // executable errors are local faults and must not retain a session
         // forever as if GitHub were temporarily unavailable.
         if error.chain().any(|cause| {
@@ -4029,7 +4030,8 @@ fn artifact_create_request(
         "workflow_run_backend_id": plan_id,
         "workflow_job_run_backend_id": job_id,
         "name": name,
-        "version": 4
+        "mime_type": {"value": "application/zip"},
+        "version": 7
     });
     if let Some(days) = retention_days {
         let expires_at = (now + time::Duration::days(i64::from(days)))
@@ -4038,6 +4040,73 @@ fn artifact_create_request(
         request["expires_at"] = serde_json::Value::String(expires_at);
     }
     Ok(request)
+}
+
+struct ArtifactTempFile(std::path::PathBuf);
+
+impl ArtifactTempFile {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ArtifactTempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn write_artifact_temp_file(
+    path: std::path::PathBuf,
+    content: &[u8],
+) -> std::io::Result<ArtifactTempFile> {
+    use std::io::Write;
+
+    let (temp, mut file) = open_artifact_temp_file(path)?;
+    file.write_all(content)?;
+    Ok(temp)
+}
+
+fn open_artifact_temp_file(
+    path: std::path::PathBuf,
+) -> std::io::Result<(ArtifactTempFile, std::fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Acquire ownership atomically before constructing the cleanup guard.
+    // A failed create_new must never allow Drop to remove another owner's file.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
+    Ok((ArtifactTempFile(path), file))
+}
+
+fn results_service_post(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+    body: &str,
+    operation: &str,
+) -> Result<String> {
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .header(ACCEPT, "application/json")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .timeout(Duration::from_secs(30))
+        .body(body.to_owned())
+        .send()
+        .with_context(|| format!("send Results Service {operation}"))?;
+    let status = response.status();
+    let response_body = response
+        .text()
+        .with_context(|| format!("read Results Service {operation} response"))?;
+    if !status.is_success() {
+        bail!("Results Service {operation}: status={status}, body={response_body}");
+    }
+    Ok(response_body)
 }
 
 /// Upload artifact files to GitHub's Results Service (artifact v4 format).
@@ -4061,57 +4130,21 @@ pub fn upload_artifact_blocking(
     files: &[(String, Vec<u8>)], // (archive path, content)
     options: ArtifactUploadOptions,
 ) -> Result<String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
 
-    // Write a mode-0600 file and return its path. Caller must delete.
-    let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
+    // Write a mode-0600 file. Construct the guard before any fallible I/O so
+    // failed open/write operations cannot leave secret artifact bytes behind.
+    let write_temp_file = |suffix: &str, content: &[u8]| -> std::io::Result<ArtifactTempFile> {
         let p = tmp_dir.join(format!("velnor-artifact-{}.{suffix}", uuid::Uuid::new_v4()));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&p)?;
-        f.write_all(content)?;
-        Ok(p)
+        write_artifact_temp_file(p, content)
     };
 
-    // Helper: curl POST with JSON via 0600 config + body files — secrets stay off argv.
-    let curl_post = |url: &str, body: &str| -> Result<String> {
-        let cfg = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             header = \"Authorization: Bearer {token}\"\n\
-             header = \"Accept: application/json\"\n\
-             header = \"Content-Type: application/json\"\n\
-             max-time = 30\n\
-             request = POST\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let cfg_path = write_secret_file("cfg", cfg.as_bytes()).context("write curl cfg")?;
-        let body_path = write_secret_file("body", body.as_bytes()).context("write curl body")?;
-        let out = std::process::Command::new("curl")
-            .arg("--config")
-            .arg(&cfg_path)
-            .arg("--data")
-            .arg(format!("@{}", body_path.display()))
-            .arg(url)
-            .output();
-        let _ = std::fs::remove_file(&cfg_path);
-        let _ = std::fs::remove_file(&body_path);
-        let out = out.context("run curl")?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let (resp_body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-        let status: u16 = status_str.trim().parse().unwrap_or(0);
-        if !(200..300).contains(&status) {
-            bail!("curl POST {url}: status={status}, body={resp_body}");
-        }
-        Ok(resp_body.to_string())
-    };
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build Results Service HTTP client")?;
 
     // 1. CreateArtifact → signed upload URL.
     let create_url = format!("{base}/{SERVICE}/CreateArtifact");
@@ -4123,7 +4156,9 @@ pub fn upload_artifact_blocking(
         time::OffsetDateTime::now_utc(),
     )?;
     let create_body = serde_json::to_string(&create_request).context("serialize CreateArtifact")?;
-    let create_text = curl_post(&create_url, &create_body).context("CreateArtifact request")?;
+    let create_text =
+        results_service_post(&client, &create_url, token, &create_body, "CreateArtifact")
+            .context("CreateArtifact request")?;
     let create_resp: serde_json::Value =
         serde_json::from_str(&create_text).context("CreateArtifact parse")?;
     if create_resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -4137,52 +4172,55 @@ pub fn upload_artifact_blocking(
         .to_string();
 
     // 2. Create zip archive and PUT to signed URL.
-    // The signed URL is itself a credential — keep it off argv via --config.
     let zip_bytes = artifact_zip_bytes(files, options.store_uncompressed)?;
     let zip_size = zip_bytes.len() as u64;
 
-    let zip_path = write_secret_file("zip", &zip_bytes).context("write zip temp file")?;
-    let put_cfg = format!(
-        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-         header = \"Content-Type: application/zip\"\n\
-         header = \"Content-Length: {zip_size}\"\n\
-         header = \"x-ms-blob-type: BlockBlob\"\n\
-         max-time = 60\n\
-         request = PUT\n\
-         silent\n\
-         write-out = \"\\n%{{http_code}}\"\n\
-         url = \"{upload_url}\"\n"
-    );
-    let put_cfg_path = write_secret_file("put.cfg", put_cfg.as_bytes()).context("write PUT cfg")?;
-    let put_out = std::process::Command::new("curl")
-        .arg("--config")
-        .arg(&put_cfg_path)
-        .arg("--data-binary")
-        .arg(format!("@{}", zip_path.display()))
-        .output();
-    let _ = std::fs::remove_file(&put_cfg_path);
-    let _ = std::fs::remove_file(&zip_path);
-    let put_out = put_out.context("run curl PUT")?;
-    let stdout = String::from_utf8_lossy(&put_out.stdout);
-    let (_, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-    let put_status: u16 = status_str.trim().parse().unwrap_or(0);
+    let zip_path = write_temp_file("zip", &zip_bytes).context("write zip temp file")?;
+    let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
+    let put_response = reqwest::blocking::Client::builder()
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build artifact upload HTTP client")?
+        .put(&upload_url)
+        .header("Content-Type", "application/zip")
+        .header("Content-Length", zip_size)
+        .header("x-ms-blob-type", "BlockBlob")
+        .timeout(Duration::from_secs(60))
+        .body(zip_file)
+        .send()
+        .context("send artifact blob PUT")?;
+    let put_status = put_response.status().as_u16();
     if !(200..300).contains(&put_status) {
         bail!("artifact blob PUT failed: status={put_status}");
     }
 
     // 3. FinalizeArtifact.
     let finalize_url = format!("{base}/{SERVICE}/FinalizeArtifact");
+    let zip_hash = sha2::Sha256::digest(&zip_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let finalize_body = serde_json::to_string(&serde_json::json!({
         "workflow_run_backend_id": plan_id,
         "workflow_job_run_backend_id": job_id,
         "name": name,
-        "size": zip_size.to_string()
+        "size": zip_size.to_string(),
+        "hash": {"value": format!("sha256:{zip_hash}")}
     }))
     .context("serialize FinalizeArtifact")?;
-    let finalize_text =
-        curl_post(&finalize_url, &finalize_body).context("FinalizeArtifact request")?;
+    let finalize_text = results_service_post(
+        &client,
+        &finalize_url,
+        token,
+        &finalize_body,
+        "FinalizeArtifact",
+    )
+    .context("FinalizeArtifact request")?;
     let finalize: serde_json::Value =
         serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
+    if finalize.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        bail!("FinalizeArtifact: backend returned ok=false or absent");
+    }
     let artifact_id = finalize
         .get("artifact_id")
         .or_else(|| finalize.get("artifactId"))
@@ -4202,20 +4240,105 @@ pub struct ResultsArtifactDownload {
     pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
 }
 
+fn safe_raw_artifact_path(name: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::Path::new(name);
+    let file_name = path
+        .file_name()
+        .filter(|value| *value != std::ffi::OsStr::new(".") && *value != std::ffi::OsStr::new(".."))
+        .context("raw artifact name has no safe file name")?;
+    Ok(std::path::PathBuf::from(file_name))
+}
+
+fn artifact_response_is_zip(content_type: Option<&str>, signed_url: &str) -> bool {
+    let mime_is_zip = content_type.is_some_and(|value| {
+        value.split(';').next().is_some_and(|mime| {
+            matches!(
+                mime.trim().to_ascii_lowercase().as_str(),
+                "application/zip" | "application/x-zip-compressed" | "application/zip-compressed"
+            )
+        })
+    });
+    let url_path_is_zip = Url::parse(signed_url)
+        .ok()
+        .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
+        .is_some_and(|path| path.to_ascii_lowercase().ends_with(".zip"));
+    mime_is_zip || url_path_is_zip
+}
+
+fn raw_artifact_filename(
+    headers: &reqwest::header::HeaderMap,
+    fallback: &str,
+) -> Result<std::path::PathBuf> {
+    let disposition = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok());
+    let filename = disposition.and_then(|value| {
+        let parameters = value.split(';').skip(1).filter_map(|parameter| {
+            let (key, value) = parameter.trim().split_once('=')?;
+            Some((key.trim(), value.trim().trim_matches('"')))
+        });
+        let mut fallback_filename = None;
+        for (key, value) in parameters {
+            if key.eq_ignore_ascii_case("filename*") {
+                if let Some(decoded) = decode_rfc5987_filename(value) {
+                    return Some(decoded);
+                }
+            } else if key.eq_ignore_ascii_case("filename") && !value.is_empty() {
+                fallback_filename = Some(value.to_owned());
+            }
+        }
+        fallback_filename
+    });
+    safe_raw_artifact_path(
+        filename
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback),
+    )
+}
+
+fn decode_rfc5987_filename(value: &str) -> Option<String> {
+    let (charset, encoded) = value.split_once("''")?;
+    if !charset.eq_ignore_ascii_case("utf-8") {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut chars = encoded.as_bytes().iter().copied();
+    while let Some(byte) = chars.next() {
+        if byte == b'%' {
+            let high = hex_digit(chars.next()?)?;
+            let low = hex_digit(chars.next()?)?;
+            bytes.push((high << 4) | low);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    let decoded = String::from_utf8(bytes).ok()?;
+    (!decoded.is_empty()).then_some(decoded)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn artifact_download_status_is_ok(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::OK
+}
+
 /// Download artifacts visible to this workflow run through the Results
 /// Service v4 protocol used by `actions/download-artifact`.
 ///
 /// `name` (exact) or `pattern` (glob) filter the artifact list BEFORE anything
-/// is signed or downloaded: `docker/build-push-action` stores `.dockerbuild`
-/// build-record artifacts as gzip blobs rather than zips, so downloading every
-/// listed artifact unconditionally fails any download-artifact step in such a
-/// run with "invalid Zip archive: EOCD". Non-zip artifacts that still pass the
-/// filter (e.g. an unfiltered download-all in the same run) are skipped with a
-/// warning instead of failing the step.
+/// is signed or downloaded. Selected artifacts are returned whether the
+/// Results Service serves them as ZIP archives or raw blobs.
 ///
 /// Flow: ListArtifacts -> GetSignedArtifactURL -> GET zip. Signed URLs and the
-/// runtime bearer token are supplied through mode-0600 curl config files so
-/// neither credential appears in process arguments.
+/// runtime bearer token are kept out of process arguments.
 pub fn download_artifacts_blocking(
     results_service_url: &str,
     token: &str,
@@ -4225,7 +4348,6 @@ pub fn download_artifacts_blocking(
     pattern: &str,
 ) -> Result<Vec<ResultsArtifactDownload>> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
@@ -4238,61 +4360,20 @@ pub fn download_artifacts_blocking(
         Some(builder.build().context("build artifact pattern")?)
     };
 
-    let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
-        let path = tmp_dir.join(format!(
-            "velnor-artifact-download-{}.{suffix}",
-            uuid::Uuid::new_v4()
-        ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        std::io::Write::write_all(&mut file, content)?;
-        Ok(path)
-    };
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build Results Service HTTP client")?;
 
-    let curl_post = |method: &str, body: &serde_json::Value| -> Result<serde_json::Value> {
-        let url = format!("{base}/{SERVICE}/{method}");
-        let config = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             header = \"Authorization: Bearer {token}\"\n\
-             header = \"Accept: application/json\"\n\
-             header = \"Content-Type: application/json\"\n\
-             max-time = 30\n\
-             request = POST\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let config_path = write_secret_file("cfg", config.as_bytes())?;
-        let body_path = write_secret_file("json", serde_json::to_string(body)?.as_bytes())?;
-        let output = std::process::Command::new("curl")
-            .arg("--config")
-            .arg(&config_path)
-            .arg("--data")
-            .arg(format!("@{}", body_path.display()))
-            .arg(&url)
-            .output();
-        let _ = std::fs::remove_file(&config_path);
-        let _ = std::fs::remove_file(&body_path);
-        let output = output.with_context(|| format!("run Results Service {method}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (response, status_text) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
-        let status: u16 = status_text.trim().parse().unwrap_or(0);
-        if !(200..300).contains(&status) {
-            bail!("Results Service {method}: status={status}, body={response}");
-        }
-        serde_json::from_str(response).with_context(|| format!("parse Results Service {method}"))
-    };
-
-    let listed = curl_post(
-        "ListArtifacts",
-        &serde_json::json!({
-            "workflow_run_backend_id": plan_id,
-            "workflow_job_run_backend_id": job_id
-        }),
-    )?;
+    let list_body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": plan_id,
+        "workflow_job_run_backend_id": job_id
+    }))
+    .context("serialize ListArtifacts")?;
+    let list_url = format!("{base}/{SERVICE}/ListArtifacts");
+    let listed_text = results_service_post(&client, &list_url, token, &list_body, "ListArtifacts")?;
+    let listed: serde_json::Value =
+        serde_json::from_str(&listed_text).context("parse Results Service ListArtifacts")?;
     let artifacts = listed
         .get("artifacts")
         .and_then(serde_json::Value::as_array)
@@ -4329,59 +4410,74 @@ pub fn download_artifacts_blocking(
             .or_else(|| artifact.get("workflowJobRunBackendId"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or(job_id);
-        let signed = curl_post(
+        let signed_body = serde_json::to_string(&serde_json::json!({
+            "workflow_run_backend_id": artifact_plan,
+            "workflow_job_run_backend_id": artifact_job,
+            "name": artifact_name
+        }))
+        .context("serialize GetSignedArtifactURL")?;
+        let signed_url_endpoint = format!("{base}/{SERVICE}/GetSignedArtifactURL");
+        let signed_text = results_service_post(
+            &client,
+            &signed_url_endpoint,
+            token,
+            &signed_body,
             "GetSignedArtifactURL",
-            &serde_json::json!({
-                "workflow_run_backend_id": artifact_plan,
-                "workflow_job_run_backend_id": artifact_job,
-                "name": artifact_name
-            }),
         )?;
+        let signed: serde_json::Value = serde_json::from_str(&signed_text)
+            .context("parse Results Service GetSignedArtifactURL")?;
         let signed_url = signed
             .get("signed_url")
             .or_else(|| signed.get("signedUrl"))
             .and_then(serde_json::Value::as_str)
             .filter(|url| !url.is_empty())
             .context("GetSignedArtifactURL returned no signed URL")?;
-        let zip_path = tmp_dir.join(format!(
+        let artifact_path = tmp_dir.join(format!(
             "velnor-artifact-download-{}.zip",
             uuid::Uuid::new_v4()
         ));
-        let get_config = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             max-time = 120\n\
-             location\n\
-             fail\n\
-             silent\n\
-             show-error\n\
-             url = \"{signed_url}\"\n"
-        );
-        let config_path = write_secret_file("get.cfg", get_config.as_bytes())?;
-        let output = std::process::Command::new("curl")
-            .arg("--config")
-            .arg(&config_path)
-            .arg("--output")
-            .arg(&zip_path)
-            .output();
-        let _ = std::fs::remove_file(&config_path);
-        let output = output.context("download Results Service artifact zip")?;
-        if !output.status.success() {
-            let _ = std::fs::remove_file(&zip_path);
-            bail!(
-                "artifact zip download failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        let response = reqwest::blocking::Client::builder()
+            .user_agent(RUNNER_USER_AGENT)
+            .build()
+            .context("build artifact download HTTP client")?
+            .get(signed_url)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .context("download Results Service artifact zip")?;
+        let status = response.status();
+        if status != reqwest::StatusCode::OK {
+            let body = response.text().unwrap_or_default();
+            bail!("artifact zip download failed: status={status}, body={body}");
         }
-        let archive_file = std::fs::File::open(&zip_path)?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let mut response = response;
+        let (artifact_path, mut output_file) =
+            open_artifact_temp_file(artifact_path).context("create artifact zip temp file")?;
+        std::io::copy(&mut response, &mut output_file).context("write downloaded artifact zip")?;
+        let archive_file = std::fs::File::open(artifact_path.path())?;
         let mut archive = match zip::ZipArchive::new(archive_file) {
             Ok(archive) => archive,
             Err(err) => {
-                // docker/build-push-action uploads `.dockerbuild` build-record
-                // artifacts as gzip blobs, not zips. A selected-but-non-zip
-                // artifact (only reachable on pattern/download-all requests) is
-                // skipped with a warning rather than failing the whole step.
-                let _ = std::fs::remove_file(&zip_path);
-                eprintln!("skipping artifact '{artifact_name}': not a zip archive ({err})");
+                // Selected raw artifacts (for example a gzip `.dockerbuild`
+                // build record) are valid Results Service artifacts. Preserve
+                // their bytes under the artifact name; never silently drop a
+                // selected artifact. A ZIP content type with invalid bytes is
+                // still a protocol failure.
+                if artifact_response_is_zip(content_type.as_deref(), signed_url) {
+                    bail!("artifact '{artifact_name}' is not a valid ZIP archive: {err}");
+                }
+                let raw = std::fs::read(artifact_path.path()).context("read raw artifact")?;
+                downloads.push(ResultsArtifactDownload {
+                    name: artifact_name.to_string(),
+                    files: vec![(
+                        raw_artifact_filename(response.headers(), artifact_name)?,
+                        raw,
+                    )],
+                });
                 continue;
             }
         };
@@ -4392,14 +4488,12 @@ pub fn download_artifacts_blocking(
                 continue;
             }
             let Some(path) = entry.enclosed_name() else {
-                let _ = std::fs::remove_file(&zip_path);
                 bail!("artifact '{artifact_name}' contains an unsafe archive path");
             };
             let mut content = Vec::new();
             entry.read_to_end(&mut content)?;
             files.push((path, content));
         }
-        let _ = std::fs::remove_file(&zip_path);
         downloads.push(ResultsArtifactDownload {
             name: artifact_name.to_string(),
             files,
@@ -4619,6 +4713,375 @@ mod tests {
     }
 
     #[test]
+    fn artifact_create_request_uses_current_results_service_wire_shape() {
+        let request = artifact_create_request(
+            "plan",
+            "job",
+            "release",
+            None,
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        assert_eq!(request["version"], 7);
+        assert_eq!(
+            request["mime_type"],
+            serde_json::json!({"value": "application/zip"})
+        );
+    }
+
+    #[test]
+    fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server_base = base.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    let Some(headers_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers_end = headers_end + 4;
+                    let content_length = String::from_utf8_lossy(&request[..headers_end])
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("Content-Length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= headers_end + content_length {
+                        break;
+                    }
+                }
+                requests.push(request);
+                let (status, body) = match index {
+                    0 => (
+                        "200 OK",
+                        serde_json::json!({
+                            "ok": true,
+                            "signed_upload_url": format!("{server_base}/upload")
+                        })
+                        .to_string(),
+                    ),
+                    1 => ("201 Created", String::new()),
+                    _ => (
+                        "200 OK",
+                        serde_json::json!({"ok": false, "artifact_id": "artifact-1"}).to_string(),
+                    ),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+
+        let error = upload_artifact_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "job",
+            "release",
+            &[("dist/output.txt".to_string(), b"artifact".to_vec())],
+            ArtifactUploadOptions::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ok=false"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        let create = String::from_utf8_lossy(&requests[0]);
+        assert!(create.contains("\"version\":7"));
+        assert!(create.contains("\"mime_type\":{\"value\":\"application/zip\"}"));
+        let finalize = String::from_utf8_lossy(&requests[2]);
+        assert!(finalize.contains("\"hash\":{"));
+        assert!(finalize.contains("sha256:"));
+    }
+
+    #[test]
+    fn artifact_zip_classification_matches_current_toolkit_variants() {
+        for content_type in [
+            "application/zip",
+            "application/x-zip-compressed; charset=binary",
+            "APPLICATION/ZIP-COMPRESSED",
+        ] {
+            assert!(artifact_response_is_zip(
+                Some(content_type),
+                "https://blob.test/data"
+            ));
+        }
+        assert!(artifact_response_is_zip(
+            Some("application/octet-stream"),
+            "https://blob.test/data/archive.ZIP?sig=secret"
+        ));
+        assert!(!artifact_response_is_zip(
+            Some("application/octet-stream"),
+            "https://blob.test/data/archive.bin?sig=secret"
+        ));
+    }
+
+    #[test]
+    fn raw_artifact_filename_prefers_content_disposition_and_sanitizes_path() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename=\"../report.json\"".parse().unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("report.json")
+        );
+
+        headers.remove(reqwest::header::CONTENT_DISPOSITION);
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("fallback.bin")
+        );
+    }
+
+    #[test]
+    fn raw_artifact_filename_prefers_and_decodes_rfc5987_filename() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename=old.txt; filename*=UTF-8''report%20%E2%9C%93.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("report ✓.txt")
+        );
+    }
+
+    #[test]
+    fn raw_artifact_filename_rejects_malformed_extended_value_and_falls_back() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename=report.txt; filename*=UTF-8''bad%ZZname.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("report.txt")
+        );
+
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename*=ISO-8859-1''report.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("fallback.bin")
+        );
+    }
+
+    #[test]
+    fn raw_artifact_filename_sanitizes_decoded_traversal() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename*=UTF-8''..%2F..%2Fsecret.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("secret.txt")
+        );
+    }
+
+    #[test]
+    fn artifact_download_requires_exact_http_200() {
+        assert!(artifact_download_status_is_ok(reqwest::StatusCode::OK));
+        assert!(!artifact_download_status_is_ok(
+            reqwest::StatusCode::PARTIAL_CONTENT
+        ));
+        assert!(!artifact_download_status_is_ok(
+            reqwest::StatusCode::NO_CONTENT
+        ));
+    }
+
+    #[test]
+    fn artifact_download_rejects_non_200_signed_responses_through_request_path() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        for status in [
+            reqwest::StatusCode::PARTIAL_CONTENT,
+            reqwest::StatusCode::NO_CONTENT,
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server_base = base.clone();
+            let status_line = format!("{} {}", status.as_u16(), status.canonical_reason().unwrap());
+            let server = std::thread::spawn(move || {
+                for index in 0..3 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = [0_u8; 4096];
+                    let _ = stream.read(&mut request).unwrap();
+                    let body = match index {
+                        0 => serde_json::json!({
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                        })
+                        .to_string(),
+                        1 => serde_json::json!({"signed_url": format!("{server_base}/signed.zip")}).to_string(),
+                        _ => String::new(),
+                    };
+                    let response_status = if index == 2 { &status_line } else { "200 OK" };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+
+            let error = download_artifacts_blocking(
+                &base,
+                "runtime-token",
+                "plan",
+                "consumer",
+                "release",
+                "",
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(&format!("status={status}")));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn results_service_download_rejects_zip_path_traversal() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("../escape.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"must not escape").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip");
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let (content_type, body) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                        }))
+                        .unwrap(),
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                    ),
+                    _ => ("application/zip", zip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let error =
+            download_artifacts_blocking(&base, "runtime-token", "plan", "job", "release", "")
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("unsafe archive path"),
+            "{error:#}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn results_service_download_cleans_temp_file_after_copy_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip");
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let (content_type, body, content_length) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                        }))
+                        .unwrap(),
+                        None,
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                        None,
+                    ),
+                    _ => ("application/zip", b"truncated artifact".to_vec(), Some(1024)),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    content_length.unwrap_or(body.len())
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let error =
+            download_artifacts_blocking(&base, "runtime-token", "plan", "job", "release", "")
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("write downloaded artifact zip"),
+            "{error:#}"
+        );
+        server.join().unwrap();
+        assert!(!std::env::temp_dir()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("velnor-artifact-download-")));
+    }
+
+    #[test]
     fn results_service_download_lists_signs_and_extracts_artifact_v4() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -4793,10 +5256,10 @@ mod tests {
     }
 
     #[test]
-    fn results_service_download_skips_non_zip_artifacts() {
-        // Regression: an unfiltered download-all (merge-multiple) in a run with
-        // a non-zip `.dockerbuild` build-record artifact skips that artifact
-        // with a warning instead of failing with "invalid Zip archive: EOCD".
+    fn results_service_download_preserves_selected_raw_artifacts() {
+        // Regression: an unfiltered download-all (merge-multiple) preserves a
+        // non-zip `.dockerbuild` build-record artifact instead of silently
+        // dropping it after ZIP parsing fails.
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -4807,6 +5270,7 @@ mod tests {
         let zip_bytes = zip.finish().unwrap().into_inner();
         // .dockerbuild build records are gzip blobs, not zips.
         let gzip_bytes = b"\x1f\x8b\x08\x00dockerbuild-record-not-a-zip".to_vec();
+        let expected_gzip_bytes = gzip_bytes.clone();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let signed_url = format!("{base}/signed.bin?credential=secret");
@@ -4865,7 +5329,7 @@ mod tests {
             download_artifacts_blocking(&base, "runtime-token", "plan", "consumer", "", "")
                 .unwrap();
         server.join().unwrap();
-        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads.len(), 2);
         assert_eq!(downloads[0].name, "release-linux");
         assert_eq!(
             downloads[0].files,
@@ -4874,6 +5338,60 @@ mod tests {
                 b"artifact-v4\n".to_vec()
             )]
         );
+        assert_eq!(downloads[1].name, ".dockerbuild");
+        assert_eq!(
+            downloads[1].files,
+            vec![(
+                std::path::PathBuf::from(".dockerbuild"),
+                expected_gzip_bytes
+            )]
+        );
+    }
+
+    #[test]
+    fn artifact_temp_file_removes_path_when_guard_drops() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-cleanup-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let (_guard, _file) = open_artifact_temp_file(path.clone()).unwrap();
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn artifact_temp_file_collision_preserves_preexisting_file() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-collision-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let original = b"file owned by another operation";
+        std::fs::write(&path, original).unwrap();
+
+        let error = match write_artifact_temp_file(path.clone(), b"replacement") {
+            Ok(_) => panic!("collision unexpectedly accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn artifact_temp_file_failed_open_does_not_leave_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-missing-parent-{}/artifact.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let error = match write_artifact_temp_file(path.clone(), b"secret artifact bytes") {
+            Ok(_) => panic!("missing parent unexpectedly accepted"),
+            Err(error) => error,
+        };
+        assert!(error.kind() == std::io::ErrorKind::NotFound);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -4895,7 +5413,7 @@ mod tests {
         assert_eq!(classify_broker_poll(403, ""), BrokerPollClass::Error);
         assert_eq!(classify_broker_poll(404, ""), BrokerPollClass::Error);
         assert_eq!(classify_broker_poll(500, "oops"), BrokerPollClass::Error);
-        // curl transport failure yields status 0 and must be an error too.
+        // A transport failure without an HTTP status must be an error too.
         assert_eq!(classify_broker_poll(0, ""), BrokerPollClass::Error);
     }
 
@@ -4926,7 +5444,7 @@ mod tests {
 
     #[test]
     fn completion_retry_classification() {
-        // Transport/5xx/curl-0 retry; throttling retries.
+        // Transport/5xx/status-less failures retry; throttling retries.
         assert!(is_retriable_completion_status(0));
         assert!(is_retriable_completion_status(500));
         assert!(is_retriable_completion_status(502));
@@ -5326,7 +5844,7 @@ mod tests {
     fn acquire_failure_classifies_local_faults_separately_from_transport() {
         let permission = anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "private curl directory",
+            "private transport directory",
         ));
         assert!(!acquire_failure_is_transient(&permission));
 
