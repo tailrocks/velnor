@@ -195,3 +195,44 @@ passed. No GitHub Actions rerun was performed because cleanup and external
 access blockers remain. Residual gate: the Actions result and live
 admission/readiness proof remain unresolved; do not claim live production
 proof or production readiness from this evidence.
+
+## Verified main content — 2026-08-27T00:57:04Z
+
+`tailrocks/velnor` `main` was verified at SHA
+`a77a2c10cc1fa21e428345d7216dd3dea2c6938e`, delivered by PR `#404` through a
+squash merge. Direct content and local package verification confirmed:
+
+- Required generation handling is present in `slot.rs` and the Debian slot
+  service.
+- Explicit test launches include generation, with the corresponding service
+  assertions present and passing.
+- The parser regression test in `service.rs` passes.
+- The Linux procfs tail expression in `prove.rs` is present and verified.
+- Package unit checks pass.
+
+This proves code delivery and verification on `main` only. It does not prove
+Sentry state, a live Velnor lane, or production-readiness campaign completion.
+
+The cleanup, Sentry access/admission/readiness, live verification, and
+production-readiness gates remain open. No gate is cleared by this evidence.
+
+## Traceability — verified main
+
+PR #404 head `5bb53224eb93aae3be43d3bbcec406c3306452b9` -> base `main` parent `814b41d70b2ccd7c0e66c2236bfeabccd76d1255` -> squash merge `a77a2c10cc1fa21e428345d7216dd3dea2c6938e`; merged true at `2026-08-27T00:50:59Z`; current `refs/heads/main` equals merge SHA; source branch 404.
+
+## Remote-main traceability
+
+PR #404 head 5bb53224eb93aae3be43d3bbcec406c3306452b9 was merged into base main at base parent 814b41d70b2ccd7c0e66c2236bfeabccd76d1255 through squash merge a77a2c10cc1fa21e428345d7216dd3dea2c6938e; GitHub API reports refs/heads/main equals that squash SHA. This is remote evidence, not a local ref claim. Local refs remain stale: origin/main=814b41d70b2ccd7c0e66c2236bfeabccd76d1255, local main=fd7997b...; merge object is absent locally.
+
+Raw paths verified at the remote merge SHA:
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/src/node/slot.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/src/service.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/tests/node_arch.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/src/node/prove.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/debian/velnor-slot@.service
+
+Local parser proof: cargo nextest run -p velnor-runner -E 'test(slot_requires_generation)' => 1 passed. Code delivery only; cleanup, Sentry, live-lane, and production gates remain open.
+
+Exact local parser proof: `cargo nextest run -p velnor-runner -E 'test(slot_requires_generation)'` = 1 passed.
+
+These prove code delivery only.
