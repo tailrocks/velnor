@@ -414,6 +414,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `preinst` and `postinst` now support an explicitly named
   `VELNOR_DRAINED_UNITS` canary set while retaining full-host draining as the
   default. Candidate `v0.1.237` is prepared for the next signed release.
+- The first `v0.1.237` release attempt (`33056323591`) built every artifact but
+  failed at GitHub asset upload with HTTP 400 before creating a release. The
+  failed release job was rerun through GitHub Actions; rerun `33056323591`
+  completed successfully with all builds, package signatures, coherent release
+  assembly, and attestations green. The signed release is ready for the next
+  standard APT package-update run.
 
 ## Non-goals
 
