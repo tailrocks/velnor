@@ -33,16 +33,17 @@
   defects (summary replay regressing machine phase; skipped waiting edge on
   immediate capacity reservation).
 
-### Current-SHA evidence — 2026-08-27T17:20:33Z
+### Current-SHA evidence — 2026-08-27T17:26:00Z
 
-- `3f4e067ae3c47f4fee226832c1b1dd8b343221c1`: `rtk cargo fmt --all --check`,
-  `rtk cargo nextest run -p velnor-runner ops` passed, exit 0 (15 tests), and
+- `2fc4bc0641696bd424f85290a3c07ce0943856cb`: `rtk cargo fmt --all --check`,
+  `rtk cargo nextest run -p velnor-runner` passed, exit 0 (1,080 tests), and
   `rtk mise run check` passed, exit 0: actionlint, cargo deny, cargo fmt, fleet
   generation, clippy with warnings denied, and 1,474 workspace nextest tests.
   Admission summary plus `job.acquired` now commit in one SQLite transaction;
   rollback coverage asserts no partial summary remains. Event subjects, details,
   and transition payloads are masked/projected before persistence; a secret
-  canary test passes.
+  canary test passes. Fail-closed completion paths preserve the in-flight
+  recovery marker when GitHub completion fails.
 - These local gates support implementation-level criteria only. The required
   current-SHA fixture hold/cancel proof, target-repository evidence, and
   independent verifier/reviewer sign-off are not present. Plan remains
