@@ -2900,6 +2900,15 @@ fn job_resource_options(cpus: &str, memory: &str) -> Vec<String> {
     options
 }
 
+fn resource_policy_label(cpus: &str, memory: &str) -> String {
+    let cpus = crate::container::sanitize_store_key(cpus.trim());
+    let memory = crate::container::sanitize_store_key(memory.trim());
+    if cpus.is_empty() && memory.is_empty() {
+        return "default".to_owned();
+    }
+    format!("cpu-{cpus}-memory-{memory}")
+}
+
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
     if stored.settings.use_v2_flow && stored.settings.server_url_v2.is_some() {
         return Ok(());
@@ -3947,6 +3956,7 @@ async fn handle_job_request(
             }),
             runner_name: Some(runner_name.to_owned()),
             trust_scope: Some(args.trust_scope.clone()),
+            resource_policy: Some(resource_policy_label(&args.job_cpus, &args.job_memory)),
             masks: job_secret_mask_values(&job),
         };
         if !sink.record_admission(&admission) {
@@ -4544,6 +4554,25 @@ async fn handle_job_request(
             job_result.result
         );
     } else if args.complete_noop {
+        if let Some(sink) = crate::ops::global() {
+            let uid = job.job_id.clone();
+            sink.transition(
+                &uid,
+                &format!("t-waiting-{uid}"),
+                velnor_model::EventReason::JobWaiting,
+                Some("no-op execution reserved".to_owned()),
+                None,
+                None,
+            );
+            sink.transition(
+                &uid,
+                &format!("t-started-{uid}"),
+                velnor_model::EventReason::JobStarted,
+                Some("no-op execution began".to_owned()),
+                None,
+                None,
+            );
+        }
         complete_run_service_job_refreshing(
             &run_service_job.client,
             &broker_cancellation.stored,

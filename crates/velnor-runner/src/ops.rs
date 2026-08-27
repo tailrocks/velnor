@@ -85,6 +85,7 @@ pub struct JobAdmission {
     pub queued_at_rfc3339: Option<String>,
     pub runner_name: Option<String>,
     pub trust_scope: Option<String>,
+    pub resource_policy: Option<String>,
     /// Secret/mask values collected from the raw job message; applied to
     /// every textual projection so no secret value can enter the store even
     /// when a workflow embeds one in its name or ref.
@@ -125,7 +126,10 @@ impl JobAdmission {
             acquired_at: Some(Timestamp::now()),
             runner_name: self.runner_name.as_deref().map(|v| self.project(v)),
             trust_scope: self.trust_scope.as_deref().map(|v| self.project(v)),
-            resource_policy: None,
+            resource_policy: self
+                .resource_policy
+                .as_deref()
+                .map(|value| self.project(value)),
             phase: JobPhase::Queued,
             conclusion: None,
             infrastructure_category: None,
@@ -487,6 +491,7 @@ mod tests {
             queued_at_rfc3339: None,
             runner_name: Some("fixture-runner-0".to_owned()),
             trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
             masks: secret.iter().map(|value| (*value).to_owned()).collect(),
         }
     }
