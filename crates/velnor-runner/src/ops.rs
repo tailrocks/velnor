@@ -244,17 +244,36 @@ impl OpsSink {
                 return self.required_failure("store.admission.validate", &error);
             }
         };
-        if let Err(error) = self.store.persist_summary(&summary) {
+        if summary.instance_slug() != self.instance_slug {
+            return self.required_failure(
+                "store.admission.instance",
+                "admission instance does not match the installed operational-store sink",
+            );
+        }
+        let token = format!("t-acquired-{job_uid}");
+        let correlation_id = match Slug::validate("correlation_id", &format!("corr-{token}")) {
+            Ok(value) => value,
+            Err(error) => {
+                return self.required_failure("store.admission.transition", &error.to_string());
+            }
+        };
+        let transition = Transition {
+            token,
+            correlation_id,
+            reason: EventReason::JobAcquired,
+            message: Some("admission persisted".to_owned()),
+            transition_time: Timestamp::now(),
+            conclusion: None,
+            infrastructure_category: None,
+        };
+        if let Err(error) = self.store.persist_summary_and_transition(
+            &summary,
+            &self.instance_slug,
+            &job_uid,
+            &transition,
+        ) {
             return self.required_failure("store.admission.persist", &error.to_string());
         }
-        self.transition(
-            &job_uid,
-            &format!("t-acquired-{job_uid}"),
-            EventReason::JobAcquired,
-            Some("admission persisted".to_owned()),
-            None,
-            None,
-        );
         true
     }
 
@@ -283,9 +302,9 @@ impl OpsSink {
         message: Option<String>,
         conclusion: Option<String>,
         infrastructure_category: Option<String>,
-    ) {
+    ) -> bool {
         let Ok(correlation) = Slug::validate("correlation_id", &format!("corr-{token}")) else {
-            return;
+            return false;
         };
         let transition = Transition {
             token: token.to_owned(),
@@ -301,7 +320,9 @@ impl OpsSink {
                 .record_job_transition(&self.instance_slug, job_uid, &transition)
         {
             self.absorb("store.transition", &error.to_string());
+            return false;
         }
+        true
     }
 
     /// Daemon-side bounded retention pass, time-gated per process; safe to
@@ -459,6 +480,51 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn admission_fails_closed_when_acquired_transition_is_rejected() {
+        let (_dir, sink) = temp_sink("admission-transition-failure");
+        let mut adm = admission(121, None);
+        // Force the summary and transition to address different store
+        // instances. The summary write succeeds, but the required transition
+        // must be rejected rather than allowing execution to proceed.
+        adm.instance_slug = "other-instance".to_owned();
+
+        assert!(!sink.record_admission(&adm));
+        assert!(sink.degraded());
+    }
+
+    #[test]
+    fn atomic_admission_rolls_back_summary_when_transition_fails() {
+        let (_dir, sink) = temp_sink("atomic-admission");
+        let summary = admission(131, None).model_summary().unwrap();
+        let token = "t-acquired-wrong-job".to_owned();
+        let transition = Transition {
+            token,
+            correlation_id: Slug::validate("correlation_id", "corr-t-acquired-wrong-job").unwrap(),
+            reason: EventReason::JobAcquired,
+            message: Some("admission persisted".to_owned()),
+            transition_time: Timestamp::now(),
+            conclusion: None,
+            infrastructure_category: None,
+        };
+
+        assert!(
+            sink.store
+                .persist_summary_and_transition(
+                    &summary,
+                    "test-instance",
+                    "wrong-job-uid",
+                    &transition,
+                )
+                .is_err()
+        );
+        assert!(sink
+            .store
+            .job_summaries("test-instance")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
