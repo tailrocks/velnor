@@ -627,6 +627,20 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   gate. The test now runs two controller cycles and compares second-cycle
   CPU/transaction deltas; local nextest passes with 16-slot delta `2235` vs
   one-slot `3173` (`0.70x`). The fix is forward-only candidate `0.1.242`.
+- Sentry v0.1.242 was published through signed APT and activated on the
+  isolated `velnor-daemon.service` scope. Health reached ready with five idle
+  slots, zero jobs/containers/job workers, zero overlap, zero durable no-op
+  events, and zero recovery alerts. A short idle sampler then exposed a
+  deterministic synchronized CPU burst about once per broker long-poll cycle
+  (75--100% for one 10-second sample) while all job/churn counters stayed
+  zero. This gate is not counted as passed.
+- Root-cause follow-up: `ScopeBrokerSession::poll` reopened and materialized
+  `journal.db` independently for every session after each long-poll response.
+  The five sessions synchronized that replay into the observed idle CPU burst.
+  Candidate `0.1.243` passes the focused retirement test and removes the
+  per-session journal replay; the controller passes one slot snapshot and
+  generation/phase readiness into each poll. Full workspace proof and a new
+  signed-APT Sentry soak are required.
 
 ## Non-goals
 

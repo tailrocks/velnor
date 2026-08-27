@@ -23,7 +23,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{ActorPhase, Generation};
+use velnor_model::Generation;
 
 use crate::{
     action::{
@@ -1041,6 +1041,7 @@ impl ScopeBrokerSession {
         state_dir: &Path,
         tx: &mpsc::Sender<BrokerAssignment>,
         signals: &BrokerManagerSignals,
+        slot_ready: bool,
     ) -> Result<ScopeBrokerPoll> {
         if draining() {
             return Ok(ScopeBrokerPoll::Stopped);
@@ -1069,15 +1070,10 @@ impl ScopeBrokerSession {
             // recovery/JIT churn.
             return Ok(ScopeBrokerPoll::Completed);
         }
-        let journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))?;
-        let current = journal
-            .materialized_state()?
-            .slots
-            .into_iter()
-            .find(|slot| slot.slot_id.0 == self.slot_id);
-        if current.as_ref().is_none_or(|slot| {
-            slot.generation != self.generation || slot.phase != ActorPhase::Ready
-        }) {
+        // The scope manager already materialized the current slot snapshot
+        // once for this pass. Replaying the journal here for every session
+        // synchronized all long-poll completions into a large CPU burst.
+        if !slot_ready {
             return Ok(ScopeBrokerPoll::Stopped);
         }
         let message = tokio::select! {

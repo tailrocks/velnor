@@ -778,6 +778,7 @@ impl ScopeBrokerManager {
                     continue;
                 }
             };
+            let slot_snapshot = slots.clone();
             if let Err(error) = ensure_broker_sessions(
                 &args,
                 slots,
@@ -810,8 +811,16 @@ impl ScopeBrokerManager {
                     let stopped = stopped.clone();
                     let completed = completed.clone();
                     let failed = failed.clone();
+                    let slot_ready = slot_snapshot.iter().any(|slot| {
+                        slot.slot_id.0 == session.slot_id
+                            && slot.generation == session.generation
+                            && slot.phase == ActorPhase::Ready
+                    });
                     async move {
-                        match session.poll(&state_dir, &assignments, &signals).await {
+                        match session
+                            .poll(&state_dir, &assignments, &signals, slot_ready)
+                            .await
+                        {
                             Ok(crate::runner::ScopeBrokerPoll::Stopped) => {
                                 stopped.lock().await.push(session.slot_id.clone());
                             }
