@@ -202,6 +202,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `reconcile_overlap_count=0`, `recovery_state=healthy`, `alerts=[]`, and
   instantaneous daemon CPU 0.0% in `top`; WAL was 1,396,712 bytes and
   durable event rate was 0.0/s at the final sample.
+- 2026-08-27 final Rust verification: `mise exec -- cargo nextest run
+  --workspace` passed 1,406/1,406 tests.
   healthy silence, CLI presence, and tolerant metrics parsing.
 - Added controller alert rate/window ownership: three sustained zero-job cycles
   over the 5% CPU budget emit `idle_high_cpu`; repeated no-op observations emit
