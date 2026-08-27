@@ -6,14 +6,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use clap::Args;
 use serde_json::json;
 use velnor_control::journal::{Event, Journal, SideEffect, SlotRecord};
-use velnor_model::{ActorPhase, Generation, JobId, SlotId};
+use velnor_model::{ActorPhase, FleetHealthState, Generation, JobId, SlotId};
 
 use crate::config;
 use crate::protocol::{GitHubScope, ListedRunner, RegistrationClient};
@@ -492,11 +493,16 @@ async fn reconcile_once(
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
-        run_bounded_remote_reconciliation(
+        let reconciliation = run_bounded_remote_reconciliation(
             reconcile_remote_registrations(args, journal, jobs, pacing),
             remaining_remote_budget(remote_deadline),
         )
-        .await?;
+        .await;
+        if let Err(error) = reconciliation {
+            eprintln!("remote registration reconciliation failed closed: {error:#}");
+            publish_fail_closed_health(args, journal, server)?;
+            return Ok(LocalCycle::finished());
+        }
     }
 
     let mut proof_effects = Vec::new();
@@ -608,6 +614,21 @@ async fn reconcile_once(
 fn remaining_remote_budget(deadline: tokio::time::Instant) -> Duration {
     deadline.saturating_duration_since(tokio::time::Instant::now())
 }
+
+fn publish_fail_closed_health(
+    args: &ControllerArgs,
+    journal: &Journal,
+    server: &HealthServer,
+) -> anyhow::Result<()> {
+    let mut health = journal.materialized_state()?.health();
+    health.actual_ready_slots = 0;
+    health.capacity_permits = 0;
+    health.state = FleetHealthState::NotReady;
+    server.publish(&health)?;
+    std::fs::write(args.state_dir.join("advertised-capacity"), "0")?;
+    Ok(())
+}
+
 async fn run_bounded_remote_reconciliation<F>(operation: F, timeout: Duration) -> anyhow::Result<()>
 where
     F: Future<Output = anyhow::Result<()>>,
@@ -864,7 +885,18 @@ async fn reconcile_remote_registrations(
     for slot in state.slots.iter().filter(|slot| slot.registered) {
         let index = slot_index_from_id(&slot.slot_id);
         let slot_dir = crate::runner::daemon_slot_config_dir(&config_base, index, slot_count);
-        let local = config::load(&slot_dir).ok();
+        let local = match load_local_runner_config(&slot_dir) {
+            Ok(local) => local,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "cannot load local runner config for registered slot {} at {}",
+                        slot.slot_id.0,
+                        slot_dir.display()
+                    )
+                });
+            }
+        };
         let local_id = local.as_ref().and_then(|stored| stored.settings.agent_id);
         let local_name = local
             .as_ref()
@@ -898,6 +930,41 @@ async fn reconcile_remote_registrations(
         );
     }
     Ok(())
+}
+
+fn load_local_runner_config(slot_dir: &Path) -> anyhow::Result<Option<config::StoredRunnerConfig>> {
+    let runner_config = slot_dir.join("runner.json");
+    match std::fs::symlink_metadata(&runner_config) {
+        Ok(_) => config::load(slot_dir).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if has_dangling_symlink_component(&runner_config)? {
+                anyhow::bail!("runner config path contains a dangling symlink")
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn has_dangling_symlink_component(path: &Path) -> anyhow::Result<bool> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        let link = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata.file_type().is_symlink(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if link
+            && matches!(
+                std::fs::metadata(&current),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn remote_registration_present(
@@ -1831,6 +1898,170 @@ mod tests {
         assert_eq!(state.jobs[0].job_id, JobId("job-1".to_owned()));
         std::env::remove_var("GITHUB_TOKEN");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    async fn reconcile_with_runner_config_fixture(
+        prepare_runner_config: impl FnOnce(&Path),
+    ) -> anyhow::Result<SlotRecord> {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 0,
+                "runners": []
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-registration-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("{}/tailrocks", server.uri());
+        write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        prepare_runner_config(&dir);
+        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let reconciliation = reconcile_remote_registrations(
+            &args,
+            &mut journal,
+            &mut HashMap::new(),
+            &mut GithubPacing::default(),
+        )
+        .await;
+
+        let slot = journal
+            .load_state()
+            .unwrap()
+            .slots
+            .into_iter()
+            .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
+            .unwrap();
+        std::env::remove_var("GITHUB_TOKEN");
+        std::fs::remove_dir_all(dir).ok();
+        reconciliation.map(|()| slot)
+    }
+
+    #[tokio::test]
+    async fn missing_runner_config_allows_registration_recovery() {
+        let slot = reconcile_with_runner_config_fixture(|_| {}).await.unwrap();
+
+        assert!(!slot.registered);
+        assert!(!slot.permit_held);
+        assert!(!slot.session_live);
+        assert_eq!(slot.phase, ActorPhase::Provisioning);
+    }
+
+    #[tokio::test]
+    async fn corrupt_runner_config_does_not_clear_local_claim() {
+        let error = reconcile_with_runner_config_fixture(|dir| {
+            std::fs::write(dir.join("runner.json"), b"{not-json").unwrap();
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot load local runner config"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_runner_config_does_not_clear_local_claim() {
+        let error = reconcile_with_runner_config_fixture(|dir| {
+            std::fs::create_dir(dir.join("runner.json")).unwrap();
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot load local runner config"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broken_runner_config_symlink_does_not_allow_recovery() {
+        let error = reconcile_with_runner_config_fixture(|dir| {
+            std::os::unix::fs::symlink("missing-runner.json", dir.join("runner.json")).unwrap();
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot load local runner config"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_parent_symlink_is_not_treated_as_missing_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-dangling-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("slot");
+        std::os::unix::fs::symlink("missing-slot", &link).unwrap();
+
+        assert!(has_dangling_symlink_component(&link.join("runner.json")).unwrap());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
