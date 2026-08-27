@@ -334,7 +334,8 @@ jobs:
           url="$(jq -er '.kernel_tarball' microvm/pins.json)"
           sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
           curl --fail --show-error --silent --location --http1.1 \
-            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 600 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
             --connect-timeout 30 --max-time 900 \
             -o linux.tar.xz "$url"
           echo "$sha  linux.tar.xz" | sha256sum -c -
@@ -494,7 +495,8 @@ jobs:
           fc_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].firecracker_member' microvm/pins.json)"
           jailer_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_member' microvm/pins.json)"
           curl --fail --show-error --silent --location --http1.1 \
-            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 600 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
             --connect-timeout 30 --max-time 900 \
             -o firecracker.tgz "$url"
           echo "$sha  firecracker.tgz" | sha256sum -c -
