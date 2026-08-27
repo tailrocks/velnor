@@ -26,8 +26,20 @@ guardian → controller per scope
 ```
 
 Per-ready-slot OS process isolation is preserved. A job worker exists only for
-an assigned job. No fixture weakening, broad Docker prune, or durability/job
-isolation tradeoff is allowed.
+an assigned job. Fixture strengthening/correctness edits are now operator-
+authorized; weakening remains forbidden. No broad Docker prune or
+durability/job isolation tradeoff is allowed.
+
+## Coordination lease — sibling watchdog branch
+
+The sibling worktree `velnor-performance`, branch
+`fix/watchdog-registration-deadline`, contains an isolated active-job recovery
+fix at `node/controller.rs` (stale job PID markers must not mask live waiter
+markers). That work owns its controller/test files only. This branch owns
+fixture tooling, fixture dispatch, APT, and Sentry rollout. Do not dispatch the
+fixture, mutate APT, or mutate Sentry from the sibling branch. After the sibling
+commit is pushed, integrate only that focused commit before the active-job gate;
+do not merge its 232-commit branch wholesale.
 
 ## Phase 0 — attribution and budgets
 
@@ -106,7 +118,9 @@ isolation tradeoff is allowed.
 
 ## Phase 6 — fixture and performance proof
 
-- [x] `velnor-actions-fixture` remains unchanged.
+- [x] The current `velnor-actions-fixture` main at
+  `a176d88c8c6ff0d452ea27cb32784bb8544f3a42` remains unchanged by this branch;
+  fixture strengthening/correctness edits are operator-authorized if required.
 - [x] Deterministic local unit/fault tests pass on the current branch.
 - [x] Multi-scope zero-job idle soak runs for at least 15 minutes.
 - [x] Idle CPU and broker/JIT request budgets pass.
@@ -221,6 +235,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   workflow actions/triggers/tooling. The fixture remains untouched by this
   branch, so fixture smoke, lane parity, and evidence-comparison gates stay
   open rather than being falsely marked complete.
+- 2026-08-28 fixture audit correction: current fixture main `a176d88` passes
+  both `.github/scripts/audit_workflow_surface.py` and Velnor's fixture audit.
+  Velnor audit markers now accept current SHA-pinned action forms, Aqua
+  nextest, writer-aware Pages artifacts, Renovate token naming, and MSRV env.
+  The readiness adapter no longer passes the removed `--require-docker-socket`
+  preflight flag and forwards an explicit execution config directory. Local
+  readiness reaches the real host-image preflight; this macOS host lacks the
+  private `velnor/job-ubuntu:26.04` image, so smoke remains open.
 - 2026-08-27 fleet inspection: the Sentry unit is active on v0.1.240, while
   unrelated daemon scopes remain independently active or inactive according
   to their systemd units; no unrelated scope was restarted or mutated during

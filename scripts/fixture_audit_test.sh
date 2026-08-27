@@ -31,6 +31,12 @@ defaults:
   run:
     shell: bash
 jobs:
+  attestation:
+    permissions:
+      attestations: write
+    steps:
+      - uses: actions/attest-build-provenance@fixture-test
+      - run: gh attestation verify artifact
   matrix-setup:
     runs-on: ubuntu-latest
     outputs:
@@ -38,12 +44,12 @@ jobs:
     steps:
       - id: set
         run: |
-          echo 'configs=[{"lane":"github","runner":"\"ubuntu-latest\""},{"lane":"velnor","runner":"[\"self-hosted\",\"velnor-target-mvp\"]"}]' >> "$GITHUB_OUTPUT"
+          echo 'configs=[{"lane":"GitHub","runner":"\"ubuntu-26.04\""},{"lane":"Velnor","runner":"[\"self-hosted\",\"velnor-target-mvp\"]"}]' >> "$GITHUB_OUTPUT"
   compat:
     needs: [matrix-setup]
     if: github.event_name == 'schedule' || contains(inputs.packages, 'app-a') || true
     env:
-      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_ENABLED: "false"
     permissions:
       contents: read
     strategy:
@@ -67,7 +73,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fixture-${{ matrix.config.lane }}-linux
-      - uses: actions/cache@v5
+      - uses: actions/cache@55cc834
         with:
           restore-keys: fixture-cargo-bin-${{ matrix.config.lane }}-
       - run: |
@@ -83,7 +89,7 @@ jobs:
       - run: just nextest "$PACKAGE"
       - name: Check MSRV
         env:
-          RUSTUP_TOOLCHAIN: stable
+          MSRV: stable
         run: cargo check -p "${PACKAGE}" --locked
       - uses: ./.github/actions/check-fixture-output
       - uses: actions/upload-artifact@v7
@@ -102,6 +108,23 @@ jobs:
         with:
           merge-multiple: false
       - uses: ./.github/actions/aggregate-needs
+EOF
+
+cat >"$tmp_dir/.github/workflows/attestation-negative.yml" <<'EOF'
+missing-permission:
+no-match:
+unapproved-input:
+push-to-registry: false
+EOF
+
+cat >"$tmp_dir/.github/workflows/backend-parity.yml" <<'EOF'
+matrix.config
+"lane":"GitHub"
+"lane":"Velnor"
+matrix.config.runner
+velnor | github | both
+docker run --rm
+VELNOR_EXECUTION_BACKEND
 EOF
 
 cat >"$tmp_dir/.github/workflows/docker.yml" <<'EOF'
@@ -166,7 +189,7 @@ jobs:
     steps:
       - uses: actions/upload-pages-artifact@v5
         with:
-          name: github-pages-${{ matrix.config.lane }}
+          name: ${{ matrix.config.writer && 'github-pages' || format('github-pages-{0}', matrix.config.lane) }}
       - uses: ./.github/actions/check-deployed-docs
   deploy:
     environment:
@@ -336,7 +359,7 @@ EOF
 cat >"$tmp_dir/mise.toml" <<'EOF'
 [tools]
 rust = "stable"
-"cargo:cargo-nextest" = "latest"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
 EOF
 
 cat >"$tmp_dir/docker-bake.hcl" <<'EOF'
