@@ -931,7 +931,24 @@ fn resolve_runner_group_id(
 }
 
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
-    if let Ok(stored) = config::load(dir) {
+    let stored = match config::load(dir) {
+        Ok(stored) => Some(stored),
+        Err(load_error) => match fs::symlink_metadata(dir.join("runner.json")) {
+            Ok(_) => {
+                return Err(load_error).context(
+                    "load existing local runner config before replace; local identity preserved",
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).context(
+                    "inspect existing local runner config before replace; local identity preserved",
+                );
+            }
+        },
+    };
+
+    if let Some(stored) = stored {
         if let Some(agent_id) = stored.settings.agent_id {
             let pat = pat.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -11267,6 +11284,38 @@ jobs:
         assert_eq!(stored.settings.agent_name, "velnor");
         assert_eq!(stored.settings.agent_id, Some(2));
         assert!(!stored.settings.ephemeral);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn configure_replace_rejects_unreadable_local_config() {
+        let dir = unique_temp_dir("configure-replace-unreadable-config");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runner.json");
+        let original = br#"{"settings": "not a runner config"}"#;
+        fs::write(&path, original).unwrap();
+
+        let error = configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-replaced".into()),
+            labels: vec!["velnor".into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: true,
+            pool_id: None,
+            pool_name: None,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("load existing local runner config before replace"));
+        assert!(error.contains("local identity preserved"));
+        assert_eq!(fs::read(path).unwrap(), original);
 
         fs::remove_dir_all(dir).unwrap();
     }
