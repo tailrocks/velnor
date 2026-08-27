@@ -333,7 +333,10 @@ jobs:
           set -euo pipefail
           url="$(jq -er '.kernel_tarball' microvm/pins.json)"
           sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
-          curl -fsSL -o linux.tar.xz "$url"
+          curl --fail --show-error --silent --location --http1.1 \
+            --retry 5 --retry-delay 2 --retry-max-time 600 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
           echo "$sha  linux.tar.xz" | sha256sum -c -
 
       - name: Build guest vmlinux and rootfs.ext4
@@ -490,7 +493,10 @@ jobs:
           sha="$(jq -er --arg a "$pin_arch" '.tarballs[$a].sha256' microvm/pins.json)"
           fc_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].firecracker_member' microvm/pins.json)"
           jailer_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_member' microvm/pins.json)"
-          curl -fsSL -o firecracker.tgz "$url"
+          curl --fail --show-error --silent --location --http1.1 \
+            --retry 5 --retry-delay 2 --retry-max-time 600 \
+            --connect-timeout 30 --max-time 900 \
+            -o firecracker.tgz "$url"
           echo "$sha  firecracker.tgz" | sha256sum -c -
           mkdir -p extracted crates/velnor-runner/release/microvm
           tar -xzf firecracker.tgz -C extracted

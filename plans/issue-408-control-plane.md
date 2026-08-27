@@ -379,6 +379,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   checkout refs retain exact-SHA behavior. Three focused regression tests were
   added, and 40 checkout-related nextest tests pass. This fix requires a new
   signed release before the Sentry or APT Velnor lane can consume it.
+- Release run `33049599581` was cancelled after both guest-image jobs failed
+  at the pinned kernel download with `curl: (92) HTTP/2 stream 1 was not
+  closed cleanly: PROTOCOL_ERROR`. The release workflow now uses HTTP/1.1,
+  bounded retries, connect timeout, and total timeout for kernel and
+  Firecracker downloads. Candidate advances to `0.1.233` and requires a
+  fresh signed release.
 
 ## Non-goals
 
