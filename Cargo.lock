@@ -3438,6 +3438,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rsa",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

@@ -409,6 +409,34 @@ fn instance_slug_for_store() -> String {
     crate::ops::sanitize_slug_for_instance(&host)
 }
 
+fn persist_daemon_instance(sink: &crate::ops::OpsSink, total_slots: usize) -> Result<()> {
+    sink.upsert_instance(
+        &instance_slug_for_store(),
+        env!("CARGO_PKG_VERSION"),
+        total_slots as u32,
+    )
+    .with_context(|| {
+        format!(
+            "operational store instance upsert failed for {}",
+            sink.instance_slug()
+        )
+    })
+}
+
+fn persist_and_announce_daemon_readiness(
+    sink: &crate::ops::OpsSink,
+    total_slots: usize,
+) -> Result<()> {
+    persist_daemon_instance(sink, total_slots)?;
+    notify_daemon_ready(total_slots, total_slots);
+    sink.emit(
+        velnor_model::EventReason::ReadinessReady,
+        sink.instance_slug(),
+        Some(format!("daemon pass ready pid={}", std::process::id())),
+    );
+    Ok(())
+}
+
 pub(crate) fn mask_all(raw: &str, masks: &[String]) -> String {
     if masks.is_empty() {
         return raw.to_owned();
@@ -1295,13 +1323,6 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // without durable lifecycle state.
     crate::ops::init(instance_slug_for_store())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
-    if let Some(sink) = crate::ops::global() {
-        sink.emit(
-            velnor_model::EventReason::ReadinessReady,
-            sink.instance_slug(),
-            Some(format!("daemon pass ready pid={}", std::process::id())),
-        );
-    }
     let config_base = daemon_config_dir(args)?;
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
@@ -1345,24 +1366,22 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     if draining() {
         return Ok(());
     }
-    notify_daemon_ready(total_slots, total_slots);
-    if let Some(sink) = crate::ops::global() {
-        // Current instance state row: identity, version, and exact slot count.
-        let _ = sink.upsert_instance(
-            &instance_slug_for_store(),
-            env!("CARGO_PKG_VERSION"),
-            total_slots as u32,
-        );
-        // Time-gated retention passes continue while slots are supervised.
-        let retention_sink = std::sync::Arc::clone(sink);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                ticker.tick().await;
-                retention_sink.prune_if_due();
-            }
-        });
-    }
+    let sink = crate::ops::global().ok_or_else(|| {
+        anyhow::anyhow!("operational store unavailable after readiness initialization")
+    })?;
+    // Persist durable instance identity before advertising daemon readiness or
+    // emitting the readiness event. In supervised mode this error returns to
+    // the retry loop above; no daemon pass may continue with unrecorded state.
+    persist_and_announce_daemon_readiness(sink, total_slots)?;
+    // Time-gated retention passes continue while slots are supervised.
+    let retention_sink = std::sync::Arc::clone(sink);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            retention_sink.prune_if_due();
+        }
+    });
     println!(
         "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
         if total_slots == 1 { "" } else { "es" }
@@ -11070,6 +11089,43 @@ jobs:
         let error = validate_daemon_slots(0).unwrap_err().to_string();
 
         assert!(error.contains("--slots must be greater than zero"));
+    }
+
+    #[test]
+    fn daemon_instance_upsert_failure_is_fatal() {
+        let base = unique_temp_dir("daemon-instance-upsert-failure");
+        fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("state.db");
+        let sink = crate::ops::OpsSink::open(db_path.clone(), "test-instance".into()).unwrap();
+
+        // Keep the opened sink valid, then make the required instance write
+        // fail at the actual SQLite operation boundary.
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.execute_batch("DROP TABLE instances;").unwrap();
+        drop(connection);
+
+        let error = persist_and_announce_daemon_readiness(&sink, 2).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("operational store instance upsert failed for test-instance"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("store.operation.failed"), "{rendered}");
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let readiness_events: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_kind = 'readiness.ready'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            readiness_events, 0,
+            "failed persistence must emit no ready event"
+        );
+
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
