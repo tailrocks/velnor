@@ -663,6 +663,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   and `ci-required`. Auto-merge is enabled, but GitHub still reports the
   original pull-request contract check queued; no branch-protection bypass was
   used.
+- Auto-merge is enabled on PR #151. The original pull-request contract remains
+  unavailable while the trusted Velnor runner pool reports zero runners. The
+  Sentry `velnor-tailrocks` scope currently reports eight active jobs, so no
+  restart, drain, or process kill was used to manufacture capacity; active-job
+  preservation takes precedence over release acceleration.
 
 ## Non-goals
 
