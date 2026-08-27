@@ -431,6 +431,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   images, multi-platform GHCR image, amd64 and arm64 Debian packages, coherent
   release assembly, signatures, and attestations all passed. This satisfies the
   immutable source-ref requirement for the next standard APT publication.
+- Standard `velnor-apt` package-update run `33060735953` passed verification,
+  mutation, the Velnor lane, contract, `ci-required`, and DCO. PR #146 merged.
+  Publish run `33061090394` completed successfully through GitHub Actions:
+  repository build, deployment, and required publish gates all passed. The
+  signed APT repository now publishes candidate `velnor-runner=0.1.237`.
 
 ## Non-goals
 
