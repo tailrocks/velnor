@@ -4365,13 +4365,14 @@ async fn handle_job_request(
             teardown_ms: 0,
         };
         if let Some(teardown) = teardown {
-            spawn_post_completion_teardown(
+            start_post_completion_teardown(
                 teardown_config_dir.clone(),
                 teardown,
                 forensics.clone(),
                 timing_record,
                 job_claim,
-            );
+            )
+            .await?;
         } else if let Ok(json) = serde_json::to_string(&timing_record) {
             forensics.lifecycle(&format!("job-timing {json}"));
         }
@@ -6568,69 +6569,66 @@ struct TeardownHandle {
 }
 
 impl TeardownHandle {
-    fn run(self, job_claim: JobClaim, forensics: SlotForensics) {
+    fn run(self, job_claim: &JobClaim, forensics: &SlotForensics) -> Result<()> {
         let TeardownHandle {
             container,
             job_dir,
             services_removed,
         } = self;
+        // Keep the duplicate-job claim owned by this teardown until every
+        // cleanup operation, including BuildKit cleanup, has completed.
         let mut executor = DockerJobEngine::new(ProcessCommandRunner);
         let cleanup = if services_removed {
             executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
             executor.cleanup_without_buildkit(&container)
         };
-        if let Err(error) = cleanup {
-            eprintln!("Warning: post-completion Docker teardown failed: {error:#}");
-        }
-        if let Err(error) = fs::remove_dir_all(&job_dir) {
-            eprintln!(
-                "Warning: post-completion workspace teardown failed for {}: {error}",
-                job_dir.display()
-            );
-        }
+        cleanup.context("post-completion Docker teardown")?;
 
+        // Do not release the claim between cleanup phases. A workspace can be
+        // reused only after Docker and filesystem cleanup both succeed.
+        let _job_claim = job_claim;
         // Docker Engine can acknowledge a forced BuildKit container removal
-        // while its state volume is still attached. Keep this slow, retryable
-        // cleanup out of slot turnover, but hold the duplicate-job claim until
-        // the worker finishes so a replay cannot recreate the same scope.
-        let claim = Arc::new(std::sync::Mutex::new(Some(job_claim)));
-        let worker_claim = Arc::clone(&claim);
+        // while its state volume is still attached. Run this slow, retryable
+        // cleanup in a worker, but join it before teardown returns so the
+        // duplicate-job claim remains held until the scope is fully cleaned.
         let worker_forensics = forensics.clone();
         let worker_container = container.clone();
         let deferred = std::thread::Builder::new()
             .name("velnor-buildkit-cleanup".into())
-            .spawn(move || {
-                let _job_claim = worker_claim
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
+            .spawn(move || -> Result<()> {
                 worker_forensics.lifecycle("buildkit-teardown-deferred-start");
                 let mut executor = DockerJobEngine::new(ProcessCommandRunner);
-                match executor.cleanup_job_buildkit(&worker_container) {
+                let result = executor
+                    .cleanup_job_buildkit(&worker_container)
+                    .context("BuildKit teardown");
+                match &result {
                     Ok(()) => worker_forensics.lifecycle("buildkit-teardown-deferred-done"),
                     Err(error) => worker_forensics.lifecycle(&format!(
                         "buildkit-teardown-deferred-failed error={error:#}"
                     )),
                 }
-            });
-        if let Err(error) = deferred {
-            eprintln!(
-                "Warning: could not defer BuildKit teardown; running it synchronously: {error}"
-            );
-            let _job_claim = claim
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
-            if let Err(error) = executor.cleanup_job_buildkit(&container) {
-                eprintln!("Warning: deferred BuildKit teardown fallback failed: {error:#}");
-            }
-        }
+                result
+            })
+            .context("spawn BuildKit teardown worker")?;
+        deferred
+            .join()
+            .map_err(|panic| anyhow::anyhow!("BuildKit teardown worker panicked: {panic:?}"))??;
+        remove_job_workspace(&job_dir)?;
+        Ok(())
     }
 }
 
-type SlotTeardownTasks = std::collections::HashMap<PathBuf, std::thread::JoinHandle<()>>;
+fn remove_job_workspace(job_dir: &Path) -> Result<()> {
+    match fs::remove_dir_all(job_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("post-completion workspace teardown {}", job_dir.display())),
+    }
+}
+
+type SlotTeardownTasks = std::collections::HashMap<PathBuf, std::thread::JoinHandle<Result<()>>>;
 
 static SLOT_TEARDOWN_TASKS: std::sync::OnceLock<std::sync::Mutex<SlotTeardownTasks>> =
     std::sync::OnceLock::new();
@@ -6639,39 +6637,66 @@ fn slot_teardown_tasks() -> &'static std::sync::Mutex<SlotTeardownTasks> {
     SLOT_TEARDOWN_TASKS.get_or_init(|| std::sync::Mutex::new(SlotTeardownTasks::new()))
 }
 
-fn spawn_post_completion_teardown(
+async fn start_post_completion_teardown(
     config_dir: PathBuf,
     teardown: TeardownHandle,
     forensics: SlotForensics,
     mut timing_record: JobTimingRecord,
     job_claim: JobClaim,
-) {
+) -> Result<()> {
     let task = std::thread::spawn(move || {
         let _span = tracing::info_span!("job-teardown").entered();
         let teardown_started = Instant::now();
-        teardown.run(job_claim, forensics.clone());
-        timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
-        if let Ok(json) = serde_json::to_string(&timing_record) {
-            forensics.lifecycle(&format!("job-timing {json}"));
+        loop {
+            match teardown.clone().run(&job_claim, &forensics) {
+                Ok(()) => {
+                    timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
+                    if let Ok(json) = serde_json::to_string(&timing_record) {
+                        forensics.lifecycle(&format!("job-timing {json}"));
+                    }
+                    println!(
+                        "forensics.lifecycle event=teardown-done timestamp={}",
+                        unix_now_iso8601()
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    let detail = format!("post-completion teardown failed: {error:#}");
+                    forensics.lifecycle(&detail);
+                    if let Some(sink) = crate::ops::global() {
+                        sink.emit(
+                            velnor_model::EventReason::ReadinessDegraded,
+                            sink.instance_slug(),
+                            Some(detail.clone()),
+                        );
+                    }
+                    crate::sd_notify::status(&detail);
+                    eprintln!("Warning: {detail}; retrying until cleanup succeeds");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
         }
-        println!(
-            "forensics.lifecycle event=teardown-done timestamp={}",
-            unix_now_iso8601()
-        );
     });
-    register_slot_teardown_task(config_dir, task);
+    register_slot_teardown_task(&config_dir, task)?;
+    wait_for_prior_slot_teardown(&config_dir).await
 }
 
-fn register_slot_teardown_task(config_dir: PathBuf, task: std::thread::JoinHandle<()>) {
+fn register_slot_teardown_task(
+    config_dir: &Path,
+    task: std::thread::JoinHandle<Result<()>>,
+) -> Result<()> {
     let displaced = slot_teardown_tasks()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(config_dir, task);
+        .insert(config_dir.to_path_buf(), task);
     // A slot starts at most one job per JIT cycle. Joining here is a defensive
     // fail-closed guard if a caller ever violates that ownership invariant.
     if let Some(displaced) = displaced {
-        let _ = displaced.join();
+        displaced
+            .join()
+            .map_err(|panic| anyhow::anyhow!("displaced teardown task panicked: {panic:?}"))??;
     }
+    Ok(())
 }
 
 async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
@@ -6685,7 +6710,7 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
     tokio::task::spawn_blocking(move || task.join())
         .await
         .context("join prior slot teardown task")?
-        .map_err(|_| anyhow::anyhow!("prior slot teardown task panicked"))?;
+        .map_err(|panic| anyhow::anyhow!("prior slot teardown task panicked: {panic:?}"))??;
     Ok(())
 }
 
@@ -14230,10 +14255,13 @@ runs:
     #[tokio::test]
     async fn next_slot_run_waits_for_detached_teardown() {
         let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel::<anyhow::Result<()>>();
         register_slot_teardown_task(
-            key.clone(),
-            std::thread::spawn(move || release_receiver.recv().unwrap()),
+            &key,
+            std::thread::spawn(move || -> Result<()> {
+                release_receiver.recv().unwrap();
+                Ok(())
+            }),
         );
 
         let mut waiter = tokio::spawn(async move { wait_for_prior_slot_teardown(&key).await });
@@ -14243,7 +14271,7 @@ runs:
                 .is_err(),
             "the next run crossed the teardown ownership boundary"
         );
-        release_sender.send(()).unwrap();
+        release_sender.send(Ok(())).unwrap();
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .unwrap()
@@ -14266,7 +14294,7 @@ runs:
     #[tokio::test]
     async fn completed_teardown_is_consumed_once() {
         let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
-        register_slot_teardown_task(key.clone(), std::thread::spawn(|| {}));
+        register_slot_teardown_task(&key, std::thread::spawn(|| -> Result<()> { Ok(()) }));
 
         wait_for_prior_slot_teardown(&key).await.unwrap();
         tokio::time::timeout(
@@ -14332,6 +14360,13 @@ runs:
             .unwrap()
             .is_some());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_job_workspace_is_successfully_removed() {
+        let job_dir = unique_temp_dir("missing-job-workspace");
+
+        remove_job_workspace(&job_dir).unwrap();
     }
 
     fn timing_record(job_id: &str, pickup_ms: u64) -> JobTimingRecord {
