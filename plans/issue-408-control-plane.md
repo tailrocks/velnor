@@ -320,6 +320,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   release pipeline now uploads the guest artifact digest, verifies the
   downloaded bytes, and passes that attestation to `stage`; candidate advances
   to `0.1.230` and requires a fresh release run.
+- Release run `33026107426` validated the downloaded guest rootfs digest but
+  then rejected an older source-tree guest-agent pin. Package jobs now pass
+  explicit digests for both generated artifacts to the staging verifier;
+  static Firecracker, jailer, and kernel pins remain source-validated. Candidate
+  advances to `0.1.231` and requires a fresh signed release.
 
 ## Non-goals
 

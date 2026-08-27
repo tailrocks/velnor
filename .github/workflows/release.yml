@@ -504,6 +504,7 @@ jobs:
           [ "${#rootfs_sha256}" -eq 64 ] || { echo "::error::guest rootfs digest has invalid length" >&2; exit 1; }
           actual_rootfs_sha256="$(sha256sum guest-image/rootfs.ext4 | awk '{print $1}')"
           [ "$actual_rootfs_sha256" = "$rootfs_sha256" ] || { echo "::error::downloaded guest rootfs digest mismatch" >&2; exit 1; }
+          guest_agent_sha256="$(sha256sum crates/velnor-runner/release/microvm/velnor-guest-agent | awk '{print $1}')"
           cp guest-image/vmlinux crates/velnor-runner/release/microvm/vmlinux
           cp guest-image/rootfs.ext4 crates/velnor-runner/release/microvm/rootfs.ext4
           chmod 0755 \
@@ -518,7 +519,8 @@ jobs:
           [ "$jailer_sha" = "$expected_jailer" ] || { echo "::error::jailer sha $jailer_sha != pin $expected_jailer" >&2; exit 1; }
           cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
             stage --root crates/velnor-runner/release/microvm --arch "$pin_arch" \
-            --rootfs-sha256 "$rootfs_sha256"
+            --rootfs-sha256 "$rootfs_sha256" \
+            --guest-agent-sha256 "$guest_agent_sha256"
           kernel="$(jq -er '.kernel' crates/velnor-runner/release/microvm/manifest.json)"
           rootfs="$(jq -er '.rootfs' crates/velnor-runner/release/microvm/manifest.json)"
           case "$kernel$rootfs" in
