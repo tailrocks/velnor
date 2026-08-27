@@ -269,15 +269,16 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T23:21:49Z
+### Current baseline — 2026-08-27T23:29:53Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `785d859f29c415acbe573c078b355e0349ed8920`, clean worktree, remote
+  `0a5d5b459c2b82f7141d75ba363576cfcc7fe8fb`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
   of `origin/main` and equal to its pushed branch tip.
-- Open Velnor PR: #411 at this HEAD. CI run `33125969739` and Guest image run
-  `33125969112` are active; both are current-SHA validation, not green-main
-  proof yet.
+- Open Velnor PR: #411 at this HEAD. Current-SHA CI run `33126029601` and
+  Guest image run `33126029298` stalled in build/download work and were
+  cancelled at `2026-08-27T23:29:53Z`; neither is green-main proof. Superseded
+  runs `33125969739` and `33125969112` are also cancelled.
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
