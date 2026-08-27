@@ -357,6 +357,10 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   with `apt-get update && apt-get install velnor-runner`. Direct `dpkg -i` and
   local-path apt installs are prohibited as deployment paths.
 
+- Operator authorization: merge this Velnor PR and deploy its exact candidate
+  through the signed Debian APT workflow once every issue-plan checkbox and
+  required check passes; never bypass a gate.
+
 - 2026-07-18: **One active prompt; legacy prompts and completed plans purged**:
   the `prompts/` goal-prompt system (all sequences complete since 2026-06-11)
   and the DONE plan files 001–013/016–032 plus `plans/goal-execution-prompt.md`
