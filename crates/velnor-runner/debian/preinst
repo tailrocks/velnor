@@ -1,8 +1,9 @@
 #!/bin/sh
 # Plan 010 — transactional host activation, pre-unpack gate.
 #
-# An upgrade is refused unless (a) every velnor daemon is already drained
-# (inactive) and (b) an exact prior rollback tuple exists — the active release
+# An upgrade is refused unless (a) the requested canary scope(s) are already
+# drained (inactive), or, without a scoped deployment request, every Velnor
+# unit is drained, and (b) an exact prior rollback tuple exists — the active release
 # record + deployed identity, or a clearly marked `legacy-observed` bootstrap
 # tuple provisioned for the FIRST migration (per plan §4, that tuple is only
 # observed from the live host, never claimed as source-attested).
@@ -31,6 +32,22 @@ guardian_inactive() {
     *) return 1 ;;
   esac
   [ "$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null || true)" = inactive ]
+}
+
+scoped_units_drained() {
+  active_units=
+  for unit in $VELNOR_DRAINED_UNITS; do
+    case "$unit" in
+      velnor*.service|velnor*.timer) ;;
+      *) fail "refusing package transaction: invalid scoped unit name '$unit'" ;;
+    esac
+    state=$(systemctl show --property=ActiveState --value "$unit" 2>/dev/null || true)
+    case "$state" in
+      ''|inactive|failed) ;;
+      *) active_units="$active_units ${unit}(${state})" ;;
+    esac
+  done
+  [ -z "$active_units" ]
 }
 
 require_package_transaction_lock() {
@@ -87,8 +104,12 @@ case "$1" in
     require_package_transaction_lock
     if [ -d /run/systemd/system ]; then
       active_units=
-      all_velnor_units_drained || fail "refusing upgrade: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
-      guardian_inactive || fail "refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service."
+      if [ -n "${VELNOR_DRAINED_UNITS:-}" ]; then
+        scoped_units_drained || fail "refusing scoped upgrade: requested unit(s) remain active (${active_units:-unknown}). Stop the exact target units first."
+      else
+        all_velnor_units_drained || fail "refusing upgrade: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
+        guardian_inactive || fail "refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service."
+      fi
     fi
     rollback_tuple_present || fail "refusing upgrade: no exact prior rollback tuple ($ACTIVE_DIR/{record,deployed}.json) and no $LEGACY_MARKER bootstrap. Stage one before upgrading."
     ;;
@@ -96,8 +117,12 @@ case "$1" in
     require_package_transaction_lock
     if [ -d /run/systemd/system ]; then
       active_units=
-      all_velnor_units_drained || fail "refusing install: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
-      guardian_inactive || fail "refusing install: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service."
+      if [ -n "${VELNOR_DRAINED_UNITS:-}" ]; then
+        scoped_units_drained || fail "refusing scoped install: requested unit(s) remain active (${active_units:-unknown}). Stop the exact target units first."
+      else
+        all_velnor_units_drained || fail "refusing install: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
+        guardian_inactive || fail "refusing install: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service."
+      fi
     fi
     # Fresh install: nothing to roll back to; activation happens post-install
     # via `velnor-runner release activate`.

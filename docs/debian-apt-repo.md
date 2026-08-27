@@ -201,8 +201,22 @@ recovery.
    sudo /usr/bin/flock --exclusive --nonblock --no-fork \
      /run/velnor/package-transaction.lock \
      apt-get install velnor-runner=X.Y.Z
-   dpkg-query -W velnor-runner
+     dpkg-query -W velnor-runner
    ```
+   For a one-scope canary on a multi-scope host, preserve unrelated scopes and
+   pass their exact drained unit(s) to the same locked apt transaction. The
+   package maintainer scripts require those target units to be inactive and
+   leave unrelated services, timers, and the guardian running:
+   ```bash
+   sudo VELNOR_DRAINED_UNITS=velnor-daemon.service \
+     /usr/bin/flock --exclusive --nonblock --no-fork \
+     /run/velnor/package-transaction.lock \
+     apt-get install velnor-runner=X.Y.Z
+   ```
+   An unscoped transaction still requires a fully drained Velnor host and an
+   inactive guardian. The scoped variable accepts only `velnor*.service` and
+   `velnor*.timer` unit names; it is not a bypass for the transaction lock or
+   the installed-release coherence checks.
 5. Activate the immutable release record, verify the installed package and
    binary plus exact OCI digest and complete labels, inspect
    atomic `active`/`previous` pointers, then start only the intended instance

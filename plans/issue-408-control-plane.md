@@ -406,6 +406,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   arm64 Debian packages, coherent release assembly, signatures, and
   attestations all passed. The signed release is ready for the standard APT
   package-update workflow.
+- Signed APT publication of `v0.1.236` completed through package-update run
+  `33055514873`, publish run `33055756988`, and PR #144. Sentry policy exposed
+  a canary defect: the exact locked APT transaction reached the package
+  `preinst`, but the guard rejected unrelated active scopes and the guardian.
+  Sentry remained on `0.1.215`; no direct `.deb` or `dpkg` path was used.
+  `preinst` and `postinst` now support an explicitly named
+  `VELNOR_DRAINED_UNITS` canary set while retaining full-host draining as the
+  default. Candidate `v0.1.237` is prepared for the next signed release.
 
 ## Non-goals
 
