@@ -391,6 +391,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `--retry-all-errors`; candidate `v0.1.234` is committed as `5b29aa1`, tagged,
   and pushed. GitHub-lane release run `33051738683` is queued; APT publication
   remains gated on its successful completion and the standard package PR.
+- Release run `33051738683` retried the interrupted transfer but still exhausted
+  retries after repeated `curl: (18)` and HTTP 503 responses. Both guest
+  downloads now resume partial files with `--continue-at -` and use a bounded
+  30-minute retry window. Candidate `v0.1.235` is committed as `62acc44`,
+  tagged, and pushed; GitHub-lane release run `33052574451` is queued.
 
 ## Non-goals
 
