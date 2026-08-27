@@ -39,6 +39,88 @@ pub enum CanaryStatus {
     Unknown,
 }
 
+/// Broker/session recovery state, separate from control-loop liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryHealthState {
+    Healthy,
+    MissingSession,
+    Backoff,
+    Quarantined,
+}
+
+impl RecoveryHealthState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::MissingSession => "missing_session",
+            Self::Backoff => "backoff",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
+/// Stable operator-facing identity for a derived health condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthAlertCode {
+    ControlNotLive,
+    JournalNotWritable,
+    GithubUnreachable,
+    RoutingInvalid,
+    RunnerGroupInvalid,
+    ResourceUnsafe,
+    RecoveryMissingSession,
+    RecoveryBackoff,
+    RecoveryQuarantined,
+    CapacityShortfall,
+    NoSchedulableCapacity,
+}
+
+impl HealthAlertCode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlNotLive => "control_not_live",
+            Self::JournalNotWritable => "journal_not_writable",
+            Self::GithubUnreachable => "github_unreachable",
+            Self::RoutingInvalid => "routing_invalid",
+            Self::RunnerGroupInvalid => "runner_group_invalid",
+            Self::ResourceUnsafe => "resource_unsafe",
+            Self::RecoveryMissingSession => "recovery_missing_session",
+            Self::RecoveryBackoff => "recovery_backoff",
+            Self::RecoveryQuarantined => "recovery_quarantined",
+            Self::CapacityShortfall => "capacity_shortfall",
+            Self::NoSchedulableCapacity => "no_schedulable_capacity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthAlertSeverity {
+    Warning,
+    Critical,
+}
+
+impl HealthAlertSeverity {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct HealthAlert {
+    pub code: HealthAlertCode,
+    pub severity: HealthAlertSeverity,
+    pub message: &'static str,
+}
+
 impl CanaryStatus {
     #[must_use]
     pub fn as_str(self) -> &'static str {

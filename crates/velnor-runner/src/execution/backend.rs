@@ -355,7 +355,7 @@ fn executable_working_directory(step: &crate::executor::ExecutableStep) -> Strin
     }
 }
 
-fn executable_inputs(step: &crate::executor::ExecutableStep) -> Vec<(String, String)> {
+pub(crate) fn executable_inputs(step: &crate::executor::ExecutableStep) -> Vec<(String, String)> {
     match step {
         crate::executor::ExecutableStep::Checkout(plan) => {
             let mut inputs = vec![("clone_url".into(), plan.clone_url.clone())];
@@ -374,6 +374,15 @@ fn executable_inputs(step: &crate::executor::ExecutableStep) -> Vec<(String, Str
             if let Some(depth) = plan.fetch_depth {
                 inputs.push(("fetch_depth".into(), depth.to_string()));
             }
+            if let Some(token) = &plan.token {
+                inputs.push(("token".into(), token.clone()));
+            }
+            inputs.push(("fetch_tags".into(), u8::from(plan.fetch_tags).to_string()));
+            inputs.push((
+                "persist_credentials".into(),
+                u8::from(plan.persist_credentials).to_string(),
+            ));
+            inputs.push(("clean".into(), u8::from(plan.clean).to_string()));
             inputs
         }
         crate::executor::ExecutableStep::Native { invocation, .. } => invocation
