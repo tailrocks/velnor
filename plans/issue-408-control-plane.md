@@ -683,6 +683,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `cargo fmt --all -- --check` and strict workspace Clippy passed. The branch
   is pushed at `247e0d0` after signed merge `e2f3518`; no external gate is
   marked complete by these local results.
+- PR #410 now points at `e5c85b1` and is mergeable. Fresh CI run
+  `33100587474` has passed validation and is running the GitHub lane; guest
+  image run `33100586739` is still running both architecture jobs. These
+  checks are not yet final evidence for merge.
 
 ## Non-goals
 
