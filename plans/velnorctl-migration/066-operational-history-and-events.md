@@ -33,9 +33,9 @@
   defects (summary replay regressing machine phase; skipped waiting edge on
   immediate capacity reservation).
 
-### Current-SHA evidence — 2026-08-27T17:39:03Z
+### Current-SHA evidence — 2026-08-27T17:47:58Z
 
-- `d213ead758a87b6546303c50988473985aeeffbf`: `rtk cargo fmt --all --check`,
+- `2e5ccd607865f2835b39149ecbe22c3c7e49555c`: `rtk cargo fmt --all --check`,
   `rtk cargo nextest run -p velnor-runner` passed, exit 0 (1,080 tests), and
   `rtk mise run check` passed, exit 0: actionlint, cargo deny, cargo fmt, fleet
   generation, clippy with warnings denied, and 1,474 workspace nextest tests.
@@ -48,6 +48,8 @@
   Operational-store initialization is mandatory; dry-run CLI coverage uses an
   explicit temporary state DB rather than a production fallback. Supervised
   daemon passes retry store open/migration failures before registration.
+  All early terminal completions clear the recovery marker only after remote
+  acknowledgement; failed completion retains it for restart recovery.
 - These local gates support implementation-level criteria only. The required
   current-SHA fixture hold/cancel proof, target-repository evidence, and
   independent verifier/reviewer sign-off are not present. Plan remains
