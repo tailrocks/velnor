@@ -1161,6 +1161,15 @@ fn notify_daemon_ready(usable_slots: usize, slots: usize) {
     ));
 }
 
+fn gha_cache_root(layout: Option<crate::storage::StorageLayout>) -> Result<PathBuf> {
+    let layout = layout.ok_or_else(|| {
+        anyhow::anyhow!(
+            "GHA cache is enabled but canonical storage is unavailable; set VELNOR_STORAGE_ROOT"
+        )
+    })?;
+    Ok(layout.cache_root.join("gha-cache"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlotAction {
     Continue,
@@ -1259,27 +1268,14 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // containers through their bridge gateway while disabled fleets remain
     // byte-for-byte unchanged.
     if let Some((url, _token)) = crate::gha_cache::enabled_from_env() {
-        let root = crate::storage::StorageLayout::resolve()
-            .map(|layout| layout.cache_root.join("gha-cache"))
-            .unwrap_or_else(|| {
-                daemon_config_dir(&args)
-                    .unwrap_or_else(|_| std::env::temp_dir())
-                    .join("gha-cache")
-            });
-        match crate::gha_cache::CacheService::open(root) {
-            Ok(service) => match crate::gha_cache::bind_configured(service).await {
-                Ok(bound) => {
-                    crate::sd_notify::status(&format!("gha cache service ready at {bound}"));
-                    println!("gha cache service listening on {bound} (public base {url})");
-                }
-                Err(error) => eprintln!(
-                    "Warning: gha cache service failed to bind ({error:#}); caches stay unavailable"
-                ),
-            },
-            Err(error) => {
-                eprintln!("Warning: gha cache store init failed: {error:#}");
-            }
-        }
+        let root = gha_cache_root(crate::storage::StorageLayout::resolve())?;
+        let service = crate::gha_cache::CacheService::open(root)
+            .context("initialize GHA cache service on canonical storage")?;
+        let bound = crate::gha_cache::bind_configured(service)
+            .await
+            .context("bind GHA cache service")?;
+        crate::sd_notify::status(&format!("gha cache service ready at {bound}"));
+        println!("gha cache service listening on {bound} (public base {url})");
     }
 
     if !supervised {
@@ -10005,6 +10001,22 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gha_cache_requires_canonical_storage() {
+        let error = gha_cache_root(None).unwrap_err();
+        assert!(error.to_string().contains("canonical storage"));
+        assert!(error.to_string().contains("VELNOR_STORAGE_ROOT"));
+    }
+
+    #[test]
+    fn gha_cache_uses_canonical_cache_root() {
+        let layout = crate::storage::StorageLayout::from_prefix(Path::new("/var"));
+        assert_eq!(
+            gha_cache_root(Some(layout)).unwrap(),
+            PathBuf::from("/var/cache/velnor/v1/gha-cache")
+        );
+    }
 
     #[test]
     fn job_claim_excludes_duplicate_slots_until_owner_drops() {
