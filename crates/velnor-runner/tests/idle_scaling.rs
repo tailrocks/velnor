@@ -71,13 +71,23 @@ fn wait_for_metrics(path: &Path) -> Value {
     panic!("controller did not publish metrics: {}", path.display());
 }
 
-fn wait_for_second_cycle(path: &Path, first: &Value) -> Value {
-    let first_sequence = number(first, &["sequence"]);
-    for _ in 0..900 {
+fn wait_for_steady_cycles(path: &Path, slots: u32) -> (Value, Value) {
+    let mut previous = wait_for_metrics(path);
+    let mut steady_cycles = 0;
+    for _ in 0..3_600 {
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                if number(&value, &["sequence"]) > first_sequence {
-                    return value;
+                let populated = number(&value, &["slot_processes"]) == u64::from(slots);
+                if number(&value, &["sequence"]) > number(&previous, &["sequence"]) {
+                    if populated {
+                        steady_cycles += 1;
+                    } else {
+                        steady_cycles = 0;
+                    }
+                    if steady_cycles >= 4 {
+                        return (previous, value);
+                    }
+                    previous = value;
                 }
             }
         }
@@ -139,8 +149,7 @@ fn idle_resource_scaling_from_one_to_sixteen_slots_is_bounded() {
         let state_dir = scratch(slots);
         let metrics_path = state_dir.join("controller-metrics.json");
         let mut child = spawn_controller(&state_dir, slots);
-        let first_metrics = wait_for_metrics(&metrics_path);
-        let metrics = wait_for_second_cycle(&metrics_path, &first_metrics);
+        let (first_metrics, metrics) = wait_for_steady_cycles(&metrics_path, slots);
         let measurement = Measurement {
             slots,
             slot_processes: number(&metrics, &["slot_processes"]),

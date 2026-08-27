@@ -641,6 +641,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   per-session journal replay; the controller passes one slot snapshot and
   generation/phase readiness into each poll. Full workspace proof and a new
   signed-APT Sentry soak are required.
+- The corrected idle-scaling proof now waits for four consecutive populated
+  controller cycles before measuring the final steady pair. This avoids both
+  slot-process startup CPU and partially populated snapshots while retaining
+  the required 1-to-16-slot 2x assertion. Focused nextest passed in 201.7s;
+  the remaining full-suite run is still required for this candidate.
 
 ## Non-goals
 
