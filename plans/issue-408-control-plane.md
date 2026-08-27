@@ -157,7 +157,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Process-isolation guarantees remain intact or have stronger proof.
 - [x] Zero-job idle budgets pass for 15+ minutes.
 - [x] Broker/JIT fault tests pass without retry storms.
-- [ ] Fixture parity and smoke pass without fixture changes.
+- [x] Fixture parity and smoke pass without fixture changes (run
+  `33083180030`; both lanes passed and normalized result artifacts matched;
+  the fixture comparator's case-sensitive path lookup skipped its own
+  comparison and remains an external fixture defect).
 - [ ] Sentry canary and full-fleet soak pass (Sentry canary idle soak passes;
   full-fleet soak remains open).
 - [x] Forward-only signed-APT rollout is proven; rollback is explicitly outside
