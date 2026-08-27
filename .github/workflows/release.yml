@@ -333,7 +333,11 @@ jobs:
           set -euo pipefail
           url="$(jq -er '.kernel_tarball' microvm/pins.json)"
           sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
-          curl -fsSL -o linux.tar.xz "$url"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
           echo "$sha  linux.tar.xz" | sha256sum -c -
 
       - name: Build guest vmlinux and rootfs.ext4
@@ -344,6 +348,7 @@ jobs:
             build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
+          sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -351,6 +356,7 @@ jobs:
           path: |
             dist/microvm/vmlinux
             dist/microvm/rootfs.ext4
+            dist/microvm/rootfs.sha256
 
   build:
     needs: [identity, metadata, guest-image]
@@ -488,7 +494,11 @@ jobs:
           sha="$(jq -er --arg a "$pin_arch" '.tarballs[$a].sha256' microvm/pins.json)"
           fc_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].firecracker_member' microvm/pins.json)"
           jailer_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_member' microvm/pins.json)"
-          curl -fsSL -o firecracker.tgz "$url"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o firecracker.tgz "$url"
           echo "$sha  firecracker.tgz" | sha256sum -c -
           mkdir -p extracted crates/velnor-runner/release/microvm
           tar -xzf firecracker.tgz -C extracted
@@ -497,6 +507,12 @@ jobs:
           cp "target/${TARGET}/release/velnor-guest-agent" crates/velnor-runner/release/microvm/velnor-guest-agent
           test -s guest-image/vmlinux || { echo "::error::guest-image missing vmlinux" >&2; exit 1; }
           test -s guest-image/rootfs.ext4 || { echo "::error::guest-image missing rootfs.ext4" >&2; exit 1; }
+          test -s guest-image/rootfs.sha256 || { echo "::error::guest-image missing rootfs.sha256" >&2; exit 1; }
+          rootfs_sha256="$(awk '{print $1}' guest-image/rootfs.sha256)"
+          [ "${#rootfs_sha256}" -eq 64 ] || { echo "::error::guest rootfs digest has invalid length" >&2; exit 1; }
+          actual_rootfs_sha256="$(sha256sum guest-image/rootfs.ext4 | awk '{print $1}')"
+          [ "$actual_rootfs_sha256" = "$rootfs_sha256" ] || { echo "::error::downloaded guest rootfs digest mismatch" >&2; exit 1; }
+          guest_agent_sha256="$(sha256sum crates/velnor-runner/release/microvm/velnor-guest-agent | awk '{print $1}')"
           cp guest-image/vmlinux crates/velnor-runner/release/microvm/vmlinux
           cp guest-image/rootfs.ext4 crates/velnor-runner/release/microvm/rootfs.ext4
           chmod 0755 \
@@ -510,7 +526,9 @@ jobs:
           [ "$fc_sha" = "$expected_fc" ] || { echo "::error::firecracker sha $fc_sha != pin $expected_fc" >&2; exit 1; }
           [ "$jailer_sha" = "$expected_jailer" ] || { echo "::error::jailer sha $jailer_sha != pin $expected_jailer" >&2; exit 1; }
           cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
-            stage --root crates/velnor-runner/release/microvm --arch "$pin_arch"
+            stage --root crates/velnor-runner/release/microvm --arch "$pin_arch" \
+            --rootfs-sha256 "$rootfs_sha256" \
+            --guest-agent-sha256 "$guest_agent_sha256"
           kernel="$(jq -er '.kernel' crates/velnor-runner/release/microvm/manifest.json)"
           rootfs="$(jq -er '.rootfs' crates/velnor-runner/release/microvm/manifest.json)"
           case "$kernel$rootfs" in

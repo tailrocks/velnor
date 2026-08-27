@@ -58,9 +58,8 @@ pub enum Command {
     Cache(crate::args::CacheArgs),
     Capabilities(crate::args::CapabilitiesArgs),
     Configure(crate::args::ConfigureArgs),
-    Daemon(DaemonArgs),
+    Daemon(Box<DaemonArgs>),
     Preflight(crate::args::PreflightArgs),
-    Run(RunArgs),
     Remove(crate::args::RemoveArgs),
     Status(crate::args::StatusArgs),
     Storage(crate::args::StorageArgs),
@@ -71,7 +70,7 @@ pub enum Command {
 impl From<ServiceCommand> for Command {
     fn from(command: ServiceCommand) -> Self {
         match command {
-            ServiceCommand::Daemon(args) => Self::Daemon(*args),
+            ServiceCommand::Daemon(args) => Self::Daemon(args),
             ServiceCommand::Release(args) => Self::Release(args),
             ServiceCommand::Capabilities(args) => Self::Capabilities(args.into()),
             ServiceCommand::Guardian(_)
@@ -549,9 +548,11 @@ pub async fn execute() -> anyhow::Result<()> {
         other => {
             let command = Command::from(other);
             let telemetry_dir = match &command {
-                Command::Daemon(args) => crate::runner::daemon_config_dir(&(*args).clone().into())
-                    .ok()
-                    .map(|dir| dir.join("logs")),
+                Command::Daemon(args) => {
+                    crate::runner::daemon_config_dir(&((**args).clone().into()))
+                        .ok()
+                        .map(|dir| dir.join("logs"))
+                }
                 _ => None,
             };
             crate::scaffold::init_telemetry(telemetry_dir.as_deref());
@@ -562,10 +563,9 @@ pub async fn execute() -> anyhow::Result<()> {
 
 async fn dispatch_service(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Daemon(args) => crate::runner::daemon(args.into()).await,
+        Command::Daemon(args) => crate::runner::daemon((*args).into()).await,
         Command::Release(args) => crate::release::run(args.into()),
         Command::Capabilities(args) => crate::manifest::run(args),
-        Command::Run(args) => crate::runner::run(args.into()).await,
         other => crate::scaffold::dispatch(other_command(other)).await,
     }
 }
@@ -580,7 +580,7 @@ fn other_command(command: Command) -> crate::args::Command {
         Command::Status(args) => crate::args::Command::Status(args),
         Command::Storage(args) => crate::args::Command::Storage(args),
         Command::Doctor(args) => crate::args::Command::Doctor(args),
-        Command::Daemon(_) | Command::Release(_) | Command::Run(_) => {
+        Command::Daemon(_) | Command::Release(_) => {
             unreachable!("handled by the service dispatcher")
         }
     }

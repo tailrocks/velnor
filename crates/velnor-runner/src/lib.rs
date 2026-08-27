@@ -114,9 +114,6 @@ pub mod scaffold {
     /// bootstrap: long-running commands log spans, one-shot commands do not.
     pub fn telemetry_dir(command: &Command) -> Option<PathBuf> {
         match command {
-            Command::Run(args) => crate::config::config_dir(args.config_dir.clone())
-                .ok()
-                .map(|dir| dir.join("logs")),
             Command::Daemon(args) => crate::runner::daemon_config_dir(args)
                 .ok()
                 .map(|dir| dir.join("logs")),
@@ -129,9 +126,8 @@ pub mod scaffold {
             Command::Cache(args) => crate::cache::run(args),
             Command::Capabilities(args) => crate::manifest::run(args),
             Command::Configure(args) => crate::runner::configure(args).await,
-            Command::Daemon(args) => crate::runner::daemon(args).await,
+            Command::Daemon(args) => crate::runner::daemon(*args).await,
             Command::Preflight(args) => crate::preflight::preflight(args),
-            Command::Run(args) => crate::runner::run(args).await,
             Command::Remove(args) => crate::runner::remove(args).await,
             Command::Status(args) => crate::runner::status(args).await,
             Command::Storage(args) => crate::storage::run(args),

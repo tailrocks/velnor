@@ -414,10 +414,13 @@ fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
             .unwrap_or_else(|_| HealthDocument::empty().with_derived_state()),
     };
     document.execution_backend = execution.backend();
+    let mut json = serde_json::to_value(&document)
+        .map_err(|error| CommandError::operation(error.to_string()))?;
+    json["alerts"] = serde_json::to_value(document.alerts())
+        .map_err(|error| CommandError::operation(error.to_string()))?;
     println!(
         "{}",
-        serde_json::to_string(&document)
-            .map_err(|error| CommandError::operation(error.to_string()))?
+        serde_json::to_string(&json).map_err(|error| CommandError::operation(error.to_string()))?
     );
     Ok(())
 }

@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 
 const SETTINGS_FILE: &str = "runner.json";
 
-const PREPARED_SETTINGS_DIR: &str = "next";
-
 #[cfg(unix)]
 fn replace_atomically(dir: &Path, path: &Path, bytes: &[u8], temp_path: &Path) -> Result<()> {
     use std::io::Write;
@@ -209,6 +207,7 @@ pub fn remove(dir: &Path) -> Result<bool> {
 /// Atomically move a prepared successor identity into the live config path.
 /// Both directories belong to one daemon slot, so the rename preserves the
 /// configless-gap invariant between JIT generations.
+#[cfg(any())]
 pub fn promote_prepared(dir: &Path) -> Result<bool> {
     let prepared = dir.join(PREPARED_SETTINGS_DIR);
     let source = prepared.join(SETTINGS_FILE);
@@ -324,31 +323,6 @@ mod tests {
 
         assert!(error.to_string().contains("create temporary config"));
         assert_eq!(fs::read(temp.join(SETTINGS_FILE)).unwrap(), existing);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn promotes_prepared_config_without_a_configless_gap() {
-        let temp = std::env::temp_dir().join(format!(
-            "velnor-config-promote-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let prepared = temp.join(PREPARED_SETTINGS_DIR);
-        fs::create_dir_all(&prepared).unwrap();
-        fs::write(prepared.join(SETTINGS_FILE), br#"{"agent_id":42}"#).unwrap();
-
-        assert!(promote_prepared(&temp).unwrap());
-        assert_eq!(
-            fs::read(temp.join(SETTINGS_FILE)).unwrap(),
-            br#"{"agent_id":42}"#
-        );
-        assert!(!prepared.exists());
-        assert!(!promote_prepared(&temp).unwrap());
-
         fs::remove_dir_all(temp).unwrap();
     }
 

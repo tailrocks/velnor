@@ -71,6 +71,22 @@ all_velnor_units_drained() {
   [ -z "$active_units" ]
 }
 
+scoped_units_drained() {
+  active_units=
+  for unit in $VELNOR_DRAINED_UNITS; do
+    case "$unit" in
+      velnor*.service|velnor*.timer) ;;
+      *) fail "refusing package configuration: invalid scoped unit name '$unit'" ;;
+    esac
+    state=$(systemctl show --property=ActiveState --value "$unit" 2>/dev/null || true)
+    case "$state" in
+      ''|inactive|failed) ;;
+      *) active_units="$active_units ${unit}(${state})" ;;
+    esac
+  done
+  [ -z "$active_units" ]
+}
+
 microvm_verify_sha256() {
   file="$1"
   field="$2"
@@ -87,7 +103,11 @@ case "$1" in
     require_package_transaction_lock
     if [ -d /run/systemd/system ]; then
       active_units=
-      all_velnor_units_drained || fail "refusing package configuration: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
+      if [ -n "${VELNOR_DRAINED_UNITS:-}" ]; then
+        scoped_units_drained || fail "refusing scoped package configuration: requested unit(s) remain active (${active_units:-unknown}). Stop the exact target units first."
+      else
+        all_velnor_units_drained || fail "refusing package configuration: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
+      fi
     fi
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
     # Jailer chroot and writable disks must be exec-capable; /run is tmpfs noexec.

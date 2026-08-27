@@ -307,6 +307,7 @@ fn status_json_health_vector_keys_are_stable() {
     for required in velnor_model::HealthDocument::REQUIRED_KEYS {
         assert!(keys.contains(&required), "{required} missing from {keys:?}");
     }
+    assert!(first["alerts"].is_array());
     assert_ne!(first["state"], "ready");
 }
 

@@ -1,20 +1,21 @@
 # Latest GitHub Runner V2 Refresh
 
-Date: 2026-06-11 (previous refresh: 2026-06-01, `v2.334.0`)
+Date: 2026-08-27 (previous refresh: 2026-06-11, `v2.335.1`)
 
 Reference source:
 
-- `actions/runner` latest release checked: `v2.335.1`
-- tag commit: `7d737449ef346f6524f75688d0c9c95fa10ba10a`
-- `main` at check time: `16c52e389da99f4d21d142c8c87f34a1e0767823`
-- previous release: `v2.334.0`
-  (`f1995ede5d885c997d13d8eca5467c4ce97fe69c`)
-- v2.334.0 → v2.335.1 delta over the V2 anchor files: only
-  `src/Runner.Worker/JobRunner.cs` changed — the DAP-debugger lifecycle moved
-  into a StepsRunner hook (`OnJobStepsInitializedAsync`). No broker,
-  run-service, container, or step/log protocol change; all anchors below
-  remain valid (re-audited 2026-06-11).
-- release page: <https://github.com/actions/runner/releases/tag/v2.335.1>
+- `actions/runner` latest release checked: `v2.337.0`
+- tag commit: `397b032cbf865e9c3ddfab89d533ec19325e1273`
+- previous release: `v2.335.1`
+  (`7d737449ef346f6524f75688d0c9c95fa10ba10a`)
+- v2.335.1 → v2.337.0 delta over the V2 anchor files: broker/session
+  recovery now distinguishes expired sessions, migrated-settings retries
+  exclude session conflicts, and a missing runner can clean local config;
+  job dispatch waits for worker exit after cancellation. The run-service
+  acquire/renew/complete request shapes and V2 message flow remain unchanged.
+  Velnor's bounded recovery remains the local control-plane implementation
+  (re-audited 2026-08-27).
+- release page: <https://github.com/actions/runner/releases/tag/v2.337.0>
 
 Drift check:
 
@@ -34,8 +35,8 @@ source reference only; the Velnor runner path targets broker/run-service V2.
 
 ## Upstream V2 Control Flow
 
-Source anchors in `actions/runner` `v2.335.1` (unchanged from `v2.334.0`
-except `JobRunner.cs`; line anchors below re-checked against the new tag):
+Source anchors in `actions/runner` `v2.337.0` (line anchors below re-checked
+against the new tag):
 
 - `src/Runner.Listener/Runner.cs:393-403`: listener selection uses
   `BrokerMessageListener` when `RunnerSettings.UseV2Flow` is true.
