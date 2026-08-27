@@ -325,6 +325,17 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   explicit digests for both generated artifacts to the staging verifier;
   static Firecracker, jailer, and kernel pins remain source-validated. Candidate
   advances to `0.1.231` and requires a fresh signed release.
+- Release run `33027312071` succeeded end-to-end for `v0.1.231`: guest
+  kernel/rootfs jobs, metadata, multi-platform GHCR image, amd64/arm64 Debian
+  packages, coherent release record, and all four hosted attestations passed.
+  The immutable GitHub release contains the expected package, record, manifest,
+  and checksum assets.
+- Standard APT publication is currently externally blocked. Stale run
+  `tailrocks/velnor-apt#33009466388` remains queued despite repeated cancel API
+  requests; deletion is forbidden (HTTP 403). GitHub-lane dispatch
+  `tailrocks/velnor-apt#33028868347` is pending behind the repository-wide
+  `cancel-in-progress: false` concurrency group. No APT or Sentry mutation is
+  claimed until that group is clean.
 
 ## Non-goals
 
