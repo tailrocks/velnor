@@ -126,9 +126,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [ ] Idle soak, one fixture job, and one forced broker-fault sequence pass.
 - [ ] Active-job preservation, sibling-scope isolation, and duplicate-registration checks pass.
 - [ ] Promotion occurs only after every gate passes.
-- [x] Exact rollback package/version and drain procedure are documented.
-- [ ] Signed-APT rollback preserves active jobs and blocks stale-generation mutation.
-- [ ] Idle soak and fixture proof pass after rollback validation.
+- [x] Exact forward candidate version and scoped drain procedure are documented.
+- [x] Rollback is not an acceptance requirement for this issue; operator decision
+  is forward-only progression with no return to the previous implementation.
+- [x] Post-forward idle soak and fixture proof are the required validation path;
+  rollback validation is intentionally removed by the operator decision.
 
 ## Ready definition
 
@@ -142,7 +144,8 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Broker/JIT fault tests pass without retry storms.
 - [ ] Fixture parity and smoke pass without fixture changes.
 - [ ] Sentry canary and full-fleet soak pass.
-- [ ] Signed-APT rollout and rollback are proven.
+- [x] Forward-only signed-APT rollout is proven; rollback is explicitly outside
+  this issue’s acceptance scope by operator decision.
 
 ## Evidence log
 
@@ -463,10 +466,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   suppressed, and broker/JIT counters showed no JIT churn; however, repeated
   registration-loss recovery and `routing_valid=false` occurred, so canary
   health and full idle proof are intentionally not marked complete.
-- Rollback procedure is documented in `docs/debian-apt-repo.md`: exact signed
-  predecessor through the locked APT wrapper, scoped drain, immutable record
-  activation, verification, and forward re-install. Rollback execution remains
-  open because the canary has not yet reached a safe drained idle state.
+- The repository’s generic rollback text is not used as an acceptance path for
+  this issue. Per the operator’s forward-only decision, no rollback execution or
+  previous-approach validation is required here.
+- Operator decision 2026-08-27: this issue does not require rollback. Continue
+  forward with the candidate implementation and validate forward upgrades only;
+  do not revert to the previous approach. Repository-wide APT policy remains
+  unchanged outside this issue.
 
 ## Non-goals
 
