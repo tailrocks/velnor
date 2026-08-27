@@ -33,15 +33,14 @@
   defects (summary replay regressing machine phase; skipped waiting edge on
   immediate capacity reservation).
 
-### Current-SHA evidence — 2026-08-27T16:49:45Z
+### Current-SHA evidence — 2026-08-27T17:13:45Z
 
-- `fe6aa2e7a0f741220917c373fa4342fc915f4f53`: `rtk cargo fmt --check` and
-  `rtk cargo nextest run -p velnor-runner ops` passed, exit 0 (13 tests).
-  The immediately preceding source-compatible tree passed `rtk mise run check`
-  at `65ed377` (formatting, actionlint, fleet generation, advisories, 1,471
-  workspace tests with one declared leak, and clippy with warnings denied).
-- Same source line: `rtk cargo nextest run -p velnor-model -p velnor-control -p
-  velnorctl` passed, exit 0, 227 tests.
+- `7c84e605dbb2fc5d7d35817c5982c627fc94ea32`: `rtk cargo fmt --all --check`,
+  `rtk cargo nextest run -p velnor-runner ops` passed, exit 0 (15 tests), and
+  `rtk mise run check` passed, exit 0: actionlint, cargo deny, cargo fmt, fleet
+  generation, clippy with warnings denied, and 1,474 workspace nextest tests.
+  Admission summary plus `job.acquired` now commit in one SQLite transaction;
+  rollback coverage asserts no partial summary remains.
 - These local gates support implementation-level criteria only. The required
   current-SHA fixture hold/cancel proof, target-repository evidence, and
   independent verifier/reviewer sign-off are not present. Plan remains
