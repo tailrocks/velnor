@@ -33,12 +33,12 @@
   defects (summary replay regressing machine phase; skipped waiting edge on
   immediate capacity reservation).
 
-### Current-SHA evidence — 2026-08-27T17:47:58Z
+### Current-SHA evidence — 2026-08-27T18:16:40Z
 
-- `2e5ccd607865f2835b39149ecbe22c3c7e49555c`: `rtk cargo fmt --all --check`,
-  `rtk cargo nextest run -p velnor-runner` passed, exit 0 (1,080 tests), and
+- `558edb07cce00cc7661b2dab1c247222da83e9b6`: `rtk cargo fmt --all --check`,
+  `rtk cargo nextest run -p velnor-runner` passed, exit 0 (1,084 tests), and
   `rtk mise run check` passed, exit 0: actionlint, cargo deny, cargo fmt, fleet
-  generation, clippy with warnings denied, and 1,474 workspace nextest tests.
+  generation, clippy with warnings denied, and 1,478 workspace nextest tests.
   Admission summary plus `job.acquired` now commit in one SQLite transaction;
   rollback coverage asserts no partial summary remains. Event subjects, details,
   and transition payloads are masked/projected before persistence; a secret
@@ -47,7 +47,9 @@
   admission; event details are bounded and control-safe.
   Operational-store initialization is mandatory; dry-run CLI coverage uses an
   explicit temporary state DB rather than a production fallback. Supervised
-  daemon passes retry store open/migration failures before registration.
+  daemon passes retry store open/migration failures before registration, and
+  daemon readiness is gated on durable instance persistence; a failed upsert
+  emits no readiness event.
   All early terminal completions clear the recovery marker only after remote
   acknowledgement; failed completion retains it for restart recovery.
 - These local gates support implementation-level criteria only. The required

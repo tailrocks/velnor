@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T18:05:23Z
+### Current baseline — 2026-08-27T18:16:40Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `0de39f9543fdb9d8440de307680ec7f814aa1c7f`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 217 commits ahead
+  `558edb07cce00cc7661b2dab1c247222da83e9b6`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 219 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -291,12 +291,11 @@ evidence and requires a fresh baseline.
   Firecracker safety fork was not merged wholesale because it conflicts with
   the active guest/runtime architecture.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T18:05:23Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1477/1477` passed (one existing
-  leaky test reported). Focused `velnor-runner` nextest passed `1083/1083`,
-  including the three busy-delete/recovery regressions; commit `0de39f9` now
-  propagates busy-path config and completion failures while preserving local
-  recovery evidence.
+  `2026-08-27T18:16:40Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1478/1478` passed with zero
+  skipped tests. Focused `velnor-runner` nextest passed `1084/1084`; commit
+  `558edb0` gates readiness on durable instance persistence and emits no
+  readiness event when that store write fails.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
