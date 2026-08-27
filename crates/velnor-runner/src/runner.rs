@@ -3919,6 +3919,7 @@ async fn handle_job_request(
     if let Some(sink) = crate::ops::global() {
         let admission = crate::ops::JobAdmission {
             instance_slug: sink.instance_slug().to_owned(),
+            job_uid: job.job_id.clone(),
             repository_full_name: crate::github_adapter::job_variable(&job, "github.repository")
                 .unwrap_or_default()
                 .to_owned(),
@@ -4198,14 +4199,7 @@ async fn handle_job_request(
         // then fail-close instead of hanging GitHub with zero steps.
         let capacity_wait_started = Instant::now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
-        let ops_job_uid = crate::ops::global().and_then(|sink| {
-            let run_id = crate::github_adapter::job_variable(&job, "github.run_id")
-                .and_then(|raw| raw.parse::<u64>().ok())?;
-            let attempt = crate::github_adapter::job_variable(&job, "github.run_attempt")
-                .and_then(|raw| raw.parse::<u32>().ok())?;
-            let _ = sink;
-            Some(format!("summary-run-{run_id}-attempt-{attempt}"))
-        });
+        let ops_job_uid = crate::ops::global().map(|_| job.job_id.clone());
         let mut emitted_pressure = false;
         let job_peak_reservation = loop {
             let reserve_result = reserve_job_peak_capacity(storage_layout, config_dir, args);
@@ -8548,8 +8542,8 @@ async fn complete_run_service_job(
             .and_then(|raw| raw.parse::<u64>().ok());
         let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
             .and_then(|raw| raw.parse::<u32>().ok());
-        if let (Some(run_id), Some(attempt)) = (run_id, attempt) {
-            let uid = format!("summary-run-{run_id}-attempt-{attempt}");
+        if run_id.is_some() && attempt.is_some() {
+            let uid = job.job_id.clone();
             let reason = match result {
                 crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
                 _ => velnor_model::EventReason::JobCompleted,
@@ -8564,7 +8558,7 @@ async fn complete_run_service_job(
             };
             sink.transition(
                 &uid,
-                &format!("t-terminal-{}-{run_id}-{attempt}", reason.as_str()),
+                &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
                 reason,
                 None,
                 Some(conclusion.to_owned()),
@@ -9010,15 +9004,15 @@ async fn complete_acquired_job_outcome(
                 .and_then(|raw| raw.parse::<u64>().ok());
             let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
                 .and_then(|raw| raw.parse::<u32>().ok());
-            if let (Some(run_id), Some(attempt)) = (run_id, attempt) {
-                let uid = format!("summary-run-{run_id}-attempt-{attempt}");
+            if run_id.is_some() && attempt.is_some() {
+                let uid = job.job_id.clone();
                 let reason = match conclusion {
                     crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
                     _ => velnor_model::EventReason::JobRejected,
                 };
                 sink.transition(
                     &uid,
-                    &format!("t-terminal-{}-{run_id}-{attempt}", reason.as_str()),
+                    &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
                     reason,
                     Some(masked_reason.clone()),
                     None,

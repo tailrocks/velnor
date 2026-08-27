@@ -73,6 +73,7 @@ pub fn sanitize_slug_for_instance(raw: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct JobAdmission {
     pub instance_slug: String,
+    pub job_uid: String,
     pub repository_full_name: String,
     pub workflow: String,
     pub job_name: String,
@@ -91,14 +92,11 @@ pub struct JobAdmission {
 }
 
 impl JobAdmission {
-    /// Stable store identity for a summary row; matches the store's own
-    /// upsert key derivation exactly.
+    /// Stable store identity for a summary row, sourced from the normalized
+    /// GitHub job identity rather than the run/attempt pair.
     #[must_use]
     pub fn job_uid(&self) -> Option<String> {
-        Some(format!(
-            "summary-run-{}-attempt-{}",
-            self.run_id?, self.attempt?
-        ))
+        (!self.job_uid.trim().is_empty()).then(|| self.job_uid.clone())
     }
 
     fn model_summary(&self) -> Result<ModelJobSummary, String> {
@@ -224,10 +222,7 @@ impl OpsSink {
             // The admission row is the required durable record before a job
             // can execute. Without both identity fields it has no stable key,
             // so accepting the job would create unrecorded work.
-            return self.required_failure(
-                "store.admission.identity",
-                "github.run_id and github.run_attempt are required",
-            );
+            return self.required_failure("store.admission.identity", "github.job_id is required");
         };
         let summary = match admission.model_summary() {
             Ok(summary) => summary,
@@ -480,6 +475,7 @@ mod tests {
     fn admission(run_id: u64, secret: Option<&str>) -> JobAdmission {
         JobAdmission {
             instance_slug: "test-instance".to_owned(),
+            job_uid: format!("job-{run_id}"),
             repository_full_name: "tailrocks/velnor-actions-fixture".to_owned(),
             workflow: "control plane".to_owned(),
             job_name: secret.map_or("hold".to_owned(), str::to_owned),

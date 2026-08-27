@@ -180,6 +180,32 @@ fn persist_fetch_round_trip_and_idempotent_repersist() {
 }
 
 #[test]
+fn distinct_jobs_sharing_run_attempt_are_not_overwritten() {
+    let temp = TempDb::new("same-run");
+    let store = Store::open(&temp.path).unwrap();
+    let first = summary(42, 1);
+    let mut second_inputs = inputs_of(&first);
+    second_inputs.job_uid = "job-42-test".to_owned();
+    second_inputs.job_name = "test".to_owned();
+    let second = JobSummary::from_normalized(second_inputs).unwrap();
+
+    store.persist_summary(&first).unwrap();
+    store.persist_summary(&second).unwrap();
+    assert_eq!(store.job_summaries("sentry/main").unwrap().len(), 2);
+    let error = store
+        .fetch_summary("sentry/main", 42, 1)
+        .expect_err("run/attempt lookup is ambiguous for multiple jobs");
+    assert_eq!(error.envelope.reason, "store.job.summary.ambiguous");
+    assert_eq!(
+        store
+            .fetch_summary_by_job_uid("sentry/main", first.job_uid())
+            .unwrap()
+            .unwrap(),
+        first
+    );
+}
+
+#[test]
 fn unidentified_summary_fails_closed_and_writes_nothing() {
     let temp = TempDb::new("unidentified");
     let store = Store::open(&temp.path).unwrap();

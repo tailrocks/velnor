@@ -291,9 +291,8 @@ impl Store {
         Ok(())
     }
 
-    /// Persist one sanitized [`ModelJobSummary`], upserting by
-    /// `(instance_slug, run_id, attempt)` so replaying the same identity
-    /// refreshes the row instead of duplicating it.
+    /// Persist one sanitized [`ModelJobSummary`], upserting by its normalized
+    /// `(instance_slug, job_uid)` identity.
     ///
     /// The upsert deliberately never touches `phase`, `conclusion`, or
     /// `infrastructure_category`: those columns belong exclusively to the
@@ -329,6 +328,14 @@ impl Store {
         job_uid: &str,
         transition: &Transition,
     ) -> StoreResult<()> {
+        if summary.instance_slug() != instance_slug || summary.job_uid() != job_uid {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.job.identity.mismatch")
+                    .with_remediation(
+                        "use one normalized instance and job identity for both records",
+                    ),
+            );
+        }
         let mut conn = self.lock_conn()?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -358,10 +365,41 @@ impl Store {
              FROM jobs WHERE instance_slug = ?1 AND run_id = ?2 AND attempt = ?3",
         )?;
         let mut rows = statement.query(params![instance_slug, run_id, i64::from(attempt)])?;
-        match rows.next()? {
-            Some(row) => decode_summary_row(row).map(Some),
-            None => Ok(None),
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let summary = decode_summary_row(row)?;
+        if rows.next()?.is_some() {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.job.summary.ambiguous")
+                    .with_remediation("query the summary by its job identity"),
+            );
         }
+        Ok(Some(summary))
+    }
+
+    /// Fetch one persisted sanitized summary by its exact job identity.
+    ///
+    /// # Errors
+    /// Envelope-classified read failures; a stored value that no longer
+    /// satisfies the sanitized contract is `store.job.summary.decode`.
+    pub fn fetch_summary_by_job_uid(
+        &self,
+        instance_slug: &str,
+        job_uid: &str,
+    ) -> StoreResult<Option<ModelJobSummary>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+                    head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
+                    trust_scope, resource_policy, phase, conclusion, infrastructure_category
+             FROM jobs WHERE instance_slug = ?1 AND job_uid = ?2",
+        )?;
+        let mut rows = statement.query(params![instance_slug, job_uid])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(decode_summary_row(row)?))
     }
 
     /// Atomically apply one transition under the enforced job state machine:
@@ -534,14 +572,13 @@ fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> S
         return Err(unidentified_summary());
     };
     let run_id = i64::try_from(run_id).map_err(|_| summary_out_of_range("run_id"))?;
-    let job_uid = format!("summary-run-{run_id}-attempt-{attempt}");
+    let job_uid = summary.job_uid().to_owned();
     transaction.execute(
         "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
                            head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
                            trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
-         ON CONFLICT (instance_slug, run_id, attempt)
-            WHERE run_id IS NOT NULL AND attempt IS NOT NULL
+         ON CONFLICT (instance_slug, job_uid)
           DO UPDATE SET
             job_uid = excluded.job_uid,
             repository = excluded.repository,
