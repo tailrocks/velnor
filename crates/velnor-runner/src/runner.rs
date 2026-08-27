@@ -4347,6 +4347,8 @@ async fn handle_job_request(
         let finalize_ms = duration_ms(finalize_started.elapsed());
         renewal.abort();
         completion?;
+        clear_in_flight_job(&teardown_config_dir)
+            .context("failed to clear acknowledged in-flight job")?;
         println!(
             "forensics.lifecycle event=completion-posted timestamp={}",
             unix_now_iso8601()
@@ -4384,7 +4386,6 @@ async fn handle_job_request(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
         );
-        let _ = clear_in_flight_job(&teardown_config_dir);
     } else if args.complete_noop {
         complete_run_service_job_refreshing(
             &run_service_job.client,
@@ -4401,6 +4402,7 @@ async fn handle_job_request(
             &journal_dir,
         )
         .await?;
+        clear_in_flight_job(config_dir).context("failed to clear acknowledged in-flight job")?;
         println!("No-op job completed and message acknowledged.");
     } else {
         println!(
