@@ -646,6 +646,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   slot-process startup CPU and partially populated snapshots while retaining
   the required 1-to-16-slot 2x assertion. Focused nextest passed in 201.7s;
   the remaining full-suite run is still required for this candidate.
+- GitHub release run `33092968450` passed all v0.1.243 build, test, signing,
+  attestation, package, and release assembly jobs. The standard
+  `velnor-apt` package-update run `33095136706` also passed its explicit
+  GitHub-lane verification and mutation jobs, opening PR #151. Its required
+  pull-request validation is currently queued on the repository's trusted
+  Velnor runner; no bypass or direct publication was used. v0.1.243 Sentry
+  installation and the post-fix idle soak remain blocked on that signed APT
+  publication completing.
 
 ## Non-goals
 
