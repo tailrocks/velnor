@@ -259,6 +259,30 @@ restart, drain, policy mutation, or further mutation is authorized.
 
 Behavioral verifier artifact is static-only; no live probe was executed.
 
+## Root-cause proof — 2026-08-27T00:16:00Z
+
+Durable evidence for `tailrocks/velnor` PR run `33024674982`, SHA
+`e79ed1969e9b05081c4af4e5f0f7c2d295590883`: the GitHub lane failed test
+`controller_observes_live_session_and_executor_before_ready_proof` with
+`session_live=false` and `executor_proven=true`. The contract and `ci-required`
+checks were downstream of that failure; the Velnor lane was skipped. This is a
+test/readiness failure record, not live production proof.
+
+Root cause: direct test slot launches omitted `--generation`, while strict
+procfs identity validation ignored the heartbeat. The architecture therefore
+allowed a slot to appear executor-proven without proving a live session for the
+same generation and heartbeat identity.
+
+Structural fix: make `SlotArgs` generation required and use explicit test and
+systemd invocations, so every slot launch carries generation identity and the
+readiness proof observes the strict procfs/heartbeat contract.
+
+Local regression proof: focused `cargo nextest` passed 3/3, and formatting
+passed. No GitHub Actions rerun was performed because cleanup and external
+access blockers remain. Residual gate: the Actions result and live
+admission/readiness proof remain unresolved; do not claim live production
+proof or production readiness from this evidence.
+
 ## Current read-only refresh — 2026-08-26T23:30:38Z
 
 Successful read-only facts captured in this refresh:
@@ -277,3 +301,22 @@ therefore remains historical; no current-state inference is made from it.
 
 No mutation occurred in this refresh. The production-readiness gates remain
 blocked.
+
+## Current partial recheck — 2026-08-26T23:49:51Z
+
+At capture, noncompleted runs were observed as follows:
+
+| repository | noncompleted runs at capture |
+|---|---|
+| `tailrocks/velnor` | `33024640131` in progress; `33024640078` queued; `33024639794` in progress |
+| `ChainArgos/java-monorepo` | `33019314096`, `32985134450`, `32984965998`, and `32984867843` queued |
+| `jackin-project/jackin` | none |
+
+Historical Velnor runs `33023384527` and `33023384501` are now completed with
+failure conclusions. The newly observed runs are not claimed to be
+campaign-owned.
+
+Runner registrations, validation labels, and runner-group `4` membership were
+not captured in this partial recheck. No inference is made from their absence.
+No cleanup action is safe on this evidence. No mutation or dispatch occurred;
+the no-dispatch gate and production-readiness gate remain open.

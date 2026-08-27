@@ -585,3 +585,27 @@ fn other_command(command: Command) -> crate::args::Command {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn service_slot_requires_generation() {
+        let error = ServiceCli::try_parse_from([
+            "velnor-runner",
+            "slot",
+            "--state-dir",
+            "/tmp/velnor-state",
+            "--scope",
+            "scope",
+            "--slot-index",
+            "0",
+        ])
+        .expect_err("slot parsing should require --generation");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--generation"));
+    }
+}

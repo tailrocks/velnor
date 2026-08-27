@@ -119,6 +119,8 @@ fn slot_kill_drops_one_unit_of_capacity() {
                 "iso",
                 "--slot-index",
                 &index.to_string(),
+                "--generation",
+                "1",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::from(std::fs::File::create(&out).unwrap()))
@@ -242,6 +244,7 @@ fn packaged_units_have_no_controller_partof_to_workers() {
     assert!(!slot.lines().any(|line| line.starts_with("PartOf=")));
     assert!(!job.lines().any(|line| line.starts_with("PartOf=")));
     assert!(slot.contains("velnor-runner slot"));
+    assert!(slot.contains("--generation 1"));
     assert!(job.contains("KillMode=control-group"));
     assert!(include_str!("../debian/velnor-guardian.service").contains("velnor-runner guardian"));
     assert!(!include_str!("../debian/velnor-guardian.service")
@@ -520,6 +523,8 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
             "--scope",
             "proof",
             "--slot-index",
+            "1",
+            "--generation",
             "1",
         ])
         .stdin(Stdio::null())

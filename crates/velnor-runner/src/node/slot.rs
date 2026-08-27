@@ -18,7 +18,7 @@ pub struct SlotArgs {
     #[arg(long)]
     pub slot_index: usize,
     /// Generation reserved by the controller before this process was spawned.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long)]
     pub generation: u64,
     /// One heartbeat cycle then exit (tests). Production loops until SIGTERM.
     #[arg(long)]
