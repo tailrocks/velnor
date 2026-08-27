@@ -221,6 +221,69 @@ impl HealthDocument {
         }
         FleetHealthState::Ready
     }
+
+    /// Return stable operator-facing alerts derived from the health vector.
+    #[must_use]
+    pub fn alerts(&self) -> Vec<HealthAlert> {
+        let mut alerts = Vec::with_capacity(6);
+        let mut push = |code, severity, message| {
+            alerts.push(HealthAlert {
+                code,
+                severity,
+                message,
+            });
+        };
+        if !self.control_live {
+            push(
+                HealthAlertCode::ControlNotLive,
+                HealthAlertSeverity::Critical,
+                "control cycle is not live",
+            );
+        }
+        if !self.journal_writable {
+            push(
+                HealthAlertCode::JournalNotWritable,
+                HealthAlertSeverity::Critical,
+                "durable journal is not writable",
+            );
+        }
+        if !self.github_reachable {
+            push(
+                HealthAlertCode::GithubUnreachable,
+                HealthAlertSeverity::Warning,
+                "GitHub is not reachable",
+            );
+        }
+        if !self.routing_valid {
+            push(
+                HealthAlertCode::RoutingInvalid,
+                HealthAlertSeverity::Critical,
+                "routing proof is invalid",
+            );
+        }
+        if !self.runner_group_valid {
+            push(
+                HealthAlertCode::RunnerGroupInvalid,
+                HealthAlertSeverity::Critical,
+                "runner group proof is invalid",
+            );
+        }
+        if self.actual_ready_slots < self.desired_ready_slots {
+            push(
+                HealthAlertCode::CapacityShortfall,
+                HealthAlertSeverity::Warning,
+                "ready capacity is below the desired floor",
+            );
+        }
+        if self.actual_ready_slots == 0 || self.capacity_permits == 0 {
+            push(
+                HealthAlertCode::NoSchedulableCapacity,
+                HealthAlertSeverity::Critical,
+                "no schedulable capacity is available",
+            );
+        }
+        alerts
+    }
 }
 
 /// Compare-and-swap generation. External mutations must carry the current value.
