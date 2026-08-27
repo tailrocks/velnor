@@ -4348,10 +4348,29 @@ pub fn download_artifacts_blocking(
     name: &str,
     pattern: &str,
 ) -> Result<Vec<ResultsArtifactDownload>> {
+    download_artifacts_blocking_in_temp_dir(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        pattern,
+        &std::env::temp_dir(),
+    )
+}
+
+fn download_artifacts_blocking_in_temp_dir(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    pattern: &str,
+    tmp_dir: &std::path::Path,
+) -> Result<Vec<ResultsArtifactDownload>> {
     use std::io::Read;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
-    let tmp_dir = std::env::temp_dir();
 
     let matcher = if !name.is_empty() || pattern.is_empty() {
         None
@@ -5030,6 +5049,11 @@ mod tests {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
+        let temp_root = std::env::temp_dir().join(format!(
+            "velnor-artifact-download-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&temp_root).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let signed_url = format!("{base}/signed.zip");
@@ -5064,22 +5088,23 @@ mod tests {
             }
         });
 
-        let error =
-            download_artifacts_blocking(&base, "runtime-token", "plan", "job", "release", "")
-                .unwrap_err();
+        let error = download_artifacts_blocking_in_temp_dir(
+            &base,
+            "runtime-token",
+            "plan",
+            "job",
+            "release",
+            "",
+            &temp_root,
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("write downloaded artifact zip"),
             "{error:#}"
         );
         server.join().unwrap();
-        assert!(!std::env::temp_dir()
-            .read_dir()
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("velnor-artifact-download-")));
+        assert!(temp_root.read_dir().unwrap().next().is_none());
+        std::fs::remove_dir(temp_root).unwrap();
     }
 
     #[test]
