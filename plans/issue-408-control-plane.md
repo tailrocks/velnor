@@ -562,6 +562,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   clean 15-minute idle window plus fixture/fault run, active-job/isolation
   proof, promotion, fixture parity, and full-fleet Sentry soak.
 
+- 2026-08-27 unchanged-fixture smoke run `33080712906` passed end-to-end on
+  the Velnor lane: both `app-a` and `app-b`, provenance, result comparison,
+  and `compat-required` succeeded. The subsequent `both` run
+  `33081151039` has all GitHub jobs successful; its Velnor jobs remain queued
+  behind unrelated fleet capacity, so parity is still open.
+
 ## Non-goals
 
 - Do not remove or simplify fixture content.
