@@ -249,6 +249,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   removing or weakening existing cases. Its local workflow-surface and Velnor
   fixture audits pass; authoritative default-branch adoption and Velnor smoke
   remain gated on PR checks/merge.
+- 2026-08-28 fixture PR validation rerun `33111079713` is queued at
+  `tailrocks / validate request`: the only org runner carrying
+  `velnor-trusted` is `velnor-tailrocks-slot-9`, reported `offline=true,
+  busy=true`; available microVM runners lack that trusted label. Sentry still
+  reports eight active jobs, so registration deletion/replacement is unsafe
+  and was not attempted.
 - 2026-08-27 fleet inspection: the Sentry unit is active on v0.1.240, while
   unrelated daemon scopes remain independently active or inactive according
   to their systemd units; no unrelated scope was restarted or mutated during
