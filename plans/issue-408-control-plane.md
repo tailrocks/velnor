@@ -358,6 +358,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   current apt package state remains `0.1.215` until the PR is validated and
   merged by the standard process. Sentry deployment remains gated; no direct
   `.deb` or `dpkg` path is used.
+- PR #144 validation remains queued after inspection: job `98434933844`
+  requires label `velnor-trusted`, has no assigned runner, and the visible
+  `tailrocks/velnor` runners are offline or carry only `dogfood`, `self-hosted`,
+  `velnor`, and `velnor-target-mvp`. The GitHub-lane package update itself is
+  successful; publication cannot proceed until the standard required check
+  receives a runner and the PR is merged.
 
 ## Non-goals
 
