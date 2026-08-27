@@ -426,6 +426,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   names `refs/tags/v0.1.237`. The package PR was not mutated. The release will
   be rerun from the tag ref so attestations bind to the record's exact source
   ref before APT publication is retried.
+- GitHub-lane release run `33058891658`, dispatched from exact tag
+  `refs/tags/v0.1.237`, completed successfully. Identity, metadata, both guest
+  images, multi-platform GHCR image, amd64 and arm64 Debian packages, coherent
+  release assembly, signatures, and attestations all passed. This satisfies the
+  immutable source-ref requirement for the next standard APT publication.
 
 ## Non-goals
 
