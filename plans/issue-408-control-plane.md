@@ -508,6 +508,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   recreations; afterward JIT create failures and delete churn stayed zero.
   Two active run-service jobs remained in progress at capture time, so the
   15-minute zero-job soak and final active-job completion proof remain open.
+- A fresh Sentry idle soak began at `12:45:47Z` after the active jobs cleared.
+  It held jobs=0, containers=0, waiter/job workers=0, five registrations,
+  ready health, zero JIT churn, and zero direct daemon CPU samples for about
+  13 minutes before two new real assignments arrived. The soak was stopped
+  as invalid rather than falsely counted as a 15-minute pass. The subsequent
+  workload continued to show zero idle waiter processes and zero JIT create
+  failures; a new uninterrupted idle window is still required when the
+  external queue is quiet.
 
 ## Non-goals
 
