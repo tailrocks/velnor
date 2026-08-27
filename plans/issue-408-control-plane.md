@@ -204,6 +204,17 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   durable event rate was 0.0/s at the final sample.
 - 2026-08-27 final Rust verification: `mise exec -- cargo nextest run
   --workspace` passed 1,406/1,406 tests.
+- 2026-08-27 external fixture audit: `tailrocks/velnor-actions-fixture` main
+  remains commit `a176d88c8c6ff0d452ea27cb32784bb8544f3a42`; its latest
+  backend-parity Velnor lane run `32916768719` failed, and
+  `mise exec -- scripts/fixture_readiness.sh` still reports missing canonical
+  workflow actions/triggers/tooling. The fixture remains untouched by this
+  branch, so fixture smoke, lane parity, and evidence-comparison gates stay
+  open rather than being falsely marked complete.
+- 2026-08-27 fleet inspection: the Sentry unit is active on v0.1.240, while
+  unrelated daemon scopes remain independently active or inactive according
+  to their systemd units; no unrelated scope was restarted or mutated during
+  the canary.
   healthy silence, CLI presence, and tolerant metrics parsing.
 - Added controller alert rate/window ownership: three sustained zero-job cycles
   over the 5% CPU budget emit `idle_high_cpu`; repeated no-op observations emit
