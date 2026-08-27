@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T17:55:09Z
+### Current baseline — 2026-08-27T18:05:23Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `b0db90f65d4706a066c611947eee21179be6b881`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 215 commits ahead
+  `0de39f9543fdb9d8440de307680ec7f814aa1c7f`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 217 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -291,11 +291,12 @@ evidence and requires a fresh baseline.
   Firecracker safety fork was not merged wholesale because it conflicts with
   the active guest/runtime architecture.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T17:55:09Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1475/1475` passed. Focused
-  `velnor-runner` nextest also passed `1081/1081`, including
-  `successful_runner_delete_surfaces_in_flight_cleanup_failure`; commit
-  `b0db90f` now propagates recovery-marker cleanup failure after remote delete.
+  `2026-08-27T18:05:23Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1477/1477` passed (one existing
+  leaky test reported). Focused `velnor-runner` nextest passed `1083/1083`,
+  including the three busy-delete/recovery regressions; commit `0de39f9` now
+  propagates busy-path config and completion failures while preserving local
+  recovery evidence.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
