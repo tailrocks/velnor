@@ -33,9 +33,9 @@
   defects (summary replay regressing machine phase; skipped waiting edge on
   immediate capacity reservation).
 
-### Current-SHA evidence — 2026-08-27T16:46:42Z
+### Current-SHA evidence — 2026-08-27T16:49:45Z
 
-- `1f8076fca9006512f116efa519d417bb1a6a9e29`: `rtk cargo fmt --check` and
+- `fe6aa2e7a0f741220917c373fa4342fc915f4f53`: `rtk cargo fmt --check` and
   `rtk cargo nextest run -p velnor-runner ops` passed, exit 0 (13 tests).
   The immediately preceding source-compatible tree passed `rtk mise run check`
   at `65ed377` (formatting, actionlint, fleet generation, advisories, 1,471
