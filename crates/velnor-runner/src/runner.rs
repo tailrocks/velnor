@@ -2242,7 +2242,8 @@ async fn delete_runner_keeping_busy_identity(
     {
         Ok(()) => {
             if let Some(dir) = slot_dir {
-                let _ = clear_in_flight_job(dir);
+                clear_in_flight_job(dir)
+                    .context("clear in-flight job after remote runner deletion")?;
             }
             Ok(())
         }
@@ -11913,6 +11914,38 @@ jobs:
 
         assert!(error.to_string().contains("Assigned rejected"));
         assert!(!in_flight_job_path(&config_dir).exists());
+        server.verify().await;
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn successful_runner_delete_surfaces_in_flight_cleanup_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/orgs/test/actions/runners/123"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config_dir = unique_temp_dir("runner-delete-cleanup-failure");
+        fs::create_dir_all(config_dir.join("in-flight-job.json")).unwrap();
+        let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
+
+        let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("clear in-flight job after remote runner deletion"));
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
