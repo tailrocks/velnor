@@ -725,6 +725,15 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   builds; final PR CI `33108920851` reached its test gate. The guest and CI
   runs remain external release evidence until terminal; APT PR #151's required
   validation rerun `33107782103` remains queued behind the trusted runner.
+- 2026-08-28 protected rollout recheck: APT PR #151 validation rerun
+  `33107782103` again left its trusted `validate request` canceled and its
+  replacement jobs queued; the PR remains blocked and no signed publication
+  exists. Explicit-identity Sentry inspection reports `velnor-tailrocks` at
+  `jobs=8`, `idle_slots=0`, `actual_ready_slots=1`, `registered_slots=9`,
+  `recovery_state=missing_session`, and `state=degraded`; its metrics still
+  show `reconcile_overlap_count=0`, `waiter_processes=0`, and
+  `job_processes=0`. Active jobs and the degraded scope were not restarted,
+  drained, killed, upgraded, or registration-mutated.
 
 ## Non-goals
 
