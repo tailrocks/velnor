@@ -516,6 +516,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   workload continued to show zero idle waiter processes and zero JIT create
   failures; a new uninterrupted idle window is still required when the
   external queue is quiet.
+- At the latest live check (`13:03:37Z`), v0.1.239 remained active and the
+  Sentry daemon was still at zero instantaneous CPU in the scoped sample with
+  five registrations, zero JIT create failures, zero waiter processes, and
+  zero overlap. Two new real jobs were active, so the second soak window is
+  also not started. The eight unchecked items below remain intentionally open:
+  fixture/reference refresh and parity, complete evidence comparison, a
+  clean 15-minute idle window plus fixture/fault run, active-job/isolation
+  proof, promotion, fixture parity, and full-fleet Sentry soak.
 
 ## Non-goals
 
