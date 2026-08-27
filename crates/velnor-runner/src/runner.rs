@@ -1075,12 +1075,58 @@ fn registration_was_deleted(error: &anyhow::Error) -> bool {
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    run_with_jit_prewarmer(args, None).await
+    run_with_jit_prewarmer(args, None, RunnerStorageMode::ExplicitLocal).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunnerStorageMode {
+    /// Packaged, supervised daemon: host-global canonical storage is mandatory.
+    SupervisedProduction,
+    /// Direct/one-shot execution: config-scoped storage is an explicit mode.
+    ExplicitLocal,
+}
+
+fn daemon_storage_mode(args: &DaemonArgs) -> RunnerStorageMode {
+    if args.url.is_some() && !args.once && !args.dry_run_registration {
+        RunnerStorageMode::SupervisedProduction
+    } else {
+        RunnerStorageMode::ExplicitLocal
+    }
+}
+
+fn select_runner_storage_layout(
+    config_dir: &Path,
+    mode: RunnerStorageMode,
+) -> Result<crate::storage::StorageLayout> {
+    select_runner_storage_layout_from(config_dir, mode, crate::storage::StorageLayout::resolve())
+}
+
+fn select_runner_storage_layout_from(
+    config_dir: &Path,
+    mode: RunnerStorageMode,
+    canonical: Option<crate::storage::StorageLayout>,
+) -> Result<crate::storage::StorageLayout> {
+    if let Some(layout) = canonical {
+        return Ok(layout);
+    }
+    match mode {
+        RunnerStorageMode::SupervisedProduction => {
+            bail!("supervised production requires canonical storage; set VELNOR_STORAGE_ROOT")
+        }
+        RunnerStorageMode::ExplicitLocal => Ok(crate::storage::StorageLayout {
+            cache_root: config_dir.join("cache"),
+            lib_root: config_dir.to_path_buf(),
+            run_root: daemon_capacity_run_root(config_dir),
+            log_root: config_dir.join("logs"),
+            mode: "explicit-config",
+        }),
+    }
 }
 
 async fn run_with_jit_prewarmer(
     args: RunArgs,
     prewarm_trigger: Option<oneshot::Sender<()>>,
+    storage_mode: RunnerStorageMode,
 ) -> Result<()> {
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
@@ -1098,6 +1144,7 @@ async fn run_with_jit_prewarmer(
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
+    let storage_layout = select_runner_storage_layout(&dir, storage_mode)?;
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
     let stored = config::load(&dir).map_err(local_identity_unavailable)?;
@@ -1108,7 +1155,16 @@ async fn run_with_jit_prewarmer(
     })?;
     let token = oauth_access_token(&stored).await.map_err(local_failure)?;
     ensure_v2_runner_settings(&stored).map_err(local_failure)?;
-    run_v2(args, dir, stored, agent_id, token, prewarm_trigger).await
+    run_v2(
+        args,
+        dir,
+        stored,
+        agent_id,
+        token,
+        prewarm_trigger,
+        storage_layout,
+    )
+    .await
 }
 
 /// Append one line to the daemon supervisor's forensic log
@@ -1337,6 +1393,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     crate::ops::init(instance_slug_for_store())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
+    let _storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
@@ -1603,9 +1660,10 @@ pub(crate) async fn run_daemon_slot(
     slot_index: usize,
     slots: usize,
 ) -> Result<()> {
+    let storage_mode = daemon_storage_mode(&args);
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
-        return run(slot_args).await;
+        return run_with_jit_prewarmer(slot_args, None, storage_mode).await;
     }
 
     // The controller launches this loop in a separate job-worker process. A
@@ -1662,7 +1720,7 @@ pub(crate) async fn run_daemon_slot(
             });
             (Some(trigger), Some(prewarm_waiter))
         };
-        let run_result = run_with_jit_prewarmer(slot_args, prewarm_trigger).await;
+        let run_result = run_with_jit_prewarmer(slot_args, prewarm_trigger, storage_mode).await;
         if let Some(prewarm_waiter) = prewarm_waiter {
             if let Err(join_error) = prewarm_waiter.await {
                 eprintln!(
@@ -2858,6 +2916,7 @@ async fn run_v2(
     agent_id: i64,
     token: OAuthAccessToken,
     mut prewarm_trigger: Option<oneshot::Sender<()>>,
+    storage_layout: crate::storage::StorageLayout,
 ) -> Result<()> {
     // Disk peak is reserved only while a job is executing (see
     // `reserve_job_peak_capacity` in `handle_job_request`). Idle JIT slots
@@ -3035,6 +3094,7 @@ async fn run_v2(
                     &stored,
                     &config_dir,
                     &args,
+                    &storage_layout,
                     stored.settings.disable_update,
                     &stored.settings.agent_name,
                     &forensics,
@@ -3122,6 +3182,7 @@ fn daemon_capacity_run_root(config_dir: &Path) -> PathBuf {
 /// returned [`crate::capacity::Reservation`] when the job finishes so idle
 /// slots free the admission budget for other daemons.
 fn reserve_job_peak_capacity(
+    storage_layout: &crate::storage::StorageLayout,
     config_dir: &Path,
     args: &RunArgs,
 ) -> Result<crate::capacity::Reservation> {
@@ -3130,9 +3191,7 @@ fn reserve_job_peak_capacity(
             .clone()
             .unwrap_or_else(|| config_dir.join("_work")),
     );
-    let run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let run_root = storage_layout.run_root.clone();
     let controller = crate::capacity::CapacityController {
         run_root: run_root.clone(),
         emergency_reserve_bytes: args.emergency_reserve_bytes,
@@ -3156,15 +3215,9 @@ fn reserve_job_peak_capacity(
                 .saturating_add(args.job_peak_bytes)
                 .saturating_add(hysteresis);
             let needed = required.saturating_sub(free);
-            let log_root = crate::storage::StorageLayout::resolve()
-                .map(|layout| layout.log_root)
-                .unwrap_or_else(|| config_dir.join("logs"));
             let reclaim_layout = crate::storage::StorageLayout {
                 cache_root: work_root.clone(),
-                lib_root: config_dir.to_path_buf(),
-                run_root: run_root.clone(),
-                log_root,
-                mode: "resolved",
+                ..storage_layout.clone()
             };
             if needed > 0 {
                 let _ = crate::cache::reclaim(&reclaim_layout, needed, &active)?;
@@ -3560,6 +3613,7 @@ async fn handle_v2_message(
     stored: &StoredRunnerConfig,
     config_dir: &std::path::Path,
     args: &RunArgs,
+    storage_layout: &crate::storage::StorageLayout,
     disable_update: bool,
     runner_name: &str,
     forensics: &SlotForensics,
@@ -3778,6 +3832,7 @@ async fn handle_v2_message(
     handle_job_request(
         config_dir,
         args,
+        storage_layout,
         run_service_job,
         acquired_identity,
         broker_cancellation,
@@ -3794,6 +3849,7 @@ async fn handle_v2_message(
 async fn handle_job_request(
     config_dir: &std::path::Path,
     args: &RunArgs,
+    storage_layout: &crate::storage::StorageLayout,
     run_service_job: RunServiceJobContext,
     acquired_identity: AcquiredJobIdentity,
     broker_cancellation: BrokerCancellationContext,
@@ -3802,12 +3858,9 @@ async fn handle_job_request(
     forensics: &SlotForensics,
     pickup_ms: u64,
 ) -> Result<()> {
-    let capacity_run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let capacity_run_root = &storage_layout.run_root;
     let journal_dir = crate::node::complete::journal_dir_near(config_dir);
-    let Some(job_claim) =
-        JobClaim::try_acquire(&capacity_run_root, &job.plan.plan_id, &job.job_id)?
+    let Some(job_claim) = JobClaim::try_acquire(capacity_run_root, &job.plan.plan_id, &job.job_id)?
     else {
         println!(
             "Skipping duplicate delivery of run-service job {}; another local slot owns it.",
@@ -4014,7 +4067,7 @@ async fn handle_job_request(
                     // candidate scope for all concurrent holders.
                     let holder_scope = format!("{scope}/{lease_holder}");
                     crate::capacity::ScopeLease::acquire(
-                        &capacity_run_root,
+                        capacity_run_root,
                         class,
                         &holder_scope,
                         stale_after,
@@ -4155,7 +4208,7 @@ async fn handle_job_request(
         });
         let mut emitted_pressure = false;
         let job_peak_reservation = loop {
-            let reserve_result = reserve_job_peak_capacity(config_dir, args);
+            let reserve_result = reserve_job_peak_capacity(storage_layout, config_dir, args);
             let last_error = reserve_result
                 .as_ref()
                 .err()
@@ -10032,6 +10085,35 @@ mod tests {
     }
 
     #[test]
+    fn supervised_storage_requires_canonical_layout() {
+        let error = select_runner_storage_layout_from(
+            Path::new("/config/slot-1"),
+            RunnerStorageMode::SupervisedProduction,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("supervised production"));
+        assert!(error.to_string().contains("VELNOR_STORAGE_ROOT"));
+    }
+
+    #[test]
+    fn explicit_local_storage_is_scoped_to_config_dir() {
+        let layout = select_runner_storage_layout_from(
+            Path::new("/config/slot-1"),
+            RunnerStorageMode::ExplicitLocal,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(layout.cache_root, PathBuf::from("/config/slot-1/cache"));
+        assert_eq!(layout.lib_root, PathBuf::from("/config/slot-1"));
+        assert_eq!(layout.run_root, PathBuf::from("/config/slot-1/run"));
+        assert_eq!(layout.log_root, PathBuf::from("/config/slot-1/logs"));
+        assert_eq!(layout.mode, "explicit-config");
+    }
+
+    #[test]
     fn job_claim_excludes_duplicate_slots_until_owner_drops() {
         let root = std::env::temp_dir().join(format!("velnor-job-claim-{}", uuid::Uuid::new_v4()));
 
@@ -12915,6 +12997,7 @@ jobs:
             &stored,
             Path::new("/config"),
             &run_args(false, false, false),
+            &crate::storage::StorageLayout::from_prefix(Path::new("/var")),
             true,
             "velnor",
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
@@ -12967,6 +13050,7 @@ jobs:
             &stored,
             Path::new("/config"),
             &run_args(false, false, false),
+            &crate::storage::StorageLayout::from_prefix(Path::new("/var")),
             true,
             "velnor",
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
