@@ -567,6 +567,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   and `compat-required` succeeded. The subsequent `both` run
   `33081151039` has all GitHub jobs successful; its Velnor jobs remain queued
   behind unrelated fleet capacity, so parity is still open.
+- 2026-08-27 the real fixture smoke run `33080712906` is authoritative
+  unchanged-fixture proof: both Velnor package matrices, provenance,
+  comparison, and `compat-required` passed. The `both` parity run
+  `33081151039` was canceled after all matching tailrocks target runners
+  became offline while an unrelated `velnor-tailrocks` Docker job remained
+  active; its GitHub lane passed, but Velnor parity is unproven.
 
 ## Non-goals
 
