@@ -284,3 +284,16 @@ by readback; attach its next authorized run as later live evidence.
 Live steps 3–5: pre-change sanitized captures, operator digest review/approval per org, sequential
 apply ×3, routing/denial/warm proof with run ids, scheduled-audit host enablement (repo-side systemd
 unit slice queued), ledger seed approval after ref-shape ruling.
+
+### Fresh read-only snapshot (2026-08-27T16:55Z)
+
+Using the GitHub Actions runner-group API (`2026-03-10`), all three groups remain
+`visibility=selected` and `allows_public_repositories=true`, but
+`restricted_to_workflows=false` with `selected_workflows=[]`:
+
+- `tailrocks/velnor-trusted` (id 3): 21 selected repositories.
+- `ChainArgos/velnor-trusted` (id 4): 6 selected repositories.
+- `jackin-project/velnor-trusted` (id 3): 9 selected repositories.
+
+The bounded audit performed no mutation. Plan 039 remains open; the workflow
+restriction, exact closure, and operator approval STOP conditions still apply.
