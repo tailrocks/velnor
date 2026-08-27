@@ -186,6 +186,8 @@ fn sanitize_slug(raw: &str) -> String {
 pub struct OpsSink {
     store: Store,
     instance_slug: String,
+    // Keep admitted masks for this sink lifetime: a later operational event
+    // may repeat an earlier secret, so eviction would re-enable persistence.
     masks: Mutex<Vec<String>>,
     degraded: AtomicBool,
     last_prune_unix: AtomicU64,
@@ -252,7 +254,12 @@ impl OpsSink {
                 "admission instance does not match the installed operational-store sink",
             );
         }
-        self.remember_masks(&admission.masks);
+        if !self.remember_masks(&admission.masks) {
+            return self.required_failure(
+                "store.masks",
+                "event mask registry is unavailable; admission rejected",
+            );
+        }
         let token = format!("t-acquired-{job_uid}");
         let correlation_id = match Slug::validate("correlation_id", &format!("corr-{token}")) {
             Ok(value) => value,
@@ -282,8 +289,11 @@ impl OpsSink {
 
     /// Best-effort normalized event; failures degrade, never propagate.
     pub fn emit(&self, reason: EventReason, subject: &str, detail: Option<String>) {
-        let subject = self.project_event_text(subject);
-        let detail = detail.map(|value| self.project_event_text(&value));
+        let Some(masks) = self.event_masks() else {
+            return;
+        };
+        let subject = sanitize_event_subject(subject, &masks);
+        let detail = detail.map(|value| sanitize_event_detail(&value, &masks));
         let correlation = Slug::validate("correlation_id", &subject).ok();
         if let Err(error) = self.store.append_event(&EventRow {
             instance_slug: self.instance_slug.clone(),
@@ -308,6 +318,9 @@ impl OpsSink {
         conclusion: Option<String>,
         infrastructure_category: Option<String>,
     ) -> bool {
+        let Some(masks) = self.event_masks() else {
+            return false;
+        };
         let Ok(correlation) = Slug::validate("correlation_id", &format!("corr-{token}")) else {
             return false;
         };
@@ -315,11 +328,10 @@ impl OpsSink {
             token: token.to_owned(),
             correlation_id: correlation,
             reason,
-            message: message.map(|value| self.project_event_text(&value)),
+            message: message.map(|value| sanitize_event_detail(&value, &masks)),
             transition_time: Timestamp::now(),
-            conclusion: conclusion.map(|value| self.project_event_text(&value)),
-            infrastructure_category: infrastructure_category
-                .map(|value| self.project_event_text(&value)),
+            conclusion,
+            infrastructure_category,
         };
         if let Err(error) =
             self.store
@@ -406,29 +418,27 @@ impl OpsSink {
         false
     }
 
-    fn remember_masks(&self, values: &[String]) {
+    fn remember_masks(&self, values: &[String]) -> bool {
         let Ok(mut masks) = self.masks.lock() else {
             self.absorb("store.masks", "mask registry lock poisoned");
-            return;
+            return false;
         };
         for value in values.iter().filter(|value| !value.is_empty()) {
             if !masks.iter().any(|known| known == value) {
                 masks.push(value.clone());
             }
         }
-        if masks.len() > 128 {
-            let excess = masks.len() - 128;
-            masks.drain(..excess);
-        }
+        true
     }
 
-    fn project_event_text(&self, raw: &str) -> String {
-        let masks = self
-            .masks
-            .lock()
-            .map(|values| values.clone())
-            .unwrap_or_default();
-        sanitize_event_text(raw, &masks)
+    fn event_masks(&self) -> Option<Vec<String>> {
+        match self.masks.lock() {
+            Ok(values) => Some(values.clone()),
+            Err(_) => {
+                self.absorb("store.masks", "mask registry lock poisoned");
+                None
+            }
+        }
     }
 
     fn absorb(&self, code: &str, detail: &str) {
@@ -438,8 +448,30 @@ impl OpsSink {
     }
 }
 
-fn sanitize_event_text(raw: &str, masks: &[String]) -> String {
+fn sanitize_event_subject(raw: &str, masks: &[String]) -> String {
     sanitize_slug(&crate::runner::mask_all(raw, masks))
+}
+
+fn sanitize_event_detail(raw: &str, masks: &[String]) -> String {
+    const MAX_EVENT_DETAIL_BYTES: usize = 4096;
+    let masked = crate::runner::mask_all(raw, masks);
+    let mut detail = String::with_capacity(masked.len().min(MAX_EVENT_DETAIL_BYTES));
+    for character in masked.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if detail.len() + character.len_utf8() > MAX_EVENT_DETAIL_BYTES {
+            break;
+        }
+        detail.push(character);
+    }
+    if detail.is_empty() {
+        "unknown".to_owned()
+    } else {
+        detail
+    }
 }
 
 #[cfg(test)]
@@ -564,7 +596,7 @@ mod tests {
 
     #[test]
     fn secrets_never_reach_database_pages() {
-        let (_dir, sink) = temp_sink("secret-safety");
+        let (dir, sink) = temp_sink("secret-safety");
         let marker_secret = "super-secret-marker-value-42";
         // A workflow whose display name embeds a secret variable value still
         // admits — but every projection is masked first.
@@ -594,6 +626,19 @@ mod tests {
             sink.store.event_count("test-instance", "unknown").unwrap(),
             1
         );
+        drop(sink);
+        for filename in ["state.db", "state.db-wal", "state.db-shm"] {
+            let path = dir.join(filename);
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            assert!(
+                !bytes
+                    .windows(marker_secret.len())
+                    .any(|window| window == marker_secret.as_bytes()),
+                "secret marker reached {filename}"
+            );
+        }
     }
 
     #[test]
