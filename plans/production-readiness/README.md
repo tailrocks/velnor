@@ -269,14 +269,14 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T22:05:00Z
+### Current baseline — 2026-08-27T22:36:42Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `28e3dfffd2a6c1fccbd4b0de44a35510ec668d6c`, clean worktree, remote
+  `a7ca6bbd2354401318d787e7c8430dacc291e375`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
   of `origin/main` and equal to its pushed branch tip.
-- Open Velnor PR: #411 at this HEAD. Current CI run `33121768566` and Guest
-  image run `33121768061` are queued; this is not green-main proof.
+- Open Velnor PR: #411 at this HEAD. Current CI run `33123159423` and Guest
+  image run `33123158919` are in progress; this is not green-main proof.
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
@@ -296,12 +296,11 @@ evidence and requires a fresh baseline.
   downgrade was intentionally omitted under the modern-protocol rule.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, with
   actionlint, cargo deny, cargo fmt, fleet generation, clippy `-D warnings`,
-  and workspace nextest `1505/1505` (nextest run ID
-  `2a1d95ca-2d58-4272-8a5d-5a8d674e8f49`). Focused Plan 066 tests passed
-  `84/84`; package nextest passed `1180/1180` before the final remote merge.
-  Code commits `61605e6` and `28e3dff` preserve canonical job identity,
-  migration history, resource policy, legal no-op lifecycle transitions, and
-  branch-side remote changes.
+  and workspace nextest `1506/1506` (nextest run ID
+  `67f4d16d-b489-4d41-a541-76d53c282671`). Focused Plan 066 tests were also
+  green before this gate. Code commit `a7ca6bb` adds persisted slot identity,
+  preserves resource policy and legal no-op lifecycle transitions, and
+  rejects unsanitized raw job rows before persistence.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
