@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use velnor_control::store::{
@@ -186,6 +186,7 @@ fn sanitize_slug(raw: &str) -> String {
 pub struct OpsSink {
     store: Store,
     instance_slug: String,
+    masks: Mutex<Vec<String>>,
     degraded: AtomicBool,
     last_prune_unix: AtomicU64,
     budget: RetentionBudget,
@@ -204,6 +205,7 @@ impl OpsSink {
         Ok(Self {
             store,
             instance_slug,
+            masks: Mutex::new(Vec::new()),
             degraded: AtomicBool::new(false),
             last_prune_unix: AtomicU64::new(0),
             budget: RetentionBudget::default(),
@@ -250,6 +252,7 @@ impl OpsSink {
                 "admission instance does not match the installed operational-store sink",
             );
         }
+        self.remember_masks(&admission.masks);
         let token = format!("t-acquired-{job_uid}");
         let correlation_id = match Slug::validate("correlation_id", &format!("corr-{token}")) {
             Ok(value) => value,
@@ -279,11 +282,13 @@ impl OpsSink {
 
     /// Best-effort normalized event; failures degrade, never propagate.
     pub fn emit(&self, reason: EventReason, subject: &str, detail: Option<String>) {
-        let correlation = Slug::validate("correlation_id", subject).ok();
+        let subject = self.project_event_text(subject);
+        let detail = detail.map(|value| self.project_event_text(&value));
+        let correlation = Slug::validate("correlation_id", &subject).ok();
         if let Err(error) = self.store.append_event(&EventRow {
             instance_slug: self.instance_slug.clone(),
             event_kind: reason.as_str().to_owned(),
-            subject: subject.to_owned(),
+            subject,
             correlation_id: correlation.map(|slug| slug.as_str().to_owned()),
             occurred_at: Timestamp::now(),
             detail,
@@ -310,10 +315,11 @@ impl OpsSink {
             token: token.to_owned(),
             correlation_id: correlation,
             reason,
-            message,
+            message: message.map(|value| self.project_event_text(&value)),
             transition_time: Timestamp::now(),
-            conclusion,
-            infrastructure_category,
+            conclusion: conclusion.map(|value| self.project_event_text(&value)),
+            infrastructure_category: infrastructure_category
+                .map(|value| self.project_event_text(&value)),
         };
         if let Err(error) =
             self.store
@@ -400,11 +406,40 @@ impl OpsSink {
         false
     }
 
+    fn remember_masks(&self, values: &[String]) {
+        let Ok(mut masks) = self.masks.lock() else {
+            self.absorb("store.masks", "mask registry lock poisoned");
+            return;
+        };
+        for value in values.iter().filter(|value| !value.is_empty()) {
+            if !masks.iter().any(|known| known == value) {
+                masks.push(value.clone());
+            }
+        }
+        if masks.len() > 128 {
+            let excess = masks.len() - 128;
+            masks.drain(..excess);
+        }
+    }
+
+    fn project_event_text(&self, raw: &str) -> String {
+        let masks = self
+            .masks
+            .lock()
+            .map(|values| values.clone())
+            .unwrap_or_default();
+        sanitize_event_text(raw, &masks)
+    }
+
     fn absorb(&self, code: &str, detail: &str) {
         self.degraded.store(true, Ordering::Relaxed);
         tracing::error!(target: "velnor::ops", code, "{code}: {detail}");
         eprintln!("forensics.ops event=store-write-failed code={code} error={detail}");
     }
+}
+
+fn sanitize_event_text(raw: &str, masks: &[String]) -> String {
+    sanitize_slug(&crate::runner::mask_all(raw, masks))
 }
 
 #[cfg(test)]
@@ -543,6 +578,21 @@ mod tests {
                 .event_count("test-instance", marker_secret)
                 .unwrap(),
             0
+        );
+        sink.emit(
+            EventReason::ReadinessDegraded,
+            marker_secret,
+            Some(format!("failure detail: {marker_secret}")),
+        );
+        assert_eq!(
+            sink.store
+                .event_count("test-instance", marker_secret)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sink.store.event_count("test-instance", "unknown").unwrap(),
+            1
         );
     }
 
