@@ -178,6 +178,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   from the health vector; `velnorctl status --json` now includes `alerts`, and
   doctor prints local alerts plus reconcile/worker/broker/JIT metrics from
   `controller-metrics.json`. Focused tests cover alert ordering/serialization,
+
+- 2026-08-27 official `actions/runner` v2.337.0 audit: tag
+  `397b032cbf865e9c3ddfab89d533ec19325e1273` is current. Velnor now advertises
+  protocol/user-agent `2.337.0`; `velnor-tools check-runner-reference` passes.
+  Upstream broker/session deltas were reviewed before updating the trace.
+- 2026-08-27 verification: `cargo fmt --all -- --check`, `cargo check
+  -p velnor-runner --locked`, and focused `cargo nextest run -p velnor-runner
+  -p velnor-control -p velnor-tools` passed (1,231/1,231).
   healthy silence, CLI presence, and tolerant metrics parsing.
 - Added controller alert rate/window ownership: three sustained zero-job cycles
   over the 5% CPU budget emit `idle_high_cpu`; repeated no-op observations emit
