@@ -139,7 +139,7 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Health/doctor expose useful capacity, resource safety, and churn through health alerts and controller-metrics summaries.
 - [x] Process-isolation guarantees remain intact or have stronger proof.
 - [x] Zero-job idle budgets pass for 15+ minutes.
-- [ ] Broker/JIT fault tests pass without retry storms.
+- [x] Broker/JIT fault tests pass without retry storms.
 - [ ] Fixture parity and smoke pass without fixture changes.
 - [ ] Sentry canary and full-fleet soak pass.
 - [ ] Signed-APT rollout and rollback are proven.
@@ -440,6 +440,16 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   the exact locked APT transaction to `0.1.237`; unrelated daemon units and
   their running containers were left untouched. The active release pointer was
   then atomically activated from the checksum-verified `v0.1.237` record.
+- Focused broker protocol and runner fault coverage passed under nextest:
+  `mise exec -- cargo nextest run -p velnor-runner --test broker_protocol --lib`
+  ran 1001 tests with 1001 passed, including 401/403/404/5xx, timeout,
+  retry, completion, session isolation, registration-loss, generation-fencing,
+  backoff, quarantine, and sibling-isolation cases.
+- Canonical fixture readiness was run without modifying
+  `velnor-actions-fixture`; it reported the existing fixture audit drift and
+  prior failed run `32935294686`. A fresh unchanged fixture smoke attempt was
+  blocked before dispatch because this environment has no `GITHUB_TOKEN`; no
+  fixture workaround was applied.
 
 ## Non-goals
 
