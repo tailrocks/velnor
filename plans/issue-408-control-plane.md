@@ -718,6 +718,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   transient aarch64 download failure, then two failed-job retries reached the
   same external build/download path and were canceled after the hard progress
   window; the already-published v0.1.244 release guest run remains green.
+- 2026-08-28 guest-image reliability correction: final head `eaf772d` adds
+  bounded HTTP/1.1 retries and connect/transfer timeouts to the pinned kernel
+  download, matching the release workflow's proven transport behavior. Final
+  guest run `33108920045` passed both downloads and reached both architecture
+  builds; final PR CI `33108920851` reached its test gate. The guest and CI
+  runs remain external release evidence until terminal; APT PR #151's required
+  validation rerun `33107782103` remains queued behind the trusted runner.
 
 ## Non-goals
 
