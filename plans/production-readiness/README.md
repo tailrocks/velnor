@@ -269,34 +269,35 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T16:14:09Z
+### Current baseline — 2026-08-27T16:35:24Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `92bddf2f174652b775123f925734b6fb67a9e182`, tracked plan-ledger changes
-  present in the worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 102 commits ahead
-  and 1 commit behind local `main`.
+  `8a36c4a871746ca7fa17682b6c28070de6f71152`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 146 commits ahead
+  of its remote-tracking counterpart.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
-  successful CI/Release/Guest image for tag `v0.1.242` (run IDs
-  `33086166306`, `33086166265`, `33086165280`); no active Velnor runs were
-  observed.
+  in-progress CI/Release and successful Guest image for tag `v0.1.243` (run IDs
+  `33092968591`, `33092968450`, `33092967555`); older `v0.1.242` CI/Release/
+  Guest image runs succeeded (run IDs `33086166306`, `33086166265`,
+  `33086165280`).
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
   absent. Root campaign progress remains 4/94 done; 039 remains in progress.
-- Current-SHA local evidence: `rtk cargo nextest run -p velnor-control` exit 0
-  (71 passed) and `rtk cargo nextest run -p velnor-runner ops` exit 0 (12
-  passed), captured 2026-08-27T16:13:35Z–16:13:37Z.
+- Current-SHA local evidence: `rtk cargo fmt --check` exit 0 and
+  `rtk cargo nextest run -p velnor-model -p velnor-control -p velnor-runner`
+  exit 0 (1,251 passed), captured 2026-08-27T16:34Z.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
   `restricted_to_workflows=false`; Tailrocks currently selects 21 repositories
   including `cloudflare-tofu` and `github-terraform`.
-- Sentry read-only snapshot at `2026-08-27T16:07:53Z`: Docker 29.7.2 active;
-  `velnor-runner 0.1.242` and `/usr/bin/velnorctl` present;
-  `/usr/bin/velnor-tools` absent; all listed Velnor systemd units active; the
-  health vector is degraded with `github_reachable=false`,
+- Sentry read-only snapshot last captured at `2026-08-27T16:07:53Z` (not a
+  current-state proof): Docker 29.7.2 active; `velnor-runner 0.1.242` and
+  `/usr/bin/velnorctl` present; `/usr/bin/velnor-tools` absent; exact unit
+  states were not regenerated in this pass; the health vector was degraded with
+  `github_reachable=false`,
   `routing_valid=false`, `runner_group_valid=false`, and zero ready slots.
 - Blockers: the Plan 039 digest/closure and workflow-ref admission ruling are
   not approved for public-code policy mutation; stale validation-run cleanup,
