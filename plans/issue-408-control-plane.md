@@ -401,6 +401,11 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   official `mirrors.edge.kernel.org` endpoint with the same SHA-256. Candidate
   `v0.1.236` is committed as `8948d43`, tagged, and pushed; the failed run was
   cancelled before the next standard GitHub-lane release dispatch.
+- GitHub-lane release run `33053243380` succeeded end-to-end for `v0.1.236`:
+  identity, metadata, both guest images, multi-platform GHCR image, amd64 and
+  arm64 Debian packages, coherent release assembly, signatures, and
+  attestations all passed. The signed release is ready for the standard APT
+  package-update workflow.
 
 ## Non-goals
 
