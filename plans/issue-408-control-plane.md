@@ -364,6 +364,15 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `velnor`, and `velnor-target-mvp`. The GitHub-lane package update itself is
   successful; publication cannot proceed until the standard required check
   receives a runner and the PR is merged.
+- After restoring a trusted runner, the reopened PR run `33048266253` reached
+  the Velnor lane but failed on the pre-fix installed runner: checkout fetched
+  ephemeral merge SHA `e6d3e7c…`, and GitHub returned `not our ref`; the lane
+  then failed its contract and `ci-required`. The exact head passed the
+  canonical GitHub lane in `33049018135` (including `ci-required`). An admin
+  merge attempt was rejected by the repository rule requiring the failing
+  `ci-required`; no bypass or direct publication was performed. The source
+  checkout fix must be installed before the Velnor PR lane can pass, leaving
+  signed APT publication externally gated.
 
 ## Non-goals
 
