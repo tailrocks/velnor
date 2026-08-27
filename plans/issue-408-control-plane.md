@@ -593,6 +593,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   Velnor capacity is free; the active `velnor-tailrocks` workload was
   preserved. The parity checkbox stays open until this run completes and its
   compare evidence is captured.
+- The parity attempt consumed one Velnor job on tailrocks slot-9, but after
+  completion the slot lost its consumed GitHub registration and recreated
+  registration `15517`, which immediately became offline. The aggregate run
+  `33083180030` remains queued, with all Velnor jobs waiting. This is live
+  evidence that registration/session churn is still present in another scope;
+  parity and full-fleet gates remain open.
 
 ## Non-goals
 
