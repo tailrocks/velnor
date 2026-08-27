@@ -318,7 +318,6 @@ Runner registrations, validation labels, and runner-group `4` membership were
 not captured in this partial recheck. No inference is made from their absence.
 No cleanup action is safe on this evidence. No mutation or dispatch occurred;
 the no-dispatch gate and production-readiness gate remain open.
-
 ## Earlier queue-correlation snapshot
 
 This separate 2026-08-27 snapshot predates the later read-only refreshes above.
