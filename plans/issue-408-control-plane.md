@@ -342,6 +342,10 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   mise/mold/cache/provenance/artifact/Docker/Pages/Renovate/merge-group and
   environment-injection surfaces. The fixture remains unmodified; fixture
   readiness, smoke, and parity gates stay open.
+- Current Sentry verification is also externally unavailable: `ssh sentry`
+  reaches the configured ED25519 identity but the SSH agent refuses signing,
+  then the host rejects public-key authentication. No Sentry mutation or
+  canary claim is made without restored operator access.
 
 ## Non-goals
 
