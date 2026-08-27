@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T20:17:19Z
+### Current baseline — 2026-08-27T20:17:55Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `2f9c7711f940c681d759cbc5d07d63296762fdff`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 239 commits ahead
+  `70a86d5a2785768c826d0d9e525d7563d7eb36e7`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 240 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
