@@ -57,6 +57,7 @@ fn job(slug: &str, uid: &str) -> JobRow {
         trigger_event: Some("workflow_dispatch".to_owned()),
         queued_at: Some(Timestamp::UNIX_EPOCH),
         acquired_at: None,
+        slot_name: Some("slot-0".to_owned()),
         runner_name: Some("fixture-runner-0".to_owned()),
         trust_scope: Some("trusted".to_owned()),
         resource_policy: Some("standard".to_owned()),

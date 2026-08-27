@@ -349,6 +349,7 @@ pub struct NormalizedJob {
     pub trigger_event: Option<TriggerEvent>,
     pub queued_at: Option<Timestamp>,
     pub acquired_at: Option<Timestamp>,
+    pub slot_name: Option<String>,
     pub runner_name: Option<String>,
     pub trust_scope: Option<String>,
     pub resource_policy: Option<String>,
@@ -380,6 +381,7 @@ pub struct JobSummary {
     trigger_event: Option<TriggerEvent>,
     queued_at: Option<Timestamp>,
     acquired_at: Option<Timestamp>,
+    slot_name: Option<Slug>,
     runner_name: Option<Slug>,
     trust_scope: Option<Slug>,
     resource_policy: Option<Slug>,
@@ -404,6 +406,7 @@ struct JobSummaryWire {
     trigger_event: Option<TriggerEvent>,
     queued_at: Option<Timestamp>,
     acquired_at: Option<Timestamp>,
+    slot_name: Option<String>,
     runner_name: Option<String>,
     trust_scope: Option<String>,
     resource_policy: Option<String>,
@@ -429,6 +432,7 @@ impl TryFrom<JobSummaryWire> for JobSummary {
             trigger_event: wire.trigger_event,
             queued_at: wire.queued_at,
             acquired_at: wire.acquired_at,
+            slot_name: wire.slot_name,
             runner_name: wire.runner_name,
             trust_scope: wire.trust_scope,
             resource_policy: wire.resource_policy,
@@ -473,6 +477,7 @@ impl JobSummary {
             trigger_event: input.trigger_event,
             queued_at: input.queued_at,
             acquired_at: input.acquired_at,
+            slot_name: optional_slug("slot_name", input.slot_name)?,
             runner_name: optional_slug("runner_name", input.runner_name)?,
             trust_scope: optional_slug("trust_scope", input.trust_scope)?,
             resource_policy: optional_slug("resource_policy", input.resource_policy)?,
@@ -545,6 +550,11 @@ impl JobSummary {
     #[must_use]
     pub fn runner_name(&self) -> Option<&str> {
         self.runner_name.as_ref().map(Slug::as_str)
+    }
+
+    #[must_use]
+    pub fn slot_name(&self) -> Option<&str> {
+        self.slot_name.as_ref().map(Slug::as_str)
     }
 
     #[must_use]
@@ -622,6 +632,7 @@ mod tests {
             trigger_event: Some(TriggerEvent::WorkflowDispatch),
             queued_at: Some(Timestamp::parse("2026-08-24T12:30:45Z").unwrap()),
             acquired_at: Some(Timestamp::parse("2026-08-24T12:30:47Z").unwrap()),
+            slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
             trust_scope: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),

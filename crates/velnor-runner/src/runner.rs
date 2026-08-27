@@ -2909,6 +2909,14 @@ fn resource_policy_label(cpus: &str, memory: &str) -> String {
     format!("cpu-{cpus}-memory-{memory}")
 }
 
+fn canonical_slot_name(config_dir: &Path) -> String {
+    config_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("slot-"))
+        .map_or_else(|| "slot-0".to_owned(), ToOwned::to_owned)
+}
+
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
     if stored.settings.use_v2_flow && stored.settings.server_url_v2.is_some() {
         return Ok(());
@@ -3957,6 +3965,7 @@ async fn handle_job_request(
             runner_name: Some(runner_name.to_owned()),
             trust_scope: Some(args.trust_scope.clone()),
             resource_policy: Some(resource_policy_label(&args.job_cpus, &args.job_memory)),
+            slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
         };
         if !sink.record_admission(&admission) {

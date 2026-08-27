@@ -282,6 +282,7 @@ mod tests {
             trigger_event: Some("push".to_owned()),
             queued_at: Some(Timestamp::UNIX_EPOCH),
             acquired_at: None,
+            slot_name: Some("slot-0".to_owned()),
             runner_name: None,
             trust_scope: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),
@@ -375,6 +376,19 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].repository, "org/repo");
         assert_eq!(summaries[0].phase, "queued");
+    }
+
+    #[test]
+    fn raw_job_row_rejects_secret_markers_before_persistence() {
+        let temp = TempDb::new("raw-job-safety");
+        let store = Store::open(&temp.path).expect("open store");
+        let mut row = job("raw", "job-1", "org/repo");
+        row.job_name = "secret-token-value".to_owned();
+        let error = store
+            .record_job(&row)
+            .expect_err("raw row must fail closed");
+        assert_eq!(error.envelope.reason, "store.job.summary.invalid");
+        assert!(store.job_summaries("raw").unwrap().is_empty());
     }
 
     #[test]

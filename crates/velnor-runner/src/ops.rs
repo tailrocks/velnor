@@ -83,6 +83,7 @@ pub struct JobAdmission {
     pub head_sha: Option<String>,
     pub trigger_event: Option<String>,
     pub queued_at_rfc3339: Option<String>,
+    pub slot_name: Option<String>,
     pub runner_name: Option<String>,
     pub trust_scope: Option<String>,
     pub resource_policy: Option<String>,
@@ -124,6 +125,7 @@ impl JobAdmission {
                 .as_deref()
                 .and_then(|raw| Timestamp::parse(raw).ok()),
             acquired_at: Some(Timestamp::now()),
+            slot_name: self.slot_name.as_deref().map(|v| self.project(v)),
             runner_name: self.runner_name.as_deref().map(|v| self.project(v)),
             trust_scope: self.trust_scope.as_deref().map(|v| self.project(v)),
             resource_policy: self
@@ -489,6 +491,7 @@ mod tests {
             head_sha: Some("deadbeef".to_owned()),
             trigger_event: Some("workflow_dispatch".to_owned()),
             queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
             trust_scope: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),

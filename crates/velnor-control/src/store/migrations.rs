@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 4;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -125,6 +125,11 @@ ON jobs (instance_slug, run_id, attempt)
 WHERE run_id IS NOT NULL AND attempt IS NOT NULL;
 ";
 
+/// Add the normalized execution-slot identity without rewriting history.
+const SCHEMA_V5: &str = "
+ALTER TABLE jobs ADD COLUMN slot_name TEXT;
+";
+
 /// Bounded retention state (Plan 066 step 5): the singleton row records the
 /// last completed prune so accounting can publish it without re-deriving.
 const SCHEMA_V3: &str = "
@@ -158,6 +163,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "job-run-attempt-index-is-not-unique",
         sql: SCHEMA_V4,
+    },
+    Migration {
+        version: 5,
+        name: "job-slot-identity",
+        sql: SCHEMA_V5,
     },
 ];
 
@@ -330,7 +340,10 @@ pub(crate) fn apply_pending(
         // and attempt. Historical v2 cannot create its unique index there;
         // record v2 without that DDL and let appended v4 perform the safe
         // non-unique repair. No rows are rewritten or discarded.
-        if migration.version != 2 || !has_run_attempt_duplicates(&transaction)? {
+        let slot_column_exists = migration.version == 5 && has_slot_column(&transaction)?;
+        if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
+            && !slot_column_exists
+        {
             transaction.execute_batch(migration.sql)?;
         }
         if let Some(hook) = hook {
@@ -357,6 +370,16 @@ fn has_run_attempt_duplicates(conn: &rusqlite::Transaction<'_>) -> StoreResult<b
              WHERE run_id IS NOT NULL AND attempt IS NOT NULL
              GROUP BY instance_slug, run_id, attempt
              HAVING COUNT(*) > 1
+         )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn has_slot_column(conn: &rusqlite::Transaction<'_>) -> StoreResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'slot_name'
          )",
         [],
         |row| row.get(0),
