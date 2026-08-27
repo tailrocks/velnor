@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T18:16:40Z
+### Current baseline — 2026-08-27T18:22:33Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `558edb07cce00cc7661b2dab1c247222da83e9b6`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 219 commits ahead
+  `dac1d9d296bd2d4e6b7486ef9a17a819c0714050`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 221 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -291,11 +291,11 @@ evidence and requires a fresh baseline.
   Firecracker safety fork was not merged wholesale because it conflicts with
   the active guest/runtime architecture.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T18:16:40Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1478/1478` passed with zero
-  skipped tests. Focused `velnor-runner` nextest passed `1084/1084`; commit
-  `558edb0` gates readiness on durable instance persistence and emits no
-  readiness event when that store write fails.
+  `2026-08-27T18:22:33Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1479/1479` passed with zero
+  skipped tests. Focused `velnor-runner` nextest passed `1085/1085`; commit
+  `dac1d9d` fails closed when replacement encounters corrupt or unreadable
+  local runner identity, preserving recovery state.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
