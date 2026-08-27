@@ -5,6 +5,7 @@
 //! `PartOf=controller`. Every journal side effect is executed here.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clap::Args;
 use serde::Serialize;
-use velnor_control::journal::{Event, Journal, JournalStats, SideEffect};
+use velnor_control::journal::{Event, Journal, JournalStats, SideEffect, SlotRecord};
 use velnor_model::{ActorPhase, ExecutionBackendKind, Generation, JobId, SlotId};
 
 use crate::config;
@@ -34,6 +35,15 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Reserve half of the controller's 30s watchdog budget for local journal,
+/// process, and health work. Every remote operation in one cycle shares this
+/// deadline; one slow API cannot consume the budget of later operations.
+const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
+/// A canceled JIT POST may have been accepted by GitHub before curl died.
+/// Reserve time to remove that deterministic-name orphan before the next
+/// controller cycle retries registration.
+const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
+const FENCED_SLOT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Full reconciliation is a safety watchdog, not the broker polling clock.
 /// Broker waiters own the short assignment latency path; running the whole
 /// proof/filesystem/journal pass every two seconds multiplied idle CPU across
@@ -1341,28 +1351,55 @@ async fn reconcile_once(
     execution_cache: &mut ExecutionObservationCache,
 ) -> anyhow::Result<(LocalCycle, velnor_model::HealthDocument)> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
+    let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
     let journal_cpu = controller_cpu_time();
-    let existing = journal.materialized_state()?;
-    let permit_events = (1..=total).map(|index| {
+    reap(slots);
+    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
+    let state = journal.materialized_state()?;
+    let mut permit_events = Vec::new();
+    for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
-        let generation = existing
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == id)
-            .map_or(Generation::INITIAL, |slot| slot.generation);
-        Event::PermitReserved {
+        let slot = state.slots.iter().find(|slot| slot.slot_id == id);
+        let generation = slot
+            .map(|slot| slot.generation)
+            .unwrap_or(Generation::INITIAL);
+        let fenced_generation = fenced_slot_recovery_generation(slot);
+        let generation = if let Some(next_generation) = fenced_generation {
+            if args.spawn_slots {
+                terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
+            }
+            next_generation
+        } else {
+            generation
+        };
+        let process_alive = slots.contains_key(&id.0)
+            || slot.and_then(|slot| slot.pid).is_some_and(|pid| {
+                prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
+            });
+        if fenced_generation.is_none()
+            && !permit_needs_reconciliation(
+                slot,
+                generation,
+                index > args.desired_ready,
+                args.spawn_slots,
+                process_alive,
+            )
+        {
+            continue;
+        }
+        permit_events.push(Event::PermitReserved {
             slot_id: id,
             generation,
             surge: index > args.desired_ready,
-        }
-    });
+        });
+    }
     let effects = journal
         .apply_many(permit_events)?
         .into_iter()
         .flat_map(|outcome| outcome.commands)
         .collect::<Vec<_>>();
     for command in effects {
-        execute_effect(args, journal, slots, &mut *pacing, command).await?;
+        execute_effect(args, journal, slots, &mut *pacing, remote_deadline, command).await?;
     }
     account_cpu(&mut cpu.journal, journal_cpu);
     // Slot process recovery is supervision, not a durable state transition.
@@ -1371,7 +1408,7 @@ async fn reconcile_once(
     let filesystem_cpu = controller_cpu_time();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
-        let generation = existing
+        let generation = state
             .slots
             .iter()
             .find(|slot| slot.slot_id == id)
@@ -1383,13 +1420,17 @@ async fn reconcile_once(
     account_cpu(&mut cpu.filesystem, filesystem_cpu);
 
     let github_cpu = controller_cpu_time();
-    observe_github_and_routing(args, journal, pacing).await?;
+    observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
     account_cpu(&mut cpu.github, github_cpu);
 
     if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
         *last_registration_reconcile = Instant::now();
         let github_cpu = controller_cpu_time();
-        reconcile_remote_registrations(args, journal, jobs, recovery).await?;
+        run_bounded_remote_reconciliation(
+            reconcile_remote_registrations(args, journal, jobs, recovery),
+            remaining_remote_budget(remote_deadline),
+        )
+        .await?;
         account_cpu(&mut cpu.github, github_cpu);
     }
 
@@ -1448,11 +1489,21 @@ async fn reconcile_once(
                 slot_id,
                 generation,
             } => registrations.push((slot_id, generation)),
-            command => execute_effect(args, journal, slots, &mut *pacing, command).await?,
+            command => {
+                execute_effect(args, journal, slots, &mut *pacing, remote_deadline, command).await?
+            }
         }
     }
     let github_cpu = controller_cpu_time();
-    register_runners(args, journal, pacing, registrations, Some(jit_metrics)).await?;
+    register_runners(
+        args,
+        journal,
+        pacing,
+        registrations,
+        remote_deadline,
+        Some(jit_metrics),
+    )
+    .await?;
     account_cpu(&mut cpu.github, github_cpu);
 
     // Controller-owned broker managers own the idle session lifecycle. The
@@ -1516,7 +1567,7 @@ async fn execute_effect(
         SideEffect::RegisterRunner {
             slot_id,
             generation,
-        } => register_runner(args, journal, pacing, slot_id, generation).await,
+        } => register_runner(args, journal, pacing, slot_id, generation, remote_deadline).await,
         // Broker assignments are spawned by `drain_broker_assignments` before
         // run-service acquisition. `JobOwned` is the durable proof emitted by
         // that worker; spawning again here would create a second poller.
@@ -1549,7 +1600,15 @@ async fn register_runner(
     generation: Generation,
     remote_deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
-    register_runners(args, journal, pacing, vec![(slot_id, generation)], None).await
+    register_runners(
+        args,
+        journal,
+        pacing,
+        vec![(slot_id, generation)],
+        remote_deadline,
+        None,
+    )
+    .await
 }
 
 /// Configure independent, already-proven slots concurrently, then commit the
@@ -1561,6 +1620,7 @@ async fn register_runners(
     journal: &mut Journal,
     pacing: &mut GithubPacing,
     registrations: Vec<(SlotId, Generation)>,
+    remote_deadline: tokio::time::Instant,
     mut jit_metrics: Option<&mut JitMetrics>,
 ) -> anyhow::Result<()> {
     if registrations.is_empty() {
@@ -1589,18 +1649,44 @@ async fn register_runners(
             async move {
                 let index = slot_index_from_id(&slot_id);
                 let started = Instant::now();
-                let result = tokio::time::timeout(
-                    JIT_REGISTRATION_TIMEOUT,
-                    crate::runner::jit_configure_one_slot(&exec, &config_base, index, slot_count),
-                )
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "JIT registration timed out after {}s",
-                        JIT_REGISTRATION_TIMEOUT.as_secs()
+                let timeout = remaining_remote_budget(remote_deadline)
+                    .saturating_sub(JIT_ORPHAN_CLEANUP_BUDGET)
+                    .min(JIT_REGISTRATION_TIMEOUT);
+                let result = if timeout.is_zero() {
+                    Err(anyhow::anyhow!(
+                        "JIT registration skipped: remote budget exhausted"
+                    ))
+                } else {
+                    match tokio::time::timeout(
+                        timeout,
+                        crate::runner::jit_configure_one_slot(
+                            &exec,
+                            &config_base,
+                            index,
+                            slot_count,
+                        ),
                     )
-                })
-                .and_then(|result| result);
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let cleanup_timeout = remaining_remote_budget(remote_deadline);
+                            if !cleanup_timeout.is_zero() {
+                                let _ = tokio::time::timeout(
+                                    cleanup_timeout,
+                                    crate::runner::cleanup_orphaned_jit_one_slot(
+                                        &exec,
+                                        &config_base,
+                                        index,
+                                        slot_count,
+                                    ),
+                                )
+                                .await;
+                            }
+                            Err(anyhow::anyhow!("JIT registration timed out"))
+                        }
+                    }
+                };
                 (slot_id, generation, result, started.elapsed())
             }
         })

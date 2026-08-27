@@ -1109,8 +1109,6 @@ impl Journal {
                 !outcome.rejected && !outcome.changed && outcome.commands.is_empty(),
             ));
             if !outcome.rejected {
-                let unchanged_without_commands =
-                    outcome.commands.is_empty() && outcome.state == state;
                 state = outcome.state.clone();
                 // Observations are intentionally idempotent. Durable history
                 // records transitions and intents, not every controller tick.
@@ -1698,13 +1696,6 @@ mod tests {
             let outcome = journal.apply(event).unwrap();
             assert!(!outcome.rejected);
         }
-    }
-
-    fn event_count(journal: &Journal) -> i64 {
-        journal
-            .conn
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-            .unwrap()
     }
 
     #[test]

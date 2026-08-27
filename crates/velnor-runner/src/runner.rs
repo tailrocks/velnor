@@ -54,13 +54,13 @@ use crate::{
     },
     platform,
     protocol::{
-        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
-        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthAccessToken, OAuthClient,
-        OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel,
-        RunServiceClient, RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry,
-        RunServiceVariableValue, RunnerBusyConflict, RunnerJobRequestRef, RunnerStatus,
-        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, TimelineRecordState,
-        RUNNER_JOB_REQUEST,
+        decode_jit_config, is_transient_acquire_error, AcquireJobOutcome, BrokerClient,
+        DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope, ListedRunner,
+        OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
+        RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
+        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict,
+        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
+        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -81,6 +81,13 @@ const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
 const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const BROKER_HANDOFF_START_GRACE: Duration = Duration::from_secs(30);
+const PENDING_JIT_REGISTRATION_FILE: &str = ".jit-registration-pending.json";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PendingJitRegistration {
+    agent_name: String,
+    runner_id: Option<i64>,
+}
 
 // Idle-slot health (master-plan P1.9, 2026-06-11 zombie-fleet incident).
 // Broker poll success alone is NOT health: GitHub's runner registry can drop
@@ -1599,12 +1606,6 @@ fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
         (false, _) => SlotAction::Continue,
         (true, false) => SlotAction::DeregisterAndExit,
         (true, true) => SlotAction::FinishJobThenExit,
-    }
-}
-
-async fn wait_for_drain_signal() {
-    while !draining() {
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

@@ -37,6 +37,106 @@ pub fn velnor_runner_display() -> String {
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 const JIT_CURL_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 const JIT_CURL_MAX_TIME_SECONDS: u64 = 45;
+const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
+const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
+const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
+const PRIVATE_CURL_STALE_AFTER: Duration = Duration::from_secs(600);
+const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
+const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
+const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
+
+/// Private curl inputs are removed even when an async caller is cancelled.
+struct PrivateTempFiles {
+    dir: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
+impl PrivateTempFiles {
+    fn new() -> Result<Self> {
+        let dir = std::env::temp_dir().join("velnor-curl");
+        std::fs::create_dir_all(&dir)?;
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&dir)?.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&dir, permissions)?;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let stale = entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry.file_name().to_string_lossy().starts_with("velnor-")
+                    && entry
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                        .is_some_and(|age| age > PRIVATE_CURL_STALE_AFTER);
+                if stale {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        Ok(Self {
+            dir,
+            paths: Vec::new(),
+        })
+    }
+
+    fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = self
+            .dir
+            .join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
+        self.paths.push(path.clone());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(content)?;
+        Ok(path)
+    }
+}
+
+impl Drop for PrivateTempFiles {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn run_private_curl(
+    prefix: &str,
+    config: &str,
+    body: Option<&[u8]>,
+    url: &str,
+    capture_headers: bool,
+) -> Result<(std::process::Output, Vec<u8>)> {
+    let mut files = PrivateTempFiles::new()?;
+    let config_path = files.write(prefix, "cfg", config.as_bytes())?;
+    let body_path = body
+        .map(|body| files.write(prefix, "body", body))
+        .transpose()?;
+    let headers_path = capture_headers
+        .then(|| files.write(prefix, "headers", &[]))
+        .transpose()?;
+    let mut command = tokio::process::Command::new("curl");
+    command.kill_on_drop(true).arg("--config").arg(&config_path);
+    if let Some(path) = &headers_path {
+        command.arg("--dump-header").arg(path);
+    }
+    if let Some(path) = &body_path {
+        command.arg("--data").arg(format!("@{}", path.display()));
+    }
+    let output = command.arg(url).output().await.context("run curl")?;
+    let headers = headers_path
+        .as_deref()
+        .map(std::fs::read)
+        .transpose()?
+        .unwrap_or_default();
+    Ok((output, headers))
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
@@ -955,7 +1055,7 @@ impl RegistrationClient {
 
             match result {
                 Err(e) => {
-                    last_err = e.context("send JIT runner config request");
+                    last_err = anyhow::Error::from(e).context("send JIT runner config request");
                     self.cleanup_named_jit_orphans(scope, &pat, &request.name)
                         .await;
                 }
