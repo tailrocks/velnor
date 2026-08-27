@@ -1062,10 +1062,33 @@ fn load_policy(path: &Path) -> Result<OrgPolicy> {
     Ok(policy)
 }
 
+fn ensure_policy_matches_ledger(policy: &OrgPolicy, ledger: &ReleaseRefLedger) -> Result<()> {
+    let generated = generate_policies_from_ledger(ledger)?;
+    let Some(expected) = generated
+        .iter()
+        .find(|candidate| candidate.organization == policy.organization)
+    else {
+        bail!(
+            "fleet plan: ledger has no generated policy for organization '{}'; refusing a cross-check",
+            policy.organization
+        );
+    };
+    let expected_json = expected.canonical_json()?;
+    let actual_json = policy.canonical_json()?;
+    if actual_json != expected_json {
+        bail!(
+            "fleet plan: policy for organization '{}' does not match the supplied release-ref ledger; regenerate the policy",
+            policy.organization
+        );
+    }
+    Ok(())
+}
+
 fn fleet_plan(args: FleetPlanArgs) -> Result<()> {
     let policy = load_policy(&args.policy)?;
     if let Some(ledger_path) = &args.ledger {
-        ReleaseRefLedger::load(ledger_path)?;
+        let ledger = ReleaseRefLedger::load(ledger_path)?;
+        ensure_policy_matches_ledger(&policy, &ledger)?;
     }
     println!("organization: {}", policy.organization);
     println!("group: {}", policy.group_name);
