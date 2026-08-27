@@ -574,6 +574,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   became offline while an unrelated `velnor-tailrocks` Docker job remained
   active; its GitHub lane passed, but Velnor parity is unproven.
 
+- 2026-08-27 removed exactly one owned stale offline tailrocks runner
+  registration (`velnor-tailrocks-slot-9-next-717185-111`, id 15515). The
+  active sibling registration (id 15514) and its unrelated Docker job were
+  preserved. This reduced stale registration drift but did not create fleet
+  capacity; Velnor parity remains open until a target runner is free.
+
 ## Non-goals
 
 - Do not remove or simplify fixture content.
