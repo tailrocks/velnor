@@ -2357,8 +2357,21 @@ async fn delete_and_remove_daemon_slot_jit_config(
     args: &DaemonArgs,
     slot_dir: &Path,
 ) -> Result<()> {
-    let Some(stored) = config::load(slot_dir).ok() else {
-        return Ok(());
+    let stored = match config::load(slot_dir) {
+        Ok(stored) => stored,
+        Err(load_error) => match fs::symlink_metadata(slot_dir.join("runner.json")) {
+            Ok(_) => {
+                return Err(load_error).context(
+                    "load existing daemon slot runner config before cleanup; local identity preserved",
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).context(
+                    "inspect existing daemon slot runner config before cleanup; local identity preserved",
+                );
+            }
+        },
     };
 
     if let Some(agent_id) = stored.settings.agent_id {
@@ -11384,6 +11397,41 @@ jobs:
         assert_eq!(config::load(&slot_dir).unwrap().settings.agent_id, Some(2));
         assert!(base.join("slots").exists());
 
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_slot_cleanup_rejects_corrupt_local_identity() {
+        let base = unique_temp_dir("daemon-slot-corrupt-cleanup");
+        let slot_dir = daemon_slot_config_dir(&base, 1, 1);
+        fs::create_dir_all(&slot_dir).unwrap();
+        let path = slot_dir.join("runner.json");
+        let original = br#"{"settings":"not a runner config"}"#;
+        fs::write(&path, original).unwrap();
+
+        let error = delete_and_remove_daemon_slot_jit_config(&daemon_args(1), &slot_dir)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("load existing daemon slot runner config before cleanup"));
+        assert!(error.contains("local identity preserved"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_slot_cleanup_missing_config_is_noop() {
+        let base = unique_temp_dir("daemon-slot-missing-cleanup");
+        fs::create_dir_all(&base).unwrap();
+        let slot_dir = daemon_slot_config_dir(&base, 1, 1);
+
+        delete_and_remove_daemon_slot_jit_config(&daemon_args(1), &slot_dir)
+            .await
+            .unwrap();
+
+        assert!(!slot_dir.join("runner.json").exists());
         fs::remove_dir_all(base).unwrap();
     }
 
