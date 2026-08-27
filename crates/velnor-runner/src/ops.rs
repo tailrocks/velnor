@@ -17,12 +17,12 @@ use std::time::Duration;
 use velnor_control::store::{
     EventRow, InstanceRow, RetentionBudget, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
+#[cfg(test)]
+use velnor_model::ExitClass;
 use velnor_model::{
     EventReason, JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, Slug,
     Timestamp, TriggerEvent,
 };
-#[cfg(test)]
-use velnor_model::ExitClass;
 
 /// Environment override for the operational database location; tests and
 /// fixture validation runs point this at a temporary file.
@@ -434,7 +434,7 @@ impl OpsSink {
         if let Ok(mut injected) = self.injected_write_failure.lock() {
             if let Some((class, reason)) = injected.take() {
                 return Err(
-                    StoreError::new(class, reason).with_remediation("test-injected write failure"),
+                    StoreError::new(class, reason).with_remediation("test-injected write failure")
                 );
             }
         }
@@ -626,7 +626,8 @@ mod tests {
         assert!(sink
             .forensic_failures()
             .iter()
-            .any(|entry| entry.contains("store.admission.persist") && entry.contains("store.test.disk-full")));
+            .any(|entry| entry.contains("store.admission.persist")
+                && entry.contains("store.test.disk-full")));
         assert!(sink
             .store
             .job_summaries("test-instance")
@@ -686,11 +687,16 @@ mod tests {
         ));
 
         assert!(sink.degraded());
-        assert!(sink
-            .forensic_failures()
-            .iter()
-            .any(|entry| entry.contains("store.transition") && entry.contains("store.test.locked")));
-        assert_eq!(sink.store.transition_count("test-instance", &uid).unwrap(), 1);
+        assert!(
+            sink.forensic_failures()
+                .iter()
+                .any(|entry| entry.contains("store.transition")
+                    && entry.contains("store.test.locked"))
+        );
+        assert_eq!(
+            sink.store.transition_count("test-instance", &uid).unwrap(),
+            1
+        );
         assert_eq!(
             sink.store
                 .fetch_summary("test-instance", 124, 1)
@@ -708,7 +714,9 @@ mod tests {
         assert!(sink.record_admission(&adm));
 
         let locker = rusqlite::Connection::open(dir.join("state.db")).unwrap();
-        locker.busy_timeout(std::time::Duration::from_millis(1)).unwrap();
+        locker
+            .busy_timeout(std::time::Duration::from_millis(1))
+            .unwrap();
         locker.execute_batch("BEGIN IMMEDIATE").unwrap();
 
         sink.emit(
