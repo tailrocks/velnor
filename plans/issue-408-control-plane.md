@@ -484,6 +484,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   registration from monopolizing a controller cycle or leaving an uncancelled
   curl request as the retry loop advances. Candidate source version is
   `0.1.238`; focused nextest verification passed 1002/1002.
+- Forward canary diagnosis after `0.1.238`: repository-derived routing policy
+  used `write_policy_if_absent`, so an old label set survived daemon
+  configuration changes and kept routing invalid indefinitely. Candidate
+  `0.1.239` replaces this with content-aware refresh; explicit operator policy
+  files remain authoritative and unchanged policy files are not rewritten.
+  Focused nextest (2/2) and strict clippy pass.
 
 ## Non-goals
 

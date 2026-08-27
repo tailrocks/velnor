@@ -303,6 +303,17 @@ pub fn write_policy_if_absent(state_dir: &Path, policy: &RoutingFields) -> anyho
     write_fields(&path, policy)
 }
 
+/// Replace a policy derived from immutable daemon configuration only when it
+/// changed. Explicit `routing_policy_file` overrides use `write_policy_file`
+/// and never pass through this helper.
+pub fn write_policy_if_changed(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
+    let path = state_dir.join(ROUTING_POLICY_FILE);
+    if read_fields(&path).as_ref() == Some(policy) {
+        return Ok(());
+    }
+    write_fields(&path, policy)
+}
+
 /// Replace desired policy. Org fleets rewrite this from the generated
 /// allowlist every cycle so a stale live-membership snapshot cannot stay
 /// the desired baseline.
@@ -724,6 +735,30 @@ mod tests {
                 valid: true,
                 group_valid: true
             }
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn derived_policy_refreshes_only_when_configuration_changes() {
+        let dir = tmp("policy-change");
+        let old = matching_fields();
+        write_policy_if_changed(&dir, &old).unwrap();
+        let old_mtime = std::fs::metadata(dir.join(ROUTING_POLICY_FILE))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(write_policy_if_changed(&dir, &old).is_ok());
+        let mut updated = old.clone();
+        updated.labels.push("velnor-trusted".into());
+        write_policy_if_changed(&dir, &updated).unwrap();
+        assert_eq!(read_policy(&dir), Some(updated));
+        assert!(
+            std::fs::metadata(dir.join(ROUTING_POLICY_FILE))
+                .unwrap()
+                .modified()
+                .unwrap()
+                >= old_mtime
         );
         std::fs::remove_dir_all(dir).ok();
     }

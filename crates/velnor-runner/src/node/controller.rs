@@ -1743,7 +1743,7 @@ async fn observe_github_and_routing(
             prove::write_policy(&args.state_dir, &policy)?;
             Some(policy)
         } else if let Some(policy) = repo_policy {
-            prove::write_policy_if_absent(&args.state_dir, &policy)?;
+            prove::write_policy_if_changed(&args.state_dir, &policy)?;
             Some(policy)
         } else if let Some(url) = exec.url.as_deref() {
             if let Ok(scope) = crate::protocol::GitHubScope::parse(url) {
