@@ -2249,23 +2249,33 @@ async fn delete_runner_keeping_busy_identity(
         }
         Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
             if let Some(dir) = slot_dir {
-                if let Ok(stored) = config::load(dir) {
-                    if complete_recorded_in_flight_job(dir, &stored)
+                let stored = config::load(dir)
+                    .map_err(local_failure)
+                    .with_context(|| {
+                        format!(
+                            "load runner identity before completing in-flight job for runner id {agent_id}; local identity preserved"
+                        )
+                    })?;
+                let completed = complete_recorded_in_flight_job(dir, &stored)
+                    .await
+                    .map_err(local_failure)
+                    .with_context(|| {
+                        format!(
+                            "complete recorded in-flight job before retrying deletion of runner id {agent_id}; local identity preserved"
+                        )
+                    })?;
+                if completed {
+                    match RegistrationClient::new()?
+                        .delete_runner(scope, pat, agent_id)
                         .await
-                        .unwrap_or(false)
                     {
-                        match RegistrationClient::new()?
-                            .delete_runner(scope, pat, agent_id)
-                            .await
-                        {
-                            Ok(()) => return Ok(()),
-                            Err(retry) if retry.downcast_ref::<RunnerBusyConflict>().is_some() => {
-                                return Err(local_failure(retry).context(format!(
-                                    "quarantine runner id {agent_id} after fail-closed leftover job; local identity preserved"
-                                )));
-                            }
-                            Err(retry) => return Err(retry),
+                        Ok(()) => return Ok(()),
+                        Err(retry) if retry.downcast_ref::<RunnerBusyConflict>().is_some() => {
+                            return Err(local_failure(retry).context(format!(
+                                "quarantine runner id {agent_id} after fail-closed leftover job; local identity preserved"
+                            )));
                         }
+                        Err(retry) => return Err(retry),
                     }
                 }
             }
@@ -11946,6 +11956,92 @@ jobs:
         assert!(error
             .to_string()
             .contains("clear in-flight job after remote runner deletion"));
+        server.verify().await;
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn busy_runner_delete_surfaces_leftover_completion_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/orgs/test/actions/runners/123"))
+            .respond_with(ResponseTemplate::new(422).set_body_string(
+                r#"{"message":"Sorry, the runner is currently running a job. Unable to delete."}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config_dir = unique_temp_dir("busy-runner-completion-failure");
+        fs::create_dir_all(&config_dir).unwrap();
+        config::save(&config_dir, &stored_config()).unwrap();
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: format!("{}/run-service", server.uri()),
+            billing_owner_id: None,
+            journal_dir: config_dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        persist_in_flight_job(&config_dir, &context, &job).unwrap();
+        let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
+
+        let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("complete recorded in-flight job before retrying deletion"));
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("missing credentials")));
+        assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
+        assert!(config::load(&config_dir).is_ok());
+        assert!(in_flight_job_path(&config_dir).exists());
+        server.verify().await;
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn busy_runner_delete_surfaces_runner_config_load_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/orgs/test/actions/runners/123"))
+            .respond_with(ResponseTemplate::new(422).set_body_string(
+                r#"{"message":"Sorry, the runner is currently running a job. Unable to delete."}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config_dir = unique_temp_dir("busy-runner-config-load-failure");
+        fs::create_dir_all(config_dir.join("runner.json")).unwrap();
+        let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
+
+        let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("load runner identity before completing in-flight job"));
+        assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
+        assert!(config_dir.join("runner.json").is_dir());
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
