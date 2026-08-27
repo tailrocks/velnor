@@ -385,6 +385,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   bounded retries, connect timeout, and total timeout for kernel and
   Firecracker downloads. Candidate advances to `0.1.233` and requires a
   fresh signed release.
+- Release `v0.1.233` run `33050494181` reproduced a second interrupted pinned
+  kernel transfer (`curl: (18) end of response with 125714700 bytes missing`)
+  despite the HTTP/1.1 retry settings. The release workflow now adds
+  `--retry-all-errors`; candidate `v0.1.234` is committed as `5b29aa1`, tagged,
+  and pushed. GitHub-lane release run `33051738683` is queued; APT publication
+  remains gated on its successful completion and the standard package PR.
 
 ## Non-goals
 
