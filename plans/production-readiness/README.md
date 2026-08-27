@@ -269,10 +269,10 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T16:35:24Z
+### Current baseline — 2026-08-27T16:43:32Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `8a36c4a871746ca7fa17682b6c28070de6f71152`, clean worktree, remote
+  `5fda09d429b10be003791ffd464c9566dacb2ccb`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 146 commits ahead
   of its remote-tracking counterpart.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
@@ -287,7 +287,10 @@ evidence and requires a fresh baseline.
   absent. Root campaign progress remains 4/94 done; 039 remains in progress.
 - Current-SHA local evidence: `rtk cargo fmt --check` exit 0 and
   `rtk cargo nextest run -p velnor-model -p velnor-control -p velnor-runner`
-  exit 0 (1,251 passed), captured 2026-08-27T16:34Z.
+  exit 0 (1,251 passed) at `8a36c4a`; after the ledger-only commit,
+  `rtk cargo fmt --check` and `rtk cargo nextest run -p velnor-model -p
+  velnor-control -p velnorctl` passed, exit 0 (227 passed), at
+  `2026-08-27T16:43:32Z`.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
