@@ -3825,8 +3825,8 @@ async fn handle_job_request(
                 REASON,
             )
             .await;
-            let _ = clear_in_flight_job(config_dir);
-            let _ = completion;
+            completion.context("failed to complete the rejected job")?;
+            clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
             bail!("{REASON}");
         }
     } else {
@@ -3839,8 +3839,8 @@ async fn handle_job_request(
             REASON,
         )
         .await;
-        let _ = clear_in_flight_job(config_dir);
-        let _ = completion;
+        completion.context("failed to complete the job rejected for store unavailability")?;
+        clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
         bail!("{REASON}");
     }
 
@@ -3856,8 +3856,8 @@ async fn handle_job_request(
             reason,
         )
         .await;
-        let _ = clear_in_flight_job(config_dir);
         completion?;
+        clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
         bail!("{reason}");
     }
     apply_workflow_script_step_names(&mut job, &early_context).await;
