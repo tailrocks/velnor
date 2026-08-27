@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T19:36:04Z
+### Current baseline — 2026-08-27T19:57:39Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `28c930025d9e47e4b68d20dd7442bb14efd83a0b`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 231 commits ahead
+  `ee7ecca0b91afb790f5c4eba9715a4b93a90076b`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 233 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -288,16 +288,21 @@ evidence and requires a fresh baseline.
 - Branch integration: all six current remote branch tips with unique commits
   are ancestors of this branch; immutable recovery refs for all local and
   remote tips remain under `refs/backup/branch-sync/`. The local-only
-  Firecracker safety fork was not merged wholesale because it conflicts with
-  the active guest/runtime architecture.
+  Firecracker safety fork was not merged wholesale because its four commits
+  conflict with and are superseded by the active guest/runtime architecture.
+  The remaining local branch audit classified package/cache, PAT pacing,
+  lease, heartbeat, worker-recovery, and performance commits as already
+  present or safely superseded; obsolete release/docs-only commits were not
+  cherry-picked. `dcf9bfe` waiter ownership is covered by the current
+  controller path, with its stale-job/live-waiter edge case fixed at
+  `ee7ecca`.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
-  `2026-08-27T19:36:04Z`: actionlint, cargo deny, cargo fmt, fleet generation,
-  clippy `-D warnings`, and workspace nextest `1492/1492` passed with zero
-  skipped tests. Focused `velnor-runner` nextest passed `1098/1098`; commit
-  `28c9300` makes supervised storage fail closed when canonical storage is
-  absent, keeps explicit local execution config-scoped, threads the selected
-  layout through capacity/reclaim paths, and preserves durable state when
-  runner identity config is corrupt, unreadable, or symlink-invalid.
+  `2026-08-27T19:57:39Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1493/1493` passed with zero
+  skipped tests. Focused `velnor-runner` nextest passed `1099/1099`; commit
+  `ee7ecca` preserves live waiter ownership when stale job markers coexist,
+  while retaining the canonical-storage and corrupt-identity fail-closed
+  behavior from `28c9300`.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
@@ -313,5 +318,6 @@ evidence and requires a fresh baseline.
   not approved for public-code policy mutation; stale validation-run cleanup,
   runner deletion, drain, dispatch, package publication, Sentry install, and
   rollback require explicit authorization; Sentry lacks the packaged
-  `velnor-tools` prerequisite; Plan 079 and final signed-APT/independent-audit
+  `velnor-tools` prerequisite; PID start-identity binding remains a separate
+  lifecycle hardening leaf; Plan 079 and final signed-APT/independent-audit
   gates are not complete. No external mutation was performed.
