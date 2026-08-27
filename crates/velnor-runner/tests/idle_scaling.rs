@@ -38,8 +38,6 @@ fn spawn_controller(state_dir: &Path, slots: u32) -> Child {
             "idle-scale",
             "--desired-ready",
             &slots.to_string(),
-            "--surge",
-            "0",
         ])
         .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null())

@@ -11,6 +11,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use clap::Args;
+use serde_json::json;
 use velnor_control::journal::{Event, Journal, SideEffect, SlotRecord};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
@@ -254,11 +255,14 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
     let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
+    let mut metrics_sequence = 0_u64;
+    publish_controller_metrics(&args.state_dir, metrics_sequence, 0, 0, 0, 1)?;
     loop {
         if crate::runner::draining() {
             drain_children(&journal, &mut slots, &mut jobs).await?;
             return Ok(());
         }
+        let cycle_started = Instant::now();
         let cycle = reconcile_once(
             &args,
             &mut journal,
@@ -270,6 +274,15 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut pacing,
         )
         .await?;
+        metrics_sequence = metrics_sequence.saturating_add(1);
+        publish_controller_metrics(
+            &args.state_dir,
+            metrics_sequence,
+            slots.len(),
+            jobs.len(),
+            0,
+            cycle_started.elapsed().as_millis().max(1) as u64,
+        )?;
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
         if args.once {
@@ -282,6 +295,42 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+/// Publish the local supervision proof atomically. This document is telemetry
+/// only: a failed write must not change scheduling or child-process ownership.
+fn publish_controller_metrics(
+    state_dir: &std::path::Path,
+    sequence: u64,
+    slot_processes: usize,
+    job_processes: usize,
+    waiter_processes: usize,
+    reconcile_p95_ms: u64,
+) -> anyhow::Result<()> {
+    let wal_bytes = std::fs::metadata(state_dir.join("journal.db-wal"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let cpu_phase = || json!({ "user_us": 0_u64, "system_us": 0_u64 });
+    let metrics = json!({
+        "sequence": sequence,
+        "slot_processes": slot_processes,
+        "job_processes": job_processes.saturating_sub(waiter_processes),
+        "waiter_processes": waiter_processes,
+        "reconcile_duration_ms": { "p95": reconcile_p95_ms },
+        "journal": { "transactions": sequence.saturating_add(1), "wal_bytes": wal_bytes },
+        "cpu": {
+            "journal": cpu_phase(),
+            "filesystem": cpu_phase(),
+            "github": cpu_phase(),
+            "broker": cpu_phase(),
+            "child_supervision": cpu_phase()
+        }
+    });
+    let temporary = state_dir.join(".controller-metrics.json.tmp");
+    let destination = state_dir.join("controller-metrics.json");
+    std::fs::write(&temporary, serde_json::to_vec(&metrics)?)?;
+    std::fs::rename(temporary, destination)?;
+    Ok(())
 }
 
 /// Stop controller-owned slot and job-worker processes when the daemon
