@@ -297,3 +297,13 @@ Using the GitHub Actions runner-group API (`2026-03-10`), all three groups remai
 
 The bounded audit performed no mutation. Plan 039 remains open; the workflow
 restriction, exact closure, and operator approval STOP conditions still apply.
+
+The repository's deterministic read-only planner also emitted these desired
+policy digests from the current tree (no observed-state section is available in
+this build):
+
+- `tailrocks`: `sha256:b9f497117c5a4d6bc13b48ac5dbc857de92f9465df06631fcd3d8cb516e8cd57`
+- `ChainArgos`: `sha256:db3edaa1e0f2e058708fb3310bfc5ca9eca8cbe1c71cdeb76e33fe7ab47f68c0`
+- `jackin-project`: `sha256:97b13ff43e2132fc92fb34cbea4e34bca9c1754457b2899ece08a858ed39571f`
+
+Command: `rtk cargo run -p velnor-tools --locked -- fleet-policy plan --policy fleet/policies/<org>-desired-policy.json`; exit code 0 for all three plans. These digests are planning evidence only and do not authorize apply.
