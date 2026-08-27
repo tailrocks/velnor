@@ -269,11 +269,11 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T20:06:48Z
+### Current baseline — 2026-08-27T20:16:14Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `0580bec6425e9e2071771abd1101e662e3f97933`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 235 commits ahead
+  `8f660ad96775a1cc0ad2032d8a958330cb706315`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 237 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
@@ -295,7 +295,9 @@ evidence and requires a fresh baseline.
   present or safely superseded; obsolete release/docs-only commits were not
   cherry-picked. `dcf9bfe` waiter ownership is covered by the current
   controller path, with its stale-job/live-waiter edge case fixed at
-  `ee7ecca`.
+  `ee7ecca`. Current remote #408 behavior `eaf772d` was ported as bounded
+  kernel-download retry/timeout hardening at `8f660ad`; its forced HTTP/1.1
+  downgrade was intentionally omitted under the modern-protocol rule.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
   `2026-08-27T19:57:39Z`: actionlint, cargo deny, cargo fmt, fleet generation,
   clippy `-D warnings`, and workspace nextest `1493/1493` passed with zero
