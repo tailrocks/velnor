@@ -269,12 +269,12 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T16:49:06Z
+### Current baseline — 2026-08-27T16:51:25Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `fe6aa2e7a0f741220917c373fa4342fc915f4f53`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 149 commits ahead
-  of its remote-tracking counterpart.
+  `394283951e0a6aa4b15f98efc403a29b2f5390ac`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 193 commits ahead
+  of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
   (`777b2a27`), and #403 (`13876374`). Recent `main` release runs include
   successful CI/Release/Guest image for tag `v0.1.243` (run IDs
@@ -290,12 +290,10 @@ evidence and requires a fresh baseline.
   remote tips remain under `refs/backup/branch-sync/`. The local-only
   Firecracker safety fork was not merged wholesale because it conflicts with
   the active guest/runtime architecture.
-- Current-SHA local evidence: `rtk cargo fmt --check` exit 0 and
-  `rtk cargo nextest run -p velnor-model -p velnor-control -p velnor-runner`
-  exit 0 (1,251 passed) at `8a36c4a`; after the ledger-only commit,
-  `rtk cargo fmt --check` and `rtk cargo nextest run -p velnor-model -p
-  velnor-control -p velnorctl` passed, exit 0 (227 passed), at
-  `2026-08-27T16:43:32Z`.
+- Current-SHA local evidence: `rtk cargo fmt --check` and
+  `rtk cargo nextest run -p velnor-runner` passed, exit 0 (1,078 tests),
+  captured at `2026-08-27T16:50Z`; the broader `rtk mise run check` passed on
+  the immediately preceding source-compatible tree at `65ed377`.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
