@@ -220,8 +220,8 @@ For each representative workflow in each repository:
 - Branch: `fix/watchdog-registration-deadline`.
 - HEAD/remote: local `HEAD` and
   `origin/fix/watchdog-registration-deadline` both point to
-  `3dbc086cda36c13d35b33ad3ad0de0a835b068d3`.
-- Committed artifact fix: `3dbc086` (`fix(artifacts): isolate download temp
+  `25778bc5b05bbfa585b8ea2eeed2884984aa4798`.
+- Committed artifact fix: `25778bc5b05bbfa585b8ea2eeed2884984aa4798` (`fix(artifacts): isolate download temp
   directory`).
 - Current dirty work before delivery: five intended lifecycle/schema/lease
   files — `crates/velnor-control/src/journal.rs`,
