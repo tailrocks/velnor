@@ -676,6 +676,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   mise, mold, cache, provenance, artifact, Docker, Pages, Renovate,
   merge-group, and environment-injection entries; fixture content remains
   unchanged and readiness is not marked complete.
+- 2026-08-28 merge verification after syncing `origin/main` and preserving
+  its bounded registration recovery: focused runner/control/model nextest
+  passed 1,205/1,205; idle scaling passed with 16-slot controller CPU 2,736µs
+  versus 1-slot 1,181µs; final workspace nextest passed 1,425/1,425;
+  `cargo fmt --all -- --check` and strict workspace Clippy passed. The branch
+  is pushed at `247e0d0` after signed merge `e2f3518`; no external gate is
+  marked complete by these local results.
 
 ## Non-goals
 
