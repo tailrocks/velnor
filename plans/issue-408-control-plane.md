@@ -314,6 +314,12 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   `aarch64=8a2730c7e360350a4f7edc78d4d28141488f1ad4e444c873d6d3bcba9e32d24d`).
   Candidate advances to `0.1.229`; the immutable manifest is updated and a
   fresh signed release is required.
+- Release run `33024640078` proved the package jobs were rebuilding against a
+  stale source-tree rootfs pin: guest jobs produced one image, while package
+  jobs consumed the same artifact but compared it to the previous pin. The
+  release pipeline now uploads the guest artifact digest, verifies the
+  downloaded bytes, and passes that attestation to `stage`; candidate advances
+  to `0.1.230` and requires a fresh release run.
 
 ## Non-goals
 

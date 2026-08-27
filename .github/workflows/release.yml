@@ -344,6 +344,7 @@ jobs:
             build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
+          sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -351,6 +352,7 @@ jobs:
           path: |
             dist/microvm/vmlinux
             dist/microvm/rootfs.ext4
+            dist/microvm/rootfs.sha256
 
   build:
     needs: [identity, metadata, guest-image]
@@ -497,6 +499,11 @@ jobs:
           cp "target/${TARGET}/release/velnor-guest-agent" crates/velnor-runner/release/microvm/velnor-guest-agent
           test -s guest-image/vmlinux || { echo "::error::guest-image missing vmlinux" >&2; exit 1; }
           test -s guest-image/rootfs.ext4 || { echo "::error::guest-image missing rootfs.ext4" >&2; exit 1; }
+          test -s guest-image/rootfs.sha256 || { echo "::error::guest-image missing rootfs.sha256" >&2; exit 1; }
+          rootfs_sha256="$(awk '{print $1}' guest-image/rootfs.sha256)"
+          [ "${#rootfs_sha256}" -eq 64 ] || { echo "::error::guest rootfs digest has invalid length" >&2; exit 1; }
+          actual_rootfs_sha256="$(sha256sum guest-image/rootfs.ext4 | awk '{print $1}')"
+          [ "$actual_rootfs_sha256" = "$rootfs_sha256" ] || { echo "::error::downloaded guest rootfs digest mismatch" >&2; exit 1; }
           cp guest-image/vmlinux crates/velnor-runner/release/microvm/vmlinux
           cp guest-image/rootfs.ext4 crates/velnor-runner/release/microvm/rootfs.ext4
           chmod 0755 \
@@ -510,7 +517,8 @@ jobs:
           [ "$fc_sha" = "$expected_fc" ] || { echo "::error::firecracker sha $fc_sha != pin $expected_fc" >&2; exit 1; }
           [ "$jailer_sha" = "$expected_jailer" ] || { echo "::error::jailer sha $jailer_sha != pin $expected_jailer" >&2; exit 1; }
           cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
-            stage --root crates/velnor-runner/release/microvm --arch "$pin_arch"
+            stage --root crates/velnor-runner/release/microvm --arch "$pin_arch" \
+            --rootfs-sha256 "$rootfs_sha256"
           kernel="$(jq -er '.kernel' crates/velnor-runner/release/microvm/manifest.json)"
           rootfs="$(jq -er '.rootfs' crates/velnor-runner/release/microvm/manifest.json)"
           case "$kernel$rootfs" in

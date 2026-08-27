@@ -29,6 +29,7 @@ fn run() -> Result<(), String> {
 fn stage(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let mut root = None;
     let mut arch = None;
+    let mut rootfs_sha256 = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--root" => {
@@ -43,13 +44,27 @@ fn stage(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
                         .ok_or_else(|| "missing --arch value".to_string())?,
                 );
             }
+            "--rootfs-sha256" => {
+                rootfs_sha256 = Some(
+                    args.next()
+                        .ok_or_else(|| "missing --rootfs-sha256 value".to_string())?,
+                );
+            }
             other => return Err(format!("unknown stage flag {other}")),
         }
     }
     let root = root.ok_or("missing --root")?;
     let arch = GuestArch::parse(arch.as_deref().ok_or("missing --arch")?)
         .map_err(|error| error.to_string())?;
-    let expected = expected_checksums_for_arch(arch.as_str()).map_err(|error| error.to_string())?;
+    let mut expected =
+        expected_checksums_for_arch(arch.as_str()).map_err(|error| error.to_string())?;
+    if let Some(rootfs_sha256) = rootfs_sha256 {
+        if rootfs_sha256.len() != 64 || !rootfs_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("--rootfs-sha256 must be 64 hexadecimal characters".into());
+        }
+        expected.rootfs = rootfs_sha256;
+    }
     let mut fs = RealHostFs;
     stage_release_dir(&root, &mut fs, Some(&expected)).map_err(|error| error.to_string())?;
     println!("staged coherent microVM identity in {}", root.display());
