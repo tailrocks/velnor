@@ -450,6 +450,19 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   prior failed run `32935294686`. A fresh unchanged fixture smoke attempt was
   blocked before dispatch because this environment has no `GITHUB_TOKEN`; no
   fixture workaround was applied.
+- With keyring-backed GitHub authentication supplied ephemerally, the canonical
+  fixture smoke still stopped before dispatch at the non-mutating live-host
+  doctor: the checked-in `actions/runner` reference is `v2.335.1` while the
+  current upstream reference is `v2.337.0`. No fixture files or workflow content
+  were changed; fixture smoke/parity therefore remains open pending the required
+  reference refresh and review.
+- Sentry canary runtime evidence: after activation, a real Java-monorepo job
+  was admitted and executed with transient worker/container isolation while
+  unrelated host-scope containers remained running. During the observed load,
+  daemon CPU stayed low in samples, durable no-op observations remained
+  suppressed, and broker/JIT counters showed no JIT churn; however, repeated
+  registration-loss recovery and `routing_valid=false` occurred, so canary
+  health and full idle proof are intentionally not marked complete.
 
 ## Non-goals
 
