@@ -342,10 +342,14 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   mise/mold/cache/provenance/artifact/Docker/Pages/Renovate/merge-group and
   environment-injection surfaces. The fixture remains unmodified; fixture
   readiness, smoke, and parity gates stay open.
-- Current Sentry verification is also externally unavailable: `ssh sentry`
-  reaches the configured ED25519 identity but the SSH agent refuses signing,
-  then the host rejects public-key authentication. No Sentry mutation or
-  canary claim is made without restored operator access.
+- Sentry access was restored on 2026-08-27. Read-only inspection confirms the
+  incident shape on the live host: `/usr/bin/velnor-runner` is `0.1.215`, the
+  `velnor-daemon.service` for `velnor-sentry` has five slot processes and one
+  idle `velnor-runner job` waiter despite an empty Docker list, and the daemon
+  accumulated about 12h42m CPU in 14h57m. The live process sample showed the
+  Sentry daemon at about 82.7% CPU. `velnorctl doctor` could not query GitHub
+  because its token is unset. No Sentry mutation or canary claim is made until
+  signed APT publication is unblocked and an isolated scope is selected.
 
 ## Non-goals
 
