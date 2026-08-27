@@ -773,6 +773,17 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   show `reconcile_overlap_count=0`, `waiter_processes=0`, and
   `job_processes=0`. Active jobs and the degraded scope were not restarted,
   drained, killed, upgraded, or registration-mutated.
+- 2026-08-28 continuation gate recheck: PR #410 head `ebec37f` spawned fresh
+  CI `33113664810` and guest-image `33113664381`; both remain non-terminal
+  while the GitHub lane/guest builds run. Fixture PR #111 remains blocked with
+  `ci-required` queued because the sole `velnor-trusted` runner is offline.
+  Explicit-identity Sentry inspection found the isolated `velnor-sentry`
+  scope healthy and idle (`jobs=0`, `actual_ready_slots=5`, `state=ready`),
+  but the installed host binary is still `0.1.242`; fleet process inspection
+  also shows legacy daemon arguments plus stale waiter/zombie processes.
+  No live scope was restarted, drained, killed, upgraded, or registration-
+  mutated; fixture readiness, active-job proof, promotion, and soak gates stay
+  open.
 
 ## Non-goals
 
