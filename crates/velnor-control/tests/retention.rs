@@ -250,15 +250,28 @@ fn byte_ceiling_prunes_until_under_budget_or_exhausted() {
         store
             .record_job(&terminal_job("bc", &format!("bulk-{index}"), 3600))
             .unwrap();
+        store
+            .append_event(&event(
+                "bc",
+                &format!("orphan-{index}"),
+                "gc.completed",
+                3600,
+            ))
+            .unwrap();
     }
-    let baseline = store.accounting().unwrap().database_bytes;
-    assert!(baseline > 0);
 
     let mut budget = tiny_budget();
-    budget.max_database_bytes = baseline.saturating_sub(1);
+    budget.max_event_age = None;
+    budget.max_terminal_job_age = None;
+    budget.max_database_bytes = 1;
     let report = store.prune_history(&budget).unwrap();
-    assert!(report.database_bytes < baseline || report.deleted_jobs == 0);
-    assert!(report.database_bytes <= budget.max_database_bytes || report.deleted_jobs > 0);
+    // SQLite cannot shrink below one page, so this is deterministic exhaustion
+    // behavior: every prunable terminal job is removed, then the byte ceiling
+    // remains unsatisfied because no rows remain to delete.
+    assert_eq!(report.deleted_jobs, 40);
+    assert!(report.deleted_events >= 40);
+    assert_eq!(total_jobs(&store), 0);
+    assert!(report.database_bytes > budget.max_database_bytes);
 
     // Ceiling already satisfied: nothing is deleted.
     let before = store.accounting().unwrap().job_rows;
@@ -267,6 +280,55 @@ fn byte_ceiling_prunes_until_under_budget_or_exhausted() {
     let idle = store.prune_history(&satisfied).unwrap();
     assert_eq!(idle.deleted_jobs, 0);
     assert_eq!(store.accounting().unwrap().job_rows, before);
+}
+
+#[test]
+fn age_pruning_deletes_expired_prefix_before_fresh_rows() {
+    let temp = TempDb::new("age-prefix");
+    let store = Store::open(&temp.path).unwrap();
+    store.record_job(&terminal_job("age", "fresh", 0)).unwrap();
+    store.record_job(&terminal_job("age", "old", 3600)).unwrap();
+    store
+        .append_event(&event("age", "fresh-event", "gc.completed", 0))
+        .unwrap();
+    store
+        .append_event(&event("age", "old-event", "gc.completed", 3600))
+        .unwrap();
+
+    let report = store.prune_history(&tiny_budget()).unwrap();
+
+    assert_eq!(report.deleted_jobs, 1);
+    assert_eq!(report.deleted_events, 1);
+    assert!(!job_exists(&store, "age", "old"));
+    assert!(job_exists(&store, "age", "fresh"));
+    assert_eq!(store.event_count("age", "old-event").unwrap(), 0);
+    assert_eq!(store.event_count("age", "fresh-event").unwrap(), 1);
+}
+
+#[test]
+fn age_pruning_skips_protected_events_without_blocking_unprotected_rows() {
+    let temp = TempDb::new("age-protected");
+    let store = Store::open(&temp.path).unwrap();
+    store
+        .record_job(&active_job("protected", "active"))
+        .unwrap();
+    store
+        .append_event(&event("protected", "active", "job.started", 3600))
+        .unwrap();
+    store
+        .append_event(&event("protected", "expired", "gc.completed", 3600))
+        .unwrap();
+    store
+        .append_event(&event("protected", "fresh", "gc.completed", 0))
+        .unwrap();
+
+    let report = store.prune_history(&tiny_budget()).unwrap();
+
+    assert_eq!(report.deleted_events, 1);
+    assert_eq!(store.event_count("protected", "active").unwrap(), 1);
+    assert_eq!(store.event_count("protected", "expired").unwrap(), 0);
+    assert_eq!(store.event_count("protected", "fresh").unwrap(), 1);
+    assert!(job_exists(&store, "protected", "active"));
 }
 
 #[test]

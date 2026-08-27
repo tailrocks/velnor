@@ -121,8 +121,9 @@ impl Store {
             if let Some(hook) = hook {
                 hook(PrunePhase::AfterEventPrune)?;
             }
-            let (deleted_jobs, deleted_transitions) =
+            let (more_events, deleted_jobs, deleted_transitions) =
                 Self::prune_terminal_jobs(&transaction, budget, now)?;
+            let deleted_events = deleted_events.saturating_add(more_events);
             if let Some(hook) = hook {
                 hook(PrunePhase::AfterJobPrune)?;
             }
@@ -145,10 +146,10 @@ impl Store {
         // ceiling is still exceeded, a bounded incremental vacuum releases
         // freed pages so the byte budget converges. A busy sibling writer
         // can skip the truncation but never fails the prune.
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         if Self::database_bytes(&conn)? > budget.max_database_bytes {
             // Page-bounded: at most 500 pages per pass.
-            let _ = conn.execute_batch("PRAGMA incremental_vacuum(500);");
+            conn.execute_batch("PRAGMA incremental_vacuum(500);")?;
         }
         let database_bytes = Self::database_bytes(&conn)?;
         drop(conn);
@@ -221,6 +222,7 @@ impl Store {
         let mut deleted = 0u64;
         if let Some(max_age) = budget.max_event_age {
             let cutoff = minus_age(now, max_age);
+            let mut cursor = 0_i64;
             loop {
                 let batch = protected_expired_older_than(
                     conn,
@@ -228,11 +230,14 @@ impl Store {
                     "occurred_at",
                     budget.batch_size,
                     cutoff,
+                    cursor,
                 )?;
-                if batch.ids.is_empty() || !batch.exhausted {
+                deleted += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &batch.ids)?;
+                let Some(last_id) = batch.last_id else { break };
+                cursor = last_id;
+                if batch.exhausted {
                     break;
                 }
-                deleted += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &batch.ids)?;
             }
         }
         if budget.max_event_rows > 0 {
@@ -270,31 +275,40 @@ impl Store {
         conn: &rusqlite::Connection,
         budget: &RetentionBudget,
         now: Timestamp,
-    ) -> StoreResult<(u64, u64)> {
+    ) -> StoreResult<(u64, u64, u64)> {
         const TERMINAL_STATES: &str = "('completed','canceled','rejected')";
         let mut deleted_jobs = 0u64;
         let mut deleted_transitions = 0u64;
+        let mut deleted_events = 0u64;
 
-        // Age rule: oldest-first bounded scans stop at the first fresh row.
+        // Age rule: bounded scans continue past fresh rows because insertion
+        // order and event time are independent.
         if let Some(max_age) = budget.max_terminal_job_age {
             let cutoff = minus_age(now, max_age);
+            let mut cursor = 0_i64;
             loop {
                 let batch = unprotected_expired_batch(
                     conn,
                     &format!(
                         "SELECT id, updated_at FROM jobs
-                         WHERE phase IN {TERMINAL_STATES} ORDER BY id ASC LIMIT ?1"
+                         WHERE phase IN {TERMINAL_STATES}
+                           AND id > ?2 ORDER BY id ASC LIMIT ?1"
                     ),
                     budget.batch_size,
                     cutoff,
+                    cursor,
                 )?;
-                if batch.ids.is_empty() || !batch.exhausted {
-                    break;
-                }
+
                 for id in &batch.ids {
-                    let (jobs, transitions) = delete_job_with_ancestry(conn, *id)?;
+                    let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id)?;
                     deleted_jobs += jobs;
                     deleted_transitions += transitions;
+                    deleted_events += events;
+                }
+                let Some(last_id) = batch.last_id else { break };
+                cursor = last_id;
+                if batch.exhausted {
+                    break;
                 }
             }
         }
@@ -313,15 +327,17 @@ impl Store {
                 |r| r.get(0),
             )?;
             if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
-                loop {
+                for _ in 0..10_000 {
                     let victims: Vec<i64> = {
                         let mut statement = conn.prepare_cached(&format!(
                             "SELECT id FROM jobs
                              WHERE id < ?1 AND phase IN {TERMINAL_STATES}
                              ORDER BY id ASC LIMIT ?2"
                         ))?;
-                        let mut rows =
-                            statement.query(params![keep_from_id, budget.batch_size as i64])?;
+                        let mut rows = statement.query(params![
+                            keep_from_id,
+                            i64::try_from(budget.batch_size).unwrap_or(i64::MAX),
+                        ])?;
                         let mut ids = Vec::new();
                         while let Some(row) = rows.next()? {
                             ids.push(row.get(0)?);
@@ -332,9 +348,10 @@ impl Store {
                         break;
                     }
                     for id in &victims {
-                        let (jobs, transitions) = delete_job_with_ancestry(conn, *id)?;
+                        let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id)?;
                         deleted_jobs += jobs;
                         deleted_transitions += transitions;
+                        deleted_events += events;
                     }
                 }
             }
@@ -361,9 +378,10 @@ impl Store {
                         other => Err(other),
                     })?;
                 let Some(victim) = victim else { break };
-                let (jobs, transitions) = delete_job_with_ancestry(conn, victim)?;
+                let (jobs, transitions, events) = delete_job_with_ancestry(conn, victim)?;
                 deleted_jobs += jobs;
                 deleted_transitions += transitions;
+                deleted_events += events;
             }
             for _ in 0..200 {
                 if Self::database_bytes(conn)? <= budget.max_database_bytes {
@@ -373,16 +391,16 @@ impl Store {
                 if victims.is_empty() {
                     break;
                 }
-                delete_by_ids(conn, "DELETE FROM events WHERE id IN", &victims)?;
+                deleted_events += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &victims)?;
             }
         }
-        Ok((deleted_jobs, deleted_transitions))
+        Ok((deleted_events, deleted_jobs, deleted_transitions))
     }
 }
 
 /// Delete one job row plus its transitions and its own job events; returns
-/// `(deleted_jobs, deleted_transitions)`.
-fn delete_job_with_ancestry(conn: &rusqlite::Connection, id: i64) -> StoreResult<(u64, u64)> {
+/// `(deleted_jobs, deleted_transitions, deleted_events)`.
+fn delete_job_with_ancestry(conn: &rusqlite::Connection, id: i64) -> StoreResult<(u64, u64, u64)> {
     let identity: Option<(String, String)> = conn
         .query_row(
             "SELECT instance_slug, job_uid FROM jobs WHERE id = ?1",
@@ -395,24 +413,24 @@ fn delete_job_with_ancestry(conn: &rusqlite::Connection, id: i64) -> StoreResult
             other => Err(other),
         })?;
     let Some((instance_slug, job_uid)) = identity else {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     };
     let transitions = conn.execute(
         "DELETE FROM job_transitions WHERE instance_slug = ?1 AND job_uid = ?2",
         params![instance_slug, job_uid],
     )? as u64;
-    conn.execute(
+    let events = conn.execute(
         "DELETE FROM events WHERE instance_slug = ?1 AND subject = ?2",
         params![instance_slug, job_uid],
-    )?;
+    )? as u64;
     let jobs = conn.execute("DELETE FROM jobs WHERE id = ?1", [id])? as u64;
-    Ok((jobs, transitions))
+    Ok((jobs, transitions, events))
 }
 
 struct ExpiredBatch {
     ids: Vec<i64>,
-    /// Whether scanning stopped because the batch ran out of rows rather
-    /// than because a live (non-expired) row was reached.
+    last_id: Option<i64>,
+    /// Whether the scan reached the end of the candidate rows.
     exhausted: bool,
 }
 
@@ -424,23 +442,28 @@ fn scan_expired_batch(
     sql: &str,
     batch: u64,
     cutoff: Timestamp,
+    cursor: i64,
 ) -> StoreResult<ExpiredBatch> {
     let mut statement = conn.prepare_cached(sql)?;
-    let mut rows = statement.query([batch as i64])?;
+    let mut rows = statement.query(params![batch as i64, cursor])?;
     let mut ids = Vec::new();
-    let mut exhausted = true;
+    let mut last_id = None;
+    let mut row_count = 0;
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
+        last_id = Some(id);
+        row_count += 1;
         let raw: String = row.get(1)?;
         let parsed = Timestamp::parse(&raw).map_err(|_| stale_timestamp_error())?;
         if parsed < cutoff {
             ids.push(id);
-        } else {
-            exhausted = false;
-            break;
         }
     }
-    Ok(ExpiredBatch { ids, exhausted })
+    Ok(ExpiredBatch {
+        ids,
+        last_id,
+        exhausted: row_count < batch,
+    })
 }
 
 /// Events version of [`scan_expired_batch`]: additionally skips (and scans
@@ -453,6 +476,7 @@ fn protected_expired_older_than(
     column: &str,
     batch: u64,
     cutoff: Timestamp,
+    cursor: i64,
 ) -> StoreResult<ExpiredBatch> {
     let sql = format!(
         "SELECT id, {column} FROM {table}
@@ -461,11 +485,11 @@ fn protected_expired_older_than(
              WHERE j.instance_slug = {table}.instance_slug
                AND j.job_uid = {table}.subject
                AND j.phase IN {active}
-         )
+         ) AND {table}.id > ?2
          ORDER BY id ASC LIMIT ?1",
         active = active_phase_list(),
     );
-    scan_expired_batch(conn, &sql, batch, cutoff)
+    scan_expired_batch(conn, &sql, batch, cutoff, cursor)
 }
 
 /// Jobs version of [`scan_expired_batch`]: the terminal-state filter is part
@@ -475,8 +499,9 @@ fn unprotected_expired_batch(
     sql: &str,
     batch: u64,
     cutoff: Timestamp,
+    cursor: i64,
 ) -> StoreResult<ExpiredBatch> {
-    scan_expired_batch(conn, sql, batch, cutoff)
+    scan_expired_batch(conn, sql, batch, cutoff, cursor)
 }
 
 /// IDs strictly below `keep_from_id`, excluding rows whose `(instance_slug,
