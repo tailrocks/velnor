@@ -695,6 +695,20 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
   errors (`401`×5, `404`×2), 22 registration-loss events, and
   `jit.create_attempts=30`. This is authoritative pre-candidate churn
   evidence; no restart, drain, upgrade, or registration mutation was made.
+- 2026-08-28 candidate release gate: signed candidate commit `00331fa` and
+  annotated tag `v0.1.244` passed PR CI `33103874600` (`github lane`, contract,
+  and `ci-required`), guest-image run `33103873105`, and Release run
+  `33104911256` (both architectures, release metadata, GHCR image, both debs,
+  release assembly, and four hosted attestations). GitHub release assets are
+  published at `v0.1.244`; no APT publication or Sentry mutation has occurred.
+- 2026-08-28 APT gate: canonical Package update dispatch `33106970852` was
+  scoped to Velnor but queued because Sentry's only `velnor-target-mvp` runner
+  was busy. Read-only Sentry health showed `velnor-tailrocks` had `jobs=8` and
+  `idle_slots=0`; the matching runner registration then disappeared. The
+  queued run was canceled without starting a job. An explicit GitHub-lane
+  dispatch `33107254562` was canceled while pending behind that stale queued
+  run. No active job, sibling scope, runner registration, or package data was
+  modified.
 
 ## Non-goals
 
