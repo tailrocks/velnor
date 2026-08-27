@@ -1041,8 +1041,9 @@ async fn run_with_jit_prewarmer(
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
-    // Standalone/one-shot runs degrade observability only; the daemon uses
-    // strict init so store failures classify as readiness failures.
+    // Standalone/one-shot runs degrade observability only; supervised daemon
+    // startup uses strict init so store failures classify as readiness
+    // failures.
     let _ = crate::ops::init(instance_slug_for_store(), false);
     if let Some(sink) = crate::ops::global() {
         sink.emit(
