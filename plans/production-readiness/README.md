@@ -269,10 +269,10 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T16:51:25Z
+### Current baseline — 2026-08-27T17:00:53Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `394283951e0a6aa4b15f98efc403a29b2f5390ac`, clean worktree, remote
+  `cc529869b1b2e8a146e39a25fa4abc296abfee5d`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 193 commits ahead
   of `origin/main` and equal to its pushed branch tip.
 - Open Velnor PRs: #409 (`4b2ab398`), #406 (`bea0b5b3`), #405
@@ -290,10 +290,10 @@ evidence and requires a fresh baseline.
   remote tips remain under `refs/backup/branch-sync/`. The local-only
   Firecracker safety fork was not merged wholesale because it conflicts with
   the active guest/runtime architecture.
-- Current-SHA local evidence: `rtk cargo fmt --check` and
-  `rtk cargo nextest run -p velnor-runner` passed, exit 0 (1,078 tests),
-  captured at `2026-08-27T16:50Z`; the broader `rtk mise run check` passed on
-  the immediately preceding source-compatible tree at `65ed377`.
+- Current-SHA local evidence: `rtk mise run check` passed, exit 0, captured at
+  `2026-08-27T17:00:53Z`: actionlint, cargo deny, cargo fmt, fleet generation,
+  clippy `-D warnings`, and workspace nextest `1472/1472` passed. This includes
+  the ledger-enforcement patch at `cc52986`.
 - GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
   `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
   are all `visibility=selected`, `allows_public_repositories=true`,
