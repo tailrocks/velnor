@@ -3970,6 +3970,11 @@ async fn handle_job_request(
         };
         if !sink.record_admission(&admission) {
             const REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
+            sink.emit(
+                velnor_model::EventReason::JobRejected,
+                &job.job_id,
+                Some(REASON.to_owned()),
+            );
             let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
