@@ -9,6 +9,9 @@ pub const KERNEL_TARBALL: &str =
 /// kernel.org sha256 of [`KERNEL_TARBALL`].
 pub const KERNEL_TARBALL_SHA256: &str =
     "1ba5f93b411ead7587fe48b2eec6c656f6796d31f5e406d236913c77512497ec";
+/// Immutable Ubuntu archive snapshot used to make rootfs package selection
+/// reproducible across release rebuilds.
+pub const UBUNTU_SNAPSHOT: &str = "https://snapshot.ubuntu.com/ubuntu/20260826T000000Z";
 
 /// Required kconfig tokens. Undocumented extras in the fragment are rejected
 /// only when they enable forbidden features.
@@ -148,6 +151,12 @@ pub fn validate_guest_toml(text: &str) -> Result<(), MicroVmPreflightFailure> {
         return Err(MicroVmPreflightFailure::new(
             "guest.spec",
             "guest.toml must pin kernel_tarball_sha256",
+        ));
+    }
+    if !text.contains(&format!("ubuntu_snapshot = \"{UBUNTU_SNAPSHOT}\"")) {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.spec",
+            "guest.toml must pin ubuntu_snapshot",
         ));
     }
     if !text.contains("no_sshd = true") {

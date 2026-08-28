@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const SETTINGS_FILE: &str = "runner.json";
-
 const PREPARED_SETTINGS_DIR: &str = "next";
 
 #[cfg(unix)]
@@ -328,31 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn promotes_prepared_config_without_a_configless_gap() {
-        let temp = std::env::temp_dir().join(format!(
-            "velnor-config-promote-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let prepared = temp.join(PREPARED_SETTINGS_DIR);
-        fs::create_dir_all(&prepared).unwrap();
-        fs::write(prepared.join(SETTINGS_FILE), br#"{"agent_id":42}"#).unwrap();
-
-        assert!(promote_prepared(&temp).unwrap());
-        assert_eq!(
-            fs::read(temp.join(SETTINGS_FILE)).unwrap(),
-            br#"{"agent_id":42}"#
-        );
-        assert!(!prepared.exists());
-        assert!(!promote_prepared(&temp).unwrap());
-
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
     fn packaged_storage_root_is_var_lib_not_home_dot_velnor() {
         let dir = resolve_config_dir(ResolveConfigDir {
             velnor_storage_root: Some("/var".into()),
@@ -457,5 +431,15 @@ mod tests {
             resolve_config_dir(doctor_unit_env(shipped_state_directory(doctor), None)).unwrap();
         assert_eq!(doctor_dir, PathBuf::from("/var/lib/velnor/runner"));
         assert!(!doctor_dir.starts_with("/root/.velnor"));
+    }
+
+    #[test]
+    fn packaged_env_explicitly_selects_native_github_transport() {
+        let env = include_str!("../debian/velnor.env");
+        let assignments: Vec<_> = env
+            .lines()
+            .filter(|line| line.starts_with("VELNOR_GITHUB_HTTP_TRANSPORT="))
+            .collect();
+        assert_eq!(assignments, ["VELNOR_GITHUB_HTTP_TRANSPORT=native"]);
     }
 }

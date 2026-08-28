@@ -14,7 +14,7 @@ Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
 ExecStartPre=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner release verify-installed
-ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner controller --state-dir /var/lib/velnor --scope %i --desired-ready ${VELNOR_SLOTS} --surge 1
+ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner controller --state-dir /var/lib/velnor --scope %i --desired-ready ${VELNOR_SLOTS}
 Restart=always
 RestartSec=5
 TimeoutStopSec=120

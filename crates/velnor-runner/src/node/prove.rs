@@ -5,6 +5,7 @@
 //! `{valid: true, group_valid: true}` file, a URL-only file, or any empty
 //! field is invalid (August 24 class: registration without repo access).
 
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use velnor_model::{ExecutionBackendKind, Generation, SlotId};
 
 use crate::protocol::{
-    github_json_request, github_json_request_with_rate_limit, GitHubScope, ListedWorkflowJob,
+    github_json_request_with_rate_limit, GitHubRateLimitStatus, GitHubScope, ListedWorkflowJob,
     RunnerGroup,
 };
 
@@ -249,11 +250,35 @@ pub fn routing_drift(policy: &RoutingFields, evidence: &RoutingFields) -> Routin
 
 const GITHUB_PROBE_TIMEOUT_SECS: u64 = 10;
 
+/// Preserve the most restrictive rate-limit telemetry across all requests in
+/// one probe. The controller paces on the lowest remaining budget and latest
+/// reset deadline, so a later response cannot erase an earlier exhaustion
+/// signal by omitting headers or reporting a healthier window.
+fn aggregate_rate_limit_status(
+    current: GitHubRateLimitStatus,
+    next: GitHubRateLimitStatus,
+) -> GitHubRateLimitStatus {
+    GitHubRateLimitStatus {
+        retry_after_seconds: current
+            .retry_after_seconds
+            .into_iter()
+            .chain(next.retry_after_seconds)
+            .max(),
+        rate_limit_reset_epoch: current
+            .rate_limit_reset_epoch
+            .into_iter()
+            .chain(next.rate_limit_reset_epoch)
+            .max(),
+        remaining: current.remaining.into_iter().chain(next.remaining).min(),
+    }
+}
+
 /// Inputs for a live GitHub routing/reachability probe.
 pub struct GitHubProbeRequest<'a> {
     pub url: &'a str,
     pub token: &'a str,
     pub policy: Option<&'a RoutingFields>,
+    pub configured_group: Option<&'a str>,
     pub pool_id: Option<i64>,
     pub configured_labels: &'a [String],
     pub configured_trust: &'a str,
@@ -264,11 +289,23 @@ pub struct GitHubProbeRequest<'a> {
 pub struct GitHubProbe {
     pub reachable: bool,
     pub evidence: Option<RoutingFields>,
+    /// Explicit reason the probe failed closed, when reachability was not
+    /// enough to establish the configured routing identity.
+    pub diagnostic: Option<String>,
     /// The shared PAT budget is exhausted; callers must pace to
     /// `rate_limit_reset_epoch` instead of retrying on the reconcile tick.
     pub rate_limited: bool,
     pub rate_limit_reset_epoch: Option<u64>,
     pub rate_limit_remaining: Option<u64>,
+}
+
+impl GitHubProbe {
+    fn failed(diagnostic: impl Into<String>) -> Self {
+        Self {
+            diagnostic: Some(diagnostic.into()),
+            ..Self::default()
+        }
+    }
 }
 
 /// Trust scope the process is actually running with.
@@ -376,6 +413,17 @@ pub fn write_policy_if_absent(state_dir: &Path, policy: &RoutingFields) -> anyho
     write_fields(&path, policy)
 }
 
+/// Replace a policy derived from immutable daemon configuration only when it
+/// changed. Explicit `routing_policy_file` overrides use `write_policy_file`
+/// and never pass through this helper.
+pub fn write_policy_if_changed(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
+    let path = state_dir.join(ROUTING_POLICY_FILE);
+    if read_fields(&path).as_ref() == Some(policy) {
+        return Ok(());
+    }
+    write_fields(&path, policy)
+}
+
 /// Replace desired policy. Org fleets rewrite this from the generated
 /// allowlist every cycle so a stale live-membership snapshot cannot stay
 /// the desired baseline.
@@ -401,13 +449,17 @@ pub fn write_evidence(state_dir: &Path, evidence: &RoutingFields) -> anyhow::Res
 /// Rate-limit telemetry from the response headers is surfaced so the
 /// controller can pace the whole fleet to the token reset window.
 pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
-    let Ok(scope) = GitHubScope::parse(request.url) else {
-        return GitHubProbe::default();
+    let scope = match GitHubScope::parse(request.url) {
+        Ok(scope) => scope,
+        Err(error) => return GitHubProbe::failed(format!("parse GitHub URL: {error}")),
     };
-    let Ok(runners_url) = scope.runners_url() else {
-        return GitHubProbe::default();
+    let runners_url = match scope.runners_url() {
+        Ok(url) => url,
+        Err(error) => {
+            return GitHubProbe::failed(format!("build runners URL: {error}"));
+        }
     };
-    let Ok((status, body, rate_limit)) = github_json_request_with_rate_limit(
+    let (status, body, rate_limit) = match github_json_request_with_rate_limit(
         "GET",
         runners_url.as_str(),
         request.token,
@@ -415,8 +467,9 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
         GITHUB_PROBE_TIMEOUT_SECS,
     )
     .await
-    else {
-        return GitHubProbe::default();
+    {
+        Ok(response) => response,
+        Err(error) => return GitHubProbe::failed(format!("request runners: {error}")),
     };
     if !(200..300).contains(&status) {
         if rate_limit.is_limited(status) {
@@ -427,12 +480,15 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
             return GitHubProbe {
                 reachable: false,
                 evidence: None,
+                diagnostic: Some(format!(
+                    "GitHub routing probe rate-limited; routing identity is unproven (HTTP {status})"
+                )),
                 rate_limited: true,
                 rate_limit_reset_epoch: rate_limit.reset_epoch_or_retry_after(now_epoch),
                 rate_limit_remaining: rate_limit.remaining,
             };
         }
-        return GitHubProbe::default();
+        return GitHubProbe::failed(format!("runners request returned HTTP {status}"));
     }
     let _ = body;
     let labels = if !request.configured_labels.is_empty() {
@@ -456,50 +512,98 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
         labels,
         trust_scope,
     };
+    let mut final_rate_limit = rate_limit;
     if let Some((owner, repo)) = scope.repo_full_name() {
         evidence.selected_repositories = vec![format!("{owner}/{repo}")];
-        if evidence.group.is_empty() {
-            evidence.group = request
+        if let Some(group) = repository_group_identity(request.configured_group) {
+            evidence.group = group;
+        } else {
+            return GitHubProbe {
+                reachable: true,
+                evidence: None,
+                diagnostic: Some(
+                    "routing identity unproven: configured runner group name or id is missing"
+                        .to_owned(),
+                ),
+                rate_limited: false,
+                rate_limit_reset_epoch: final_rate_limit.rate_limit_reset_epoch,
+                rate_limit_remaining: final_rate_limit.remaining,
+            };
+        }
+    } else {
+        let live = live_group_and_repos(
+            &scope,
+            request.token,
+            request
                 .policy
-                .map(|policy| policy.group.clone())
-                .filter(|group| !group.is_empty())
-                .unwrap_or_else(|| "Default".to_owned());
-        }
-    } else if let Some((group_name, repos)) = live_group_and_repos(
-        &scope,
-        request.token,
-        request
-            .policy
-            .map(|policy| policy.group.as_str())
-            .unwrap_or(""),
-        request.pool_id,
-    )
-    .await
-    {
+                .map(|policy| policy.group.as_str())
+                .unwrap_or(""),
+            request.pool_id,
+        )
+        .await;
+        let (group_name, repos, live_rate_limit) = match live {
+            Ok(live) => live,
+            Err(error) => {
+                let rate_limit = aggregate_rate_limit_status(final_rate_limit, error.rate_limit);
+                let now_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                return GitHubProbe {
+                    reachable: !error.rate_limited,
+                    evidence: None,
+                    diagnostic: Some(format!("routing identity unproven: {}", error.message)),
+                    rate_limited: error.rate_limited,
+                    rate_limit_reset_epoch: rate_limit.reset_epoch_or_retry_after(now_epoch),
+                    rate_limit_remaining: rate_limit.remaining,
+                };
+            }
+        };
+        final_rate_limit = aggregate_rate_limit_status(final_rate_limit, live_rate_limit);
         evidence.group = group_name;
-        if !repos.is_empty() {
-            evidence.selected_repositories = repos;
+        if repos.is_empty() {
+            return GitHubProbe {
+                reachable: true,
+                evidence: None,
+                diagnostic: Some(
+                    "routing identity unproven: GitHub returned zero runner-group repositories"
+                        .to_owned(),
+                ),
+                rate_limited: false,
+                rate_limit_reset_epoch: final_rate_limit.rate_limit_reset_epoch,
+                rate_limit_remaining: final_rate_limit.remaining,
+            };
         }
+        evidence.selected_repositories = repos;
     }
     GitHubProbe {
         reachable: true,
         evidence: Some(evidence),
+        diagnostic: None,
         rate_limited: false,
-        rate_limit_reset_epoch: rate_limit.rate_limit_reset_epoch,
-        rate_limit_remaining: rate_limit.remaining,
+        rate_limit_reset_epoch: final_rate_limit.rate_limit_reset_epoch,
+        rate_limit_remaining: final_rate_limit.remaining,
     }
 }
 
+fn repository_group_identity(configured_group: Option<&str>) -> Option<String> {
+    configured_group
+        .filter(|group| !group.is_empty())
+        .map(str::to_owned)
+}
+
 /// Queued, unassigned workflow jobs whose labels this fleet can serve.
-pub async fn queued_job_ids(url: &str, token: &str, policy: &RoutingFields) -> Vec<String> {
-    let Ok(scope) = GitHubScope::parse(url) else {
-        return Vec::new();
-    };
+pub async fn queued_job_ids(url: &str, token: &str, policy: &RoutingFields) -> Result<Vec<String>> {
+    let scope = GitHubScope::parse(url).context("parse GitHub URL for queued-job probe")?;
     let mut ids = Vec::new();
     for repository in &policy.selected_repositories {
-        ids.extend(queued_job_ids_for_repo(&scope, token, repository, policy).await);
+        ids.extend(
+            queued_job_ids_for_repo(&scope, token, repository, policy)
+                .await
+                .with_context(|| format!("probe queued jobs for {repository}"))?,
+        );
     }
-    ids
+    Ok(ids)
 }
 
 fn read_fields(path: &Path) -> Option<RoutingFields> {
@@ -520,47 +624,153 @@ async fn live_group_and_repos(
     token: &str,
     want_group: &str,
     pool_id: Option<i64>,
-) -> Option<(String, Vec<String>)> {
-    let url = scope.runner_groups_url().ok()?;
-    let (status, body) =
-        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS)
-            .await
-            .ok()?;
+) -> Result<(String, Vec<String>, GitHubRateLimitStatus), LiveLookupError> {
+    let url = scope
+        .runner_groups_url()
+        .map_err(|error| LiveLookupError::message(format!("build runner-groups URL: {error}")))?;
+    let (status, body, rate_limit) = github_json_request_with_rate_limit(
+        "GET",
+        url.as_str(),
+        token,
+        None,
+        GITHUB_PROBE_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|error| LiveLookupError::message(format!("request runner groups: {error}")))?;
     if !(200..300).contains(&status) {
-        return None;
+        return Err(LiveLookupError::response(
+            "runner-groups",
+            status,
+            body,
+            rate_limit,
+        ));
     }
     #[derive(Deserialize)]
     struct Groups {
         runner_groups: Vec<RunnerGroup>,
     }
-    let groups: Groups = serde_json::from_str(&body).ok()?;
-    let group = groups
-        .runner_groups
-        .iter()
-        .find(|group| pool_id == Some(group.id))
-        .or_else(|| {
-            groups
-                .runner_groups
-                .iter()
-                .find(|group| !want_group.is_empty() && group.name == want_group)
-        })
-        .or_else(|| groups.runner_groups.iter().find(|group| !group.default))
-        .or_else(|| groups.runner_groups.first())?
-        .clone();
-    let repos = live_group_repos(scope, token, group.id)
-        .await
-        .unwrap_or_default();
-    Some((group.name, repos))
+    let groups: Groups = serde_json::from_str(&body).map_err(|error| {
+        LiveLookupError::with_rate_limit(
+            format!("parse runner-groups response: {error}"),
+            rate_limit,
+        )
+    })?;
+    let group = resolve_live_group(&groups.runner_groups, want_group, pool_id)
+        .map_err(|error| LiveLookupError::with_rate_limit(error, rate_limit))?;
+    let (repos, repos_rate_limit) = match live_group_repos(scope, token, group.id).await {
+        Ok(result) => result,
+        Err(mut error) => {
+            error.rate_limit = aggregate_rate_limit_status(rate_limit, error.rate_limit);
+            return Err(error);
+        }
+    };
+    Ok((
+        group.name,
+        repos,
+        aggregate_rate_limit_status(rate_limit, repos_rate_limit),
+    ))
 }
 
-async fn live_group_repos(scope: &GitHubScope, token: &str, group_id: i64) -> Option<Vec<String>> {
-    let url = scope.runner_group_repositories_url(group_id).ok()?;
-    let (status, body) =
-        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS)
-            .await
-            .ok()?;
+#[derive(Debug)]
+struct LiveLookupError {
+    message: String,
+    rate_limit: GitHubRateLimitStatus,
+    rate_limited: bool,
+}
+
+impl LiveLookupError {
+    fn message(message: impl Into<String>) -> Self {
+        Self::with_rate_limit(message, GitHubRateLimitStatus::default())
+    }
+
+    fn with_rate_limit(message: impl Into<String>, rate_limit: GitHubRateLimitStatus) -> Self {
+        Self {
+            message: message.into(),
+            rate_limited: false,
+            rate_limit,
+        }
+    }
+
+    fn response(
+        endpoint: &str,
+        status: u16,
+        body: String,
+        rate_limit: GitHubRateLimitStatus,
+    ) -> Self {
+        Self {
+            message: format!("{endpoint} request returned HTTP {status}: {}", body.trim()),
+            rate_limited: rate_limit.is_limited(status),
+            rate_limit,
+        }
+    }
+}
+
+fn resolve_live_group(
+    groups: &[RunnerGroup],
+    requested_name: &str,
+    requested_id: Option<i64>,
+) -> Result<RunnerGroup, String> {
+    if groups.is_empty() {
+        return Err(format!(
+            "runner group '{requested_name}' is unavailable: GitHub returned zero runner groups"
+        ));
+    }
+
+    let group = if let Some(requested_id) = requested_id {
+        let group = groups
+            .iter()
+            .find(|group| group.id == requested_id)
+            .ok_or_else(|| {
+                format!(
+                "configured runner group '{requested_name}' with id {requested_id} was not found"
+            )
+            })?;
+        if !requested_name.is_empty() && group.name != requested_name {
+            return Err(format!(
+                "configured runner group '{requested_name}' resolves to id {}, not configured id {requested_id}",
+                group.id
+            ));
+        }
+        group
+    } else if !requested_name.is_empty() {
+        groups
+            .iter()
+            .find(|group| group.name == requested_name)
+            .ok_or_else(|| format!("configured runner group '{requested_name}' was not found"))?
+    } else {
+        return Err("configured runner group identity is missing".to_owned());
+    };
+    Ok(group.clone())
+}
+
+async fn live_group_repos(
+    scope: &GitHubScope,
+    token: &str,
+    group_id: i64,
+) -> Result<(Vec<String>, GitHubRateLimitStatus), LiveLookupError> {
+    let url = scope
+        .runner_group_repositories_url(group_id)
+        .map_err(|error| {
+            LiveLookupError::message(format!("build runner-group repositories URL: {error}"))
+        })?;
+    let (status, body, rate_limit) = github_json_request_with_rate_limit(
+        "GET",
+        url.as_str(),
+        token,
+        None,
+        GITHUB_PROBE_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|error| {
+        LiveLookupError::message(format!("request runner-group repositories: {error}"))
+    })?;
     if !(200..300).contains(&status) {
-        return None;
+        return Err(LiveLookupError::response(
+            "runner-group repositories",
+            status,
+            body,
+            rate_limit,
+        ));
     }
     #[derive(Deserialize)]
     struct Page {
@@ -570,13 +780,19 @@ async fn live_group_repos(scope: &GitHubScope, token: &str, group_id: i64) -> Op
     struct Repo {
         full_name: String,
     }
-    let page: Page = serde_json::from_str(&body).ok()?;
-    Some(
+    let page: Page = serde_json::from_str(&body).map_err(|error| {
+        LiveLookupError::with_rate_limit(
+            format!("parse runner-group repositories response: {error}"),
+            rate_limit,
+        )
+    })?;
+    Ok((
         page.repositories
             .into_iter()
             .map(|repo| repo.full_name)
             .collect(),
-    )
+        rate_limit,
+    ))
 }
 
 async fn queued_job_ids_for_repo(
@@ -584,21 +800,27 @@ async fn queued_job_ids_for_repo(
     token: &str,
     repository: &str,
     policy: &RoutingFields,
-) -> Vec<String> {
-    let mut url = match scope.repo_queued_runs_url(repository) {
-        Ok(url) => url,
-        Err(_) => return Vec::new(),
-    };
+) -> Result<Vec<String>> {
+    let mut url = scope
+        .repo_queued_runs_url(repository)
+        .with_context(|| format!("build queued workflow runs URL for {repository}"))?;
     url.query_pairs_mut()
         .append_pair("status", "queued")
         .append_pair("per_page", "20");
-    let Ok((status, body)) =
-        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS).await
-    else {
-        return Vec::new();
-    };
+    let (status, body, _rate_limit) = github_json_request_with_rate_limit(
+        "GET",
+        url.as_str(),
+        token,
+        None,
+        GITHUB_PROBE_TIMEOUT_SECS,
+    )
+    .await
+    .context("request queued workflow runs")?;
     if !(200..300).contains(&status) {
-        return Vec::new();
+        bail!(
+            "queued workflow runs request returned HTTP {status}: {}",
+            body.trim()
+        );
     }
     #[derive(Deserialize)]
     struct Runs {
@@ -608,14 +830,16 @@ async fn queued_job_ids_for_repo(
     struct Run {
         id: u64,
     }
-    let Ok(runs) = serde_json::from_str::<Runs>(&body) else {
-        return Vec::new();
-    };
+    let runs: Runs = serde_json::from_str(&body).context("parse queued workflow runs response")?;
     let mut ids = Vec::new();
     for run in runs.workflow_runs {
-        ids.extend(queued_jobs_for_run(scope, token, repository, run.id, policy).await);
+        ids.extend(
+            queued_jobs_for_run(scope, token, repository, run.id, policy)
+                .await
+                .with_context(|| format!("probe queued jobs for {repository} run {}", run.id))?,
+        );
     }
-    ids
+    Ok(ids)
 }
 
 async fn queued_jobs_for_run(
@@ -624,29 +848,33 @@ async fn queued_jobs_for_run(
     repository: &str,
     run_id: u64,
     policy: &RoutingFields,
-) -> Vec<String> {
-    let Ok(url) = scope
+) -> Result<Vec<String>> {
+    let url = scope
         .api_base_url
         .join(&format!("repos/{repository}/actions/runs/{run_id}/jobs"))
-    else {
-        return Vec::new();
-    };
-    let Ok((status, body)) =
-        github_json_request("GET", url.as_str(), token, None, GITHUB_PROBE_TIMEOUT_SECS).await
-    else {
-        return Vec::new();
-    };
+        .with_context(|| format!("build jobs URL for {repository} run {run_id}"))?;
+    let (status, body, _rate_limit) = github_json_request_with_rate_limit(
+        "GET",
+        url.as_str(),
+        token,
+        None,
+        GITHUB_PROBE_TIMEOUT_SECS,
+    )
+    .await
+    .context("request queued workflow jobs")?;
     if !(200..300).contains(&status) {
-        return Vec::new();
+        bail!(
+            "queued workflow jobs request returned HTTP {status}: {}",
+            body.trim()
+        );
     }
     #[derive(Deserialize)]
     struct Jobs {
         jobs: Vec<ListedWorkflowJob>,
     }
-    let Ok(jobs) = serde_json::from_str::<Jobs>(&body) else {
-        return Vec::new();
-    };
-    jobs.jobs
+    let jobs: Jobs = serde_json::from_str(&body).context("parse queued workflow jobs response")?;
+    Ok(jobs
+        .jobs
         .into_iter()
         .filter(|job| {
             job.runner_id.is_none()
@@ -657,7 +885,7 @@ async fn queued_jobs_for_run(
                     .all(|label| policy.labels.iter().any(|have| have == label))
         })
         .map(|job| job.id.to_string())
-        .collect()
+        .collect())
 }
 
 /// Write `routing.json` from policy + evidence files when both exist.
@@ -677,6 +905,20 @@ pub fn reconcile_from_dir(state_dir: &Path) -> anyhow::Result<Option<RoutingObse
         evidence,
         policy,
     })))
+}
+
+/// Remove live routing proof after a probe cannot establish current identity.
+/// A prior valid `routing.json` must not survive without its source evidence.
+pub fn invalidate_routing_evidence(state_dir: &Path) -> anyhow::Result<()> {
+    for name in [ROUTING_EVIDENCE_FILE, ROUTING_FILE] {
+        let path = state_dir.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Record a preflight executor proof file. Daemon startup must not call this.
@@ -802,6 +1044,30 @@ mod tests {
     }
 
     #[test]
+    fn derived_policy_refreshes_only_when_configuration_changes() {
+        let dir = tmp("policy-change");
+        let old = matching_fields();
+        write_policy_if_changed(&dir, &old).unwrap();
+        let old_mtime = std::fs::metadata(dir.join(ROUTING_POLICY_FILE))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(write_policy_if_changed(&dir, &old).is_ok());
+        let mut updated = old.clone();
+        updated.labels.push("velnor-trusted".into());
+        write_policy_if_changed(&dir, &updated).unwrap();
+        assert_eq!(read_policy(&dir), Some(updated));
+        assert!(
+            std::fs::metadata(dir.join(ROUTING_POLICY_FILE))
+                .unwrap()
+                .modified()
+                .unwrap()
+                >= old_mtime
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn repo_mismatch_is_invalid() {
         let dir = tmp("mismatch");
         let evidence = matching_fields();
@@ -866,6 +1132,22 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_routing_evidence_removes_stale_proof_idempotently() {
+        let dir = tmp("invalidate");
+        let fields = matching_fields();
+        write_routing_document(&dir, fields.clone(), fields.clone()).unwrap();
+        write_evidence(&dir, &fields).unwrap();
+
+        invalidate_routing_evidence(&dir).unwrap();
+        assert!(!dir.join(ROUTING_FILE).exists());
+        assert!(!dir.join(ROUTING_EVIDENCE_FILE).exists());
+        assert_eq!(observe_routing(&dir), RoutingObservation::invalid());
+
+        invalidate_routing_evidence(&dir).unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn empty_labels_are_invalid() {
         let dir = tmp("labels");
         let mut fields = matching_fields();
@@ -897,6 +1179,26 @@ mod tests {
             "trusted".into(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn repository_group_identity_requires_explicit_configuration() {
+        assert_eq!(repository_group_identity(None), None);
+    }
+
+    #[test]
+    fn repository_group_identity_accepts_explicit_name_or_id() {
+        let policy = matching_fields();
+        assert_eq!(
+            repository_group_identity(Some(policy.group.as_str())),
+            Some("velnor".into())
+        );
+        assert_eq!(repository_group_identity(Some("7")), Some("7".into()));
+    }
+
+    #[test]
+    fn repository_group_identity_never_fabricates_default() {
+        assert_ne!(repository_group_identity(None), Some("Default".into()));
     }
 
     #[test]
@@ -963,6 +1265,8 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
@@ -995,12 +1299,12 @@ mod tests {
             .await;
 
         let url = format!("{}/tailrocks", server.uri());
-        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
         let probe = probe_github(GitHubProbeRequest {
             url: &url,
             token: "ghs_test",
             policy: None,
-            pool_id: None,
+            configured_group: None,
+            pool_id: Some(7),
             configured_labels: &["velnor".into()],
             configured_trust: "trusted",
         })
@@ -1021,6 +1325,120 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    fn runner_groups() -> Vec<RunnerGroup> {
+        vec![
+            RunnerGroup {
+                id: 7,
+                name: "velnor".into(),
+                default: false,
+            },
+            RunnerGroup {
+                id: 8,
+                name: "Default".into(),
+                default: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn aggregate_rate_limit_status_preserves_stricter_endpoint_telemetry() {
+        let runner_groups = GitHubRateLimitStatus {
+            retry_after_seconds: Some(30),
+            rate_limit_reset_epoch: Some(2_000),
+            remaining: Some(0),
+        };
+        let repositories = GitHubRateLimitStatus {
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(1_500),
+            remaining: Some(4_999),
+        };
+
+        assert_eq!(
+            aggregate_rate_limit_status(runner_groups, repositories),
+            runner_groups
+        );
+    }
+
+    #[test]
+    fn ordinary_permission_403_is_not_rate_limited() {
+        let error = LiveLookupError::response(
+            "runner-group repositories",
+            403,
+            "permission denied".to_owned(),
+            GitHubRateLimitStatus {
+                retry_after_seconds: None,
+                rate_limit_reset_epoch: Some(2_000),
+                remaining: Some(4_999),
+            },
+        );
+
+        assert!(!error.rate_limited);
+    }
+
+    #[test]
+    fn resolve_live_group_matches_exact_name() {
+        assert_eq!(
+            resolve_live_group(&runner_groups(), "velnor", None).map(|group| group.id),
+            Ok(7)
+        );
+    }
+
+    #[test]
+    fn resolve_live_group_matches_exact_id() {
+        assert_eq!(
+            resolve_live_group(&runner_groups(), "", Some(7)).map(|group| group.name),
+            Ok("velnor".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_live_group_rejects_name_id_mismatch() {
+        let result = resolve_live_group(&runner_groups(), "velnor", Some(8));
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("not configured id 8")
+        ));
+    }
+
+    #[test]
+    fn resolve_live_group_does_not_fallback_to_name_when_id_is_missing() {
+        let result = resolve_live_group(&runner_groups(), "velnor", Some(9));
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("with id 9 was not found")
+        ));
+    }
+
+    #[test]
+    fn resolve_live_group_rejects_case_mismatch() {
+        let result = resolve_live_group(&runner_groups(), "VELNOR", Some(7));
+        assert!(matches!(result, Err(error) if error.contains("not configured id 7")));
+    }
+
+    #[test]
+    fn resolve_live_group_rejects_missing_requested_identity() {
+        let result = resolve_live_group(&runner_groups(), "missing", None);
+        assert!(matches!(result, Err(error) if error.contains("was not found")));
+    }
+
+    #[test]
+    fn resolve_live_group_rejects_when_no_identity_is_configured() {
+        let result = resolve_live_group(&runner_groups(), "", None);
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("identity is missing")
+        ));
+    }
+
+    #[test]
+    fn resolve_live_group_rejects_empty_response() {
+        let result = resolve_live_group(&[], "velnor", Some(7));
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("zero runner groups")
+        ));
+    }
+
     /// Secondary-limit 403 carrying `Retry-After` but no
     /// `x-ratelimit-reset`: the probe must surface a deadline derived from
     /// `Retry-After` so the controller paces to the requested delay instead
@@ -1030,6 +1448,8 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
@@ -1042,11 +1462,11 @@ mod tests {
             .await;
 
         let url = format!("{}/tailrocks", server.uri());
-        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
         let probe = probe_github(GitHubProbeRequest {
             url: &url,
             token: "ghs_test",
             policy: None,
+            configured_group: None,
             pool_id: None,
             configured_labels: &["velnor".into()],
             configured_trust: "trusted",
@@ -1064,6 +1484,191 @@ mod tests {
         assert!(
             reset >= now + 30 && reset <= now + 31,
             "reset={reset} now={now}"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_probe_fails_closed_when_repository_lookup_fails() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"runners": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "runner_groups": [{"id": 7, "name": "velnor", "default": false}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v3/orgs/tailrocks/actions/runner-groups/7/repositories",
+            ))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/tailrocks", server.uri());
+        let probe = probe_github(GitHubProbeRequest {
+            url: &url,
+            token: "ghs_test",
+            policy: None,
+            configured_group: None,
+            pool_id: Some(7),
+            configured_labels: &["velnor".into()],
+            configured_trust: "trusted",
+        })
+        .await;
+        assert!(probe.reachable);
+        assert!(probe.evidence.is_none());
+        assert!(probe
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("HTTP 503")));
+    }
+
+    #[tokio::test]
+    async fn org_probe_does_not_accept_policy_repositories_when_live_response_is_empty() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"runners": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "runner_groups": [{"id": 7, "name": "velnor", "default": false}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v3/orgs/tailrocks/actions/runner-groups/7/repositories",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 0,
+                "repositories": []
+            })))
+            .mount(&server)
+            .await;
+
+        let policy = RoutingFields {
+            group: "velnor".into(),
+            selected_repositories: vec!["tailrocks/stale-policy-repo".into()],
+            labels: vec!["velnor".into()],
+            trust_scope: "trusted".into(),
+        };
+        let url = format!("{}/tailrocks", server.uri());
+        let probe = probe_github(GitHubProbeRequest {
+            url: &url,
+            token: "ghs_test",
+            policy: Some(&policy),
+            configured_group: None,
+            pool_id: Some(7),
+            configured_labels: &[],
+            configured_trust: "trusted",
+        })
+        .await;
+
+        assert!(probe.reachable);
+        assert!(probe.evidence.is_none(), "probe={probe:?}");
+        assert!(probe
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| { diagnostic.contains("zero runner-group repositories") }));
+    }
+
+    #[tokio::test]
+    async fn queued_job_probe_preserves_valid_empty_queue() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/repos/tailrocks/velnor/actions/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "workflow_runs": []
+            })))
+            .mount(&server)
+            .await;
+        let policy = matching_fields();
+        let ids = queued_job_ids(
+            &format!("{}/tailrocks/velnor", server.uri()),
+            "token",
+            &policy,
+        )
+        .await
+        .unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_job_probe_propagates_http_failure() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/repos/tailrocks/velnor/actions/runs"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream unavailable"))
+            .mount(&server)
+            .await;
+        let error = queued_job_ids(
+            &format!("{}/tailrocks/velnor", server.uri()),
+            "token",
+            &matching_fields(),
+        )
+        .await
+        .unwrap_err();
+        let chain = format!("{error:#}");
+        assert!(chain.contains("HTTP 503"), "{chain}");
+        assert!(chain.contains("upstream unavailable"), "{chain}");
+    }
+
+    #[tokio::test]
+    async fn queued_job_probe_propagates_malformed_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/repos/tailrocks/velnor/actions/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&server)
+            .await;
+        let error = queued_job_ids(
+            &format!("{}/tailrocks/velnor", server.uri()),
+            "token",
+            &matching_fields(),
+        )
+        .await
+        .unwrap_err();
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("parse queued workflow runs response"),
+            "{chain}"
         );
     }
 }

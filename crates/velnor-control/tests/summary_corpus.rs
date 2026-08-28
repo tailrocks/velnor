@@ -76,6 +76,7 @@ fn summary(run_id: u64, attempt: u32) -> JobSummary {
         trigger_event: Some(TriggerEvent::WorkflowDispatch),
         queued_at: Some(at("2026-08-24T12:30:45Z")),
         acquired_at: Some(at("2026-08-24T12:30:47Z")),
+        slot_name: Some("slot-0".to_owned()),
         runner_name: Some("sentry.slot-0.runner_a".to_owned()),
         trust_scope: Some("trusted".to_owned()),
         resource_policy: Some("standard.v2".to_owned()),
@@ -110,6 +111,7 @@ fn inputs_of(summary: &JobSummary) -> NormalizedJob {
         trigger_event: summary.trigger_event(),
         queued_at: summary.queued_at(),
         acquired_at: summary.acquired_at(),
+        slot_name: summary.slot_name().map(str::to_owned),
         runner_name: summary.runner_name().map(str::to_owned),
         trust_scope: summary.trust_scope().map(str::to_owned),
         resource_policy: summary.resource_policy().map(str::to_owned),
@@ -177,6 +179,32 @@ fn persist_fetch_round_trip_and_idempotent_repersist() {
     // A different attempt is a distinct identity.
     store.persist_summary(&summary(42, 2)).unwrap();
     assert_eq!(store.job_summaries("sentry/main").unwrap().len(), 2);
+}
+
+#[test]
+fn distinct_jobs_sharing_run_attempt_are_not_overwritten() {
+    let temp = TempDb::new("same-run");
+    let store = Store::open(&temp.path).unwrap();
+    let first = summary(42, 1);
+    let mut second_inputs = inputs_of(&first);
+    second_inputs.job_uid = "job-42-test".to_owned();
+    second_inputs.job_name = "test".to_owned();
+    let second = JobSummary::from_normalized(second_inputs).unwrap();
+
+    store.persist_summary(&first).unwrap();
+    store.persist_summary(&second).unwrap();
+    assert_eq!(store.job_summaries("sentry/main").unwrap().len(), 2);
+    let error = store
+        .fetch_summary("sentry/main", 42, 1)
+        .expect_err("run/attempt lookup is ambiguous for multiple jobs");
+    assert_eq!(error.envelope.reason, "store.job.summary.ambiguous");
+    assert_eq!(
+        store
+            .fetch_summary_by_job_uid("sentry/main", first.job_uid())
+            .unwrap()
+            .unwrap(),
+        first
+    );
 }
 
 #[test]

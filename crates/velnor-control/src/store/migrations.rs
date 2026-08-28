@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -109,12 +109,25 @@ CREATE TABLE IF NOT EXISTS reconciliations (
 CREATE INDEX IF NOT EXISTS idx_events_subject ON events (instance_slug, subject, id);
 ";
 
-/// Summary upserts are idempotent by `(instance_slug, run_id, attempt)`;
-/// the partial index leaves pre-identity rows (NULL run/attempt) untouched.
+/// Historical v2 DDL. It is retained byte-for-byte because migration history
+/// is append-only. v4 repairs databases that passed through this index.
 const SCHEMA_V2: &str = "
 CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_instance_run_attempt
 ON jobs (instance_slug, run_id, attempt)
 WHERE run_id IS NOT NULL AND attempt IS NOT NULL;
+";
+
+/// Repair databases that passed through the original v2 unique index.
+const SCHEMA_V4: &str = "
+DROP INDEX IF EXISTS uq_jobs_instance_run_attempt;
+CREATE INDEX IF NOT EXISTS idx_jobs_instance_run_attempt
+ON jobs (instance_slug, run_id, attempt)
+WHERE run_id IS NOT NULL AND attempt IS NOT NULL;
+";
+
+/// Add the normalized execution-slot identity without rewriting history.
+const SCHEMA_V5: &str = "
+ALTER TABLE jobs ADD COLUMN slot_name TEXT;
 ";
 
 /// Bounded retention state (Plan 066 step 5): the singleton row records the
@@ -145,6 +158,16 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "bounded-retention-state",
         sql: SCHEMA_V3,
+    },
+    Migration {
+        version: 4,
+        name: "job-run-attempt-index-is-not-unique",
+        sql: SCHEMA_V4,
+    },
+    Migration {
+        version: 5,
+        name: "job-slot-identity",
+        sql: SCHEMA_V5,
     },
 ];
 
@@ -208,7 +231,11 @@ fn lease_live(owner: &Option<String>, heartbeat_at: &Option<String>) -> bool {
     {
         Some(beat) => {
             let age = Timestamp::now().as_offset_datetime() - beat.as_offset_datetime();
-            age.is_zero() || Duration::try_from(age).is_ok_and(|d| d < LOCK_LEASE)
+            if age.is_negative() {
+                Duration::try_from(-age).is_ok_and(|d| d < LOCK_LEASE)
+            } else {
+                age.is_zero() || Duration::try_from(age).is_ok_and(|d| d < LOCK_LEASE)
+            }
         }
         None => false,
     }
@@ -217,10 +244,17 @@ fn lease_live(owner: &Option<String>, heartbeat_at: &Option<String>) -> bool {
 /// Refresh the heartbeat of the lock held by `owner`.
 fn heartbeat(conn: &Connection, owner: &str) -> StoreResult<()> {
     let now = rfc3339(Timestamp::now());
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE migration_lock SET heartbeat_at = ?1 WHERE singleton = 0 AND owner = ?2",
         rusqlite::params![now, owner],
     )?;
+    if updated != 1 {
+        return Err(
+            StoreError::new(ExitClass::Conflict, "store.migration.lock.lost").with_remediation(
+                "migration ownership changed; abort and retry from durable state",
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -249,8 +283,9 @@ fn try_acquire_lock(conn: &Connection, owner: &str) -> StoreResult<bool> {
     let stolen = conn.execute(
         "UPDATE migration_lock SET owner = ?1, acquired_at = ?2, heartbeat_at = ?2
          WHERE singleton = 0
-           AND (owner IS NULL OR owner = '' OR owner = ?3)",
-        rusqlite::params![owner, now, held_owner],
+           AND ((owner IS NULL OR owner = '')
+                OR (owner = ?3 AND heartbeat_at IS ?4))",
+        rusqlite::params![owner, now, held_owner, held_beat],
     )?;
     Ok(stolen > 0)
 }
@@ -300,7 +335,17 @@ pub(crate) fn apply_pending(
         // concurrent daemon readers; the busy timeout governs the wait.
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        transaction.execute_batch(migration.sql)?;
+        heartbeat(&transaction, owner)?;
+        // A v1 database may already contain multiple jobs sharing one run
+        // and attempt. Historical v2 cannot create its unique index there;
+        // record v2 without that DDL and let appended v4 perform the safe
+        // non-unique repair. No rows are rewritten or discarded.
+        let slot_column_exists = migration.version == 5 && has_slot_column(&transaction)?;
+        if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
+            && !slot_column_exists
+        {
+            transaction.execute_batch(migration.sql)?;
+        }
         if let Some(hook) = hook {
             hook(migration.version)?;
         }
@@ -310,7 +355,46 @@ pub(crate) fn apply_pending(
             rusqlite::params![migration.version, rendered],
         )?;
         transaction.commit()?;
+        // A lease may expire while DDL runs. Do not report success unless the
+        // same owner still controls the migration lock after the commit.
+        heartbeat(conn, owner)?;
         version = migration.version;
     }
     Ok(version)
+}
+
+fn has_run_attempt_duplicates(conn: &rusqlite::Transaction<'_>) -> StoreResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM jobs
+             WHERE run_id IS NOT NULL AND attempt IS NOT NULL
+             GROUP BY instance_slug, run_id, attempt
+             HAVING COUNT(*) > 1
+         )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn has_slot_column(conn: &rusqlite::Transaction<'_>) -> StoreResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'slot_name'
+         )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn far_future_heartbeat_is_not_live_forever() {
+        assert!(!lease_live(
+            &Some("future-owner".to_owned()),
+            &Some("2099-01-01T00:00:00Z".to_owned())
+        ));
+    }
 }

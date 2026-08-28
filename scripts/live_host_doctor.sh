@@ -59,11 +59,11 @@ cargo run -q -p velnor-tools -- check-runner-reference
 
 echo "==> Running Docker preflight"
 preflight_args=(--work-dir "$WORK_DIR")
+if [[ -f "$EXECUTION_TOML" ]]; then
+  preflight_args+=(--config-dir "$(dirname -- "$EXECUTION_TOML")")
+fi
 if [[ -n "$DOCKER_HOST_WORK_DIR" ]]; then
   preflight_args+=(--docker-host-work-dir "$DOCKER_HOST_WORK_DIR")
-fi
-if [[ "$REQUIRE_DOCKER_SOCKET" == "true" ]]; then
-  preflight_args+=(--require-docker-socket)
 fi
 cargo run --bin velnorctl -- preflight "${preflight_args[@]}"
 

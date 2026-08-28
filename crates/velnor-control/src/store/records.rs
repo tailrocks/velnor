@@ -4,7 +4,7 @@
 //! the atomic current-state-plus-event seam. Events are append-only: no
 //! update or delete helper exists for them.
 
-use rusqlite::params;
+use rusqlite::{params, Transaction};
 use velnor_model::{
     transition_target, EventReason, ExitClass, InfrastructureCategory, InvalidJobSummaryField,
     JobConclusion, JobPhase, JobState, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
@@ -71,6 +71,7 @@ pub struct JobRow {
     pub trigger_event: Option<String>,
     pub queued_at: Option<Timestamp>,
     pub acquired_at: Option<Timestamp>,
+    pub slot_name: Option<String>,
     pub runner_name: Option<String>,
     pub trust_scope: Option<String>,
     pub resource_policy: Option<String>,
@@ -141,6 +142,7 @@ pub struct JobSummary {
     pub trigger_event: Option<String>,
     pub queued_at: Option<String>,
     pub acquired_at: Option<String>,
+    pub slot_name: Option<String>,
     pub runner_name: Option<String>,
     pub trust_scope: Option<String>,
     pub resource_policy: Option<String>,
@@ -242,12 +244,13 @@ impl Store {
     /// # Errors
     /// Envelope-classified persistence failures.
     pub fn record_job(&self, row: &JobRow) -> StoreResult<()> {
+        validate_job_row(row)?;
         let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
-                               head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
+                               head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
                                trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT (instance_slug, job_uid) DO UPDATE SET
                 repository = excluded.repository,
                 workflow = excluded.workflow,
@@ -259,6 +262,7 @@ impl Store {
                 trigger_event = excluded.trigger_event,
                 queued_at = COALESCE(jobs.queued_at, excluded.queued_at),
                 acquired_at = COALESCE(jobs.acquired_at, excluded.acquired_at),
+                slot_name = COALESCE(excluded.slot_name, jobs.slot_name),
                 runner_name = excluded.runner_name,
                 trust_scope = excluded.trust_scope,
                 resource_policy = excluded.resource_policy,
@@ -279,6 +283,7 @@ impl Store {
                 row.trigger_event,
                 row.queued_at.map(rfc3339),
                 row.acquired_at.map(rfc3339),
+                row.slot_name,
                 row.runner_name,
                 row.trust_scope,
                 row.resource_policy,
@@ -291,9 +296,8 @@ impl Store {
         Ok(())
     }
 
-    /// Persist one sanitized [`ModelJobSummary`], upserting by
-    /// `(instance_slug, run_id, attempt)` so replaying the same identity
-    /// refreshes the row instead of duplicating it.
+    /// Persist one sanitized [`ModelJobSummary`], upserting by its normalized
+    /// `(instance_slug, job_uid)` identity.
     ///
     /// The upsert deliberately never touches `phase`, `conclusion`, or
     /// `infrastructure_category`: those columns belong exclusively to the
@@ -311,60 +315,38 @@ impl Store {
     /// attempt (the idempotency key would be undefined); other persistence
     /// failures are envelope-classified.
     pub fn persist_summary(&self, summary: &ModelJobSummary) -> StoreResult<()> {
-        let Some(run_id) = summary.run_id() else {
-            return Err(unidentified_summary());
-        };
-        let Some(attempt) = summary.attempt() else {
-            return Err(unidentified_summary());
-        };
-        let run_id = i64::try_from(run_id).map_err(|_| summary_out_of_range("run_id"))?;
-        let job_uid = format!("summary-run-{run_id}-attempt-{attempt}");
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
-                               head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
-                               trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
-             ON CONFLICT (instance_slug, run_id, attempt)
-                WHERE run_id IS NOT NULL AND attempt IS NOT NULL
-              DO UPDATE SET
-                job_uid = excluded.job_uid,
-                repository = excluded.repository,
-                workflow = excluded.workflow,
-                job_name = excluded.job_name,
-                head_ref = excluded.head_ref,
-                head_sha = excluded.head_sha,
-                trigger_event = excluded.trigger_event,
-                queued_at = COALESCE(jobs.queued_at, excluded.queued_at),
-                acquired_at = COALESCE(jobs.acquired_at, excluded.acquired_at),
-                runner_name = excluded.runner_name,
-                trust_scope = excluded.trust_scope,
-                resource_policy = excluded.resource_policy,
-                updated_at = excluded.updated_at",
-            params![
-                summary.instance_slug(),
-                job_uid,
-                summary.repository().full_name(),
-                summary.workflow(),
-                summary.job_name(),
-                run_id,
-                i64::from(attempt),
-                summary.head_ref(),
-                summary.head_sha(),
-                summary.trigger_event().map(TriggerEvent::as_str),
-                summary.queued_at().map(rfc3339),
-                summary.acquired_at().map(rfc3339),
-                summary.runner_name(),
-                summary.trust_scope(),
-                summary.resource_policy(),
-                summary.phase().as_str(),
-                summary.conclusion().map(JobConclusion::as_str),
-                summary
-                    .infrastructure_category()
-                    .map(InfrastructureCategory::as_str),
-                rfc3339(Timestamp::now()),
-            ],
-        )?;
+        let mut conn = self.lock_conn()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        insert_summary(&transaction, summary)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically persist an admission summary and its required acquired
+    /// transition. A failure rolls back both writes, so callers never accept
+    /// work with a partial operational record.
+    pub fn persist_summary_and_transition(
+        &self,
+        summary: &ModelJobSummary,
+        instance_slug: &str,
+        job_uid: &str,
+        transition: &Transition,
+    ) -> StoreResult<()> {
+        if summary.instance_slug() != instance_slug || summary.job_uid() != job_uid {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.job.identity.mismatch")
+                    .with_remediation(
+                        "use one normalized instance and job identity for both records",
+                    ),
+            );
+        }
+        let mut conn = self.lock_conn()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        insert_summary(&transaction, summary)?;
+        record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -383,15 +365,46 @@ impl Store {
         let conn = self.lock_conn()?;
         let mut statement = conn.prepare_cached(
             "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
-                    head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
+                    head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
                     trust_scope, resource_policy, phase, conclusion, infrastructure_category
              FROM jobs WHERE instance_slug = ?1 AND run_id = ?2 AND attempt = ?3",
         )?;
         let mut rows = statement.query(params![instance_slug, run_id, i64::from(attempt)])?;
-        match rows.next()? {
-            Some(row) => decode_summary_row(row).map(Some),
-            None => Ok(None),
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let summary = decode_summary_row(row)?;
+        if rows.next()?.is_some() {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.job.summary.ambiguous")
+                    .with_remediation("query the summary by its job identity"),
+            );
         }
+        Ok(Some(summary))
+    }
+
+    /// Fetch one persisted sanitized summary by its exact job identity.
+    ///
+    /// # Errors
+    /// Envelope-classified read failures; a stored value that no longer
+    /// satisfies the sanitized contract is `store.job.summary.decode`.
+    pub fn fetch_summary_by_job_uid(
+        &self,
+        instance_slug: &str,
+        job_uid: &str,
+    ) -> StoreResult<Option<ModelJobSummary>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+                    head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
+                    trust_scope, resource_policy, phase, conclusion, infrastructure_category
+             FROM jobs WHERE instance_slug = ?1 AND job_uid = ?2",
+        )?;
+        let mut rows = statement.query(params![instance_slug, job_uid])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(decode_summary_row(row)?))
     }
 
     /// Atomically apply one transition under the enforced job state machine:
@@ -430,79 +443,10 @@ impl Store {
         // the whole wait instead.
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let current_phase: String = transaction
-            .query_row(
-                "SELECT phase FROM jobs WHERE instance_slug = ?1 AND job_uid = ?2",
-                params![instance_slug, job_uid],
-                |row| row.get(0),
-            )
-            .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    StoreError::new(ExitClass::Unavailable, "store.job.missing").with_remediation(
-                        format!("job {job_uid} is not recorded for this instance"),
-                    )
-                }
-                other => StoreError::from(other),
-            })?;
-        let inserted = transaction
-            .execute(
-                "INSERT OR IGNORE INTO job_transitions (instance_slug, job_uid, transition_token,
-                                                        correlation_id, reason, message, transition_time)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    instance_slug,
-                    job_uid,
-                    transition.token,
-                    transition.correlation_id.as_str(),
-                    transition.reason.as_str(),
-                    transition.message,
-                    rfc3339(transition.transition_time),
-                ],
-            )?;
-        if inserted == 0 {
-            // Exact-token replay: no-op success, never a duplicate row or
-            // event, valid even when the job has since reached a terminal
-            // state.
-            transaction.commit()?;
-            return Ok(false);
-        }
-        let from = JobState::try_from(current_phase.as_str()).map_err(|_| {
-            StoreError::new(ExitClass::Operation, "store.job.state.unknown")
-                .with_remediation("stored phase is not part of the closed job state taxonomy")
-        })?;
-        let Some(target) = transition_target(from, transition.reason) else {
-            return Err(illegal_transition_error(from, transition.reason));
-        };
-        let updated = transaction.execute(
-            "UPDATE jobs SET phase = ?1, conclusion = ?2, infrastructure_category = ?3, updated_at = ?4
-             WHERE instance_slug = ?5 AND job_uid = ?6",
-            params![
-                target.as_str(),
-                transition.conclusion,
-                transition.infrastructure_category,
-                rfc3339(transition.transition_time),
-                instance_slug,
-                job_uid,
-            ],
-        )?;
-        if updated == 0 {
-            return Err(StoreError::new(ExitClass::Unavailable, "store.job.missing")
-                .with_remediation(format!("job {job_uid} is not recorded for this instance")));
-        }
-        transaction.execute(
-            "INSERT INTO events (instance_slug, event_kind, subject, correlation_id, occurred_at, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                instance_slug,
-                format!("job.transition.{}", transition.reason.as_str()),
-                job_uid,
-                transition.correlation_id.as_str(),
-                rfc3339(transition.transition_time),
-                transition.message,
-            ],
-        )?;
+        let applied =
+            record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
         transaction.commit()?;
-        Ok(true)
+        Ok(applied)
     }
 
     /// Append one normalized event. Events are never updated or deleted.
@@ -587,7 +531,7 @@ impl Store {
         let conn = self.lock_conn()?;
         let mut statement = conn.prepare_cached(
             "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
-                    head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
+                    head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
                     trust_scope, resource_policy, phase, conclusion, infrastructure_category
              FROM jobs WHERE instance_slug = ?1 ORDER BY id DESC",
         )?;
@@ -625,6 +569,183 @@ impl Store {
     }
 }
 
+fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> StoreResult<()> {
+    let Some(run_id) = summary.run_id() else {
+        return Err(unidentified_summary());
+    };
+    let Some(attempt) = summary.attempt() else {
+        return Err(unidentified_summary());
+    };
+    let run_id = i64::try_from(run_id).map_err(|_| summary_out_of_range("run_id"))?;
+    let job_uid = summary.job_uid().to_owned();
+    transaction.execute(
+        "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+                           head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
+                           trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+         ON CONFLICT (instance_slug, job_uid)
+          DO UPDATE SET
+            job_uid = excluded.job_uid,
+            repository = excluded.repository,
+            workflow = excluded.workflow,
+            job_name = excluded.job_name,
+            head_ref = excluded.head_ref,
+            head_sha = excluded.head_sha,
+            trigger_event = excluded.trigger_event,
+            queued_at = COALESCE(jobs.queued_at, excluded.queued_at),
+            acquired_at = COALESCE(jobs.acquired_at, excluded.acquired_at),
+            slot_name = COALESCE(excluded.slot_name, jobs.slot_name),
+            runner_name = excluded.runner_name,
+            trust_scope = excluded.trust_scope,
+            resource_policy = excluded.resource_policy,
+            updated_at = excluded.updated_at",
+        params![
+            summary.instance_slug(),
+            job_uid,
+            summary.repository().full_name(),
+            summary.workflow(),
+            summary.job_name(),
+            run_id,
+            i64::from(attempt),
+            summary.head_ref(),
+            summary.head_sha(),
+            summary.trigger_event().map(TriggerEvent::as_str),
+            summary.queued_at().map(rfc3339),
+            summary.acquired_at().map(rfc3339),
+            summary.slot_name(),
+            summary.runner_name(),
+            summary.trust_scope(),
+            summary.resource_policy(),
+            summary.phase().as_str(),
+            summary.conclusion().map(JobConclusion::as_str),
+            summary
+                .infrastructure_category()
+                .map(InfrastructureCategory::as_str),
+            rfc3339(Timestamp::now()),
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_job_row(row: &JobRow) -> StoreResult<()> {
+    let invalid = || {
+        StoreError::new(ExitClass::Conflict, "store.job.summary.invalid")
+            .with_remediation("persist summaries through the validated job-summary constructor")
+    };
+    for (field, value) in [
+        ("instance_slug", row.instance_slug.as_str()),
+        ("job_uid", row.job_uid.as_str()),
+        ("workflow", row.workflow.as_str()),
+        ("job_name", row.job_name.as_str()),
+    ] {
+        Slug::validate(field, value).map_err(|_| invalid())?;
+    }
+    let (owner, name) = row.repository.rsplit_once('/').ok_or_else(invalid)?;
+    Slug::validate("repository.owner", owner).map_err(|_| invalid())?;
+    Slug::validate("repository.name", name).map_err(|_| invalid())?;
+    for (field, value) in [
+        ("head_ref", row.head_ref.as_deref()),
+        ("head_sha", row.head_sha.as_deref()),
+        ("runner_name", row.runner_name.as_deref()),
+        ("trust_scope", row.trust_scope.as_deref()),
+        ("resource_policy", row.resource_policy.as_deref()),
+        ("slot_name", row.slot_name.as_deref()),
+        ("conclusion", row.conclusion.as_deref()),
+        (
+            "infrastructure_category",
+            row.infrastructure_category.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            Slug::validate(field, value).map_err(|_| invalid())?;
+        }
+    }
+    if let Some(value) = row.trigger_event.as_deref() {
+        TriggerEvent::try_from(value).map_err(|_| invalid())?;
+    }
+    if !matches!(
+        row.phase.as_str(),
+        "queued" | "acquired" | "waiting" | "started" | "completed" | "canceled" | "rejected"
+    ) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn record_job_transition_in_transaction(
+    transaction: &Transaction<'_>,
+    instance_slug: &str,
+    job_uid: &str,
+    transition: &Transition,
+) -> StoreResult<bool> {
+    let current_phase: String = transaction
+        .query_row(
+            "SELECT phase FROM jobs WHERE instance_slug = ?1 AND job_uid = ?2",
+            params![instance_slug, job_uid],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                StoreError::new(ExitClass::Unavailable, "store.job.missing")
+                    .with_remediation(format!("job {job_uid} is not recorded for this instance"))
+            }
+            other => StoreError::from(other),
+        })?;
+    let inserted = transaction.execute(
+        "INSERT OR IGNORE INTO job_transitions (instance_slug, job_uid, transition_token,
+                                                correlation_id, reason, message, transition_time)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            instance_slug,
+            job_uid,
+            transition.token,
+            transition.correlation_id.as_str(),
+            transition.reason.as_str(),
+            transition.message,
+            rfc3339(transition.transition_time),
+        ],
+    )?;
+    if inserted == 0 {
+        return Ok(false);
+    }
+    let from = JobState::try_from(current_phase.as_str()).map_err(|_| {
+        StoreError::new(ExitClass::Operation, "store.job.state.unknown")
+            .with_remediation("stored phase is not part of the closed job state taxonomy")
+    })?;
+    let Some(target) = transition_target(from, transition.reason) else {
+        return Err(illegal_transition_error(from, transition.reason));
+    };
+    let updated = transaction.execute(
+        "UPDATE jobs SET phase = ?1, conclusion = ?2, infrastructure_category = ?3, updated_at = ?4
+         WHERE instance_slug = ?5 AND job_uid = ?6",
+        params![
+            target.as_str(),
+            transition.conclusion,
+            transition.infrastructure_category,
+            rfc3339(transition.transition_time),
+            instance_slug,
+            job_uid,
+        ],
+    )?;
+    if updated == 0 {
+        return Err(StoreError::new(ExitClass::Unavailable, "store.job.missing")
+            .with_remediation(format!("job {job_uid} is not recorded for this instance")));
+    }
+    transaction.execute(
+        "INSERT INTO events (instance_slug, event_kind, subject, correlation_id, occurred_at, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            instance_slug,
+            format!("job.transition.{}", transition.reason.as_str()),
+            job_uid,
+            transition.correlation_id.as_str(),
+            rfc3339(transition.transition_time),
+            transition.message,
+        ],
+    )?;
+    Ok(true)
+}
+
 fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobSummary> {
     Ok(JobSummary {
         instance_slug: row.get(0)?,
@@ -639,12 +760,13 @@ fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobSummary> {
         trigger_event: row.get(9)?,
         queued_at: row.get(10)?,
         acquired_at: row.get(11)?,
-        runner_name: row.get(12)?,
-        trust_scope: row.get(13)?,
-        resource_policy: row.get(14)?,
-        phase: row.get(15)?,
-        conclusion: row.get(16)?,
-        infrastructure_category: row.get(17)?,
+        slot_name: row.get(12)?,
+        runner_name: row.get(13)?,
+        trust_scope: row.get(14)?,
+        resource_policy: row.get(15)?,
+        phase: row.get(16)?,
+        conclusion: row.get(17)?,
+        infrastructure_category: row.get(18)?,
     })
 }
 
@@ -658,7 +780,7 @@ fn decode_summary_row(row: &rusqlite::Row<'_>) -> StoreResult<ModelJobSummary> {
     let (owner, name) = repository_full
         .rsplit_once('/')
         .ok_or_else(|| summary_decode("repository"))?;
-    let phase_raw: String = row.get(15)?;
+    let phase_raw: String = row.get(16)?;
     // The column stores two coordinated vocabularies: the summary phase on
     // insert and the store-side machine state after transitions. Map the
     // machine spellings back onto the closed JobPhase taxonomy; anything
@@ -694,16 +816,17 @@ fn decode_summary_row(row: &rusqlite::Row<'_>) -> StoreResult<ModelJobSummary> {
         })?,
         queued_at: optional_timestamp("queued_at", row.get(10)?)?,
         acquired_at: optional_timestamp("acquired_at", row.get(11)?)?,
-        runner_name: row.get(12)?,
-        trust_scope: row.get(13)?,
-        resource_policy: row.get(14)?,
+        slot_name: row.get(12)?,
+        runner_name: row.get(13)?,
+        trust_scope: row.get(14)?,
+        resource_policy: row.get(15)?,
         phase,
-        conclusion: optional_enum("conclusion", row.get(16)?, |raw: &str| {
+        conclusion: optional_enum("conclusion", row.get(17)?, |raw: &str| {
             JobConclusion::try_from(raw)
         })?,
         infrastructure_category: optional_enum(
             "infrastructure_category",
-            row.get(17)?,
+            row.get(18)?,
             |raw: &str| InfrastructureCategory::try_from(raw),
         )?,
     })

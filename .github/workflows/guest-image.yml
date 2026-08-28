@@ -68,7 +68,11 @@ jobs:
           set -euo pipefail
           url="$(jq -er '.kernel_tarball' microvm/pins.json)"
           sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
-          curl -fsSL -o linux.tar.xz "$url"
+          curl --fail --show-error --silent --location \
+            --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
           echo "$sha  linux.tar.xz" | sha256sum -c -
 
       - name: Build guest vmlinux and rootfs.ext4

@@ -8,6 +8,7 @@ use super::artifacts::{hex_sha256, ArtifactChecksums, FIRECRACKER_VERSION, JAILE
 use super::guest::{
     validate_built_kernel_config, validate_guest_toml, validate_kernel_config,
     validate_rootfs_packages, KERNEL_TARBALL_SHA256, KERNEL_VERSION, ROOTFS_PACKAGES,
+    UBUNTU_SNAPSHOT,
 };
 use super::HostFs;
 use crate::executor::{CommandResult, CommandRunner};
@@ -454,6 +455,7 @@ fn build_rootfs(
         "--components=main,universe".into(),
         "noble".into(),
         tree.display().to_string(),
+        UBUNTU_SNAPSHOT.into(),
     ]);
     let mmdebstrap = runner.run("env", &mmdebstrap_args);
     match mmdebstrap {
@@ -479,21 +481,11 @@ fn build_rootfs(
                 format!("mmdebstrap exited {}: {}", result.code, result.stderr),
             ));
         }
-        Err(_) => {
-            run(
-                runner,
-                "env",
-                &[
-                    "SOURCE_DATE_EPOCH=0".into(),
-                    "debootstrap".into(),
-                    "--variant=minbase".into(),
-                    format!("--include={includes}"),
-                    format!("--arch={deb_arch}"),
-                    "noble".into(),
-                    tree.display().to_string(),
-                ],
+        Err(error) => {
+            return Err(MicroVmPreflightFailure::new(
                 "guest.rootfs",
-            )?;
+                format!("mmdebstrap unavailable: {error}"),
+            ));
         }
     }
     if tree.join("usr/sbin/sshd").is_file() {
@@ -513,6 +505,60 @@ fn build_rootfs(
             MicroVmPreflightFailure::new("guest.agent", format!("write guest-agent: {error}"))
         })?;
     }
+    for relative in [
+        "var/cache/apt/archives",
+        "var/lib/apt/lists",
+        "var/log",
+        "run",
+        "tmp",
+        "var/tmp",
+    ] {
+        let path = tree.join(relative);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                MicroVmPreflightFailure::new(
+                    "guest.rootfs",
+                    format!("remove volatile {relative}: {error}"),
+                )
+            })?;
+        }
+        std::fs::create_dir_all(&path).map_err(|error| {
+            MicroVmPreflightFailure::new(
+                "guest.rootfs",
+                format!("recreate volatile {relative}: {error}"),
+            )
+        })?;
+    }
+    for relative in ["var/lib/systemd/random-seed", "etc/machine-id"] {
+        let path = tree.join(relative);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| {
+                MicroVmPreflightFailure::new(
+                    "guest.rootfs",
+                    format!("remove volatile {relative}: {error}"),
+                )
+            })?;
+        }
+        std::fs::File::create(&path).map_err(|error| {
+            MicroVmPreflightFailure::new(
+                "guest.rootfs",
+                format!("create deterministic {relative}: {error}"),
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for relative in ["tmp", "var/tmp"] {
+            std::fs::set_permissions(tree.join(relative), std::fs::Permissions::from_mode(0o1777))
+                .map_err(|error| {
+                    MicroVmPreflightFailure::new(
+                        "guest.rootfs",
+                        format!("chmod {relative}: {error}"),
+                    )
+                })?;
+        }
+    }
     let init = tree.join("init");
     std::fs::write(&init, GUEST_INIT_SCRIPT).map_err(|error| {
         MicroVmPreflightFailure::new("guest.rootfs", format!("write init: {error}"))
@@ -524,22 +570,71 @@ fn build_rootfs(
             |error| MicroVmPreflightFailure::new("guest.rootfs", format!("chmod init: {error}")),
         )?;
     }
+    // mmdebstrap may leave host-time metadata on directories and files even
+    // when package selection is pinned. Normalize every entry before ext4
+    // population so inode timestamps cannot vary between CI workers.
+    run(
+        runner,
+        "find",
+        &[
+            tree.display().to_string(),
+            "-depth".into(),
+            "-exec".into(),
+            "touch".into(),
+            "-h".into(),
+            "-d".into(),
+            "@0".into(),
+            "{}".into(),
+            "+".into(),
+        ],
+        "guest.rootfs",
+    )?;
+    let tarball = work_dir.join("rootfs.tar");
+    run(
+        runner,
+        "tar",
+        &[
+            "--create".into(),
+            format!("--file={}", tarball.display()),
+            "--directory".into(),
+            tree.display().to_string(),
+            "--sort=name".into(),
+            "--numeric-owner".into(),
+            "--owner=0".into(),
+            "--group=0".into(),
+            "--mtime=@0".into(),
+            "--format=posix".into(),
+            "--pax-option=delete=atime,delete=ctime".into(),
+            "--no-xattrs".into(),
+            ".".into(),
+        ],
+        "guest.rootfs",
+    )?;
     run(
         runner,
         "env",
         &[
+            "LC_ALL=C.UTF-8".into(),
+            "TZ=UTC".into(),
             "SOURCE_DATE_EPOCH=0".into(),
+            "E2FSPROGS_FAKE_TIME=0".into(),
             "mke2fs".into(),
             "-t".into(),
             "ext4".into(),
+            "-b".into(),
+            "4096".into(),
+            "-I".into(),
+            "256".into(),
+            "-m".into(),
+            "0".into(),
             "-U".into(),
             "00000000-0000-0000-0000-000000000001".into(),
             "-L".into(),
             "velnor-guest".into(),
             "-E".into(),
-            "hash_seed=00000000-0000-0000-0000-000000000002".into(),
+            "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,root_perms=0755,lazy_itable_init=0,lazy_journal_init=0,nodiscard,no_copy_xattrs".into(),
             "-d".into(),
-            tree.display().to_string(),
+            tarball.display().to_string(),
             output.display().to_string(),
             "1024m".into(),
         ],

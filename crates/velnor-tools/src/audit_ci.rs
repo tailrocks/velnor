@@ -3050,6 +3050,14 @@ jobs:
         }
     }
 
+    fn approved_sample_fleet_ledger() -> ReleaseRefLedger {
+        let mut ledger = sample_fleet_ledger();
+        for entry in &mut ledger.entries {
+            entry.review_state = crate::fleet_policy::ReviewState::Approved;
+        }
+        ledger
+    }
+
     // Currency expectation is built with the same generator the check audits,
     // a circularity intentionally mitigated by the independent snapshot
     // equality test `generate_reproduces_committed_snapshot_bytes`
@@ -3068,14 +3076,14 @@ jobs:
 
     #[test]
     fn fleet_policy_findings_empty_when_bytes_current() {
-        let ledger = sample_fleet_ledger();
+        let ledger = approved_sample_fleet_ledger();
         let findings = fleet_policy_findings(Ok(ledger.clone()), &expected_policy_bytes(&ledger));
         assert!(findings.is_empty(), "{findings:?}");
     }
 
     #[test]
     fn fleet_policy_findings_name_missing_file() {
-        let ledger = sample_fleet_ledger();
+        let ledger = approved_sample_fleet_ledger();
         let findings = fleet_policy_findings(Ok(ledger), &BTreeMap::new());
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, "fleet-policy-current");
@@ -3090,7 +3098,7 @@ jobs:
 
     #[test]
     fn fleet_policy_findings_pinpoint_stale_bytes() {
-        let ledger = sample_fleet_ledger();
+        let ledger = approved_sample_fleet_ledger();
         let mut stale = expected_policy_bytes(&ledger);
         let current = stale.get("tailrocks").cloned().expect("tailrocks");
         // Flip the very first byte of the JSON body.
@@ -3108,7 +3116,7 @@ jobs:
 
     #[test]
     fn fleet_policy_findings_reject_extra_org_files() {
-        let ledger = sample_fleet_ledger();
+        let ledger = approved_sample_fleet_ledger();
         let mut on_disk = expected_policy_bytes(&ledger);
         on_disk.insert("ghost-org".to_owned(), "{}\n".to_owned());
         let findings = fleet_policy_findings(Ok(ledger), &on_disk);
@@ -3169,7 +3177,7 @@ jobs:
         std::fs::create_dir_all(root.path.join("fleet")).unwrap();
         std::fs::write(
             root.path.join("fleet/release-refs.toml"),
-            "schema_version = 1\n\n[[entries]]\nowner = \"tailrocks\"\nrepository = \"ruxel\"\nworkflow_path = \".github/workflows/ci.yml\"\ngit_ref = \"refs/heads/main\"\nadmission_reason = \"test\"\napproving_change = \"test\"\nreview_state = \"seed-pending-review\"\n",
+            "schema_version = 1\n\n[[entries]]\nowner = \"tailrocks\"\nrepository = \"ruxel\"\nworkflow_path = \".github/workflows/ci.yml\"\ngit_ref = \"refs/heads/main\"\nadmission_reason = \"test\"\napproving_change = \"test\"\nreview_state = \"approved\"\n",
         )
         .unwrap();
         let findings = audit_fleet_policy_surface(&root.path).expect("audit");

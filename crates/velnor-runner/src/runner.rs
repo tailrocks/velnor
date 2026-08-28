@@ -409,6 +409,34 @@ fn instance_slug_for_store() -> String {
     crate::ops::sanitize_slug_for_instance(&host)
 }
 
+fn persist_daemon_instance(sink: &crate::ops::OpsSink, total_slots: usize) -> Result<()> {
+    sink.upsert_instance(
+        &instance_slug_for_store(),
+        env!("CARGO_PKG_VERSION"),
+        total_slots as u32,
+    )
+    .with_context(|| {
+        format!(
+            "operational store instance upsert failed for {}",
+            sink.instance_slug()
+        )
+    })
+}
+
+fn persist_and_announce_daemon_readiness(
+    sink: &crate::ops::OpsSink,
+    total_slots: usize,
+) -> Result<()> {
+    persist_daemon_instance(sink, total_slots)?;
+    notify_daemon_ready(total_slots, total_slots);
+    sink.emit(
+        velnor_model::EventReason::ReadinessReady,
+        sink.instance_slug(),
+        Some(format!("daemon pass ready pid={}", std::process::id())),
+    );
+    Ok(())
+}
+
 pub(crate) fn mask_all(raw: &str, masks: &[String]) -> String {
     if masks.is_empty() {
         return raw.to_owned();
@@ -903,7 +931,24 @@ fn resolve_runner_group_id(
 }
 
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
-    if let Ok(stored) = config::load(dir) {
+    let stored = match config::load(dir) {
+        Ok(stored) => Some(stored),
+        Err(load_error) => match fs::symlink_metadata(dir.join("runner.json")) {
+            Ok(_) => {
+                return Err(load_error).context(
+                    "load existing local runner config before replace; local identity preserved",
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).context(
+                    "inspect existing local runner config before replace; local identity preserved",
+                );
+            }
+        },
+    };
+
+    if let Some(stored) = stored {
         if let Some(agent_id) = stored.settings.agent_id {
             let pat = pat.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1030,20 +1075,66 @@ fn registration_was_deleted(error: &anyhow::Error) -> bool {
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    run_with_jit_prewarmer(args, None).await
+    run_with_jit_prewarmer(args, None, RunnerStorageMode::ExplicitLocal).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunnerStorageMode {
+    /// Packaged, supervised daemon: host-global canonical storage is mandatory.
+    SupervisedProduction,
+    /// Direct/one-shot execution: config-scoped storage is an explicit mode.
+    ExplicitLocal,
+}
+
+fn daemon_storage_mode(args: &DaemonArgs) -> RunnerStorageMode {
+    if args.url.is_some() && !args.once && !args.dry_run_registration {
+        RunnerStorageMode::SupervisedProduction
+    } else {
+        RunnerStorageMode::ExplicitLocal
+    }
+}
+
+fn select_runner_storage_layout(
+    config_dir: &Path,
+    mode: RunnerStorageMode,
+) -> Result<crate::storage::StorageLayout> {
+    select_runner_storage_layout_from(config_dir, mode, crate::storage::StorageLayout::resolve())
+}
+
+fn select_runner_storage_layout_from(
+    config_dir: &Path,
+    mode: RunnerStorageMode,
+    canonical: Option<crate::storage::StorageLayout>,
+) -> Result<crate::storage::StorageLayout> {
+    if let Some(layout) = canonical {
+        return Ok(layout);
+    }
+    match mode {
+        RunnerStorageMode::SupervisedProduction => {
+            bail!("supervised production requires canonical storage; set VELNOR_STORAGE_ROOT")
+        }
+        RunnerStorageMode::ExplicitLocal => Ok(crate::storage::StorageLayout {
+            cache_root: config_dir.join("cache"),
+            lib_root: config_dir.to_path_buf(),
+            run_root: daemon_capacity_run_root(config_dir),
+            log_root: config_dir.join("logs"),
+            mode: "explicit-config",
+        }),
+    }
 }
 
 async fn run_with_jit_prewarmer(
     args: RunArgs,
     prewarm_trigger: Option<oneshot::Sender<()>>,
+    storage_mode: RunnerStorageMode,
 ) -> Result<()> {
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
-    // Standalone/one-shot runs degrade observability only; the daemon uses
-    // strict init so store failures classify as readiness failures.
-    let _ = crate::ops::init(instance_slug_for_store(), false);
+    // Operational-store open/migration is mandatory before one-shot work.
+    crate::ops::init(instance_slug_for_store())
+        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     if let Some(sink) = crate::ops::global() {
         sink.emit(
             velnor_model::EventReason::ReadinessReady,
@@ -1053,6 +1144,7 @@ async fn run_with_jit_prewarmer(
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
+    let storage_layout = select_runner_storage_layout(&dir, storage_mode)?;
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
     let stored = config::load(&dir).map_err(local_identity_unavailable)?;
@@ -1063,7 +1155,16 @@ async fn run_with_jit_prewarmer(
     })?;
     let token = oauth_access_token(&stored).await.map_err(local_failure)?;
     ensure_v2_runner_settings(&stored).map_err(local_failure)?;
-    run_v2(args, dir, stored, agent_id, token, prewarm_trigger).await
+    run_v2(
+        args,
+        dir,
+        stored,
+        agent_id,
+        token,
+        prewarm_trigger,
+        storage_layout,
+    )
+    .await
 }
 
 /// Append one line to the daemon supervisor's forensic log
@@ -1114,6 +1215,15 @@ fn notify_daemon_ready(usable_slots: usize, slots: usize) {
     crate::sd_notify::status(&format!(
         "configured: {usable_slots}/{slots} runner slot(s); control READY follows a local cycle"
     ));
+}
+
+fn gha_cache_root(layout: Option<crate::storage::StorageLayout>) -> Result<PathBuf> {
+    let layout = layout.ok_or_else(|| {
+        anyhow::anyhow!(
+            "GHA cache is enabled but canonical storage is unavailable; set VELNOR_STORAGE_ROOT"
+        )
+    })?;
+    Ok(layout.cache_root.join("gha-cache"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1208,55 +1318,20 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         }
     }
 
-    // Plan 066 step 4: open/migration failure of the operational store is a
-    // daemon readiness failure. Supervised mode surfaces it through the
-    // never-exit retry loop below; one-shot modes already fail fast.
-    crate::ops::init(instance_slug_for_store(), supervised)
-        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
-    if let Some(sink) = crate::ops::global() {
-        sink.emit(
-            velnor_model::EventReason::ReadinessReady,
-            sink.instance_slug(),
-            Some(format!(
-                "daemon ready pid={} supervised={supervised}",
-                std::process::id()
-            )),
-        );
-    }
-
-    if supervised {
-        if let Ok(config_base) = daemon_config_dir(&args) {
-            start_drain_listener(config_base);
-        }
-    }
-
     // P1: host the GitHub cache contract when the operator enables it. Both
     // the service spawn and the runtime-env injection key off the same two
     // variables, so an enabled fleet serves warm gha-cache traffic to job
     // containers through their bridge gateway while disabled fleets remain
     // byte-for-byte unchanged.
     if let Some((url, _token)) = crate::gha_cache::enabled_from_env() {
-        let root = crate::storage::StorageLayout::resolve()
-            .map(|layout| layout.cache_root.join("gha-cache"))
-            .unwrap_or_else(|| {
-                daemon_config_dir(&args)
-                    .unwrap_or_else(|_| std::env::temp_dir())
-                    .join("gha-cache")
-            });
-        match crate::gha_cache::CacheService::open(root) {
-            Ok(service) => match crate::gha_cache::bind_configured(service).await {
-                Ok(bound) => {
-                    crate::sd_notify::status(&format!("gha cache service ready at {bound}"));
-                    println!("gha cache service listening on {bound} (public base {url})");
-                }
-                Err(error) => eprintln!(
-                    "Warning: gha cache service failed to bind ({error:#}); caches stay unavailable"
-                ),
-            },
-            Err(error) => {
-                eprintln!("Warning: gha cache store init failed: {error:#}");
-            }
-        }
+        let root = gha_cache_root(crate::storage::StorageLayout::resolve())?;
+        let service = crate::gha_cache::CacheService::open(root)
+            .context("initialize GHA cache service on canonical storage")?;
+        let bound = crate::gha_cache::bind_configured(service)
+            .await
+            .context("bind GHA cache service")?;
+        crate::sd_notify::status(&format!("gha cache service ready at {bound}"));
+        println!("gha cache service listening on {bound} (public base {url})");
     }
 
     if !supervised {
@@ -1311,7 +1386,14 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     if draining() {
         return Ok(());
     }
+    // Store open/migration belongs inside the pass so supervised startup
+    // retries transient filesystem/database failures with the same bounded
+    // loop as registration failures. No pass may preflight or register
+    // without durable lifecycle state.
+    crate::ops::init(instance_slug_for_store())
+        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
+    let _storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
@@ -1340,13 +1422,8 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
-    let surge: u32 = if resolved_args.dry_run_registration || resolved_args.once {
-        0
-    } else {
-        1
-    };
-    let total_slots = slots.saturating_add(surge as usize);
-    reserve_capacity_permits(&config_base, &resolved_args, slots as u32, surge)?;
+    let total_slots = slots;
+    reserve_capacity_permits(&config_base, &resolved_args, slots as u32)?;
     if !daemon_should_poll_after_jit_config(&resolved_args) {
         let _usable_slots =
             configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
@@ -1359,26 +1436,24 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     if draining() {
         return Ok(());
     }
-    notify_daemon_ready(total_slots, total_slots);
-    if let Some(sink) = crate::ops::global() {
-        // Current instance state row: identity, version, and slot counts.
-        let _ = sink.upsert_instance(
-            &instance_slug_for_store(),
-            env!("CARGO_PKG_VERSION"),
-            total_slots as u32,
-        );
-        // Time-gated retention passes continue while slots are supervised.
-        let retention_sink = std::sync::Arc::clone(sink);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                ticker.tick().await;
-                retention_sink.prune_if_due();
-            }
-        });
-    }
+    let sink = crate::ops::global().ok_or_else(|| {
+        anyhow::anyhow!("operational store unavailable after readiness initialization")
+    })?;
+    // Persist durable instance identity before advertising daemon readiness or
+    // emitting the readiness event. In supervised mode this error returns to
+    // the retry loop above; no daemon pass may continue with unrecorded state.
+    persist_and_announce_daemon_readiness(sink, total_slots)?;
+    // Time-gated retention passes continue while slots are supervised.
+    let retention_sink = std::sync::Arc::clone(sink);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            retention_sink.prune_if_due();
+        }
+    });
     println!(
-        "Starting Velnor controller with {total_slots} runner slot process{} (M={slots}, surge={surge}).",
+        "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
         if total_slots == 1 { "" } else { "es" }
     );
     if total_slots > 1 {
@@ -1393,7 +1468,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     daemon_forensic_log(
         &config_base,
         &format!(
-            "supervising {total_slots} slot process(es) M={slots} surge={surge} version={}",
+            "supervising {total_slots} slot process(es) slots={slots} version={}",
             env!("CARGO_PKG_VERSION")
         ),
     );
@@ -1406,7 +1481,6 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         config_base.clone(),
         scope,
         slots as u32,
-        surge,
         resolved_args.once,
     )
     .await;
@@ -1586,9 +1660,10 @@ pub(crate) async fn run_daemon_slot(
     slot_index: usize,
     slots: usize,
 ) -> Result<()> {
+    let storage_mode = daemon_storage_mode(&args);
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
-        return run(slot_args).await;
+        return run_with_jit_prewarmer(slot_args, None, storage_mode).await;
     }
 
     // The controller launches this loop in a separate job-worker process. A
@@ -1645,7 +1720,7 @@ pub(crate) async fn run_daemon_slot(
             });
             (Some(trigger), Some(prewarm_waiter))
         };
-        let run_result = run_with_jit_prewarmer(slot_args, prewarm_trigger).await;
+        let run_result = run_with_jit_prewarmer(slot_args, prewarm_trigger, storage_mode).await;
         if let Some(prewarm_waiter) = prewarm_waiter {
             if let Err(join_error) = prewarm_waiter.await {
                 eprintln!(
@@ -1960,24 +2035,54 @@ async fn cleanup_failed_daemon_slot(
     cycle: u64,
 ) {
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
-    if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
+    let slot_cleanup = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await;
+    if let Err(error) = &slot_cleanup {
         eprintln!(
             "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {error:#}",
             slot_dir.display()
         );
     }
-    if let Err(error) =
-        cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await
-    {
+    let successor_cleanup =
+        cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await;
+    if let Err(error) = &successor_cleanup {
         eprintln!("daemon slot-{slot_index} cycle {cycle} successor cleanup failed: {error:#}");
     }
     if let Some(sink) = crate::ops::global() {
-        sink.emit(
+        let (reason, detail) = daemon_slot_cleanup_event(
+            slot_index,
+            cycle,
+            slot_cleanup.is_ok(),
+            successor_cleanup.is_ok(),
+        );
+        sink.emit(reason, &daemon_slot_name(slot_index), Some(detail));
+    }
+}
+
+fn daemon_slot_cleanup_event(
+    slot_index: usize,
+    cycle: u64,
+    slot_succeeded: bool,
+    successor_succeeded: bool,
+) -> (velnor_model::EventReason, String) {
+    if slot_succeeded && successor_succeeded {
+        return (
             velnor_model::EventReason::SlotStateChanged,
-            &daemon_slot_name(slot_index),
-            Some(format!("cleaned failed slot after cycle {cycle}")),
+            format!("cleaned failed slot after cycle {cycle}"),
         );
     }
+
+    let failed_parts = match (slot_succeeded, successor_succeeded) {
+        (false, false) => "slot and successor cleanup failed",
+        (false, true) => "slot cleanup failed",
+        (true, false) => "successor cleanup failed",
+        (true, true) => unreachable!("successful cleanup handled above"),
+    };
+    (
+        velnor_model::EventReason::ReadinessDegraded,
+        format!(
+            "daemon slot-{slot_index} cleanup degraded after cycle {cycle}: {failed_parts}; local recovery files preserved"
+        ),
+    )
 }
 
 async fn cleanup_daemon_slot_successor_jit_config(
@@ -1995,7 +2100,11 @@ async fn cleanup_daemon_slot_successor_jit_config(
                     "delete successor daemon slot-{slot_index} JIT identity; local identity preserved"
                 )
             })?;
-        let _ = fs::remove_dir(&next_dir);
+        fs::remove_dir(&next_dir).with_context(|| {
+            format!(
+                "remove successor daemon slot-{slot_index} directory after deleting JIT identity; local recovery preserved"
+            )
+        })?;
     }
     Ok(())
 }
@@ -2152,12 +2261,7 @@ async fn configure_daemon_slots(
     Ok(usable_slots)
 }
 
-fn reserve_capacity_permits(
-    config_base: &Path,
-    args: &DaemonArgs,
-    desired: u32,
-    surge: u32,
-) -> Result<()> {
+fn reserve_capacity_permits(config_base: &Path, args: &DaemonArgs, desired: u32) -> Result<()> {
     use velnor_control::journal::{Event, Journal};
     use velnor_model::{Generation, SlotId};
     std::fs::create_dir_all(config_base)?;
@@ -2170,19 +2274,15 @@ fn reserve_capacity_permits(
         .apply(Event::JournalWritable)
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     journal
-        .apply(Event::DesiredCapacity {
-            ready: desired,
-            surge,
-        })
+        .apply(Event::DesiredCapacity { ready: desired })
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let scope = args.name.clone().unwrap_or_else(|| "velnor".to_owned());
-    let total = desired.saturating_add(surge).max(1);
+    let total = desired;
     for index in 1..=total {
         journal
             .apply(Event::PermitReserved {
                 slot_id: SlotId(format!("{scope}-{index}")),
                 generation: Generation::INITIAL,
-                surge: index > desired,
             })
             .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     }
@@ -2266,29 +2366,40 @@ async fn delete_runner_keeping_busy_identity(
     {
         Ok(()) => {
             if let Some(dir) = slot_dir {
-                let _ = clear_in_flight_job(dir);
+                clear_in_flight_job(dir)
+                    .context("clear in-flight job after remote runner deletion")?;
             }
             Ok(())
         }
         Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
             if let Some(dir) = slot_dir {
-                if let Ok(stored) = config::load(dir) {
-                    if complete_recorded_in_flight_job(dir, &stored)
+                let stored = config::load(dir)
+                    .map_err(local_failure)
+                    .with_context(|| {
+                        format!(
+                            "load runner identity before completing in-flight job for runner id {agent_id}; local identity preserved"
+                        )
+                    })?;
+                let completed = complete_recorded_in_flight_job(dir, &stored)
+                    .await
+                    .map_err(local_failure)
+                    .with_context(|| {
+                        format!(
+                            "complete recorded in-flight job before retrying deletion of runner id {agent_id}; local identity preserved"
+                        )
+                    })?;
+                if completed {
+                    match RegistrationClient::new()?
+                        .delete_runner(scope, pat, agent_id)
                         .await
-                        .unwrap_or(false)
                     {
-                        match RegistrationClient::new()?
-                            .delete_runner(scope, pat, agent_id)
-                            .await
-                        {
-                            Ok(()) => return Ok(()),
-                            Err(retry) if retry.downcast_ref::<RunnerBusyConflict>().is_some() => {
-                                return Err(local_failure(retry).context(format!(
-                                    "quarantine runner id {agent_id} after fail-closed leftover job; local identity preserved"
-                                )));
-                            }
-                            Err(retry) => return Err(retry),
+                        Ok(()) => return Ok(()),
+                        Err(retry) if retry.downcast_ref::<RunnerBusyConflict>().is_some() => {
+                            return Err(local_failure(retry).context(format!(
+                                "quarantine runner id {agent_id} after fail-closed leftover job; local identity preserved"
+                            )));
                         }
+                        Err(retry) => return Err(retry),
                     }
                 }
             }
@@ -2304,8 +2415,21 @@ async fn delete_and_remove_daemon_slot_jit_config(
     args: &DaemonArgs,
     slot_dir: &Path,
 ) -> Result<()> {
-    let Some(stored) = config::load(slot_dir).ok() else {
-        return Ok(());
+    let stored = match config::load(slot_dir) {
+        Ok(stored) => stored,
+        Err(load_error) => match fs::symlink_metadata(slot_dir.join("runner.json")) {
+            Ok(_) => {
+                return Err(load_error).context(
+                    "load existing daemon slot runner config before cleanup; local identity preserved",
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).context(
+                    "inspect existing daemon slot runner config before cleanup; local identity preserved",
+                );
+            }
+        },
     };
 
     if let Some(agent_id) = stored.settings.agent_id {
@@ -2424,7 +2548,7 @@ fn persist_executor_proof_after_preflight(config_base: &Path, slots: usize) -> R
 
 fn persist_microvm_probe_proof(config_base: &Path, slots: usize) -> Result<()> {
     let proof = crate::node::prove::EXECUTOR_OK;
-    let slot_count = slots.max(1);
+    let slot_count = slots;
     let mut candidates = vec![config_base.join(proof)];
     for slot in 1..=slot_count {
         candidates.push(daemon_slot_config_dir(config_base, slot, slot_count).join(proof));
@@ -2776,6 +2900,23 @@ fn job_resource_options(cpus: &str, memory: &str) -> Vec<String> {
     options
 }
 
+fn resource_policy_label(cpus: &str, memory: &str) -> String {
+    let cpus = crate::container::sanitize_store_key(cpus.trim());
+    let memory = crate::container::sanitize_store_key(memory.trim());
+    if cpus.is_empty() && memory.is_empty() {
+        return "default".to_owned();
+    }
+    format!("cpu-{cpus}-memory-{memory}")
+}
+
+fn canonical_slot_name(config_dir: &Path) -> String {
+    config_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("slot-"))
+        .map_or_else(|| "slot-0".to_owned(), ToOwned::to_owned)
+}
+
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
     if stored.settings.use_v2_flow && stored.settings.server_url_v2.is_some() {
         return Ok(());
@@ -2792,6 +2933,7 @@ async fn run_v2(
     agent_id: i64,
     token: OAuthAccessToken,
     mut prewarm_trigger: Option<oneshot::Sender<()>>,
+    storage_layout: crate::storage::StorageLayout,
 ) -> Result<()> {
     // Disk peak is reserved only while a job is executing (see
     // `reserve_job_peak_capacity` in `handle_job_request`). Idle JIT slots
@@ -2969,6 +3111,7 @@ async fn run_v2(
                     &stored,
                     &config_dir,
                     &args,
+                    &storage_layout,
                     stored.settings.disable_update,
                     &stored.settings.agent_name,
                     &forensics,
@@ -3056,6 +3199,7 @@ fn daemon_capacity_run_root(config_dir: &Path) -> PathBuf {
 /// returned [`crate::capacity::Reservation`] when the job finishes so idle
 /// slots free the admission budget for other daemons.
 fn reserve_job_peak_capacity(
+    storage_layout: &crate::storage::StorageLayout,
     config_dir: &Path,
     args: &RunArgs,
 ) -> Result<crate::capacity::Reservation> {
@@ -3064,9 +3208,7 @@ fn reserve_job_peak_capacity(
             .clone()
             .unwrap_or_else(|| config_dir.join("_work")),
     );
-    let run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let run_root = storage_layout.run_root.clone();
     let controller = crate::capacity::CapacityController {
         run_root: run_root.clone(),
         emergency_reserve_bytes: args.emergency_reserve_bytes,
@@ -3090,15 +3232,9 @@ fn reserve_job_peak_capacity(
                 .saturating_add(args.job_peak_bytes)
                 .saturating_add(hysteresis);
             let needed = required.saturating_sub(free);
-            let log_root = crate::storage::StorageLayout::resolve()
-                .map(|layout| layout.log_root)
-                .unwrap_or_else(|| config_dir.join("logs"));
             let reclaim_layout = crate::storage::StorageLayout {
                 cache_root: work_root.clone(),
-                lib_root: config_dir.to_path_buf(),
-                run_root: run_root.clone(),
-                log_root,
-                mode: "resolved",
+                ..storage_layout.clone()
             };
             if needed > 0 {
                 let _ = crate::cache::reclaim(&reclaim_layout, needed, &active)?;
@@ -3494,6 +3630,7 @@ async fn handle_v2_message(
     stored: &StoredRunnerConfig,
     config_dir: &std::path::Path,
     args: &RunArgs,
+    storage_layout: &crate::storage::StorageLayout,
     disable_update: bool,
     runner_name: &str,
     forensics: &SlotForensics,
@@ -3712,6 +3849,7 @@ async fn handle_v2_message(
     handle_job_request(
         config_dir,
         args,
+        storage_layout,
         run_service_job,
         acquired_identity,
         broker_cancellation,
@@ -3728,6 +3866,7 @@ async fn handle_v2_message(
 async fn handle_job_request(
     config_dir: &std::path::Path,
     args: &RunArgs,
+    storage_layout: &crate::storage::StorageLayout,
     run_service_job: RunServiceJobContext,
     acquired_identity: AcquiredJobIdentity,
     broker_cancellation: BrokerCancellationContext,
@@ -3736,12 +3875,9 @@ async fn handle_job_request(
     forensics: &SlotForensics,
     pickup_ms: u64,
 ) -> Result<()> {
-    let capacity_run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let capacity_run_root = &storage_layout.run_root;
     let journal_dir = crate::node::complete::journal_dir_near(config_dir);
-    let Some(job_claim) =
-        JobClaim::try_acquire(&capacity_run_root, &job.plan.plan_id, &job.job_id)?
+    let Some(job_claim) = JobClaim::try_acquire(capacity_run_root, &job.plan.plan_id, &job.job_id)?
     else {
         println!(
             "Skipping duplicate delivery of run-service job {}; another local slot owns it.",
@@ -3800,6 +3936,7 @@ async fn handle_job_request(
     if let Some(sink) = crate::ops::global() {
         let admission = crate::ops::JobAdmission {
             instance_slug: sink.instance_slug().to_owned(),
+            job_uid: job.job_id.clone(),
             repository_full_name: crate::github_adapter::job_variable(&job, "github.repository")
                 .unwrap_or_default()
                 .to_owned(),
@@ -3827,10 +3964,17 @@ async fn handle_job_request(
             }),
             runner_name: Some(runner_name.to_owned()),
             trust_scope: Some(args.trust_scope.clone()),
+            resource_policy: Some(resource_policy_label(&args.job_cpus, &args.job_memory)),
+            slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
         };
         if !sink.record_admission(&admission) {
             const REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
+            sink.emit(
+                velnor_model::EventReason::JobRejected,
+                &job.job_id,
+                Some(REASON.to_owned()),
+            );
             let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
@@ -3839,10 +3983,23 @@ async fn handle_job_request(
                 REASON,
             )
             .await;
-            let _ = clear_in_flight_job(config_dir);
-            let _ = completion;
+            completion.context("failed to complete the rejected job")?;
+            clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
             bail!("{REASON}");
         }
+    } else {
+        const REASON: &str = "operational store is unavailable; job failed closed before execution";
+        let completion = complete_acquired_job_failure(
+            &run_service_job,
+            &AcquiredJobIdentity::from_job(&job),
+            Some(&job),
+            Some("operational_store".to_string()),
+            REASON,
+        )
+        .await;
+        completion.context("failed to complete the job rejected for store unavailability")?;
+        clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
+        bail!("{REASON}");
     }
 
     let event_name = crate::github_adapter::job_variable(&job, "github.event_name").unwrap_or("");
@@ -3857,8 +4014,8 @@ async fn handle_job_request(
             reason,
         )
         .await;
-        let _ = clear_in_flight_job(config_dir);
         completion?;
+        clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
         bail!("{reason}");
     }
     apply_workflow_script_step_names(&mut job, &early_context).await;
@@ -3935,7 +4092,7 @@ async fn handle_job_request(
                     // candidate scope for all concurrent holders.
                     let holder_scope = format!("{scope}/{lease_holder}");
                     crate::capacity::ScopeLease::acquire(
-                        &capacity_run_root,
+                        capacity_run_root,
                         class,
                         &holder_scope,
                         stale_after,
@@ -3976,6 +4133,8 @@ async fn handle_job_request(
                 "cannot execute scripts because step mapping failed",
             )
             .await?;
+            clear_in_flight_job(config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             bail!("cannot execute scripts because step mapping failed");
         };
         if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope) {
@@ -3987,6 +4146,8 @@ async fn handle_job_request(
                 &format!("{error:#}"),
             )
             .await?;
+            clear_in_flight_job(config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             return Err(error);
         }
         // Strict capability admission is unconditional: there is no bypass. The
@@ -4002,6 +4163,8 @@ async fn handle_job_request(
                 &format!("{error:#}"),
             )
             .await?;
+            clear_in_flight_job(config_dir)
+                .context("failed to clear acknowledged in-flight job")?;
             return Err(error);
         }
         let admission_graph = match admit_job_closure(&job, &early_context) {
@@ -4015,6 +4178,8 @@ async fn handle_job_request(
                     &format!("{error:#}"),
                 )
                 .await?;
+                clear_in_flight_job(config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
                 return Err(error);
             }
         };
@@ -4058,17 +4223,10 @@ async fn handle_job_request(
         // then fail-close instead of hanging GitHub with zero steps.
         let capacity_wait_started = Instant::now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
-        let ops_job_uid = crate::ops::global().and_then(|sink| {
-            let run_id = crate::github_adapter::job_variable(&job, "github.run_id")
-                .and_then(|raw| raw.parse::<u64>().ok())?;
-            let attempt = crate::github_adapter::job_variable(&job, "github.run_attempt")
-                .and_then(|raw| raw.parse::<u32>().ok())?;
-            let _ = sink;
-            Some(format!("summary-run-{run_id}-attempt-{attempt}"))
-        });
+        let ops_job_uid = crate::ops::global().map(|_| job.job_id.clone());
         let mut emitted_pressure = false;
         let job_peak_reservation = loop {
-            let reserve_result = reserve_job_peak_capacity(config_dir, args);
+            let reserve_result = reserve_job_peak_capacity(storage_layout, config_dir, args);
             let last_error = reserve_result
                 .as_ref()
                 .err()
@@ -4130,6 +4288,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     bail!("{reason}");
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortCanceled => {
@@ -4145,6 +4305,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     bail!("job canceled while waiting for host disk capacity");
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortCapacityTimeout => {
@@ -4175,6 +4337,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     bail!("{reason}");
                 }
             }
@@ -4193,6 +4357,8 @@ async fn handle_job_request(
                     &format!("{error:#}"),
                 )
                 .await?;
+                clear_in_flight_job(config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
                 return Err(error).context("acquire storage leases for active job");
             }
         };
@@ -4283,6 +4449,8 @@ async fn handle_job_request(
                 .await;
                 renewal.abort();
                 completion?;
+                clear_in_flight_job(&teardown_config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
                 return Err(join_error).context("join Docker job execution task");
             }
         };
@@ -4324,6 +4492,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
+                    clear_in_flight_job(&teardown_config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
                     return Err(error);
                 }
             }
@@ -4358,6 +4528,8 @@ async fn handle_job_request(
         let finalize_ms = duration_ms(finalize_started.elapsed());
         renewal.abort();
         completion?;
+        clear_in_flight_job(&teardown_config_dir)
+            .context("failed to clear acknowledged in-flight job")?;
         println!(
             "forensics.lifecycle event=completion-posted timestamp={}",
             unix_now_iso8601()
@@ -4380,13 +4552,14 @@ async fn handle_job_request(
             teardown_ms: 0,
         };
         if let Some(teardown) = teardown {
-            spawn_post_completion_teardown(
+            start_post_completion_teardown(
                 teardown_config_dir.clone(),
                 teardown,
                 forensics.clone(),
                 timing_record,
                 job_claim,
-            );
+            )
+            .await?;
         } else if let Ok(json) = serde_json::to_string(&timing_record) {
             forensics.lifecycle(&format!("job-timing {json}"));
         }
@@ -4394,8 +4567,26 @@ async fn handle_job_request(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
         );
-        let _ = clear_in_flight_job(&teardown_config_dir);
     } else if args.complete_noop {
+        if let Some(sink) = crate::ops::global() {
+            let uid = job.job_id.clone();
+            sink.transition(
+                &uid,
+                &format!("t-waiting-{uid}"),
+                velnor_model::EventReason::JobWaiting,
+                Some("no-op execution reserved".to_owned()),
+                None,
+                None,
+            );
+            sink.transition(
+                &uid,
+                &format!("t-started-{uid}"),
+                velnor_model::EventReason::JobStarted,
+                Some("no-op execution began".to_owned()),
+                None,
+                None,
+            );
+        }
         complete_run_service_job_refreshing(
             &run_service_job.client,
             &broker_cancellation.stored,
@@ -4411,6 +4602,7 @@ async fn handle_job_request(
             &journal_dir,
         )
         .await?;
+        clear_in_flight_job(config_dir).context("failed to clear acknowledged in-flight job")?;
         println!("No-op job completed and message acknowledged.");
     } else {
         println!(
@@ -5643,7 +5835,7 @@ fn execute_microvm_script_job(
     let outcome =
         crate::execution::run_validated_job(&execution_file, isolation, &validated, &mut world)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(script_job_result_from_outcome(job, outcome))
+    Ok(script_job_result_from_outcome(job, &validated, outcome))
 }
 
 fn microvm_executable_steps(
@@ -5731,6 +5923,7 @@ fn microvm_executable_steps(
 
 fn script_job_result_from_outcome(
     job: &AgentJobRequestMessage,
+    plan: &crate::execution::ValidatedPlan,
     outcome: crate::execution::ExecutionOutcome,
 ) -> ScriptJobResult {
     let result = if outcome.exit_code == 0 {
@@ -5738,28 +5931,59 @@ fn script_job_result_from_outcome(
     } else {
         crate::protocol::TaskResult::Failed
     };
+    let masks = job_secret_mask_values(job);
+    let mut step_logs = vec![StepLog {
+        step_id: "microvm".into(),
+        display_name: "microvm result bridge".into(),
+        order: 1,
+        started_at: unix_now_iso8601(),
+        completed_at: unix_now_iso8601(),
+        lines: outcome.log_lines,
+        masks: masks.clone(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: outcome.exit_code,
+        skipped: false,
+        failure_ignored: false,
+        error_count: i32::from(outcome.exit_code != 0),
+        warning_count: 0,
+        notice_count: 0,
+        // Keep the aggregate bridge log, but never attach step summaries to it.
+        summary: String::new(),
+    }];
+    for (step_id, bytes) in outcome.step_summaries {
+        let (order, display_name) = plan
+            .steps
+            .iter()
+            .enumerate()
+            .find(|(_, step)| step.id == step_id)
+            .map(|(index, step)| ((index + 1) as i32, step.id.clone()))
+            .unwrap_or_else(|| (step_logs.len() as i32 + 1, step_id.clone()));
+        let now = unix_now_iso8601();
+        step_logs.push(StepLog {
+            step_id,
+            display_name,
+            order,
+            started_at: now.clone(),
+            completed_at: now,
+            lines: Vec::new(),
+            masks: masks.clone(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::from_utf8_lossy(&bytes).into_owned(),
+        });
+    }
     ScriptJobResult {
         result,
         outputs: outcome.outputs.into_iter().collect(),
         environment_url: outcome.environment_url,
-        step_logs: vec![StepLog {
-            step_id: "microvm".into(),
-            display_name: "microvm result bridge".into(),
-            order: 1,
-            started_at: unix_now_iso8601(),
-            completed_at: unix_now_iso8601(),
-            lines: outcome.log_lines,
-            masks: job_secret_mask_values(job),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: outcome.exit_code,
-            skipped: false,
-            failure_ignored: false,
-            error_count: i32::from(outcome.exit_code != 0),
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        }],
+        step_logs,
         teardown: None,
         timings: ExecutionTimings {
             first_step_ms: 0,
@@ -5850,7 +6074,71 @@ fn reject_incomplete_microvm_plan(
             "no cache action until key-to-blob transport is admitted",
         ));
     }
+    // Strict capability contract: pairs that reference the host Docker socket
+    // are refused, never silently filtered — the guest must not observe a job
+    // whose inputs were quietly rewritten.
+    reject_unguestable_steps(&plan.steps)?;
     Ok(())
+}
+
+/// Strict-capability gate over normalized steps before any guest side effect.
+///
+/// # Errors
+/// Any native/script pair referencing the host Docker socket, or an explicit
+/// guest-unsupported checkout input.
+fn reject_unguestable_steps(steps: &[crate::executor::ExecutableStep]) -> Result<()> {
+    for (index, step) in steps.iter().enumerate() {
+        let found = match step {
+            crate::executor::ExecutableStep::Native { invocation, .. } => find_socket_pair(
+                invocation
+                    .inputs
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .chain(invocation.env.iter().cloned()),
+            ),
+            crate::executor::ExecutableStep::Script(script) => {
+                find_socket_pair(script.env.iter().cloned())
+            }
+            _ => None,
+        };
+        if let Some((name, value)) = found {
+            return Err(microvm_capability_error(
+                &format!("jobs.steps[{index}].env-or-inputs[{name}]"),
+                &truncate_error_value(&value),
+                "pairs without a host Docker socket reference",
+            ));
+        }
+    }
+    // The guest checkout adapter fetches no LFS objects; an explicit opt-in is
+    // a silent behavior change, so refuse it instead of approximating.
+    for (index, step) in steps.iter().enumerate() {
+        if let crate::executor::ExecutableStep::Checkout(plan) = step {
+            if plan.lfs {
+                return Err(microvm_capability_error(
+                    &format!("jobs.steps[{index}].inputs.lfs"),
+                    "true",
+                    "false (guest checkout downloads no LFS objects)",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_socket_pair(pairs: impl IntoIterator<Item = (String, String)>) -> Option<(String, String)> {
+    pairs
+        .into_iter()
+        .find(|(name, value)| name.contains("docker.sock") || value.contains("docker.sock"))
+}
+
+fn truncate_error_value(value: &str) -> String {
+    if value.chars().count() <= 80 {
+        value.to_string()
+    } else {
+        let mut cut: String = value.chars().take(77).collect();
+        cut.push_str("...");
+        cut
+    }
 }
 
 fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
@@ -6583,69 +6871,66 @@ struct TeardownHandle {
 }
 
 impl TeardownHandle {
-    fn run(self, job_claim: JobClaim, forensics: SlotForensics) {
+    fn run(self, job_claim: &JobClaim, forensics: &SlotForensics) -> Result<()> {
         let TeardownHandle {
             container,
             job_dir,
             services_removed,
         } = self;
+        // Keep the duplicate-job claim owned by this teardown until every
+        // cleanup operation, including BuildKit cleanup, has completed.
         let mut executor = DockerJobEngine::new(ProcessCommandRunner);
         let cleanup = if services_removed {
             executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
             executor.cleanup_without_buildkit(&container)
         };
-        if let Err(error) = cleanup {
-            eprintln!("Warning: post-completion Docker teardown failed: {error:#}");
-        }
-        if let Err(error) = fs::remove_dir_all(&job_dir) {
-            eprintln!(
-                "Warning: post-completion workspace teardown failed for {}: {error}",
-                job_dir.display()
-            );
-        }
+        cleanup.context("post-completion Docker teardown")?;
 
+        // Do not release the claim between cleanup phases. A workspace can be
+        // reused only after Docker and filesystem cleanup both succeed.
+        let _job_claim = job_claim;
         // Docker Engine can acknowledge a forced BuildKit container removal
-        // while its state volume is still attached. Keep this slow, retryable
-        // cleanup out of slot turnover, but hold the duplicate-job claim until
-        // the worker finishes so a replay cannot recreate the same scope.
-        let claim = Arc::new(std::sync::Mutex::new(Some(job_claim)));
-        let worker_claim = Arc::clone(&claim);
+        // while its state volume is still attached. Run this slow, retryable
+        // cleanup in a worker, but join it before teardown returns so the
+        // duplicate-job claim remains held until the scope is fully cleaned.
         let worker_forensics = forensics.clone();
         let worker_container = container.clone();
         let deferred = std::thread::Builder::new()
             .name("velnor-buildkit-cleanup".into())
-            .spawn(move || {
-                let _job_claim = worker_claim
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
+            .spawn(move || -> Result<()> {
                 worker_forensics.lifecycle("buildkit-teardown-deferred-start");
                 let mut executor = DockerJobEngine::new(ProcessCommandRunner);
-                match executor.cleanup_job_buildkit(&worker_container) {
+                let result = executor
+                    .cleanup_job_buildkit(&worker_container)
+                    .context("BuildKit teardown");
+                match &result {
                     Ok(()) => worker_forensics.lifecycle("buildkit-teardown-deferred-done"),
                     Err(error) => worker_forensics.lifecycle(&format!(
                         "buildkit-teardown-deferred-failed error={error:#}"
                     )),
                 }
-            });
-        if let Err(error) = deferred {
-            eprintln!(
-                "Warning: could not defer BuildKit teardown; running it synchronously: {error}"
-            );
-            let _job_claim = claim
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
-            if let Err(error) = executor.cleanup_job_buildkit(&container) {
-                eprintln!("Warning: deferred BuildKit teardown fallback failed: {error:#}");
-            }
-        }
+                result
+            })
+            .context("spawn BuildKit teardown worker")?;
+        deferred
+            .join()
+            .map_err(|panic| anyhow::anyhow!("BuildKit teardown worker panicked: {panic:?}"))??;
+        remove_job_workspace(&job_dir)?;
+        Ok(())
     }
 }
 
-type SlotTeardownTasks = std::collections::HashMap<PathBuf, std::thread::JoinHandle<()>>;
+fn remove_job_workspace(job_dir: &Path) -> Result<()> {
+    match fs::remove_dir_all(job_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("post-completion workspace teardown {}", job_dir.display())),
+    }
+}
+
+type SlotTeardownTasks = std::collections::HashMap<PathBuf, std::thread::JoinHandle<Result<()>>>;
 
 static SLOT_TEARDOWN_TASKS: std::sync::OnceLock<std::sync::Mutex<SlotTeardownTasks>> =
     std::sync::OnceLock::new();
@@ -6654,39 +6939,66 @@ fn slot_teardown_tasks() -> &'static std::sync::Mutex<SlotTeardownTasks> {
     SLOT_TEARDOWN_TASKS.get_or_init(|| std::sync::Mutex::new(SlotTeardownTasks::new()))
 }
 
-fn spawn_post_completion_teardown(
+async fn start_post_completion_teardown(
     config_dir: PathBuf,
     teardown: TeardownHandle,
     forensics: SlotForensics,
     mut timing_record: JobTimingRecord,
     job_claim: JobClaim,
-) {
+) -> Result<()> {
     let task = std::thread::spawn(move || {
         let _span = tracing::info_span!("job-teardown").entered();
         let teardown_started = Instant::now();
-        teardown.run(job_claim, forensics.clone());
-        timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
-        if let Ok(json) = serde_json::to_string(&timing_record) {
-            forensics.lifecycle(&format!("job-timing {json}"));
+        loop {
+            match teardown.clone().run(&job_claim, &forensics) {
+                Ok(()) => {
+                    timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
+                    if let Ok(json) = serde_json::to_string(&timing_record) {
+                        forensics.lifecycle(&format!("job-timing {json}"));
+                    }
+                    println!(
+                        "forensics.lifecycle event=teardown-done timestamp={}",
+                        unix_now_iso8601()
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    let detail = format!("post-completion teardown failed: {error:#}");
+                    forensics.lifecycle(&detail);
+                    if let Some(sink) = crate::ops::global() {
+                        sink.emit(
+                            velnor_model::EventReason::ReadinessDegraded,
+                            sink.instance_slug(),
+                            Some(detail.clone()),
+                        );
+                    }
+                    crate::sd_notify::status(&detail);
+                    eprintln!("Warning: {detail}; retrying until cleanup succeeds");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
         }
-        println!(
-            "forensics.lifecycle event=teardown-done timestamp={}",
-            unix_now_iso8601()
-        );
     });
-    register_slot_teardown_task(config_dir, task);
+    register_slot_teardown_task(&config_dir, task)?;
+    wait_for_prior_slot_teardown(&config_dir).await
 }
 
-fn register_slot_teardown_task(config_dir: PathBuf, task: std::thread::JoinHandle<()>) {
+fn register_slot_teardown_task(
+    config_dir: &Path,
+    task: std::thread::JoinHandle<Result<()>>,
+) -> Result<()> {
     let displaced = slot_teardown_tasks()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(config_dir, task);
+        .insert(config_dir.to_path_buf(), task);
     // A slot starts at most one job per JIT cycle. Joining here is a defensive
     // fail-closed guard if a caller ever violates that ownership invariant.
     if let Some(displaced) = displaced {
-        let _ = displaced.join();
+        displaced
+            .join()
+            .map_err(|panic| anyhow::anyhow!("displaced teardown task panicked: {panic:?}"))??;
     }
+    Ok(())
 }
 
 async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
@@ -6700,7 +7012,7 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
     tokio::task::spawn_blocking(move || task.join())
         .await
         .context("join prior slot teardown task")?
-        .map_err(|_| anyhow::anyhow!("prior slot teardown task panicked"))?;
+        .map_err(|panic| anyhow::anyhow!("prior slot teardown task panicked: {panic:?}"))??;
     Ok(())
 }
 
@@ -8273,8 +8585,8 @@ async fn complete_run_service_job(
             .and_then(|raw| raw.parse::<u64>().ok());
         let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
             .and_then(|raw| raw.parse::<u32>().ok());
-        if let (Some(run_id), Some(attempt)) = (run_id, attempt) {
-            let uid = format!("summary-run-{run_id}-attempt-{attempt}");
+        if run_id.is_some() && attempt.is_some() {
+            let uid = job.job_id.clone();
             let reason = match result {
                 crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
                 _ => velnor_model::EventReason::JobCompleted,
@@ -8289,7 +8601,7 @@ async fn complete_run_service_job(
             };
             sink.transition(
                 &uid,
-                &format!("t-terminal-{}-{run_id}-{attempt}", reason.as_str()),
+                &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
                 reason,
                 None,
                 Some(conclusion.to_owned()),
@@ -8735,15 +9047,15 @@ async fn complete_acquired_job_outcome(
                 .and_then(|raw| raw.parse::<u64>().ok());
             let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
                 .and_then(|raw| raw.parse::<u32>().ok());
-            if let (Some(run_id), Some(attempt)) = (run_id, attempt) {
-                let uid = format!("summary-run-{run_id}-attempt-{attempt}");
+            if run_id.is_some() && attempt.is_some() {
+                let uid = job.job_id.clone();
                 let reason = match conclusion {
                     crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
                     _ => velnor_model::EventReason::JobRejected,
                 };
                 sink.transition(
                     &uid,
-                    &format!("t-terminal-{}-{run_id}-{attempt}", reason.as_str()),
+                    &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
                     reason,
                     Some(masked_reason.clone()),
                     None,
@@ -9792,6 +10104,51 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gha_cache_requires_canonical_storage() {
+        let error = gha_cache_root(None).unwrap_err();
+        assert!(error.to_string().contains("canonical storage"));
+        assert!(error.to_string().contains("VELNOR_STORAGE_ROOT"));
+    }
+
+    #[test]
+    fn gha_cache_uses_canonical_cache_root() {
+        let layout = crate::storage::StorageLayout::from_prefix(Path::new("/var"));
+        assert_eq!(
+            gha_cache_root(Some(layout)).unwrap(),
+            PathBuf::from("/var/cache/velnor/v1/gha-cache")
+        );
+    }
+
+    #[test]
+    fn supervised_storage_requires_canonical_layout() {
+        let error = select_runner_storage_layout_from(
+            Path::new("/config/slot-1"),
+            RunnerStorageMode::SupervisedProduction,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("supervised production"));
+        assert!(error.to_string().contains("VELNOR_STORAGE_ROOT"));
+    }
+
+    #[test]
+    fn explicit_local_storage_is_scoped_to_config_dir() {
+        let layout = select_runner_storage_layout_from(
+            Path::new("/config/slot-1"),
+            RunnerStorageMode::ExplicitLocal,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(layout.cache_root, PathBuf::from("/config/slot-1/cache"));
+        assert_eq!(layout.lib_root, PathBuf::from("/config/slot-1"));
+        assert_eq!(layout.run_root, PathBuf::from("/config/slot-1/run"));
+        assert_eq!(layout.log_root, PathBuf::from("/config/slot-1/logs"));
+        assert_eq!(layout.mode, "explicit-config");
+    }
 
     #[test]
     fn job_claim_excludes_duplicate_slots_until_owner_drops() {
@@ -10930,6 +11287,43 @@ jobs:
     }
 
     #[test]
+    fn daemon_instance_upsert_failure_is_fatal() {
+        let base = unique_temp_dir("daemon-instance-upsert-failure");
+        fs::create_dir_all(&base).unwrap();
+        let db_path = base.join("state.db");
+        let sink = crate::ops::OpsSink::open(db_path.clone(), "test-instance".into()).unwrap();
+
+        // Keep the opened sink valid, then make the required instance write
+        // fail at the actual SQLite operation boundary.
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.execute_batch("DROP TABLE instances;").unwrap();
+        drop(connection);
+
+        let error = persist_and_announce_daemon_readiness(&sink, 2).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("operational store instance upsert failed for test-instance"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("store.operation.failed"), "{rendered}");
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let readiness_events: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_kind = 'readiness.ready'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            readiness_events, 0,
+            "failed persistence must emit no ready event"
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn daemon_single_slot_preserves_base_config_and_paths() {
         let mut args = daemon_args(1);
         args.work_dir = Some(Path::new("/work").to_path_buf());
@@ -11073,6 +11467,38 @@ jobs:
     }
 
     #[tokio::test]
+    async fn configure_replace_rejects_unreadable_local_config() {
+        let dir = unique_temp_dir("configure-replace-unreadable-config");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runner.json");
+        let original = br#"{"settings": "not a runner config"}"#;
+        fs::write(&path, original).unwrap();
+
+        let error = configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-replaced".into()),
+            labels: vec!["velnor".into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: true,
+            pool_id: None,
+            pool_name: None,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("load existing local runner config before replace"));
+        assert!(error.contains("local identity preserved"));
+        assert_eq!(fs::read(path).unwrap(), original);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn daemon_failed_slot_cleanup_without_pat_preserves_registered_identity() {
         let base = unique_temp_dir("daemon-slot-local-cleanup");
         let slot_dir = daemon_slot_config_dir(&base, 2, 2);
@@ -11091,6 +11517,96 @@ jobs:
         assert!(base.join("slots").exists());
 
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_slot_cleanup_rejects_corrupt_local_identity() {
+        let base = unique_temp_dir("daemon-slot-corrupt-cleanup");
+        let slot_dir = daemon_slot_config_dir(&base, 1, 1);
+        fs::create_dir_all(&slot_dir).unwrap();
+        let path = slot_dir.join("runner.json");
+        let original = br#"{"settings":"not a runner config"}"#;
+        fs::write(&path, original).unwrap();
+
+        let error = delete_and_remove_daemon_slot_jit_config(&daemon_args(1), &slot_dir)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("load existing daemon slot runner config before cleanup"));
+        assert!(error.contains("local identity preserved"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_slot_cleanup_missing_config_is_noop() {
+        let base = unique_temp_dir("daemon-slot-missing-cleanup");
+        fs::create_dir_all(&base).unwrap();
+        let slot_dir = daemon_slot_config_dir(&base, 1, 1);
+
+        delete_and_remove_daemon_slot_jit_config(&daemon_args(1), &slot_dir)
+            .await
+            .unwrap();
+
+        assert!(!slot_dir.join("runner.json").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_successor_cleanup_surfaces_directory_removal_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/repos/owner/repo/actions/runners/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = unique_temp_dir("daemon-successor-cleanup-failure");
+        let next_dir = daemon_slot_successor_config_dir(&base, 1, 1);
+        let mut stored = stored_config();
+        stored.settings.github_url = format!("{}/owner/repo", server.uri());
+        config::save(&next_dir, &stored).unwrap();
+        let leftover = next_dir.join("leftover-state");
+        fs::write(&leftover, b"preserve for recovery").unwrap();
+
+        let mut args = daemon_args(1);
+        args.pat = Some("token".into());
+        let error = cleanup_daemon_slot_successor_jit_config(&args, &base, 1, 1)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("remove successor daemon slot-1 directory after deleting JIT identity"));
+        assert!(!next_dir.join("runner.json").exists());
+        assert!(leftover.exists());
+        assert!(next_dir.is_dir());
+        server.verify().await;
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn failed_daemon_slot_cleanup_selects_degraded_event() {
+        let (reason, detail) = daemon_slot_cleanup_event(1, 7, true, false);
+
+        assert_eq!(reason, velnor_model::EventReason::ReadinessDegraded);
+        assert!(detail.contains("successor cleanup failed"));
+        assert!(detail.contains("local recovery files preserved"));
+        assert!(!detail.contains("cleaned failed slot"));
+
+        let (reason, detail) = daemon_slot_cleanup_event(1, 7, true, true);
+        assert_eq!(reason, velnor_model::EventReason::SlotStateChanged);
+        assert_eq!(detail, "cleaned failed slot after cycle 7");
     }
 
     #[test]
@@ -11747,6 +12263,8 @@ jobs:
     async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200))
@@ -11784,9 +12302,129 @@ jobs:
     }
 
     #[tokio::test]
+    async fn successful_runner_delete_surfaces_in_flight_cleanup_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/orgs/test/actions/runners/123"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config_dir = unique_temp_dir("runner-delete-cleanup-failure");
+        fs::create_dir_all(config_dir.join("in-flight-job.json")).unwrap();
+        let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
+
+        let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("clear in-flight job after remote runner deletion"));
+        server.verify().await;
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn busy_runner_delete_surfaces_leftover_completion_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/orgs/test/actions/runners/123"))
+            .respond_with(ResponseTemplate::new(422).set_body_string(
+                r#"{"message":"Sorry, the runner is currently running a job. Unable to delete."}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config_dir = unique_temp_dir("busy-runner-completion-failure");
+        fs::create_dir_all(&config_dir).unwrap();
+        config::save(&config_dir, &stored_config()).unwrap();
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: format!("{}/run-service", server.uri()),
+            billing_owner_id: None,
+            journal_dir: config_dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        persist_in_flight_job(&config_dir, &context, &job).unwrap();
+        let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
+
+        let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("complete recorded in-flight job before retrying deletion"));
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("missing credentials")));
+        assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
+        assert!(config::load(&config_dir).is_ok());
+        assert!(in_flight_job_path(&config_dir).exists());
+        server.verify().await;
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn busy_runner_delete_surfaces_runner_config_load_failure() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v3/orgs/test/actions/runners/123"))
+            .respond_with(ResponseTemplate::new(422).set_body_string(
+                r#"{"message":"Sorry, the runner is currently running a job. Unable to delete."}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config_dir = unique_temp_dir("busy-runner-config-load-failure");
+        fs::create_dir_all(config_dir.join("runner.json")).unwrap();
+        let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
+
+        let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("load runner identity before completing in-flight job"));
+        assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
+        assert!(config_dir.join("runner.json").is_dir());
+        server.verify().await;
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn journal_acceptance_failure_preserves_retry_record_after_failed_completion() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(400))
@@ -12396,6 +13034,7 @@ jobs:
             &stored,
             Path::new("/config"),
             &run_args(false, false, false),
+            &crate::storage::StorageLayout::from_prefix(Path::new("/var")),
             true,
             "velnor",
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
@@ -12412,6 +13051,8 @@ jobs:
     async fn transient_acquire_failure_keeps_broker_session_alive() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wiremock::matchers::path("/run/jobs/123/acquirejob"))
@@ -12446,6 +13087,7 @@ jobs:
             &stored,
             Path::new("/config"),
             &run_args(false, false, false),
+            &crate::storage::StorageLayout::from_prefix(Path::new("/var")),
             true,
             "velnor",
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
@@ -14237,13 +14879,16 @@ runs:
     }
 
     #[tokio::test]
-    async fn next_slot_run_waits_for_detached_teardown() {
+    async fn next_slot_run_waits_for_detached_teardown() -> Result<()> {
         let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel::<anyhow::Result<()>>();
         register_slot_teardown_task(
-            key.clone(),
-            std::thread::spawn(move || release_receiver.recv().unwrap()),
-        );
+            &key,
+            std::thread::spawn(move || -> Result<()> {
+                release_receiver.recv()??;
+                Ok(())
+            }),
+        )?;
 
         let mut waiter = tokio::spawn(async move { wait_for_prior_slot_teardown(&key).await });
         assert!(
@@ -14252,12 +14897,11 @@ runs:
                 .is_err(),
             "the next run crossed the teardown ownership boundary"
         );
-        release_sender.send(()).unwrap();
+        release_sender.send(Ok(()))?;
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+            .map_err(anyhow::Error::from)???;
+        Ok(())
     }
 
     #[tokio::test]
@@ -14273,18 +14917,18 @@ runs:
     }
 
     #[tokio::test]
-    async fn completed_teardown_is_consumed_once() {
+    async fn completed_teardown_is_consumed_once() -> Result<()> {
         let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
-        register_slot_teardown_task(key.clone(), std::thread::spawn(|| {}));
+        register_slot_teardown_task(&key, std::thread::spawn(|| -> Result<()> { Ok(()) }))?;
 
-        wait_for_prior_slot_teardown(&key).await.unwrap();
+        wait_for_prior_slot_teardown(&key).await?;
         tokio::time::timeout(
             Duration::from_millis(25),
             wait_for_prior_slot_teardown(&key),
         )
         .await
-        .unwrap()
-        .unwrap();
+        .map_err(anyhow::Error::from)??;
+        Ok(())
     }
 
     #[tokio::test]
@@ -14341,6 +14985,13 @@ runs:
             .unwrap()
             .is_some());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_job_workspace_is_successfully_removed() {
+        let job_dir = unique_temp_dir("missing-job-workspace");
+
+        remove_job_workspace(&job_dir).unwrap();
     }
 
     fn timing_record(job_id: &str, pickup_ms: u64) -> JobTimingRecord {
@@ -14676,5 +15327,100 @@ runs:
                 ExecutableStep::CompositeEnd { .. }
             ] if step_id == "download-ci-xtask" && actual == condition
         ));
+    }
+
+    #[test]
+    fn microvm_rejects_host_docker_socket_pairs() {
+        let step = crate::executor::ExecutableStep::Script(crate::script_step::ScriptStep {
+            id: "leak".into(),
+            display_name: String::new(),
+            script: "true".into(),
+            shell: crate::container::Shell::Bash,
+            working_directory_container: "/__w".into(),
+            env: vec![("DOCKER_HOST".into(), "unix:///var/run/docker.sock".into())],
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        });
+        let error = reject_unguestable_steps(&[step]).unwrap_err().to_string();
+        assert!(
+            error.contains("jobs.steps[0].env-or-inputs[DOCKER_HOST]"),
+            "{error}"
+        );
+        assert!(error.contains("unix:///var/run/docker.sock"), "{error}");
+        assert!(error.contains("manifest version"), "{error}");
+    }
+
+    #[test]
+    fn microvm_rejects_native_input_with_socket_value_without_silent_drop() {
+        let step = crate::executor::ExecutableStep::Native {
+            step_id: "act".into(),
+            display_name: String::new(),
+            invocation: crate::action::NativeActionInvocation {
+                git_ref: "v5".into(),
+                adapter: crate::action::NativeActionAdapter::Mise,
+                cache_kind: None,
+                source_path: None,
+                inputs: std::iter::once((
+                    "socket_path".to_string(),
+                    "/var/run/docker.sock".to_string(),
+                ))
+                .collect(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let error = reject_unguestable_steps(&[step]).unwrap_err().to_string();
+        assert!(
+            error.contains("jobs.steps[0].env-or-inputs[socket_path]"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_checkout_lfs_opt_in() {
+        let plan = crate::checkout::CheckoutPlan {
+            step_id: "co".into(),
+            display_name: "co".into(),
+            clone_url: "https://github.com/tailrocks/velnor".into(),
+            version: None,
+            destination: PathBuf::from("/__w/repo"),
+            token: None,
+            fetch_depth: None,
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: true,
+            lfs: true,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let error = reject_unguestable_steps(&[ExecutableStep::Checkout(plan)])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("jobs.steps[0].inputs.lfs"), "{error}");
+    }
+
+    #[test]
+    fn microvm_admits_clean_checkout_without_socket_or_lfs() {
+        let plan = crate::checkout::CheckoutPlan {
+            step_id: "co".into(),
+            display_name: "co".into(),
+            clone_url: "https://github.com/tailrocks/velnor".into(),
+            version: Some("main".into()),
+            destination: PathBuf::from("/__w/repo"),
+            token: Some("secret-token".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        reject_unguestable_steps(&[ExecutableStep::Checkout(plan)]).unwrap();
     }
 }

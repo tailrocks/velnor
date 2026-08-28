@@ -318,6 +318,13 @@ fn write_result_bridge<S: Write>(
                 stream: *stream,
                 bytes: line.as_bytes().to_vec(),
             },
+            ExecutionEvent::StepStarted { step_id } => VsockMessage::StepStarted {
+                step_id: step_id.clone(),
+            },
+            ExecutionEvent::StepCompleted { step_id, exit_code } => VsockMessage::StepCompleted {
+                step_id: step_id.clone(),
+                exit_code: *exit_code,
+            },
             ExecutionEvent::CommandFile { path, bytes } => VsockMessage::CommandFile {
                 path: path.clone(),
                 bytes: bytes.clone(),

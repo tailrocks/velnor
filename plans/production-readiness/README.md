@@ -1,9 +1,54 @@
-# Velnor production-readiness execution prompt
+# Velnor production-readiness acceptance plan
 
-Use this document as the single execution prompt for the production-readiness
-campaign. The campaign is complete only when every checkbox is checked and
-each check has attached evidence. Never claim completion from partial green
-runs.
+This is the acceptance ledger for `PRD-001`. The active `/goal` authority is
+`docs/prompt.md`, the tracked goal graph, `plans/TASKS.md`, and the normative
+direction documents. `/goal` must execute this plan, but this file must not
+silently override those authorities.
+
+The campaign is complete only when every atomic item is `DONE` with current
+evidence. `TODO`, `RUNNING`, `BLOCKED`, `WAITING`, `UNKNOWN`, `UNPROVEN`, and
+historical evidence never count as complete. Never infer completion from a
+green local test, a shared commit, or partial workflow success.
+
+## Execution order
+
+1. Reconcile authority, scope, status, approvals, branch state, and external
+   state. Regenerate the stale progress ledger before mutation.
+2. Capture baseline evidence. Cancel or delete only explicitly authorized,
+   owned, inactive validation resources; unresolved ownership is `BLOCKED`.
+3. Resolve lifecycle and correctness blockers in Velnor. Do not work around
+   Velnor gaps in repositories or in `velnor-actions-fixture`.
+4. Execute Track A read-only fleet reconciliation and Track B migration in
+   dependency order. Execute each C leaf only after its named dependencies are
+   `DONE`; never batch-complete siblings.
+5. Run protocol, capability, storage, executor, lifecycle, fixture, workflow,
+   parity, and security gates at the current source SHA.
+6. Run defined cold/warm/rerun performance campaigns, fault injection, and
+   multi-repository soak. Missing telemetry fails the gate.
+7. Finish Plan 079 and remove the legacy `velnor-runner` product surface.
+8. Integrate unique branch behavior, then merge to `main` and prove green
+   `main` before any release.
+9. Publish, install, verify, roll back, and forward-recover only through the
+   signed APT path. Release and deployment are terminal gates.
+10. Run the independent final audit and generate the evidence index. Only then
+    check the final items and declare completion.
+
+## Atomic checklist and evidence contract
+
+- Assign each checkbox a stable ID: `PRD-<section>-NN`; split bullets that
+  contain multiple claims into separate rows.
+- Each row records status, dependencies, owner, authorization, baseline SHA,
+  final SHA, exact command, exit code, UTC capture time, external run IDs,
+  artifact paths and SHA-256 hashes, verifier, reviewer, and next action.
+- Only an independent verifier may change a row to `DONE`; the implementer
+  and primary orchestrator may not self-approve.
+- Every mutation requires a pre-state and post-state snapshot. Explicit
+  authorization is required for cancellation, runner deletion, drain, restart,
+  merge, tag, publish, install, rollback, policy changes, and re-admission.
+- Evidence must be sanitized. Never commit secrets, credentials, unsanitized
+  logs, or rendered GitHub HTML.
+- Run a final machine check: every row is `DONE`, every dependency is `DONE`,
+  every `DONE` row has valid evidence, and every mirror/index agrees.
 
 ## Mission and operating law
 
@@ -214,3 +259,75 @@ For each representative workflow in each repository:
   cache proof and rollback proof pass.
 - [ ] Check every checkbox in this document. Only then declare the campaign
   complete.
+
+## Progress ledger
+
+The previous dated ledger is historical evidence, not current state. Before
+each iteration, regenerate this section from the repository, GitHub, and
+Sentry. Record the current branch, HEAD, remotes, worktree paths, plan/index
+statuses, open PRs, run IDs, runner registrations, package/backend/health
+state, and all unresolved blockers. Any state change invalidates dependent
+evidence and requires a fresh baseline.
+
+### Current baseline — 2026-08-28T00:24:44Z
+
+- Repository: branch `fix/watchdog-registration-deadline`, HEAD
+  `3b9eabc9fb813653e6e2a5aa6e01e23c224fa9ce`, clean worktree, remote
+  `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
+  of `origin/main` and equal to its pushed branch tip.
+- Open Velnor PR: #411 at this HEAD. Current-SHA CI run `33129071766` and
+  Guest image run `33129071359` stalled in hosted validation and were
+  cancelled; neither is green-main proof. No validation is active.
+- Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
+  migration README, and `plans/TASKS.md`; its six atomic criteria remain
+  unchecked because current-SHA fixture proof and independent sign-off are
+  absent. Root campaign progress remains 4/94 done; 039 remains in progress.
+- Branch integration: all six current remote branch tips with unique commits
+  are ancestors of this branch; immutable recovery refs for all local and
+  remote tips remain under `refs/backup/branch-sync/`. The local-only
+  Firecracker safety fork was not merged wholesale because its four commits
+  conflict with and are superseded by the active guest/runtime architecture.
+  The remaining local branch audit classified package/cache, PAT pacing,
+  lease, heartbeat, worker-recovery, and performance commits as already
+  present or safely superseded; obsolete release/docs-only commits were not
+  cherry-picked. `dcf9bfe` waiter ownership is covered by the current
+  controller path, with its stale-job/live-waiter edge case fixed at
+  `ee7ecca`. Current remote #408 behavior `eaf772d` was ported as bounded
+  kernel-download retry/timeout hardening at `8f660ad`; its forced HTTP/1.1
+  downgrade was intentionally omitted under the modern-protocol rule.
+- Follow-up inventory found 42 additional non-ancestor local/recovery tips.
+  Recovery refs exist for every tip. Semantic audit classified most as
+  equivalent/evolved or release-only; unresolved unique behavior remains in
+  Firecracker safety, early JIT/warm-copy, release `v0.1.199`, journal/lease
+  performance, and package-guardian branches. No conflicting code was merged
+  blindly; Plan079 and current trust/storage contracts remain authoritative.
+- Current-SHA local evidence: `rtk mise run check` passed, exit 0, with
+  actionlint, cargo deny, cargo fmt, fleet generation, clippy `-D warnings`,
+  and workspace nextest `1508/1508` (nextest run ID
+  `4efdab5b-65d8-46e4-8839-50a7fda8674f`). Focused retention tests passed
+  `7/7`. Code commits `a7ca6bb` and `80d1b63` add persisted slot identity,
+  bounded retention convergence, complete deletion accounting, resource policy,
+  legal no-op lifecycle transitions, and raw-row sanitization.
+- GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
+  `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
+  are all `visibility=selected`, `allows_public_repositories=true`,
+  `restricted_to_workflows=false`; Tailrocks currently selects 21 repositories
+  including `cloudflare-tofu` and `github-terraform`.
+- Current GitHub repository readback shows the 28 canonical repositories are
+  present, but live default branches are not uniform: `master`, `develop`,
+  `staging`, and `port/cross-agent-dry` occur alongside `main`. This conflicts
+  with the 039 release-ref assumption that all 28 resolve to `refs/heads/main`;
+  the ref-shape stop remains active and no policy was changed.
+- Sentry read-only snapshot last captured at `2026-08-27T16:07:53Z` (not a
+  current-state proof): Docker 29.7.2 active; `velnor-runner 0.1.242` and
+  `/usr/bin/velnorctl` present; `/usr/bin/velnor-tools` absent; exact unit
+  states were not regenerated in this pass; the health vector was degraded with
+  `github_reachable=false`,
+  `routing_valid=false`, `runner_group_valid=false`, and zero ready slots.
+- Blockers: the Plan 039 digest/closure and workflow-ref admission ruling are
+  not approved for public-code policy mutation; stale validation-run cleanup,
+  runner deletion, drain, dispatch, package publication, Sentry install, and
+  rollback require explicit authorization; Sentry lacks the packaged
+  `velnor-tools` prerequisite; PID start-identity binding remains a separate
+  lifecycle hardening leaf; Plan 079 and final signed-APT/independent-audit
+  gates are not complete. No external mutation was performed.

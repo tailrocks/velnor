@@ -393,6 +393,9 @@ pub fn execute_guest_plan(
     let mut state = JobExecutionState::new_with_context(&base_env, &plan.context_data);
     let mut code = 0_i32;
     for step in &plan.steps {
+        events.push(ExecutionEvent::StepStarted {
+            step_id: step.id.clone(),
+        });
         events.push(log_line(&format!("[velnor-step {}]", step.id)));
         let step_state = state.with_step_action(&step.id);
         if !step_state.evaluate_condition(step.condition.as_deref()) {
@@ -411,6 +414,10 @@ pub fn execute_guest_plan(
                 "Step skipped: condition evaluated to false ({})",
                 step.condition.as_deref().unwrap_or("success()")
             )));
+            events.push(ExecutionEvent::StepCompleted {
+                step_id: step.id.clone(),
+                exit_code: 0,
+            });
             continue;
         }
         let mut resolved_step = step.clone();
@@ -528,6 +535,10 @@ pub fn execute_guest_plan(
                 stderr: result.stderr,
             },
         );
+        events.push(ExecutionEvent::StepCompleted {
+            step_id: step.id.clone(),
+            exit_code: result.code,
+        });
         if failed && !failure_ignored {
             code = result.code;
             break;
@@ -705,6 +716,12 @@ fn collect_guest_command_files(
 ) -> Result<(), String> {
     let mut live_outputs = Vec::new();
     for path in &plan.command_files {
+        // GITHUB_STEP_SUMMARY is captured per step by
+        // `apply_step_command_files` so a later step cannot erase an earlier
+        // one; reading it here again would double-publish the last buffer.
+        if path == "GITHUB_STEP_SUMMARY" {
+            continue;
+        }
         let contents = cat_guest_file(job_name, path, runner, events, host_docker)?;
         if path == "GITHUB_OUTPUT" && !contents.trim().is_empty() {
             if let Ok(parsed) = parse_file_commands(&contents) {
@@ -751,7 +768,7 @@ fn cat_guest_file(
     Ok(result.stdout)
 }
 
-fn apply_step_command_files(
+pub(super) fn apply_step_command_files(
     job_name: &str,
     runner: &mut dyn CommandRunner,
     events: &mut Vec<ExecutionEvent>,
@@ -784,6 +801,35 @@ fn apply_step_command_files(
             .filter(|line| !line.is_empty())
             .map(ToOwned::to_owned)
             .collect();
+    }
+    // Capture this step's summary contribution BEFORE any later step can
+    // truncate or overwrite the job-wide file; each step's bytes are emitted
+    // separately so the outcome accumulates every step's summary.
+    let has_summary = command_files
+        .iter()
+        .any(|path| path == "GITHUB_STEP_SUMMARY");
+    if has_summary {
+        let summary_file =
+            cat_guest_file(job_name, "GITHUB_STEP_SUMMARY", runner, events, host_docker)?;
+        if !summary_file.trim().is_empty() {
+            command_state.summary = summary_file.clone();
+            events.push(ExecutionEvent::CommandFile {
+                path: "GITHUB_STEP_SUMMARY".into(),
+                bytes: summary_file.into_bytes(),
+            });
+        }
+        docker(
+            runner,
+            events,
+            host_docker,
+            &[
+                "exec",
+                job_name,
+                "sh",
+                "-c",
+                ": > /github/file_commands/GITHUB_STEP_SUMMARY",
+            ],
+        )?;
     }
     if !has_output && !has_env && !has_path {
         return Ok(());
@@ -1420,6 +1466,131 @@ mod tests {
             .calls
             .iter()
             .any(|(_, args)| { args.iter().any(|arg| arg == "test \"parity\" = parity") }));
+    }
+
+    #[test]
+    fn guest_captures_each_executed_step_summary_before_overwrite() {
+        let mut plan = sample_plan();
+        plan.services.clear();
+        plan.outputs.clear();
+        plan.command_files = vec!["GITHUB_STEP_SUMMARY".into()];
+        plan.steps[0].id = "first".into();
+        plan.steps[0].script = r#"printf 'first\n' > "$GITHUB_STEP_SUMMARY""#.into();
+        plan.steps.push(GuestStep {
+            id: "skipped".into(),
+            script: r#"printf 'skipped\n' > "$GITHUB_STEP_SUMMARY""#.into(),
+            action: None,
+            inputs: Vec::new(),
+            env: Vec::new(),
+            working_directory: String::new(),
+            condition: Some("false".into()),
+            continue_on_error: false,
+            timeout_ms: None,
+        });
+        plan.steps.push(GuestStep {
+            id: "second".into(),
+            script: r#"printf 'second\n' > "$GITHUB_STEP_SUMMARY""#.into(),
+            action: None,
+            inputs: Vec::new(),
+            env: Vec::new(),
+            working_directory: String::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_ms: None,
+        });
+        let result = |code: i32, stdout: &str| CommandResult {
+            code,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        };
+        let mut runner = RecordingCommands {
+            results: vec![
+                result(0, ""),         // network create
+                result(0, ""),         // job container
+                result(0, ""),         // command-file initialization
+                result(0, ""),         // first step
+                result(0, "first\n"),  // first summary snapshot
+                result(0, ""),         // first summary truncate
+                result(1, ""),         // second step fails
+                result(0, "second\n"), // second summary snapshot
+                result(0, ""),         // second summary truncate
+                result(0, ""),         // job cleanup
+                result(0, ""),         // network cleanup
+            ],
+            ..RecordingCommands::default()
+        };
+        let mut events = Vec::new();
+        let code = execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
+
+        assert_eq!(code, 1);
+        assert!(runner.results.is_empty(), "unconsumed Docker results");
+        assert_eq!(
+            runner
+                .calls
+                .iter()
+                .filter(|(_, args)| {
+                    args.iter()
+                        .any(|arg| arg == r#"printf 'first\n' > "$GITHUB_STEP_SUMMARY""#)
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            runner
+                .calls
+                .iter()
+                .filter(|(_, args)| {
+                    args.iter()
+                        .any(|arg| arg == r#"printf 'second\n' > "$GITHUB_STEP_SUMMARY""#)
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            runner
+                .calls
+                .iter()
+                .filter(|(_, args)| {
+                    args.iter()
+                        .any(|arg| arg == ": > /github/file_commands/GITHUB_STEP_SUMMARY")
+                })
+                .count(),
+            2
+        );
+
+        let mut active_step = None;
+        let mut summaries = Vec::new();
+        for event in &events {
+            match event {
+                ExecutionEvent::StepStarted { step_id } => active_step = Some(step_id.clone()),
+                ExecutionEvent::StepCompleted { .. } => active_step = None,
+                ExecutionEvent::CommandFile { path, bytes } if path == "GITHUB_STEP_SUMMARY" => {
+                    assert!(active_step.is_some(), "summary emitted outside a real step");
+                    if let Some(step_id) = &active_step {
+                        summaries.push((step_id.clone(), bytes.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            summaries,
+            vec![
+                ("first".into(), b"first\n".to_vec()),
+                ("second".into(), b"second\n".to_vec()),
+            ]
+        );
+        assert!(!runner
+            .calls
+            .iter()
+            .any(|(_, args)| { args.iter().any(|arg| arg.contains("skipped\\n")) }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::JobCompleted {
+                conclusion: JobConclusion::Failure,
+                exit_code: 1
+            }
+        )));
     }
 
     #[test]

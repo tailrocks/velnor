@@ -219,7 +219,7 @@ fn lock_owner_token() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     use rusqlite::{params, Connection};
@@ -282,6 +282,7 @@ mod tests {
             trigger_event: Some("push".to_owned()),
             queued_at: Some(Timestamp::UNIX_EPOCH),
             acquired_at: None,
+            slot_name: Some("slot-0".to_owned()),
             runner_name: None,
             trust_scope: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),
@@ -378,13 +379,43 @@ mod tests {
     }
 
     #[test]
+    fn raw_job_row_rejects_secret_markers_before_persistence() {
+        let temp = TempDb::new("raw-job-safety");
+        let store = Store::open(&temp.path).expect("open store");
+        let mut row = job("raw", "job-1", "org/repo");
+        row.job_name = "secret-token-value".to_owned();
+        let error = store
+            .record_job(&row)
+            .expect_err("raw row must fail closed");
+        assert_eq!(error.envelope.reason, "store.job.summary.invalid");
+        assert!(store.job_summaries("raw").unwrap().is_empty());
+    }
+
+    #[test]
     fn repeated_migration_is_idempotent() {
         let temp = TempDb::new("idempotent");
+        {
+            let store = Store::open(&temp.path).expect("seed database");
+            store.upsert_instance(&instance("preserved")).unwrap();
+            store
+                .record_job(&job("preserved", "j1", "org/preserved"))
+                .unwrap();
+        }
         for _ in 0..3 {
             let store = Store::open(&temp.path).expect("open idempotently");
             assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         }
         let conn = Connection::open(&temp.path).unwrap();
+        migrations::ensure_meta_tables(&conn).unwrap();
+        conn.execute("UPDATE schema_version SET version = 0", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "idempotence-test", Duration::from_secs(1)).unwrap();
+        let mut conn = conn;
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "idempotence-test", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "idempotence-test").unwrap();
         let version_rows: u32 = conn
             .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
             .unwrap();
@@ -393,6 +424,122 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM migration_lock", [], |r| r.get(0))
             .unwrap();
         assert_eq!(lock_rows, 1);
+        let reopened = Store::open(&temp.path).expect("reopen after reapplication");
+        let summaries = reopened.job_summaries("preserved").unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].repository, "org/preserved");
+        let retention_state: u32 = test_connection(&reopened)
+            .query_row("SELECT COUNT(*) FROM retention_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(retention_state, 1);
+    }
+
+    #[test]
+    fn upgrades_v1_schema_preserving_rows_and_indexes() {
+        let temp = TempDb::new("v1-upgrade");
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        migrations::ensure_meta_tables(&conn).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO jobs
+             (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+              phase, updated_at)
+             VALUES ('legacy', 'legacy-job', 'org/legacy', 'ci.yml', 'build', 42, 1,
+                     'queued', '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO jobs
+             (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+              phase, updated_at)
+             VALUES ('legacy', 'legacy-job-2', 'org/legacy', 'ci.yml', 'test', 42, 1,
+                     'queued', '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        migrations::acquire_lock(&conn, "v1-upgrade", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "v1-upgrade", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "v1-upgrade").unwrap();
+
+        let index_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_jobs_instance_run_attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1);
+        let job_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs
+                 WHERE instance_slug = 'legacy' AND run_id = 42 AND attempt = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_count, 2);
+        let retention_count: u32 = conn
+            .query_row("SELECT COUNT(*) FROM retention_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retention_count, 1);
+    }
+
+    #[test]
+    fn upgrades_legacy_v2_unique_index_without_dropping_rows() {
+        let temp = TempDb::new("v2-index-repair");
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        migrations::ensure_meta_tables(&conn).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX uq_jobs_instance_run_attempt
+             ON jobs (instance_slug, run_id, attempt)
+             WHERE run_id IS NOT NULL AND attempt IS NOT NULL;",
+        )
+        .unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[2].sql).unwrap();
+        conn.execute("UPDATE schema_version SET version = 2", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO jobs
+             (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+              phase, updated_at)
+             VALUES ('legacy', 'legacy-job', 'org/legacy', 'ci.yml', 'build', 7, 1,
+                     'queued', '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        migrations::acquire_lock(&conn, "v2-repair", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "v2-repair", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "v2-repair").unwrap();
+        let old_index: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'uq_jobs_instance_run_attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_index, 0);
+        let rows: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM jobs WHERE job_uid = 'legacy-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 
     #[test]
@@ -402,6 +549,7 @@ mod tests {
         conn.busy_timeout(BUSY_TIMEOUT).unwrap();
         migrations::ensure_meta_tables(&conn).unwrap();
         assert_eq!(migrations::current_version(&conn).unwrap(), 0);
+        migrations::acquire_lock(&conn, "tester", Duration::from_secs(1)).unwrap();
 
         let failure = migrations::apply_pending(
             &mut conn,
@@ -434,7 +582,128 @@ mod tests {
     }
 
     #[test]
-    fn five_concurrent_daemons_migrate_and_write_without_corruption() {
+    fn injected_v2_and_v3_failures_roll_back_independently() {
+        let temp = TempDb::new("rollback-later");
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        migrations::ensure_meta_tables(&conn).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute("UPDATE schema_version SET version = 1", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "later-rollback", Duration::from_secs(1)).unwrap();
+
+        let v2_failure = migrations::apply_pending(
+            &mut conn,
+            "later-rollback",
+            Some(&|version| {
+                if version == 2 {
+                    Err(StoreError::new(
+                        velnor_model::ExitClass::Operation,
+                        "store.test.v2-injected",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(v2_failure.envelope.reason, "store.test.v2-injected");
+        assert_eq!(migrations::current_version(&conn).unwrap(), 1);
+        let v2_index_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_jobs_instance_run_attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v2_index_count, 0);
+
+        let v3_failure = migrations::apply_pending(
+            &mut conn,
+            "later-rollback",
+            Some(&|version| {
+                if version == 3 {
+                    Err(StoreError::new(
+                        velnor_model::ExitClass::Operation,
+                        "store.test.v3-injected",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(v3_failure.envelope.reason, "store.test.v3-injected");
+        assert_eq!(migrations::current_version(&conn).unwrap(), 2);
+        let retention_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'retention_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retention_count, 0);
+
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "later-rollback", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "later-rollback").unwrap();
+    }
+
+    #[test]
+    fn injected_v4_failure_restores_historical_unique_index() {
+        let temp = TempDb::new("rollback-v4");
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        migrations::ensure_meta_tables(&conn).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(migrations::MIGRATIONS[2].sql).unwrap();
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX uq_jobs_instance_run_attempt
+             ON jobs (instance_slug, run_id, attempt)
+             WHERE run_id IS NOT NULL AND attempt IS NOT NULL;",
+        )
+        .unwrap();
+        conn.execute("UPDATE schema_version SET version = 3", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "rollback-v4", Duration::from_secs(1)).unwrap();
+        let error = migrations::apply_pending(
+            &mut conn,
+            "rollback-v4",
+            Some(&|version| {
+                if version == 4 {
+                    Err(StoreError::new(
+                        velnor_model::ExitClass::Operation,
+                        "store.test.v4-injected",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error.envelope.reason, "store.test.v4-injected");
+        assert_eq!(migrations::current_version(&conn).unwrap(), 3);
+        let old_index: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'uq_jobs_instance_run_attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_index, 1);
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "rollback-v4", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "rollback-v4").unwrap();
+    }
+
+    #[test]
+    fn five_concurrent_daemons_migrate_read_write_without_corruption() {
         // Stress hardening for the cold-parallel flake class: the exact
         // scenario runs five times, each on a fresh database file, so a
         // one-in-N startup race cannot hide behind a lucky single pass.
@@ -442,28 +711,48 @@ mod tests {
         for iteration in 0..5 {
             let temp = TempDb::new(&format!("concurrent-{iteration}"));
             let shared = Arc::new(temp.path.clone());
-            let handles: Vec<_> = (0..5)
+            let start = Arc::new(Barrier::new(10));
+            let active = Arc::new(Barrier::new(10));
+            let handles: Vec<_> = (0..10)
                 .map(|index| {
                     let path = Arc::clone(&shared);
+                    let start = Arc::clone(&start);
+                    let active = Arc::clone(&active);
                     thread::spawn(move || {
-                        let slug = format!("daemon-{index}");
+                        start.wait();
                         let store = Store::open(path.as_path()).expect("concurrent open");
-                        store.upsert_instance(&instance(&slug)).unwrap();
-                        let row = job(&slug, &format!("job-{index}"), "org/concurrent");
-                        store.record_job(&row).unwrap();
-                        assert!(store
-                            .record_job_transition(&slug, &row.job_uid, &acquire("c"))
-                            .unwrap());
-                        store
-                            .append_event(&EventRow {
-                                instance_slug: slug.clone(),
-                                event_kind: "slot.ready".to_owned(),
-                                subject: slug.clone(),
-                                correlation_id: None,
-                                occurred_at: Timestamp::now(),
-                                detail: None,
-                            })
-                            .unwrap();
+                        active.wait();
+                        if index < 5 {
+                            let slug = format!("daemon-{index}");
+                            for write_iteration in 0..10 {
+                                store.upsert_instance(&instance(&slug)).unwrap();
+                                let row = job(&slug, &format!("job-{index}"), "org/concurrent");
+                                store.record_job(&row).unwrap();
+                                assert!(store
+                                    .record_job_transition(
+                                        &slug,
+                                        &row.job_uid,
+                                        &acquire(&format!("c-{write_iteration}")),
+                                    )
+                                    .unwrap());
+                                store
+                                    .append_event(&EventRow {
+                                        instance_slug: slug.clone(),
+                                        event_kind: "slot.ready".to_owned(),
+                                        subject: slug.clone(),
+                                        correlation_id: None,
+                                        occurred_at: Timestamp::now(),
+                                        detail: None,
+                                    })
+                                    .unwrap();
+                            }
+                        } else {
+                            for _ in 0..50 {
+                                assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+                                let summaries = store.job_summaries("daemon-0").unwrap();
+                                assert!(summaries.len() <= 1);
+                            }
+                        }
                     })
                 })
                 .collect();
@@ -479,9 +768,9 @@ mod tests {
                     store
                         .transition_count(&slug, &format!("job-{index}"))
                         .unwrap(),
-                    1
+                    10
                 );
-                assert_eq!(store.event_count(&slug, &slug).unwrap(), 1);
+                assert_eq!(store.event_count(&slug, &slug).unwrap(), 10);
             }
             let conn = test_connection(&store);
             let integrity: String = conn
@@ -554,6 +843,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(owner, None, "lock is released after a no-op migration");
+
+        let stale = rfc3339(Timestamp::parse("2000-01-01T00:00:00Z").unwrap());
+        {
+            let conn = test_connection(&second);
+            conn.execute(
+                "UPDATE migration_lock SET owner = 'crashed-daemon', acquired_at = ?1, heartbeat_at = ?1",
+                [&stale],
+            )
+            .unwrap();
+            conn.execute("UPDATE schema_version SET version = 0", [])
+                .unwrap();
+        }
+        let recovered = Store::open_with(
+            &temp.path,
+            OpenOptions {
+                migration_lock_wait: Duration::from_secs(1),
+            },
+        )
+        .expect("stale migration lease is recoverable after restart");
+        assert_eq!(recovered.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(recovered.job_summaries("keeper").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_aborts_when_lock_ownership_is_lost() {
+        let temp = TempDb::new("lost-lock");
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        migrations::ensure_meta_tables(&conn).unwrap();
+        migrations::acquire_lock(&conn, "original-owner", Duration::from_secs(1)).unwrap();
+        conn.execute(
+            "UPDATE migration_lock SET owner = 'replacement-owner' WHERE singleton = 0",
+            [],
+        )
+        .unwrap();
+        let error = migrations::apply_pending(&mut conn, "original-owner", None)
+            .expect_err("migration must fail after ownership changes");
+        assert_eq!(error.envelope.reason, "store.migration.lock.lost");
     }
 
     #[test]

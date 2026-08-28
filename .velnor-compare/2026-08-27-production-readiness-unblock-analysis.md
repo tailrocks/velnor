@@ -12,7 +12,6 @@ document records the analysis and the single canonical admission finding.
 
 Older P0 inventory and cleanup artifacts referenced by this campaign are
 historical snapshots, not current host or run state.
-
 ## Dated read-only recheck — 2026-08-27
 
 Exact capture time unavailable. Runs `33010150644`, `32987670118`,
@@ -187,7 +186,6 @@ validation job.
    and zero-job responses; only explicit ownership resolution may authorize a
    later targeted cancellation attempt. No repository-side change can safely
    manufacture a terminal result for these objects.
-
 4. **Policy repair/re-admission after drain safety.** Only after the read-only
    capture and proof that accepted jobs are safe to drain may policy be repaired
    or capacity re-admitted. Do not restart, drain, delete registrations, or
@@ -320,3 +318,73 @@ Runner registrations, validation labels, and runner-group `4` membership were
 not captured in this partial recheck. No inference is made from their absence.
 No cleanup action is safe on this evidence. No mutation or dispatch occurred;
 the no-dispatch gate and production-readiness gate remain open.
+## Earlier queue-correlation snapshot
+
+This separate 2026-08-27 snapshot predates the later read-only refreshes above.
+It is retained as historical evidence, not current state.
+
+The three obsolete ChainArgos zero-job queue objects were correlated with
+GitHub's 2026-08-26 Actions incident report, which reported 3.7% of
+larger-runner jobs stuck waiting for runner assignment and subject to
+server-side cancellation. The correlation is only a matching hypothesis, not
+proof of the causal backend component. A GitHub community incident thread was
+also reported to describe the same zero-job/queued/contradictory-cancellation
+behavior and a cancellation fix dependent on backend mitigation.
+
+At that snapshot, replacement PR-head activity showed Rust Docker run
+`33012335308` executing successfully after `Detect changes (Velnor)`, while CI
+run `33012336003` had admitted validation and skipped jobs but its
+`ChainArgos / velnor lane` remained queued. Sentry was observed with one
+online/busy runner `velnor-sentry-slot-4-next-384305-71` (runner `14725`) and
+four older slot registrations offline. Logs were reported to show broker
+messages, JIT creation, Docker-job renewal, completion, and successor
+prewarming, proving only that one admission path was live.
+
+That snapshot also reported degraded fleet indicators:
+`github_reachable=false`, `routing_valid=false`,
+`runner_group_valid=false`, zero desired/actual/registered slots, failed
+doctor units, defunct runner processes, and registry/process disagreement.
+Those observations did not prove a workflow failure or establish the deeper
+backend cause; later evidence in this file supersedes their current-state
+meaning.
+## Verified main content — 2026-08-27T00:57:04Z
+
+`tailrocks/velnor` `main` was verified at SHA
+`a77a2c10cc1fa21e428345d7216dd3dea2c6938e`, delivered by PR `#404` through a
+squash merge. Direct content and local package verification confirmed:
+
+- Required generation handling is present in `slot.rs` and the Debian slot
+  service.
+- Explicit test launches include generation, with the corresponding service
+  assertions present and passing.
+- The parser regression test in `service.rs` passes.
+- The Linux procfs tail expression in `prove.rs` is present and verified.
+- Package unit checks pass.
+
+This proves code delivery and verification on `main` only. It does not prove
+Sentry state, a live Velnor lane, or production-readiness campaign completion.
+
+Cleanup, Sentry access/admission/readiness, live verification, and all related
+production-readiness gates remain open. This evidence authorizes no dispatch,
+rerun, re-admission, or other mutation.
+
+## Traceability — verified main
+
+PR #404 head `5bb53224eb93aae3be43d3bbcec406c3306452b9` -> base `main` parent `814b41d70b2ccd7c0e66c2236bfeabccd76d1255` -> squash merge `a77a2c10cc1fa21e428345d7216dd3dea2c6938e`; merged true at `2026-08-27T00:50:59Z`; current `refs/heads/main` equals merge SHA; source branch 404.
+
+## Remote-main traceability
+
+PR #404 head 5bb53224eb93aae3be43d3bbcec406c3306452b9 was merged into base main at base parent 814b41d70b2ccd7c0e66c2236bfeabccd76d1255 through squash merge a77a2c10cc1fa21e428345d7216dd3dea2c6938e; GitHub API reports refs/heads/main equals that squash SHA. This is remote evidence, not a local ref claim. Local refs remain stale: origin/main=814b41d70b2ccd7c0e66c2236bfeabccd76d1255, local main=fd7997b...; merge object is absent locally.
+
+Raw paths verified at the remote merge SHA:
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/src/node/slot.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/src/service.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/tests/node_arch.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/src/node/prove.rs
+https://raw.githubusercontent.com/tailrocks/velnor/a77a2c10cc1fa21e428345d7216dd3dea2c6938e/crates/velnor-runner/debian/velnor-slot@.service
+
+Local parser proof: cargo nextest run -p velnor-runner -E 'test(slot_requires_generation)' => 1 passed. Code delivery only; cleanup, Sentry, live-lane, and production gates remain open.
+
+Exact local parser proof: `cargo nextest run -p velnor-runner -E 'test(slot_requires_generation)'` = 1 passed.
+
+These prove code delivery only.

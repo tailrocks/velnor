@@ -39,6 +39,88 @@ pub enum CanaryStatus {
     Unknown,
 }
 
+/// Broker/session recovery state, separate from control-loop liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryHealthState {
+    Healthy,
+    MissingSession,
+    Backoff,
+    Quarantined,
+}
+
+impl RecoveryHealthState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::MissingSession => "missing_session",
+            Self::Backoff => "backoff",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
+/// Stable operator-facing identity for a derived health condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthAlertCode {
+    ControlNotLive,
+    JournalNotWritable,
+    GithubUnreachable,
+    RoutingInvalid,
+    RunnerGroupInvalid,
+    ResourceUnsafe,
+    RecoveryMissingSession,
+    RecoveryBackoff,
+    RecoveryQuarantined,
+    CapacityShortfall,
+    NoSchedulableCapacity,
+}
+
+impl HealthAlertCode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlNotLive => "control_not_live",
+            Self::JournalNotWritable => "journal_not_writable",
+            Self::GithubUnreachable => "github_unreachable",
+            Self::RoutingInvalid => "routing_invalid",
+            Self::RunnerGroupInvalid => "runner_group_invalid",
+            Self::ResourceUnsafe => "resource_unsafe",
+            Self::RecoveryMissingSession => "recovery_missing_session",
+            Self::RecoveryBackoff => "recovery_backoff",
+            Self::RecoveryQuarantined => "recovery_quarantined",
+            Self::CapacityShortfall => "capacity_shortfall",
+            Self::NoSchedulableCapacity => "no_schedulable_capacity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthAlertSeverity {
+    Warning,
+    Critical,
+}
+
+impl HealthAlertSeverity {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct HealthAlert {
+    pub code: HealthAlertCode,
+    pub severity: HealthAlertSeverity,
+    pub message: &'static str,
+}
+
 impl CanaryStatus {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -61,7 +143,6 @@ pub struct HealthDocument {
     pub runner_group_valid: bool,
     pub desired_ready_slots: u32,
     pub actual_ready_slots: u32,
-    pub surge_ready_slots: u32,
     pub registered_slots: u32,
     pub capacity_permits: u32,
     pub executor_ready_slots: u32,
@@ -74,7 +155,7 @@ pub struct HealthDocument {
 
 impl HealthDocument {
     /// Every JSON object key the health contract requires, in document order.
-    pub const REQUIRED_KEYS: [&'static str; 16] = [
+    pub const REQUIRED_KEYS: [&'static str; 15] = [
         "control_live",
         "journal_writable",
         "github_reachable",
@@ -82,7 +163,6 @@ impl HealthDocument {
         "runner_group_valid",
         "desired_ready_slots",
         "actual_ready_slots",
-        "surge_ready_slots",
         "registered_slots",
         "capacity_permits",
         "executor_ready_slots",
@@ -105,7 +185,6 @@ impl HealthDocument {
             runner_group_valid: false,
             desired_ready_slots: 0,
             actual_ready_slots: 0,
-            surge_ready_slots: 0,
             registered_slots: 0,
             capacity_permits: 0,
             executor_ready_slots: 0,
@@ -141,6 +220,69 @@ impl HealthDocument {
             return FleetHealthState::NotReady;
         }
         FleetHealthState::Ready
+    }
+
+    /// Return stable operator-facing alerts derived from the health vector.
+    #[must_use]
+    pub fn alerts(&self) -> Vec<HealthAlert> {
+        let mut alerts = Vec::with_capacity(6);
+        let mut push = |code, severity, message| {
+            alerts.push(HealthAlert {
+                code,
+                severity,
+                message,
+            });
+        };
+        if !self.control_live {
+            push(
+                HealthAlertCode::ControlNotLive,
+                HealthAlertSeverity::Critical,
+                "control cycle is not live",
+            );
+        }
+        if !self.journal_writable {
+            push(
+                HealthAlertCode::JournalNotWritable,
+                HealthAlertSeverity::Critical,
+                "durable journal is not writable",
+            );
+        }
+        if !self.github_reachable {
+            push(
+                HealthAlertCode::GithubUnreachable,
+                HealthAlertSeverity::Warning,
+                "GitHub is not reachable",
+            );
+        }
+        if !self.routing_valid {
+            push(
+                HealthAlertCode::RoutingInvalid,
+                HealthAlertSeverity::Critical,
+                "routing proof is invalid",
+            );
+        }
+        if !self.runner_group_valid {
+            push(
+                HealthAlertCode::RunnerGroupInvalid,
+                HealthAlertSeverity::Critical,
+                "runner group proof is invalid",
+            );
+        }
+        if self.actual_ready_slots < self.desired_ready_slots {
+            push(
+                HealthAlertCode::CapacityShortfall,
+                HealthAlertSeverity::Warning,
+                "ready capacity is below the desired floor",
+            );
+        }
+        if self.actual_ready_slots == 0 || self.capacity_permits == 0 {
+            push(
+                HealthAlertCode::NoSchedulableCapacity,
+                HealthAlertSeverity::Critical,
+                "no schedulable capacity is available",
+            );
+        }
+        alerts
     }
 }
 
@@ -285,7 +427,6 @@ pub struct CapacityPermit {
     pub slot_id: SlotId,
     pub generation: Generation,
     pub held: bool,
-    pub surge: bool,
 }
 
 /// End-to-end vs component SLI dimensions. Numerical SLAs are not published
@@ -320,9 +461,8 @@ mod tests {
             runner_group_valid: true,
             desired_ready_slots: 4,
             actual_ready_slots: 4,
-            surge_ready_slots: 1,
             registered_slots: 4,
-            capacity_permits: 5,
+            capacity_permits: 4,
             executor_ready_slots: 4,
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,

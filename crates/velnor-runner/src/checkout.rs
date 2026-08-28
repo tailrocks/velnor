@@ -122,24 +122,7 @@ pub(crate) fn checkout_plan(
         step_id: checkout_step_id(step, index),
         display_name,
         clone_url,
-        version: checkout_ref(step).or_else(|| {
-            checkout_repository
-                .as_deref()
-                .filter(|repository| {
-                    self_repository
-                        .name
-                        .as_deref()
-                        .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
-                })
-                .and_then(|_| self_repository.version.clone())
-                .or_else(|| {
-                    if checkout_repository.is_none() {
-                        self_repository.version.clone()
-                    } else {
-                        None
-                    }
-                })
-        }),
+        version: checkout_version(job, step, checkout_repository.as_deref(), &self_repository),
         destination,
         token,
         fetch_depth: checkout_fetch_depth(step)?,
@@ -766,6 +749,49 @@ fn checkout_ref(step: &ActionStep) -> Option<String> {
         .and_then(|inputs| input_string(inputs, &["ref", "Ref"]))
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn checkout_version(
+    job: &AgentJobRequestMessage,
+    step: &ActionStep,
+    checkout_repository: Option<&str>,
+    self_repository: &RepositoryResource,
+) -> Option<String> {
+    if let Some(reference) = checkout_ref(step) {
+        return Some(reference);
+    }
+
+    let is_self_checkout = checkout_repository.is_none_or(|repository| {
+        self_repository
+            .name
+            .as_deref()
+            .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
+    });
+    if !is_self_checkout {
+        return None;
+    }
+
+    // GitHub's pull_request `github.sha` is an ephemeral merge commit that is
+    // not advertised as a fetchable object. The merge ref is the stable remote
+    // ref for the same checkout and is required for shallow fetches.
+    self_repository
+        .git_ref
+        .as_deref()
+        .or_else(|| job_string(job, "github.ref"))
+        .filter(|reference| is_pull_request_ref(reference))
+        .map(ToOwned::to_owned)
+        .or_else(|| self_repository.version.clone())
+}
+
+fn is_pull_request_ref(reference: &str) -> bool {
+    let mut parts = reference.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some("refs"), Some("pull"), Some(number), Some(kind), None)
+            if !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && matches!(kind, "merge" | "head")
+    )
 }
 
 fn checkout_repository(step: &ActionStep) -> Option<String> {
@@ -1603,6 +1629,97 @@ mod tests {
         assert!(!plans[0].fetch_tags);
         assert!(plans[0].persist_credentials);
         assert!(plans[0].clean);
+    }
+
+    #[test]
+    fn plans_self_pull_request_checkout_from_remote_ref() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "PR",
+            "requestId": 1,
+            "variables": {
+                "github.ref": { "value": "refs/pull/408/merge" }
+            },
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/pull/408/merge",
+                    "version": "ephemeral-merge-sha",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("refs/pull/408/merge"));
+    }
+
+    #[test]
+    fn plans_self_push_checkout_from_exact_sha() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Push",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/heads/main",
+                    "version": "push-commit-sha",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("push-commit-sha"));
+    }
+
+    #[test]
+    fn explicit_checkout_ref_overrides_pull_request_remote_ref() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "PR",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/pull/408/merge",
+                    "version": "ephemeral-merge-sha",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": { "ref": "refs/tags/v1.2.3" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("refs/tags/v1.2.3"));
     }
 
     #[test]

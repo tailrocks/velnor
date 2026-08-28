@@ -39,7 +39,7 @@ pub use guest_plan::{
 };
 pub use job_summary::{
     InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobSummary,
-    NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
+    NormalizedJob, ProductionFailureCategory, Slug, TriggerEvent, MAX_SLUG_LEN,
 };
 pub use lifecycle::{transition_target, EventReason, InvalidLifecycleToken, JobState};
 pub use microvm::{
@@ -48,8 +48,9 @@ pub use microvm::{
     JAILER_CONTROLS,
 };
 pub use node::{
-    ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthDocument, JobId,
-    NotReady, ReadyProof, SliDimension, SlotId,
+    ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthAlert,
+    HealthAlertCode, HealthAlertSeverity, HealthDocument, JobId, NotReady, ReadyProof,
+    RecoveryHealthState, SliDimension, SlotId,
 };
 pub use phase::{SlotKind, SlotPhase};
 pub use resources::{
@@ -58,9 +59,9 @@ pub use resources::{
 };
 pub use sanitized::{IdentityRef, RepositoryRef, SanitizedUrl, SecretRef};
 pub use scheduler::{
-    RunnerScaleSetMessageResponse, RunnerScaleSetStatistic, ScaleSetJobMessageType,
-    ScaleSetNotProven, SchedulerKind, SCALESET_API_VERSION, SCALESET_ENDPOINT,
-    SCALESET_MAX_CAPACITY_HEADER, SCALESET_UPSTREAM_COMMIT,
+    RunnerScaleSetMessageResponse, RunnerScaleSetStatistic, ScaleSetJobMessageType, SchedulerKind,
+    SchedulerNotCurrent, SCALESET_API_VERSION, SCALESET_ENDPOINT, SCALESET_MAX_CAPACITY_HEADER,
+    SCALESET_UPSTREAM_COMMIT,
 };
 pub use since::{InvalidSince, Since};
 pub use source::Source;

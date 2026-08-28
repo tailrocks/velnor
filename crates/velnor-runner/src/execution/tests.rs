@@ -3,6 +3,109 @@ use crate::executor::CommandResult;
 use std::path::{Path, PathBuf};
 use velnor_model::{ExecutionBackendKind, ExecutionFile};
 
+#[test]
+fn each_guest_step_summary_is_captured_before_the_next_step_writes() {
+    let mut runner = RecordingCommands {
+        results: vec![
+            CommandResult {
+                code: 0,
+                stdout: "step-one-summary\n".into(),
+                stderr: String::new(),
+            },
+            CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            CommandResult {
+                code: 0,
+                stdout: "step-two-overwrites-with-\x3e\n".into(),
+                stderr: String::new(),
+            },
+            CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ],
+        ..RecordingCommands::default()
+    };
+    let files = vec!["GITHUB_STEP_SUMMARY".to_string()];
+    let mut events = Vec::new();
+    let mut first = crate::script_step::StepCommandState::default();
+    super::guest_runtime::apply_step_command_files(
+        "job",
+        &mut runner,
+        &mut events,
+        false,
+        &files,
+        &mut first,
+    )
+    .unwrap();
+    assert_eq!(first.summary, "step-one-summary\n");
+    let mut second = crate::script_step::StepCommandState::default();
+    super::guest_runtime::apply_step_command_files(
+        "job",
+        &mut runner,
+        &mut events,
+        false,
+        &files,
+        &mut second,
+    )
+    .unwrap();
+    assert_eq!(second.summary, "step-two-overwrites-with->\n");
+    let captured: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ExecutionEvent::CommandFile { path, bytes } if path == "GITHUB_STEP_SUMMARY" => {
+                Some(bytes.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        captured,
+        [
+            b"step-one-summary\n".to_vec(),
+            b"step-two-overwrites-with->\n".to_vec()
+        ]
+    );
+}
+
+#[test]
+fn checkout_guest_inputs_carry_token_and_flags() {
+    let plan = crate::checkout::CheckoutPlan {
+        step_id: "co".into(),
+        display_name: "checkout".into(),
+        clone_url: "https://github.com/tailrocks/velnor".into(),
+        version: Some("refs/pull/1/merge".into()),
+        destination: PathBuf::from("/__w/repo"),
+        token: Some("secret-token".into()),
+        fetch_depth: Some(1),
+        fetch_tags: true,
+        persist_credentials: false,
+        clean: true,
+        lfs: false,
+        condition: None,
+        continue_on_error: false,
+        timeout_minutes: None,
+    };
+    let inputs =
+        super::backend::executable_inputs(&crate::executor::ExecutableStep::Checkout(plan));
+    let get = |name: &str| {
+        inputs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("missing input {name}"))
+    };
+    assert_eq!(get("token"), "secret-token");
+    assert_eq!(get("fetch_tags"), "1");
+    assert_eq!(get("persist_credentials"), "0");
+    assert_eq!(get("clean"), "1");
+    assert_eq!(get("fetch_depth"), "1");
+}
+
 fn seed_microvm_world(fs: &mut MemoryFs, root: &Path) {
     fs.create_dir_all(root).unwrap();
     for (name, bytes) in [
@@ -1059,6 +1162,7 @@ fn docker_backend_uses_production_engine_when_present() {
         .unwrap()
     };
     assert_eq!(outcome.conclusion, "success");
+    assert!(outcome.step_summaries.is_empty());
     assert!(outcome.masked);
     assert!(runner
         .calls
@@ -1656,7 +1760,7 @@ fn synthetic_microvm_probe_runs_guest_docker_without_host_socket() {
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
     world.allow_inline_guest_plan = false;
     world.vsock = Some(&mut vsock);
-    crate::execution::run_synthetic_microvm_probe(&mut world).unwrap();
+    crate::execution::run_synthetic_microvm_probe_with(&mut world, "velnor-probe").unwrap();
     assert!(runner
         .calls
         .iter()
@@ -1680,7 +1784,8 @@ fn synthetic_microvm_probe_fails_closed_when_guest_docker_unhealthy() {
     let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
     world.allow_inline_guest_plan = false;
     world.vsock = Some(&mut vsock);
-    let err = crate::execution::run_synthetic_microvm_probe(&mut world).unwrap_err();
+    let err =
+        crate::execution::run_synthetic_microvm_probe_with(&mut world, "velnor-probe").unwrap_err();
     assert!(err.to_string().contains("guest Docker"), "{err}");
     assert!(!runner.calls.iter().any(|(program, args)| {
         program == "docker" && args.iter().any(|arg| arg.contains("docker.sock"))

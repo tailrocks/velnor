@@ -56,7 +56,7 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
 }
 
 #[test]
-fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
+fn debian_preinst_supports_scoped_canary_drains() {
     let preinst = include_str!("../../debian/preinst");
 
     assert!(preinst.contains("PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock"));
@@ -73,9 +73,9 @@ fn debian_preinst_requires_guardian_to_be_confirmed_inactive() {
     ));
     assert!(preinst
         .contains("systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer'"));
-    assert!(preinst.contains(
-        "guardian_inactive || fail \"refusing upgrade: velnor-guardian.service is not confirmed inactive. Stop it first: systemctl stop velnor-guardian.service.\""
-    ));
+    assert!(preinst.contains("VELNOR_DRAINED_UNITS"));
+    assert!(preinst.contains("scoped_units_drained"));
+    assert!(preinst.contains("invalid scoped unit name"));
 }
 
 #[cfg(target_os = "linux")]

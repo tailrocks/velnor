@@ -328,6 +328,105 @@ impl TryFrom<&str> for InfrastructureCategory {
     }
 }
 
+/// Production-readiness failure taxonomy.
+///
+/// This closed set is separate from [`InfrastructureCategory`]: the latter
+/// preserves the two existing Docker classifier values stored in job
+/// summaries, while this type covers the readiness plan's broader failure
+/// categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ProductionFailureCategory {
+    #[serde(rename = "protocol")]
+    Protocol,
+    #[serde(rename = "workflow")]
+    Workflow,
+    #[serde(rename = "expression")]
+    Expression,
+    #[serde(rename = "adapter")]
+    Adapter,
+    #[serde(rename = "checkout")]
+    Checkout,
+    #[serde(rename = "container")]
+    Container,
+    #[serde(rename = "executor")]
+    Executor,
+    #[serde(rename = "artifact_results")]
+    ArtifactResults,
+    #[serde(rename = "cache")]
+    Cache,
+    #[serde(rename = "storage")]
+    Storage,
+    #[serde(rename = "lifecycle")]
+    Lifecycle,
+    #[serde(rename = "watchdog")]
+    Watchdog,
+    #[serde(rename = "release")]
+    Release,
+    #[serde(rename = "permissions")]
+    Permissions,
+    #[serde(rename = "repository_configuration")]
+    RepositoryConfiguration,
+}
+
+impl ProductionFailureCategory {
+    /// Every production-readiness category in canonical taxonomy order.
+    pub const ALL: [Self; 15] = [
+        Self::Protocol,
+        Self::Workflow,
+        Self::Expression,
+        Self::Adapter,
+        Self::Checkout,
+        Self::Container,
+        Self::Executor,
+        Self::ArtifactResults,
+        Self::Cache,
+        Self::Storage,
+        Self::Lifecycle,
+        Self::Watchdog,
+        Self::Release,
+        Self::Permissions,
+        Self::RepositoryConfiguration,
+    ];
+
+    /// Canonical serialized spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Protocol => "protocol",
+            Self::Workflow => "workflow",
+            Self::Expression => "expression",
+            Self::Adapter => "adapter",
+            Self::Checkout => "checkout",
+            Self::Container => "container",
+            Self::Executor => "executor",
+            Self::ArtifactResults => "artifact_results",
+            Self::Cache => "cache",
+            Self::Storage => "storage",
+            Self::Lifecycle => "lifecycle",
+            Self::Watchdog => "watchdog",
+            Self::Release => "release",
+            Self::Permissions => "permissions",
+            Self::RepositoryConfiguration => "repository_configuration",
+        }
+    }
+}
+
+impl TryFrom<&str> for ProductionFailureCategory {
+    type Error = InvalidJobSummaryField;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        Self::ALL
+            .into_iter()
+            .find(|category| category.as_str() == raw)
+            .ok_or_else(|| {
+                InvalidJobSummaryField::rule(
+                    "production_failure_category",
+                    "is not a known production failure category",
+                )
+            })
+    }
+}
+
 /// Already-normalized inputs for [`JobSummary::from_normalized`].
 ///
 /// Every string is a slug candidate revalidated at construction; there is
@@ -349,6 +448,7 @@ pub struct NormalizedJob {
     pub trigger_event: Option<TriggerEvent>,
     pub queued_at: Option<Timestamp>,
     pub acquired_at: Option<Timestamp>,
+    pub slot_name: Option<String>,
     pub runner_name: Option<String>,
     pub trust_scope: Option<String>,
     pub resource_policy: Option<String>,
@@ -380,6 +480,7 @@ pub struct JobSummary {
     trigger_event: Option<TriggerEvent>,
     queued_at: Option<Timestamp>,
     acquired_at: Option<Timestamp>,
+    slot_name: Option<Slug>,
     runner_name: Option<Slug>,
     trust_scope: Option<Slug>,
     resource_policy: Option<Slug>,
@@ -404,6 +505,7 @@ struct JobSummaryWire {
     trigger_event: Option<TriggerEvent>,
     queued_at: Option<Timestamp>,
     acquired_at: Option<Timestamp>,
+    slot_name: Option<String>,
     runner_name: Option<String>,
     trust_scope: Option<String>,
     resource_policy: Option<String>,
@@ -429,6 +531,7 @@ impl TryFrom<JobSummaryWire> for JobSummary {
             trigger_event: wire.trigger_event,
             queued_at: wire.queued_at,
             acquired_at: wire.acquired_at,
+            slot_name: wire.slot_name,
             runner_name: wire.runner_name,
             trust_scope: wire.trust_scope,
             resource_policy: wire.resource_policy,
@@ -473,6 +576,7 @@ impl JobSummary {
             trigger_event: input.trigger_event,
             queued_at: input.queued_at,
             acquired_at: input.acquired_at,
+            slot_name: optional_slug("slot_name", input.slot_name)?,
             runner_name: optional_slug("runner_name", input.runner_name)?,
             trust_scope: optional_slug("trust_scope", input.trust_scope)?,
             resource_policy: optional_slug("resource_policy", input.resource_policy)?,
@@ -545,6 +649,11 @@ impl JobSummary {
     #[must_use]
     pub fn runner_name(&self) -> Option<&str> {
         self.runner_name.as_ref().map(Slug::as_str)
+    }
+
+    #[must_use]
+    pub fn slot_name(&self) -> Option<&str> {
+        self.slot_name.as_ref().map(Slug::as_str)
     }
 
     #[must_use]
@@ -622,6 +731,7 @@ mod tests {
             trigger_event: Some(TriggerEvent::WorkflowDispatch),
             queued_at: Some(Timestamp::parse("2026-08-24T12:30:45Z").unwrap()),
             acquired_at: Some(Timestamp::parse("2026-08-24T12:30:47Z").unwrap()),
+            slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
             trust_scope: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),
@@ -785,6 +895,53 @@ mod tests {
         assert!(JobPhase::try_from("queued ").is_err());
         assert!(JobConclusion::try_from("").is_err());
         assert!(InfrastructureCategory::try_from("docker_network").is_err());
+    }
+
+    #[test]
+    fn every_production_failure_category_has_stable_serde_spelling() {
+        let expected = [
+            "protocol",
+            "workflow",
+            "expression",
+            "adapter",
+            "checkout",
+            "container",
+            "executor",
+            "artifact_results",
+            "cache",
+            "storage",
+            "lifecycle",
+            "watchdog",
+            "release",
+            "permissions",
+            "repository_configuration",
+        ];
+
+        let actual: Vec<&str> = ProductionFailureCategory::ALL
+            .into_iter()
+            .map(ProductionFailureCategory::as_str)
+            .collect();
+        assert_eq!(actual, expected);
+
+        for category in ProductionFailureCategory::ALL {
+            let spelling = category.as_str();
+            assert_eq!(
+                serde_json::to_string(&category).unwrap(),
+                format!("\"{spelling}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<ProductionFailureCategory>(&format!("\"{spelling}\""))
+                    .unwrap(),
+                category
+            );
+            assert_eq!(ProductionFailureCategory::try_from(spelling), Ok(category));
+        }
+    }
+
+    #[test]
+    fn unknown_production_failure_category_deserialization_fails_closed() {
+        assert!(serde_json::from_str::<ProductionFailureCategory>("\"unknown\"").is_err());
+        assert!(ProductionFailureCategory::try_from("artifact/results").is_err());
     }
 
     #[test]

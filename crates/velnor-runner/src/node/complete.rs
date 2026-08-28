@@ -262,11 +262,10 @@ mod tests {
                 valid: true,
                 group_valid: true,
             },
-            Event::DesiredCapacity { ready: 1, surge: 0 },
+            Event::DesiredCapacity { ready: 1 },
             Event::PermitReserved {
                 slot_id: slot.clone(),
                 generation: g,
-                surge: false,
             },
             Event::ExecutorProven {
                 slot_id: slot.clone(),
@@ -537,11 +536,10 @@ mod tests {
                 valid: true,
                 group_valid: true,
             },
-            Event::DesiredCapacity { ready: 1, surge: 0 },
+            Event::DesiredCapacity { ready: 1 },
             Event::PermitReserved {
                 slot_id: slot.clone(),
                 generation: g,
-                surge: false,
             },
             Event::ExecutorProven {
                 slot_id: slot.clone(),

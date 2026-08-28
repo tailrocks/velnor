@@ -607,9 +607,15 @@ mod tests {
     fn stale_lease_is_reaped() {
         let root = root("stale");
         let lease = ScopeLease::acquire(&root, "cache", "trusted/old", Duration::ZERO).unwrap();
-        std::mem::forget(lease);
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            release_receiver.recv().unwrap();
+            drop(lease);
+        });
         std::thread::sleep(Duration::from_secs(1));
         assert!(active_scopes(&root, Duration::ZERO).unwrap().is_empty());
+        release_sender.send(()).unwrap();
+        holder.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

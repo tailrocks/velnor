@@ -43,7 +43,7 @@ fn prime_two_ready(journal: &mut Journal) {
             valid: true,
             group_valid: true,
         },
-        Event::DesiredCapacity { ready: 2, surge: 1 },
+        Event::DesiredCapacity { ready: 2 },
     ] {
         journal.apply(event).unwrap();
     }
@@ -53,7 +53,6 @@ fn prime_two_ready(journal: &mut Journal) {
             Event::PermitReserved {
                 slot_id: slot_id.clone(),
                 generation: g,
-                surge: false,
             },
             Event::ExecutorProven {
                 slot_id: slot_id.clone(),
@@ -144,8 +143,6 @@ fn slot_kill_drops_one_unit_of_capacity() {
             "iso",
             "--desired-ready",
             "2",
-            "--surge",
-            "1",
             "--once",
             "--spawn-slots",
             "false",
@@ -168,6 +165,15 @@ fn slot_kill_drops_one_unit_of_capacity() {
             (slot.slot_id.0 == "iso-1" || slot.slot_id.0 == "iso-2") && slot.pid.is_some()
         })
         .count();
+    let state = Journal::open(dir.join("journal.db"))
+        .unwrap()
+        .load_state()
+        .unwrap();
+    assert_eq!(
+        state.slots.len(),
+        2,
+        "configured capacity must not create slot 3"
+    );
     let live: Vec<bool> = children
         .iter_mut()
         .map(|child| child.try_wait().ok().flatten().is_none())
@@ -311,7 +317,7 @@ fn prime_named_ready(journal: &mut Journal, scope: &str) {
             valid: true,
             group_valid: true,
         },
-        Event::DesiredCapacity { ready: 1, surge: 0 },
+        Event::DesiredCapacity { ready: 1 },
     ] {
         journal.apply(event).unwrap();
     }
@@ -320,7 +326,6 @@ fn prime_named_ready(journal: &mut Journal, scope: &str) {
         Event::PermitReserved {
             slot_id: slot_id.clone(),
             generation: g,
-            surge: false,
         },
         Event::ExecutorProven {
             slot_id: slot_id.clone(),
@@ -367,8 +372,505 @@ fn run_runner(dir: &Path, args: &[&str]) -> std::process::ExitStatus {
         .unwrap()
 }
 
+#[test]
+fn direct_controller_capacity_is_exact_for_zero_one_and_four() {
+    for configured in [0_u32, 1, 4] {
+        let dir = scratch(&format!("capacity-{configured}"));
+        let status = run_runner(
+            &dir,
+            &[
+                "controller",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                "capacity",
+                "--desired-ready",
+                &configured.to_string(),
+                "--once",
+                "--spawn-slots",
+                "false",
+            ],
+        );
+        assert!(status.success(), "N={configured}: {}", cmd_err(&dir));
+
+        let state = Journal::open(dir.join("journal.db"))
+            .unwrap()
+            .load_state()
+            .unwrap();
+        let health = state.health();
+        let slot_count = state.slots.len() as u32;
+        let permit_count = state.slots.iter().filter(|slot| slot.permit_held).count() as u32;
+
+        assert_eq!(slot_count, configured, "N={configured}: {state:?}");
+        assert_eq!(permit_count, configured, "N={configured}: {state:?}");
+        assert_eq!(
+            health.desired_ready_slots, configured,
+            "N={configured}: {health:?}"
+        );
+        assert_eq!(
+            health.capacity_permits, configured,
+            "N={configured}: {health:?}"
+        );
+        assert_eq!(health.actual_ready_slots, 0, "N={configured}: {health:?}");
+        assert_eq!(health.registered_slots, 0, "N={configured}: {health:?}");
+        assert_eq!(health.executor_ready_slots, 0, "N={configured}: {health:?}");
+        assert!(state.jobs.is_empty(), "N={configured}: {state:?}");
+        assert!(state.outbox.is_empty(), "N={configured}: {state:?}");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+#[test]
+fn contaminated_capacity_fails_closed_across_controller_restart_reconcile() {
+    let dir = scratch("legacy-restart-reconcile");
+    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    assert!(
+        !journal
+            .apply(Event::DesiredCapacity { ready: 2 })
+            .unwrap()
+            .rejected
+    );
+    for index in 1..=3 {
+        assert!(
+            !journal
+                .apply(Event::PermitReserved {
+                    slot_id: SlotId(format!("legacy-{index}")),
+                    generation: Generation::INITIAL,
+                })
+                .unwrap()
+                .rejected
+        );
+    }
+    drop(journal);
+
+    for restart in 1..=2 {
+        let status = run_runner(
+            &dir,
+            &[
+                "controller",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                "legacy",
+                "--desired-ready",
+                "2",
+                "--once",
+            ],
+        );
+        assert!(!status.success(), "restart {restart} must fail closed");
+        assert!(cmd_err(&dir).contains("journal.capacity.invalid"));
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        let state = reopened.load_state().unwrap();
+        assert!(state.capacity_invalid);
+        assert_eq!(state.slots.len(), 3);
+        assert_eq!(state.advertised_capacity(), 0);
+        assert_eq!(state.health().state, FleetHealthState::NotReady);
+        assert_no_owned_slot_processes(&dir, "legacy");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}
+
 fn cmd_err(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("cmd.err")).unwrap_or_default()
+}
+
+fn assert_no_owned_slot_processes(dir: &Path, scope: &str) {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .expect("inspect test-owned processes");
+    let dir_needle = dir.to_str().unwrap();
+    let scope_needle = format!("--scope {scope}");
+    let process_listing = String::from_utf8_lossy(&output.stdout);
+    let owned = process_listing
+        .lines()
+        .filter(|line| line.contains(" slot "))
+        .filter(|line| line.contains(dir_needle) && line.contains(&scope_needle))
+        .collect::<Vec<_>>();
+    assert!(
+        owned.is_empty(),
+        "unexpected owned slot processes: {owned:?}"
+    );
+}
+
+fn process_snapshot(pid: u32) -> String {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "state=,command="])
+        .output()
+        .expect("inspect test-owned process");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn process_is_owned_and_live(pid: u32, dir: &Path, scope: &str) -> bool {
+    let snapshot = process_snapshot(pid);
+    let mut fields = snapshot.splitn(2, char::is_whitespace);
+    let state = fields.next().unwrap_or_default();
+    let command = fields.next().unwrap_or_default();
+    !snapshot.is_empty()
+        && !state.contains('Z')
+        && command.contains(" slot ")
+        && command.contains(dir.to_str().unwrap())
+        && command.contains(&format!("--scope {scope}"))
+}
+
+fn controller_is_owned_and_live(pid: u32, dir: &Path, scope: &str) -> bool {
+    let snapshot = process_snapshot(pid);
+    let mut fields = snapshot.splitn(2, char::is_whitespace);
+    let state = fields.next().unwrap_or_default();
+    let command = fields.next().unwrap_or_default();
+    !snapshot.is_empty()
+        && !state.contains('Z')
+        && command.contains(" controller ")
+        && command.contains(dir.to_str().unwrap())
+        && command.contains(&format!("--scope {scope}"))
+}
+
+struct SupervisedProcessGuard {
+    controller: Option<std::process::Child>,
+    dir: PathBuf,
+    scope: String,
+    slot_pids: Vec<u32>,
+}
+
+impl SupervisedProcessGuard {
+    fn new(controller: std::process::Child, dir: &Path, scope: &str) -> Self {
+        Self {
+            controller: Some(controller),
+            dir: dir.to_owned(),
+            scope: scope.to_owned(),
+            slot_pids: Vec::new(),
+        }
+    }
+
+    fn record_slot_pids(&mut self, pids: &[u32]) {
+        self.slot_pids.extend_from_slice(pids);
+        self.slot_pids.sort_unstable();
+        self.slot_pids.dedup();
+    }
+
+    fn controller_is_running(&mut self) -> bool {
+        self.controller
+            .as_mut()
+            .is_some_and(|child| child.try_wait().expect("inspect controller").is_none())
+    }
+
+    fn discover_slot_pids(&mut self) {
+        if let Ok(journal) = Journal::open(self.dir.join("journal.db")) {
+            if let Ok(state) = journal.load_state() {
+                let pids = state
+                    .slots
+                    .iter()
+                    .filter_map(|slot| slot.pid)
+                    .collect::<Vec<_>>();
+                self.record_slot_pids(&pids);
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if let Some(mut controller) = self.controller.take() {
+            if controller
+                .try_wait()
+                .expect("inspect controller during cleanup")
+                .is_none()
+            {
+                let _ = controller.kill();
+            }
+            let _ = controller.wait();
+        }
+
+        self.discover_slot_pids();
+        for pid in self.slot_pids.iter().copied() {
+            terminate_test_process(pid, &self.dir, &self.scope);
+        }
+    }
+}
+
+impl Drop for SupervisedProcessGuard {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn wait_for_supervised_slots(guard: &mut SupervisedProcessGuard, expected: usize) -> Vec<u32> {
+    let dir = guard.dir.clone();
+    let scope = guard.scope.clone();
+    for _ in 0..100 {
+        assert!(
+            guard.controller_is_running(),
+            "supervised controller exited before N={expected} slots: {}",
+            cmd_err(&dir)
+        );
+        if let Ok(state) =
+            Journal::open(dir.join("journal.db")).and_then(|journal| journal.load_state())
+        {
+            let pids = state
+                .slots
+                .iter()
+                .filter_map(|slot| slot.pid)
+                .collect::<Vec<_>>();
+            guard.record_slot_pids(&pids);
+            if state.slots.len() == expected
+                && pids.len() == expected
+                && pids
+                    .iter()
+                    .all(|pid| process_is_owned_and_live(*pid, &dir, &scope))
+                && (1..=expected).all(|index| heartbeat_path(&dir, index).is_file())
+            {
+                return pids;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "timed out waiting for N={expected} supervised slots: {}",
+        cmd_err(&dir)
+    );
+}
+
+fn wait_for_supervised_slots_with_timeout(
+    guard: &mut SupervisedProcessGuard,
+    expected: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<u32>, String> {
+    let dir = guard.dir.clone();
+    let scope = guard.scope.clone();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !guard.controller_is_running() {
+            return Err(format!(
+                "supervised controller exited before N={expected} slots: {}",
+                cmd_err(&dir)
+            ));
+        }
+        if let Ok(state) =
+            Journal::open(dir.join("journal.db")).and_then(|journal| journal.load_state())
+        {
+            let pids = state
+                .slots
+                .iter()
+                .filter_map(|slot| slot.pid)
+                .collect::<Vec<_>>();
+            guard.record_slot_pids(&pids);
+            if state.slots.len() == expected
+                && pids.len() == expected
+                && pids
+                    .iter()
+                    .all(|pid| process_is_owned_and_live(*pid, &dir, &scope))
+            {
+                return Ok(pids);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for N={expected} supervised slots: {}",
+                cmd_err(&dir)
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn terminate_test_process(pid: u32, dir: &Path, scope: &str) {
+    if !process_is_owned_and_live(pid, dir, scope) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: command-line identity was checked immediately above and the
+        // PID came from this test's journal.
+        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    for _ in 0..40 {
+        if !process_is_owned_and_live(pid, dir, scope) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    #[cfg(unix)]
+    {
+        // Re-prove ownership before the bounded escalation.
+        if process_is_owned_and_live(pid, dir, scope) {
+            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+}
+
+#[test]
+fn supervised_controller_capacity_is_exact_for_one_and_four() {
+    for configured in [1_usize, 4] {
+        let dir = scratch(&format!("supervised-capacity-{configured}"));
+        let scope = format!("supervised-{configured}");
+        let controller = Command::new(runner())
+            .args([
+                "controller",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                &scope,
+                "--desired-ready",
+                &configured.to_string(),
+            ])
+            .env_remove("GITHUB_TOKEN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                std::fs::File::create(dir.join("controller.out")).unwrap(),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(dir.join("controller.err")).unwrap(),
+            ))
+            .spawn()
+            .unwrap();
+        let mut processes = SupervisedProcessGuard::new(controller, &dir, &scope);
+
+        let pids = wait_for_supervised_slots(&mut processes, configured);
+        assert_eq!(pids.len(), configured);
+        assert_eq!(
+            pids.iter().collect::<std::collections::HashSet<_>>().len(),
+            configured
+        );
+
+        let state = Journal::open(dir.join("journal.db"))
+            .unwrap()
+            .load_state()
+            .unwrap();
+        let health = velnor_runner::node::health::fetch(&dir).unwrap();
+        assert_eq!(state.slots.len(), configured);
+        assert_eq!(
+            state.slots.iter().filter(|slot| slot.permit_held).count(),
+            configured
+        );
+        assert_eq!(
+            state.slots.iter().filter(|slot| slot.pid.is_some()).count(),
+            configured
+        );
+        assert_eq!(health.desired_ready_slots, configured as u32);
+        assert_eq!(health.capacity_permits, configured as u32);
+        assert_eq!(health.actual_ready_slots, 0);
+        assert_ne!(health.state, FleetHealthState::Ready);
+        assert!(state.jobs.is_empty());
+        assert!(state.outbox.is_empty());
+        assert!(
+            !dir.join("advertised-capacity").exists(),
+            "unproven supervised slots must not advertise capacity"
+        );
+        assert!(dir.join("execution.toml").is_file());
+        assert!(!heartbeat_path(&dir, configured + 1).exists());
+        assert!(!dir
+            .join(format!(".slot-{}.heartbeat", configured + 1))
+            .exists());
+
+        processes.cleanup();
+        for pid in pids {
+            assert!(!process_is_owned_and_live(pid, &dir, &scope));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn supervised_process_guard_cleans_up_after_fault_injected_panic() {
+    let dir = scratch("supervised-cleanup-panic");
+    let scope = "supervised-cleanup-panic";
+    let owned_pids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_pids = std::sync::Arc::clone(&owned_pids);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let controller = Command::new(runner())
+            .args([
+                "controller",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                scope,
+                "--desired-ready",
+                "1",
+            ])
+            .env_remove("GITHUB_TOKEN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                std::fs::File::create(dir.join("controller.out")).unwrap(),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(dir.join("controller.err")).unwrap(),
+            ))
+            .spawn()
+            .unwrap();
+        let mut processes = SupervisedProcessGuard::new(controller, &dir, scope);
+        let pids = wait_for_supervised_slots(&mut processes, 1);
+        *observed_pids.lock().unwrap() = pids;
+
+        panic!("intentional cleanup fault injection");
+    }));
+
+    assert!(result.is_err(), "fault injection did not panic");
+    let pids = owned_pids.lock().unwrap().clone();
+    assert_eq!(pids.len(), 1, "fault injection did not observe one slot");
+    for pid in pids {
+        assert!(
+            !process_is_owned_and_live(pid, &dir, scope),
+            "RAII cleanup left owned process {pid} alive"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn supervised_process_guard_cleans_up_after_fault_injected_timeout() {
+    let dir = scratch("supervised-cleanup-timeout");
+    let scope = "supervised-cleanup-timeout";
+    let (controller_pid, slot_pids) = {
+        let controller = Command::new(runner())
+            .args([
+                "controller",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                scope,
+                "--desired-ready",
+                "1",
+            ])
+            .env_remove("GITHUB_TOKEN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                std::fs::File::create(dir.join("controller.out")).unwrap(),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(dir.join("controller.err")).unwrap(),
+            ))
+            .spawn()
+            .unwrap();
+        let mut processes = SupervisedProcessGuard::new(controller, &dir, scope);
+        let controller_pid = processes.controller.as_ref().unwrap().id();
+        let slot_pids = wait_for_supervised_slots(&mut processes, 1);
+        assert!(controller_is_owned_and_live(controller_pid, &dir, scope));
+        assert!(
+            slot_pids
+                .iter()
+                .all(|pid| process_is_owned_and_live(*pid, &dir, scope)),
+            "supervised slot stopped before timeout injection"
+        );
+
+        let timeout = wait_for_supervised_slots_with_timeout(
+            &mut processes,
+            2,
+            std::time::Duration::from_millis(150),
+        );
+        assert!(
+            timeout.is_err(),
+            "impossible supervised capacity did not time out"
+        );
+
+        processes.cleanup();
+        (controller_pid, slot_pids)
+    };
+
+    assert!(!controller_is_owned_and_live(controller_pid, &dir, scope));
+    for pid in slot_pids {
+        assert!(!process_is_owned_and_live(pid, &dir, scope));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -384,8 +886,6 @@ fn controller_does_not_stamp_ready_without_proofs() {
             "noproof",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -431,8 +931,6 @@ fn controller_rejects_boolean_routing_stamp() {
             "boolroute",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -474,8 +972,6 @@ fn controller_reconciles_routing_independently_of_scheduler() {
             "routerecon",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -506,8 +1002,6 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
             "proof",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -556,8 +1050,6 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
             "proof",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -603,8 +1095,6 @@ fn controller_keeps_ready_when_exec_exists_without_assignment() {
             "own",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -651,8 +1141,6 @@ fn controller_does_not_assign_rest_queued_ids() {
             "own",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -690,8 +1178,6 @@ fn controller_applies_dependency_false_without_github() {
             "dep",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",
@@ -832,8 +1318,6 @@ fn controller_sends_pending_completion_outbox() {
             "out",
             "--desired-ready",
             "1",
-            "--surge",
-            "0",
             "--once",
             "--spawn-slots",
             "false",

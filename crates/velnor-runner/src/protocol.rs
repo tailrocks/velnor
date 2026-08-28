@@ -15,10 +15,10 @@ use rsa::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::{
     collections::BTreeMap,
     fmt,
-    path::PathBuf,
     sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,122 +35,12 @@ pub fn velnor_runner_display() -> String {
     format!("Velnor Runner/{VELNOR_VERSION} (protocol: {RUNNER_VERSION})")
 }
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
-const GITHUB_CURL_CONNECT_TIMEOUT_SECS: u64 = 2;
-const GITHUB_CURL_MAX_TIME_SECS: u64 = 5;
+const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 2;
+const GITHUB_MAX_TIME_SECS: u64 = 5;
 const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
-const PRIVATE_CURL_STALE_AFTER: Duration = Duration::from_secs(600);
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
-
-/// Private curl inputs are removed even when an async caller is cancelled.
-/// This pairs with `kill_on_drop(true)` so a timed-out request cannot keep
-/// running with secrets or mutate GitHub after its owning operation ended.
-struct PrivateTempFiles {
-    dir: PathBuf,
-    paths: Vec<PathBuf>,
-}
-
-impl PrivateTempFiles {
-    fn new(_prefix: &str) -> Result<Self> {
-        let dir = std::env::temp_dir().join("velnor-curl");
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create private curl directory {}", dir.display()))?;
-        let mut permissions = std::fs::metadata(&dir)
-            .with_context(|| format!("stat private curl directory {}", dir.display()))?
-            .permissions();
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&dir, permissions)
-            .with_context(|| format!("protect private curl directory {}", dir.display()))?;
-
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let stale = entry.file_type().is_ok_and(|file_type| file_type.is_file())
-                    && entry.file_name().to_string_lossy().starts_with("velnor-")
-                    && entry
-                        .metadata()
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                        .is_some_and(|age| age > PRIVATE_CURL_STALE_AFTER);
-                if stale {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        }
-
-        Ok(Self {
-            dir,
-            paths: Vec::new(),
-        })
-    }
-
-    fn write(&mut self, prefix: &str, suffix: &str, content: &[u8]) -> Result<PathBuf> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let path = self
-            .dir
-            .join(format!("{prefix}-{}.{suffix}", Uuid::new_v4()));
-        self.paths.push(path.clone());
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("create private curl file {}", path.display()))?;
-        file.write_all(content)
-            .with_context(|| format!("write private curl file {}", path.display()))?;
-        Ok(path)
-    }
-}
-
-impl Drop for PrivateTempFiles {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-async fn run_private_curl(
-    prefix: &str,
-    config: &str,
-    body: Option<&[u8]>,
-    url: &str,
-    capture_headers: bool,
-) -> Result<(std::process::Output, Vec<u8>)> {
-    let mut files = PrivateTempFiles::new(prefix)?;
-    let config_path = files.write(prefix, "cfg", config.as_bytes())?;
-    let body_path = body
-        .map(|body| files.write(prefix, "body", body))
-        .transpose()?;
-    let headers_path = capture_headers
-        // Header output is not secret, but keep it mode-0600 and clean it via
-        // the same guard so cancellation cannot leave request metadata behind.
-        .then(|| files.write(prefix, "headers", &[]))
-        .transpose()?;
-
-    let mut command = tokio::process::Command::new("curl");
-    command.kill_on_drop(true).arg("--config").arg(&config_path);
-    if let Some(path) = &headers_path {
-        command.arg("--dump-header").arg(path);
-    }
-    if let Some(path) = &body_path {
-        command.arg("--data").arg(format!("@{}", path.display()));
-    }
-    let output = command.arg(url).output().await.context("run curl")?;
-    let headers = headers_path
-        .as_deref()
-        .map(std::fs::read)
-        .transpose()
-        .context("read curl response headers")?
-        .unwrap_or_default();
-    Ok((output, headers))
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
@@ -278,17 +168,22 @@ impl GitHubRateLimitStatus {
 
 impl GitHubRetryHint {
     fn delay(self, now_epoch: u64) -> Option<std::time::Duration> {
-        let retry_after = self.retry_after_seconds.unwrap_or(0);
-        let until_reset = self
+        let seconds = self
             .rate_limit_reset_epoch
             .map(|reset| reset.saturating_sub(now_epoch))
-            .unwrap_or(0);
-        let seconds = retry_after.max(until_reset);
+            .unwrap_or_else(|| self.retry_after_seconds.unwrap_or(0));
         (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
     }
 }
 
-fn parse_github_retry_headers(headers: &[u8]) -> GitHubRetryHint {
+fn unix_epoch_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn parse_github_retry_headers(headers: &[u8], response_epoch: u64) -> GitHubRetryHint {
     let mut hint = GitHubRetryHint::default();
     for line in String::from_utf8_lossy(headers).lines() {
         let Some((name, value)) = line.split_once(':') else {
@@ -303,21 +198,32 @@ fn parse_github_retry_headers(headers: &[u8]) -> GitHubRetryHint {
             hint.remaining = value.parse().ok();
         }
     }
+    if let Some(retry_after) = hint.retry_after_seconds {
+        let retry_until = response_epoch.saturating_add(retry_after);
+        hint.rate_limit_reset_epoch =
+            Some(hint.rate_limit_reset_epoch.unwrap_or(0).max(retry_until));
+    }
     hint
 }
 
-fn github_retry_hint_from_header_map(headers: &HeaderMap) -> GitHubRetryHint {
+fn github_retry_hint_from_header_map(headers: &HeaderMap, response_epoch: u64) -> GitHubRetryHint {
     let parse = |name: &'static str| {
         headers
             .get(name)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse().ok())
     };
-    GitHubRetryHint {
+    let mut hint = GitHubRetryHint {
         retry_after_seconds: parse("retry-after"),
         rate_limit_reset_epoch: parse("x-ratelimit-reset"),
         remaining: parse("x-ratelimit-remaining"),
+    };
+    if let Some(retry_after) = hint.retry_after_seconds {
+        let retry_until = response_epoch.saturating_add(retry_after);
+        hint.rate_limit_reset_epoch =
+            Some(hint.rate_limit_reset_epoch.unwrap_or(0).max(retry_until));
     }
+    hint
 }
 
 fn github_api_error_with_retry(
@@ -349,10 +255,10 @@ impl GitHubApiError {
 }
 
 pub fn github_api_retry_delay(error: &anyhow::Error) -> Option<std::time::Duration> {
-    let now_epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    github_api_retry_delay_at(error, unix_epoch_now())
+}
+
+fn github_api_retry_delay_at(error: &anyhow::Error, now_epoch: u64) -> Option<std::time::Duration> {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
@@ -846,8 +752,9 @@ impl OAuthClient {
         &self,
         credentials: &OAuthJwtCredentials,
     ) -> Result<OAuthAccessToken> {
+        github_http_transport()?;
         let assertion = build_client_assertion(credentials)?;
-        // Build URL-encoded form body for curl --data
+        // Build the URL-encoded OAuth form body.
         let body: String = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "client_credentials")
             .append_pair(
@@ -857,24 +764,21 @@ impl OAuthClient {
             .append_pair("client_assertion", &assertion)
             .finish();
         let url = credentials.authorization_url.clone();
-        let ua = RUNNER_USER_AGENT.to_string();
-
-        let cfg = format!(
-            "header = \"User-Agent: {ua}\"\n\
-             header = \"Accept: application/json\"\n\
-             header = \"Content-Type: application/x-www-form-urlencoded\"\n\
-             request = POST\n\
-             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let (output, _) =
-            run_private_curl("velnor-oauth", &cfg, Some(body.as_bytes()), &url, false).await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (text, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        let response = native_http_client()?
+            .post(url)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS))
+            .body(body)
+            .send()
+            .await
+            .context("send OAuth token request")?;
+        let status = response.status().as_u16();
+        let text = response
+            .text()
+            .await
+            .context("read OAuth token response body")?;
         let ok = (200..300).contains(&status);
         if !ok && status != 400 {
             return Err(github_api_error("OAuth token request", status, text));
@@ -959,21 +863,94 @@ impl RunnerKeyPair {
 }
 
 #[derive(Clone)]
-pub struct RegistrationClient {
-    http: Client,
+pub struct RegistrationClient;
+
+struct GithubHttpResponse {
+    status: u16,
+    body: String,
+    headers: HeaderMap,
+}
+
+fn github_error_from_response(action: &str, response: GithubHttpResponse) -> anyhow::Error {
+    github_api_error_with_retry(
+        action,
+        response.status,
+        response.body,
+        github_retry_hint_from_header_map(&response.headers, unix_epoch_now()),
+    )
+}
+
+fn github_transport_error(action: &str, error: impl fmt::Display) -> anyhow::Error {
+    github_api_error(action, 0, error.to_string())
+}
+
+fn github_json_body<T>(action: &str, response: GithubHttpResponse) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if !(200..300).contains(&response.status) {
+        return Err(github_error_from_response(action, response));
+    }
+    serde_json::from_str(&response.body).map_err(|error| {
+        github_api_error_with_retry(
+            action,
+            response.status,
+            format!("{}; parse error: {error}", response.body),
+            github_retry_hint_from_header_map(&response.headers, unix_epoch_now()),
+        )
+    })
+}
+
+async fn github_http_request(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<GithubHttpResponse> {
+    github_http_transport()?;
+    let method_name = method.to_owned();
+    let method = Method::from_bytes(method.as_bytes()).map_err(|error| {
+        github_transport_error(&format!("parse GitHub HTTP method '{method}'"), error)
+    })?;
+    let client = native_http_client()
+        .map_err(|error| github_transport_error("build GitHub HTTP client", error))?;
+    let mut request = client
+        .request(method, url)
+        .bearer_auth(bearer_token)
+        .header(USER_AGENT, RUNNER_USER_AGENT)
+        .header(ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(max_time_secs));
+    if let Some(body) = json_body {
+        request = request
+            .header("Content-Type", "application/json")
+            .body(body);
+    }
+    let response = request.send().await.map_err(|error| {
+        github_transport_error(
+            &format!("send native GitHub request {method_name} {url}"),
+            error,
+        )
+    })?;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response.text().await.map_err(|error| {
+        github_transport_error(
+            &format!("read native GitHub response body {method_name} {url}"),
+            error,
+        )
+    })?;
+    Ok(GithubHttpResponse {
+        status,
+        body,
+        headers,
+    })
 }
 
 impl RegistrationClient {
     pub fn new() -> Result<Self> {
-        let http = Client::builder()
-            .user_agent(RUNNER_USER_AGENT)
-            .use_native_tls()
-            .tcp_keepalive(None)
-            .connection_verbose(false)
-            .timeout(Duration::from_secs(10))
-            .build()
-            .context("build GitHub runner HTTP client")?;
-        Ok(Self { http })
+        Ok(Self)
     }
 
     pub async fn generate_jit_config(
@@ -982,15 +959,9 @@ impl RegistrationClient {
         pat: &str,
         request: &GitHubJitConfigRequest,
     ) -> Result<GitHubJitConfigResponse> {
-        // Use curl for runner registration. GitHub's infrastructure applies
-        // TLS-fingerprint-based throttling to reqwest/hyper connections while
-        // libcurl (LibreSSL) succeeds reliably. The subprocess is time-bounded
-        // because registration runs inside a watchdog-supervised controller.
         let url = scope.jit_config_url.to_string();
         let body = serde_json::to_string(request).context("serialize JIT config request")?;
         let pat = pat.to_string();
-        let ua = RUNNER_USER_AGENT.to_string();
-
         let mut last_err = anyhow::anyhow!("no attempts made");
         let mut retry_delay = None;
         for attempt in 0..3u32 {
@@ -1006,21 +977,9 @@ impl RegistrationClient {
                 );
                 tokio::time::sleep(backoff).await;
             }
-            let cfg = format!(
-                "header = \"User-Agent: {ua}\"\n\
-                 header = \"Authorization: Bearer {pat}\"\n\
-                 header = \"Accept: application/vnd.github+json\"\n\
-                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-                 header = \"Content-Type: application/json\"\n\
-                 request = POST\n\
-                 connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-                 max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-                 location\n\
-                 silent\n\
-                 write-out = \"\\n%{{http_code}}\"\n"
-            );
             let result =
-                run_private_curl("velnor-jit", &cfg, Some(body.as_bytes()), &url, true).await;
+                github_http_request("POST", &url, &pat, Some(body.clone()), GITHUB_MAX_TIME_SECS)
+                    .await;
 
             match result {
                 Err(e) => {
@@ -1028,23 +987,14 @@ impl RegistrationClient {
                     self.cleanup_named_jit_orphans(scope, &pat, &request.name)
                         .await;
                 }
-                Ok((output, headers)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let (json_part, status_str) =
-                        stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-                    let status: u16 = status_str.trim().parse().unwrap_or(0);
+                Ok(response) => {
+                    let status = response.status;
                     if status == 201 {
-                        return serde_json::from_str::<GitHubJitConfigResponse>(json_part.trim())
-                            .context("parse JIT runner config response");
+                        return github_json_body("parse JIT runner config response", response);
                     }
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let hint = parse_github_retry_headers(&headers);
-                    last_err = github_api_error_with_retry(
-                        "JIT runner config request",
-                        status,
-                        format!("{json_part}, stderr={stderr}"),
-                        hint,
-                    );
+                    let hint =
+                        github_retry_hint_from_header_map(&response.headers, unix_epoch_now());
+                    last_err = github_error_from_response("JIT runner config request", response);
                     // Permission and quota failures cannot recover during
                     // this attempt. Return immediately so controller pacing
                     // owns the retry schedule; never sleep for an hour on a
@@ -1083,31 +1033,10 @@ impl RegistrationClient {
             url.query_pairs_mut()
                 .append_pair("per_page", "100")
                 .append_pair("page", &page_number.to_string());
-            let response = self
-                .http
-                .get(url)
-                .bearer_auth(pat)
-                .header(USER_AGENT, RUNNER_USER_AGENT)
-                .header(ACCEPT, "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await
-                .context("send list runners request")?;
-            let status = response.status();
-            if !status.is_success() {
-                let hint = github_retry_hint_from_header_map(response.headers());
-                let body = response.text().await.unwrap_or_default();
-                return Err(github_api_error_with_retry(
-                    "list runners request",
-                    status.as_u16(),
-                    body,
-                    hint,
-                ));
-            }
-            let page: Page = response
-                .json()
-                .await
-                .context("parse list runners response")?;
+            let page: Page = github_json_body(
+                "list runners response",
+                github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            )?;
             let fetched = page.runners.len();
             all.extend(page.runners);
             let total = page.total_count.unwrap_or(all.len() as u64);
@@ -1142,7 +1071,7 @@ impl RegistrationClient {
             }
             Ok::<(), anyhow::Error>(())
         };
-        match tokio::time::timeout(Duration::from_secs(GITHUB_CURL_MAX_TIME_SECS), cleanup).await {
+        match tokio::time::timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS), cleanup).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 eprintln!("JIT retry orphan cleanup failed for '{agent_name}': {error:#}");
@@ -1162,32 +1091,11 @@ impl RegistrationClient {
         struct Response {
             runner_groups: Vec<RunnerGroup>,
         }
-        let response = self
-            .http
-            .get(scope.runner_groups_url()?)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .context("send list runner groups request")?;
-        let status = response.status();
-        if !status.is_success() {
-            let hint = github_retry_hint_from_header_map(response.headers());
-            let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error_with_retry(
-                "list runner groups request",
-                status.as_u16(),
-                body,
-                hint,
-            ));
-        }
-        response
-            .json::<Response>()
-            .await
-            .map(|response| response.runner_groups)
-            .context("parse list runner groups response")
+        let response: Response = github_json_body(
+            "list runner groups response",
+            github_http_request("GET", scope.runner_groups_url()?.as_str(), pat, None, 30).await?,
+        )?;
+        Ok(response.runner_groups)
     }
 
     /// Queued (unassigned) jobs in this org/repo whose labels wait on Velnor.
@@ -1204,10 +1112,7 @@ impl RegistrationClient {
                 .await
             {
                 Ok(runs) => runs,
-                Err(error) => {
-                    eprintln!("list queued runs for {repository} failed: {error:#}");
-                    continue;
-                }
+                Err(error) => return Err(error),
             };
             for run_id in runs {
                 match self
@@ -1215,9 +1120,7 @@ impl RegistrationClient {
                     .await
                 {
                     Ok(run_jobs) => jobs.extend(run_jobs),
-                    Err(error) => {
-                        eprintln!("list jobs for {repository} run {run_id} failed: {error:#}");
-                    }
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -1244,26 +1147,12 @@ impl RegistrationClient {
                 .append_pair("per_page", "100")
                 .append_pair("page", &page_number.to_string())
                 .append_pair("type", "all");
-            let response = self
-                .http
-                .get(url)
-                .bearer_auth(pat)
-                .header(USER_AGENT, RUNNER_USER_AGENT)
-                .header(ACCEPT, "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await
-                .with_context(|| format!("list repositories for org {org}"))?;
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(github_api_error(
-                    "list org repositories",
-                    status.as_u16(),
-                    body,
-                ));
-            }
-            let page: Vec<Repo> = response.json().await.context("parse org repositories")?;
+            let page: Vec<Repo> = github_json_body(
+                "list org repositories response",
+                github_http_request("GET", url.as_str(), pat, None, 30)
+                    .await
+                    .with_context(|| format!("list repositories for org {org}"))?,
+            )?;
             let fetched = page.len();
             all.extend(page.into_iter().filter_map(|repo| repo.full_name));
             if fetched < 100 {
@@ -1291,29 +1180,12 @@ impl RegistrationClient {
         url.query_pairs_mut()
             .append_pair("status", "queued")
             .append_pair("per_page", "100");
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("list queued runs for {repository}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error(
-                "list queued workflow runs",
-                status.as_u16(),
-                body,
-            ));
-        }
-        let runs: Runs = response
-            .json()
-            .await
-            .context("parse queued workflow runs")?;
+        let runs: Runs = github_json_body(
+            "list queued workflow runs response",
+            github_http_request("GET", url.as_str(), pat, None, 30)
+                .await
+                .with_context(|| format!("list queued runs for {repository}"))?,
+        )?;
         Ok(runs.workflow_runs.into_iter().map(|run| run.id).collect())
     }
 
@@ -1332,26 +1204,12 @@ impl RegistrationClient {
             .api_base_url
             .join(&format!("repos/{repository}/actions/runs/{run_id}/jobs"))
             .context("build workflow run jobs URL")?;
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("list jobs for {repository} run {run_id}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error(
-                "list workflow run jobs",
-                status.as_u16(),
-                body,
-            ));
-        }
-        let jobs: Jobs = response.json().await.context("parse workflow run jobs")?;
+        let jobs: Jobs = github_json_body(
+            "list workflow run jobs response",
+            github_http_request("GET", url.as_str(), pat, None, 30)
+                .await
+                .with_context(|| format!("list jobs for {repository} run {run_id}"))?,
+        )?;
         Ok(jobs.jobs)
     }
 
@@ -1363,28 +1221,16 @@ impl RegistrationClient {
         run_id: u64,
     ) -> Result<()> {
         let url = scope.workflow_run_cancel_url(repository, run_id)?;
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("cancel workflow run {repository}/{run_id}"))?;
-        let status = response.status().as_u16();
-        if classify_workflow_cancel(status) {
+        let response = github_http_request("POST", url.as_str(), pat, None, 30).await?;
+        if classify_workflow_cancel(response.status) {
             return Ok(());
         }
-        let body = response.text().await.unwrap_or_default();
-        Err(github_api_error("cancel workflow run", status, body))
+        Err(github_error_from_response("cancel workflow run", response))
     }
 
     /// Look up one runner registration by id. `Ok(None)` means GitHub no
-    /// longer knows the runner (404). Curl is the production default because
-    /// reqwest/hyper has drawn TLS-fingerprint throttling under idle-slot load;
-    /// `VELNOR_GITHUB_HTTP_TRANSPORT=native` enables the pooled canary path.
+    /// longer knows the runner (404). The transport is selected by
+    /// `VELNOR_GITHUB_HTTP_TRANSPORT`; the native path uses pooled requests.
     pub async fn get_runner(
         &self,
         scope: &GitHubScope,
@@ -1392,8 +1238,7 @@ impl RegistrationClient {
         runner_id: i64,
     ) -> Result<Option<ListedRunner>> {
         let url = scope.runner_url(runner_id)?;
-        let (status, body) = github_json_request("GET", url.as_str(), pat, None, 30).await?;
-        parse_runner_lookup(status, &body)
+        parse_runner_lookup_response(github_http_request("GET", url.as_str(), pat, None, 30).await?)
     }
 
     pub async fn delete_runner(
@@ -1402,33 +1247,16 @@ impl RegistrationClient {
         pat: &str,
         runner_id: i64,
     ) -> Result<()> {
-        let url = scope.runner_url(runner_id)?.to_string();
-        let cfg = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             header = \"Authorization: Bearer {pat}\"\n\
-             header = \"Accept: application/vnd.github+json\"\n\
-             header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-             request = DELETE\n\
-             connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-             max-time = {GITHUB_CURL_MAX_TIME_SECS}\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let (output, headers) = run_private_curl("velnor-del", &cfg, None, &url, true).await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-        let status: u16 = status_str.trim().parse().unwrap_or(0);
-        match classify_runner_delete(status, body) {
+        let url = scope.runner_url(runner_id)?;
+        let response = github_http_request("DELETE", url.as_str(), pat, None, 30).await?;
+        match classify_runner_delete(response.status, &response.body) {
             Some(RunnerDeleteOutcome::Gone) => Ok(()),
             Some(RunnerDeleteOutcome::BusyConflict) => {
-                Err(RunnerBusyConflict(body.trim().to_string()).into())
+                Err(RunnerBusyConflict(response.body.trim().to_string()).into())
             }
-            None => Err(github_api_error_with_retry(
+            None => Err(github_error_from_response(
                 "delete runner request",
-                status,
-                body,
-                parse_github_retry_headers(&headers),
+                response,
             )),
         }
     }
@@ -1436,22 +1264,24 @@ impl RegistrationClient {
 
 /// Transport selector for GitHub JSON requests.
 ///
-/// Curl remains the production default because GitHub has historically
-/// throttled the native TLS fingerprint under concurrent Velnor load. The
-/// native path is an explicit canary so it can be measured and rolled back by
-/// removing one daemon environment value, without changing workflow behavior.
+/// Native HTTP is the only supported GitHub JSON transport. The selector is
+/// explicit so a missing or unsupported configuration cannot silently choose
+/// a legacy transport.
 pub const GITHUB_HTTP_TRANSPORT_ENV: &str = "VELNOR_GITHUB_HTTP_TRANSPORT";
 
-pub fn github_http_transport() -> &'static str {
-    match std::env::var(GITHUB_HTTP_TRANSPORT_ENV)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "native" | "reqwest" => "native",
-        _ => "curl",
+fn parse_github_http_transport(configured: &str) -> Result<&'static str> {
+    match configured.trim() {
+        "native" => Ok("native"),
+        value => bail!(
+            "unsupported {GITHUB_HTTP_TRANSPORT_ENV} value '{value}'; accepted values: native"
+        ),
     }
+}
+
+pub fn github_http_transport() -> Result<&'static str> {
+    let configured = std::env::var(GITHUB_HTTP_TRANSPORT_ENV)
+        .with_context(|| format!("{GITHUB_HTTP_TRANSPORT_ENV} must be set to 'native'"))?;
+    parse_github_http_transport(&configured)
 }
 
 /// Make an authenticated JSON request using the selected GitHub transport.
@@ -1463,11 +1293,8 @@ pub async fn github_json_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String)> {
-    if github_http_transport() == "native" {
-        native_json_request(method, url, bearer_token, json_body, max_time_secs).await
-    } else {
-        curl_json_request(method, url, bearer_token, json_body, max_time_secs).await
-    }
+    github_http_transport()?;
+    native_json_request(method, url, bearer_token, json_body, max_time_secs).await
 }
 
 /// Like [`github_json_request`] but also returns the rate-limit telemetry
@@ -1481,12 +1308,8 @@ pub async fn github_json_request_with_rate_limit(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String, GitHubRateLimitStatus)> {
-    if github_http_transport() == "native" {
-        native_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs)
-            .await
-    } else {
-        curl_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs).await
-    }
+    github_http_transport()?;
+    native_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs).await
 }
 
 fn native_http_client() -> Result<Client> {
@@ -1567,87 +1390,12 @@ async fn native_json_request_with_rate_limit(
         .await
         .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
     let status = response.status().as_u16();
-    let rate_limit = github_retry_hint_from_header_map(response.headers()).into();
+    let rate_limit = github_retry_hint_from_header_map(response.headers(), unix_epoch_now()).into();
     let body = response
         .text()
         .await
         .context("read native GitHub response body")?;
     Ok((status, body, rate_limit))
-}
-
-/// Make an HTTP request via the curl subprocess. GitHub's infrastructure
-/// applies TLS-fingerprint-based throttling to reqwest/hyper connections;
-/// curl (LibreSSL) is the proven production fallback.
-/// Returns `(http_status_code, response_body_string)`.
-///
-/// The Authorization header and request body are written to mode-0600 temp files
-/// and passed via `--config` / `--data @file` so they do not appear on argv
-/// (which is visible in `ps aux` and audit logs).
-async fn curl_json_request(
-    method: &str,
-    url: &str,
-    bearer_token: &str,
-    json_body: Option<String>,
-    max_time_secs: u64,
-) -> Result<(u16, String)> {
-    let (status, body, _) =
-        curl_json_request_impl(method, url, bearer_token, json_body, max_time_secs, false).await?;
-    Ok((status, body))
-}
-
-/// Curl transport variant that also reports rate-limit telemetry via a
-/// `--dump-header` temp file (parsed and removed before returning).
-async fn curl_json_request_with_rate_limit(
-    method: &str,
-    url: &str,
-    bearer_token: &str,
-    json_body: Option<String>,
-    max_time_secs: u64,
-) -> Result<(u16, String, GitHubRateLimitStatus)> {
-    let (status, body, hint) =
-        curl_json_request_impl(method, url, bearer_token, json_body, max_time_secs, true).await?;
-    Ok((status, body, hint.unwrap_or_default().into()))
-}
-
-async fn curl_json_request_impl(
-    method: &str,
-    url: &str,
-    bearer_token: &str,
-    json_body: Option<String>,
-    max_time_secs: u64,
-    capture_headers: bool,
-) -> Result<(u16, String, Option<GitHubRetryHint>)> {
-    let mut cfg = format!(
-        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-         header = \"Authorization: Bearer {bearer_token}\"\n\
-         header = \"Accept: application/json\"\n\
-         max-time = {max_time_secs}\n\
-         connect-timeout = {GITHUB_CURL_CONNECT_TIMEOUT_SECS}\n\
-         request = {method}\n\
-         location\n\
-         silent\n\
-         write-out = \"\\n%{{http_code}}\"\n"
-    );
-    if json_body.is_some() {
-        cfg.push_str("header = \"Content-Type: application/json\"\n");
-    }
-    let (output, headers) = run_private_curl(
-        "velnor-curl",
-        &cfg,
-        json_body.as_deref().map(str::as_bytes),
-        url,
-        capture_headers,
-    )
-    .await?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-    let status: u16 = status_str.trim().parse().unwrap_or(0);
-    Ok((
-        status,
-        body.to_string(),
-        capture_headers.then(|| parse_github_retry_headers(&headers)),
-    ))
 }
 
 pub fn decode_jit_config(encoded_jit_config: &str) -> Result<DecodedJitConfig> {
@@ -1764,12 +1512,37 @@ pub enum BrokerPollClass {
     Empty,
     /// 2xx with a message body to decode.
     Message,
-    /// Transport failure (curl could not produce a status) or non-2xx. An
+    /// Transport failure without an HTTP status or non-2xx. An
     /// expired/unauthorized/deleted session typically answers 401/403/404 with
     /// an EMPTY body — this MUST classify as an error, never as "no message",
     /// or an idle slot turns into a zombie that polls forever while GitHub's
     /// scheduler has already dropped the runner (2026-06-11 fleet incident).
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerPollErrorClass {
+    Authentication,
+    Forbidden,
+    MissingSession,
+    Conflict,
+    RateLimited,
+    Client,
+    Server,
+    Transport,
+}
+
+pub fn classify_broker_poll_error(status: u16) -> BrokerPollErrorClass {
+    match status {
+        401 => BrokerPollErrorClass::Authentication,
+        403 => BrokerPollErrorClass::Forbidden,
+        404 => BrokerPollErrorClass::MissingSession,
+        409 => BrokerPollErrorClass::Conflict,
+        429 => BrokerPollErrorClass::RateLimited,
+        400..=499 => BrokerPollErrorClass::Client,
+        500..=599 => BrokerPollErrorClass::Server,
+        _ => BrokerPollErrorClass::Transport,
+    }
 }
 
 pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
@@ -1785,7 +1558,7 @@ pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
     BrokerPollClass::Error
 }
 
-/// Completion must retry transport failures, 5xx, and curl status-0; other
+/// Completion must retry transport failures, 5xx, and status-less failures; other
 /// 4xx (auth, validation, conflict) will not change on retry.
 pub fn is_retriable_completion_status(status: u16) -> bool {
     !(400..500).contains(&status) || status == 408 || status == 429
@@ -1802,6 +1575,18 @@ pub fn parse_runner_lookup(status: u16, body: &str) -> Result<Option<ListedRunne
         return Err(github_api_error("runner lookup", status, body.trim()));
     }
     serde_json::from_str(body.trim())
+        .map(Some)
+        .context("parse runner lookup response")
+}
+
+fn parse_runner_lookup_response(response: GithubHttpResponse) -> Result<Option<ListedRunner>> {
+    if response.status == 404 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&response.status) {
+        return Err(github_error_from_response("runner lookup", response));
+    }
+    serde_json::from_str(response.body.trim())
         .map(Some)
         .context("parse runner lookup response")
 }
@@ -2116,8 +1901,8 @@ fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
     else {
-        // Native request failures expose a reqwest error; curl failures that
-        // cannot produce an HTTP status expose an I/O error. Filesystem and
+        // Native request failures expose a reqwest error; status-less failures
+        // expose an I/O error. Filesystem and
         // executable errors are local faults and must not retain a session
         // forever as if GitHub were temporarily unavailable.
         if error.chain().any(|cause| {
@@ -3037,7 +2822,7 @@ pub struct EncryptionKey {
     pub value_base64: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskAgentMessage {
     #[serde(default, rename = "messageId")]
     pub message_id: i64,
@@ -3811,7 +3596,7 @@ impl TwirpResultsClient {
         // Route through the selected transport: GitHub has throttled
         // reqwest/hyper by TLS fingerprint (native-tls/OpenSSL) under heavy
         // concurrent load, which silently dropped step records (the job's step
-        // list went incomplete in the UI). Curl remains the default fallback.
+        // list went incomplete in the UI).
         // Retry a couple times so a transient blip never loses a step record.
         let body_json = serde_json::to_string(&body).context("serialize WorkflowStepsUpdate")?;
         let mut last_err = String::new();
@@ -4270,7 +4055,8 @@ fn artifact_create_request(
         "workflow_run_backend_id": plan_id,
         "workflow_job_run_backend_id": job_id,
         "name": name,
-        "version": 4
+        "mime_type": {"value": "application/zip"},
+        "version": 7
     });
     if let Some(days) = retention_days {
         let expires_at = (now + time::Duration::days(i64::from(days)))
@@ -4279,6 +4065,73 @@ fn artifact_create_request(
         request["expires_at"] = serde_json::Value::String(expires_at);
     }
     Ok(request)
+}
+
+struct ArtifactTempFile(std::path::PathBuf);
+
+impl ArtifactTempFile {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ArtifactTempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn write_artifact_temp_file(
+    path: std::path::PathBuf,
+    content: &[u8],
+) -> std::io::Result<ArtifactTempFile> {
+    use std::io::Write;
+
+    let (temp, mut file) = open_artifact_temp_file(path)?;
+    file.write_all(content)?;
+    Ok(temp)
+}
+
+fn open_artifact_temp_file(
+    path: std::path::PathBuf,
+) -> std::io::Result<(ArtifactTempFile, std::fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Acquire ownership atomically before constructing the cleanup guard.
+    // A failed create_new must never allow Drop to remove another owner's file.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
+    Ok((ArtifactTempFile(path), file))
+}
+
+fn results_service_post(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    token: &str,
+    body: &str,
+    operation: &str,
+) -> Result<String> {
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .header(ACCEPT, "application/json")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .timeout(Duration::from_secs(30))
+        .body(body.to_owned())
+        .send()
+        .with_context(|| format!("send Results Service {operation}"))?;
+    let status = response.status();
+    let response_body = response
+        .text()
+        .with_context(|| format!("read Results Service {operation} response"))?;
+    if !status.is_success() {
+        bail!("Results Service {operation}: status={status}, body={response_body}");
+    }
+    Ok(response_body)
 }
 
 /// Upload artifact files to GitHub's Results Service (artifact v4 format).
@@ -4302,57 +4155,21 @@ pub fn upload_artifact_blocking(
     files: &[(String, Vec<u8>)], // (archive path, content)
     options: ArtifactUploadOptions,
 ) -> Result<String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
 
-    // Write a mode-0600 file and return its path. Caller must delete.
-    let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
+    // Write a mode-0600 file. Construct the guard before any fallible I/O so
+    // failed open/write operations cannot leave secret artifact bytes behind.
+    let write_temp_file = |suffix: &str, content: &[u8]| -> std::io::Result<ArtifactTempFile> {
         let p = tmp_dir.join(format!("velnor-artifact-{}.{suffix}", uuid::Uuid::new_v4()));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&p)?;
-        f.write_all(content)?;
-        Ok(p)
+        write_artifact_temp_file(p, content)
     };
 
-    // Helper: curl POST with JSON via 0600 config + body files — secrets stay off argv.
-    let curl_post = |url: &str, body: &str| -> Result<String> {
-        let cfg = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             header = \"Authorization: Bearer {token}\"\n\
-             header = \"Accept: application/json\"\n\
-             header = \"Content-Type: application/json\"\n\
-             max-time = 30\n\
-             request = POST\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let cfg_path = write_secret_file("cfg", cfg.as_bytes()).context("write curl cfg")?;
-        let body_path = write_secret_file("body", body.as_bytes()).context("write curl body")?;
-        let out = std::process::Command::new("curl")
-            .arg("--config")
-            .arg(&cfg_path)
-            .arg("--data")
-            .arg(format!("@{}", body_path.display()))
-            .arg(url)
-            .output();
-        let _ = std::fs::remove_file(&cfg_path);
-        let _ = std::fs::remove_file(&body_path);
-        let out = out.context("run curl")?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let (resp_body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-        let status: u16 = status_str.trim().parse().unwrap_or(0);
-        if !(200..300).contains(&status) {
-            bail!("curl POST {url}: status={status}, body={resp_body}");
-        }
-        Ok(resp_body.to_string())
-    };
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build Results Service HTTP client")?;
 
     // 1. CreateArtifact → signed upload URL.
     let create_url = format!("{base}/{SERVICE}/CreateArtifact");
@@ -4364,7 +4181,9 @@ pub fn upload_artifact_blocking(
         time::OffsetDateTime::now_utc(),
     )?;
     let create_body = serde_json::to_string(&create_request).context("serialize CreateArtifact")?;
-    let create_text = curl_post(&create_url, &create_body).context("CreateArtifact request")?;
+    let create_text =
+        results_service_post(&client, &create_url, token, &create_body, "CreateArtifact")
+            .context("CreateArtifact request")?;
     let create_resp: serde_json::Value =
         serde_json::from_str(&create_text).context("CreateArtifact parse")?;
     if create_resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -4378,52 +4197,55 @@ pub fn upload_artifact_blocking(
         .to_string();
 
     // 2. Create zip archive and PUT to signed URL.
-    // The signed URL is itself a credential — keep it off argv via --config.
     let zip_bytes = artifact_zip_bytes(files, options.store_uncompressed)?;
     let zip_size = zip_bytes.len() as u64;
 
-    let zip_path = write_secret_file("zip", &zip_bytes).context("write zip temp file")?;
-    let put_cfg = format!(
-        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-         header = \"Content-Type: application/zip\"\n\
-         header = \"Content-Length: {zip_size}\"\n\
-         header = \"x-ms-blob-type: BlockBlob\"\n\
-         max-time = 60\n\
-         request = PUT\n\
-         silent\n\
-         write-out = \"\\n%{{http_code}}\"\n\
-         url = \"{upload_url}\"\n"
-    );
-    let put_cfg_path = write_secret_file("put.cfg", put_cfg.as_bytes()).context("write PUT cfg")?;
-    let put_out = std::process::Command::new("curl")
-        .arg("--config")
-        .arg(&put_cfg_path)
-        .arg("--data-binary")
-        .arg(format!("@{}", zip_path.display()))
-        .output();
-    let _ = std::fs::remove_file(&put_cfg_path);
-    let _ = std::fs::remove_file(&zip_path);
-    let put_out = put_out.context("run curl PUT")?;
-    let stdout = String::from_utf8_lossy(&put_out.stdout);
-    let (_, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
-    let put_status: u16 = status_str.trim().parse().unwrap_or(0);
+    let zip_path = write_temp_file("zip", &zip_bytes).context("write zip temp file")?;
+    let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
+    let put_response = reqwest::blocking::Client::builder()
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build artifact upload HTTP client")?
+        .put(&upload_url)
+        .header("Content-Type", "application/zip")
+        .header("Content-Length", zip_size)
+        .header("x-ms-blob-type", "BlockBlob")
+        .timeout(Duration::from_secs(60))
+        .body(zip_file)
+        .send()
+        .context("send artifact blob PUT")?;
+    let put_status = put_response.status().as_u16();
     if !(200..300).contains(&put_status) {
         bail!("artifact blob PUT failed: status={put_status}");
     }
 
     // 3. FinalizeArtifact.
     let finalize_url = format!("{base}/{SERVICE}/FinalizeArtifact");
+    let zip_hash = sha2::Sha256::digest(&zip_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let finalize_body = serde_json::to_string(&serde_json::json!({
         "workflow_run_backend_id": plan_id,
         "workflow_job_run_backend_id": job_id,
         "name": name,
-        "size": zip_size.to_string()
+        "size": zip_size.to_string(),
+        "hash": {"value": format!("sha256:{zip_hash}")}
     }))
     .context("serialize FinalizeArtifact")?;
-    let finalize_text =
-        curl_post(&finalize_url, &finalize_body).context("FinalizeArtifact request")?;
+    let finalize_text = results_service_post(
+        &client,
+        &finalize_url,
+        token,
+        &finalize_body,
+        "FinalizeArtifact",
+    )
+    .context("FinalizeArtifact request")?;
     let finalize: serde_json::Value =
         serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
+    if finalize.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+        bail!("FinalizeArtifact: backend returned ok=false or absent");
+    }
     let artifact_id = finalize
         .get("artifact_id")
         .or_else(|| finalize.get("artifactId"))
@@ -4443,20 +4265,105 @@ pub struct ResultsArtifactDownload {
     pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
 }
 
+fn safe_raw_artifact_path(name: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::Path::new(name);
+    let file_name = path
+        .file_name()
+        .filter(|value| *value != std::ffi::OsStr::new(".") && *value != std::ffi::OsStr::new(".."))
+        .context("raw artifact name has no safe file name")?;
+    Ok(std::path::PathBuf::from(file_name))
+}
+
+fn artifact_response_is_zip(content_type: Option<&str>, signed_url: &str) -> bool {
+    let mime_is_zip = content_type.is_some_and(|value| {
+        value.split(';').next().is_some_and(|mime| {
+            matches!(
+                mime.trim().to_ascii_lowercase().as_str(),
+                "application/zip" | "application/x-zip-compressed" | "application/zip-compressed"
+            )
+        })
+    });
+    let url_path_is_zip = Url::parse(signed_url)
+        .ok()
+        .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
+        .is_some_and(|path| path.to_ascii_lowercase().ends_with(".zip"));
+    mime_is_zip || url_path_is_zip
+}
+
+fn raw_artifact_filename(
+    headers: &reqwest::header::HeaderMap,
+    fallback: &str,
+) -> Result<std::path::PathBuf> {
+    let disposition = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok());
+    let filename = disposition.and_then(|value| {
+        let parameters = value.split(';').skip(1).filter_map(|parameter| {
+            let (key, value) = parameter.trim().split_once('=')?;
+            Some((key.trim(), value.trim().trim_matches('"')))
+        });
+        let mut fallback_filename = None;
+        for (key, value) in parameters {
+            if key.eq_ignore_ascii_case("filename*") {
+                if let Some(decoded) = decode_rfc5987_filename(value) {
+                    return Some(decoded);
+                }
+            } else if key.eq_ignore_ascii_case("filename") && !value.is_empty() {
+                fallback_filename = Some(value.to_owned());
+            }
+        }
+        fallback_filename
+    });
+    safe_raw_artifact_path(
+        filename
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback),
+    )
+}
+
+fn decode_rfc5987_filename(value: &str) -> Option<String> {
+    let (charset, encoded) = value.split_once("''")?;
+    if !charset.eq_ignore_ascii_case("utf-8") {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut chars = encoded.as_bytes().iter().copied();
+    while let Some(byte) = chars.next() {
+        if byte == b'%' {
+            let high = hex_digit(chars.next()?)?;
+            let low = hex_digit(chars.next()?)?;
+            bytes.push((high << 4) | low);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    let decoded = String::from_utf8(bytes).ok()?;
+    (!decoded.is_empty()).then_some(decoded)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn artifact_download_status_is_ok(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::OK
+}
+
 /// Download artifacts visible to this workflow run through the Results
 /// Service v4 protocol used by `actions/download-artifact`.
 ///
 /// `name` (exact) or `pattern` (glob) filter the artifact list BEFORE anything
-/// is signed or downloaded: `docker/build-push-action` stores `.dockerbuild`
-/// build-record artifacts as gzip blobs rather than zips, so downloading every
-/// listed artifact unconditionally fails any download-artifact step in such a
-/// run with "invalid Zip archive: EOCD". Non-zip artifacts that still pass the
-/// filter (e.g. an unfiltered download-all in the same run) are skipped with a
-/// warning instead of failing the step.
+/// is signed or downloaded. Selected artifacts are returned whether the
+/// Results Service serves them as ZIP archives or raw blobs.
 ///
 /// Flow: ListArtifacts -> GetSignedArtifactURL -> GET zip. Signed URLs and the
-/// runtime bearer token are supplied through mode-0600 curl config files so
-/// neither credential appears in process arguments.
+/// runtime bearer token are kept out of process arguments.
 pub fn download_artifacts_blocking(
     results_service_url: &str,
     token: &str,
@@ -4465,11 +4372,29 @@ pub fn download_artifacts_blocking(
     name: &str,
     pattern: &str,
 ) -> Result<Vec<ResultsArtifactDownload>> {
+    download_artifacts_blocking_in_temp_dir(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        pattern,
+        &std::env::temp_dir(),
+    )
+}
+
+fn download_artifacts_blocking_in_temp_dir(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    pattern: &str,
+    tmp_dir: &std::path::Path,
+) -> Result<Vec<ResultsArtifactDownload>> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
-    let tmp_dir = std::env::temp_dir();
 
     let matcher = if !name.is_empty() || pattern.is_empty() {
         None
@@ -4479,61 +4404,20 @@ pub fn download_artifacts_blocking(
         Some(builder.build().context("build artifact pattern")?)
     };
 
-    let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
-        let path = tmp_dir.join(format!(
-            "velnor-artifact-download-{}.{suffix}",
-            uuid::Uuid::new_v4()
-        ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        std::io::Write::write_all(&mut file, content)?;
-        Ok(path)
-    };
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build Results Service HTTP client")?;
 
-    let curl_post = |method: &str, body: &serde_json::Value| -> Result<serde_json::Value> {
-        let url = format!("{base}/{SERVICE}/{method}");
-        let config = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             header = \"Authorization: Bearer {token}\"\n\
-             header = \"Accept: application/json\"\n\
-             header = \"Content-Type: application/json\"\n\
-             max-time = 30\n\
-             request = POST\n\
-             silent\n\
-             write-out = \"\\n%{{http_code}}\"\n"
-        );
-        let config_path = write_secret_file("cfg", config.as_bytes())?;
-        let body_path = write_secret_file("json", serde_json::to_string(body)?.as_bytes())?;
-        let output = std::process::Command::new("curl")
-            .arg("--config")
-            .arg(&config_path)
-            .arg("--data")
-            .arg(format!("@{}", body_path.display()))
-            .arg(&url)
-            .output();
-        let _ = std::fs::remove_file(&config_path);
-        let _ = std::fs::remove_file(&body_path);
-        let output = output.with_context(|| format!("run Results Service {method}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (response, status_text) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
-        let status: u16 = status_text.trim().parse().unwrap_or(0);
-        if !(200..300).contains(&status) {
-            bail!("Results Service {method}: status={status}, body={response}");
-        }
-        serde_json::from_str(response).with_context(|| format!("parse Results Service {method}"))
-    };
-
-    let listed = curl_post(
-        "ListArtifacts",
-        &serde_json::json!({
-            "workflow_run_backend_id": plan_id,
-            "workflow_job_run_backend_id": job_id
-        }),
-    )?;
+    let list_body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": plan_id,
+        "workflow_job_run_backend_id": job_id
+    }))
+    .context("serialize ListArtifacts")?;
+    let list_url = format!("{base}/{SERVICE}/ListArtifacts");
+    let listed_text = results_service_post(&client, &list_url, token, &list_body, "ListArtifacts")?;
+    let listed: serde_json::Value =
+        serde_json::from_str(&listed_text).context("parse Results Service ListArtifacts")?;
     let artifacts = listed
         .get("artifacts")
         .and_then(serde_json::Value::as_array)
@@ -4570,59 +4454,74 @@ pub fn download_artifacts_blocking(
             .or_else(|| artifact.get("workflowJobRunBackendId"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or(job_id);
-        let signed = curl_post(
+        let signed_body = serde_json::to_string(&serde_json::json!({
+            "workflow_run_backend_id": artifact_plan,
+            "workflow_job_run_backend_id": artifact_job,
+            "name": artifact_name
+        }))
+        .context("serialize GetSignedArtifactURL")?;
+        let signed_url_endpoint = format!("{base}/{SERVICE}/GetSignedArtifactURL");
+        let signed_text = results_service_post(
+            &client,
+            &signed_url_endpoint,
+            token,
+            &signed_body,
             "GetSignedArtifactURL",
-            &serde_json::json!({
-                "workflow_run_backend_id": artifact_plan,
-                "workflow_job_run_backend_id": artifact_job,
-                "name": artifact_name
-            }),
         )?;
+        let signed: serde_json::Value = serde_json::from_str(&signed_text)
+            .context("parse Results Service GetSignedArtifactURL")?;
         let signed_url = signed
             .get("signed_url")
             .or_else(|| signed.get("signedUrl"))
             .and_then(serde_json::Value::as_str)
             .filter(|url| !url.is_empty())
             .context("GetSignedArtifactURL returned no signed URL")?;
-        let zip_path = tmp_dir.join(format!(
+        let artifact_path = tmp_dir.join(format!(
             "velnor-artifact-download-{}.zip",
             uuid::Uuid::new_v4()
         ));
-        let get_config = format!(
-            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
-             max-time = 120\n\
-             location\n\
-             fail\n\
-             silent\n\
-             show-error\n\
-             url = \"{signed_url}\"\n"
-        );
-        let config_path = write_secret_file("get.cfg", get_config.as_bytes())?;
-        let output = std::process::Command::new("curl")
-            .arg("--config")
-            .arg(&config_path)
-            .arg("--output")
-            .arg(&zip_path)
-            .output();
-        let _ = std::fs::remove_file(&config_path);
-        let output = output.context("download Results Service artifact zip")?;
-        if !output.status.success() {
-            let _ = std::fs::remove_file(&zip_path);
-            bail!(
-                "artifact zip download failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        let response = reqwest::blocking::Client::builder()
+            .user_agent(RUNNER_USER_AGENT)
+            .build()
+            .context("build artifact download HTTP client")?
+            .get(signed_url)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .context("download Results Service artifact zip")?;
+        let status = response.status();
+        if status != reqwest::StatusCode::OK {
+            let body = response.text().unwrap_or_default();
+            bail!("artifact zip download failed: status={status}, body={body}");
         }
-        let archive_file = std::fs::File::open(&zip_path)?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let mut response = response;
+        let (artifact_path, mut output_file) =
+            open_artifact_temp_file(artifact_path).context("create artifact zip temp file")?;
+        std::io::copy(&mut response, &mut output_file).context("write downloaded artifact zip")?;
+        let archive_file = std::fs::File::open(artifact_path.path())?;
         let mut archive = match zip::ZipArchive::new(archive_file) {
             Ok(archive) => archive,
             Err(err) => {
-                // docker/build-push-action uploads `.dockerbuild` build-record
-                // artifacts as gzip blobs, not zips. A selected-but-non-zip
-                // artifact (only reachable on pattern/download-all requests) is
-                // skipped with a warning rather than failing the whole step.
-                let _ = std::fs::remove_file(&zip_path);
-                eprintln!("skipping artifact '{artifact_name}': not a zip archive ({err})");
+                // Selected raw artifacts (for example a gzip `.dockerbuild`
+                // build record) are valid Results Service artifacts. Preserve
+                // their bytes under the artifact name; never silently drop a
+                // selected artifact. A ZIP content type with invalid bytes is
+                // still a protocol failure.
+                if artifact_response_is_zip(content_type.as_deref(), signed_url) {
+                    bail!("artifact '{artifact_name}' is not a valid ZIP archive: {err}");
+                }
+                let raw = std::fs::read(artifact_path.path()).context("read raw artifact")?;
+                downloads.push(ResultsArtifactDownload {
+                    name: artifact_name.to_string(),
+                    files: vec![(
+                        raw_artifact_filename(response.headers(), artifact_name)?,
+                        raw,
+                    )],
+                });
                 continue;
             }
         };
@@ -4633,14 +4532,12 @@ pub fn download_artifacts_blocking(
                 continue;
             }
             let Some(path) = entry.enclosed_name() else {
-                let _ = std::fs::remove_file(&zip_path);
                 bail!("artifact '{artifact_name}' contains an unsafe archive path");
             };
             let mut content = Vec::new();
             entry.read_to_end(&mut content)?;
             files.push((path, content));
         }
-        let _ = std::fs::remove_file(&zip_path);
         downloads.push(ResultsArtifactDownload {
             name: artifact_name.to_string(),
             files,
@@ -4652,6 +4549,52 @@ pub fn download_artifacts_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_http_transport_accepts_only_explicit_native_value() {
+        assert_eq!(parse_github_http_transport("native").unwrap(), "native");
+        for value in ["", "curl", "reqwest", "unknown"] {
+            let error = parse_github_http_transport(value).unwrap_err();
+            assert!(error.to_string().contains("accepted values: native"));
+        }
+    }
+
+    #[tokio::test]
+    async fn public_github_requests_validate_transport_before_io() {
+        let _transport_guard = crate::test_support::github_http_transport_env().await;
+        std::env::remove_var(GITHUB_HTTP_TRANSPORT_ENV);
+
+        let error = github_json_request("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("must be set to 'native'"),
+            "{error:#}"
+        );
+        let error = github_json_request_with_rate_limit("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("must be set to 'native'"),
+            "{error:#}"
+        );
+
+        std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "unsupported");
+        let error = github_json_request("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("accepted values: native"),
+            "{error:#}"
+        );
+        let error = github_json_request_with_rate_limit("INVALID", "not a URL", "token", None, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("accepted values: native"),
+            "{error:#}"
+        );
+    }
 
     #[tokio::test]
     async fn native_json_request_reuses_reqwest_transport_shape() {
@@ -4687,82 +4630,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn curl_json_request_sets_content_type_for_json_bodies() {
-        use wiremock::matchers::{body_string, header, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/github"))
-            .and(header("authorization", "Bearer test-token"))
-            .and(header("content-type", "application/json"))
-            .and(body_string(r#"{"hello":"world"}"#))
-            .respond_with(
-                ResponseTemplate::new(201)
-                    .insert_header("content-type", "application/json")
-                    .set_body_string(r#"{"ok":true}"#),
-            )
-            .mount(&server)
-            .await;
-
-        let result = curl_json_request(
-            "POST",
-            &format!("{}/github", server.uri()),
-            "test-token",
-            Some(r#"{"hello":"world"}"#.to_string()),
-            5,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
-    }
-
-    #[tokio::test]
-    async fn canceled_curl_kills_child_and_cleans_private_inputs() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("delayed")
-                    .set_delay(Duration::from_secs(30)),
-            )
-            .mount(&server)
-            .await;
-
-        let prefix = format!("velnor-cancel-test-{}", Uuid::new_v4());
-        let result = tokio::time::timeout(
-            Duration::from_millis(250),
-            run_private_curl(
-                &prefix,
-                "max-time = 30\nconnect-timeout = 2\nsilent\n",
-                None,
-                &server.uri(),
-                false,
-            ),
-        )
-        .await;
-        assert!(
-            result.is_err(),
-            "curl unexpectedly completed before cancellation"
-        );
-
-        let temp_dir = std::env::temp_dir().join("velnor-curl");
-        let leaked = std::fs::read_dir(temp_dir)
-            .unwrap()
-            .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
-        assert!(!leaked, "canceled curl left private input files behind");
-    }
-
-    #[tokio::test]
     async fn jit_rate_limit_returns_without_waiting_for_reset() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path(
@@ -4881,6 +4754,381 @@ mod tests {
         .unwrap();
         let request = artifact_create_request("plan", "job", "seed", Some(14), now).unwrap();
         assert_eq!(request["expires_at"], "2026-08-01T00:00:00Z");
+    }
+
+    #[test]
+    fn artifact_create_request_uses_current_results_service_wire_shape() {
+        let request = artifact_create_request(
+            "plan",
+            "job",
+            "release",
+            None,
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        assert_eq!(request["version"], 7);
+        assert_eq!(
+            request["mime_type"],
+            serde_json::json!({"value": "application/zip"})
+        );
+    }
+
+    #[test]
+    fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server_base = base.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    let Some(headers_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers_end = headers_end + 4;
+                    let content_length = String::from_utf8_lossy(&request[..headers_end])
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("Content-Length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= headers_end + content_length {
+                        break;
+                    }
+                }
+                requests.push(request);
+                let (status, body) = match index {
+                    0 => (
+                        "200 OK",
+                        serde_json::json!({
+                            "ok": true,
+                            "signed_upload_url": format!("{server_base}/upload")
+                        })
+                        .to_string(),
+                    ),
+                    1 => ("201 Created", String::new()),
+                    _ => (
+                        "200 OK",
+                        serde_json::json!({"ok": false, "artifact_id": "artifact-1"}).to_string(),
+                    ),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+
+        let error = upload_artifact_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "job",
+            "release",
+            &[("dist/output.txt".to_string(), b"artifact".to_vec())],
+            ArtifactUploadOptions::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ok=false"));
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        let create = String::from_utf8_lossy(&requests[0]);
+        assert!(create.contains("\"version\":7"));
+        assert!(create.contains("\"mime_type\":{\"value\":\"application/zip\"}"));
+        let finalize = String::from_utf8_lossy(&requests[2]);
+        assert!(finalize.contains("\"hash\":{"));
+        assert!(finalize.contains("sha256:"));
+    }
+
+    #[test]
+    fn artifact_zip_classification_matches_current_toolkit_variants() {
+        for content_type in [
+            "application/zip",
+            "application/x-zip-compressed; charset=binary",
+            "APPLICATION/ZIP-COMPRESSED",
+        ] {
+            assert!(artifact_response_is_zip(
+                Some(content_type),
+                "https://blob.test/data"
+            ));
+        }
+        assert!(artifact_response_is_zip(
+            Some("application/octet-stream"),
+            "https://blob.test/data/archive.ZIP?sig=secret"
+        ));
+        assert!(!artifact_response_is_zip(
+            Some("application/octet-stream"),
+            "https://blob.test/data/archive.bin?sig=secret"
+        ));
+    }
+
+    #[test]
+    fn raw_artifact_filename_prefers_content_disposition_and_sanitizes_path() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename=\"../report.json\"".parse().unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("report.json")
+        );
+
+        headers.remove(reqwest::header::CONTENT_DISPOSITION);
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("fallback.bin")
+        );
+    }
+
+    #[test]
+    fn raw_artifact_filename_prefers_and_decodes_rfc5987_filename() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename=old.txt; filename*=UTF-8''report%20%E2%9C%93.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("report ✓.txt")
+        );
+    }
+
+    #[test]
+    fn raw_artifact_filename_rejects_malformed_extended_value_and_falls_back() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename=report.txt; filename*=UTF-8''bad%ZZname.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("report.txt")
+        );
+
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename*=ISO-8859-1''report.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("fallback.bin")
+        );
+    }
+
+    #[test]
+    fn raw_artifact_filename_sanitizes_decoded_traversal() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_DISPOSITION,
+            "attachment; filename*=UTF-8''..%2F..%2Fsecret.txt"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            raw_artifact_filename(&headers, "fallback.bin").unwrap(),
+            std::path::PathBuf::from("secret.txt")
+        );
+    }
+
+    #[test]
+    fn artifact_download_requires_exact_http_200() {
+        assert!(artifact_download_status_is_ok(reqwest::StatusCode::OK));
+        assert!(!artifact_download_status_is_ok(
+            reqwest::StatusCode::PARTIAL_CONTENT
+        ));
+        assert!(!artifact_download_status_is_ok(
+            reqwest::StatusCode::NO_CONTENT
+        ));
+    }
+
+    #[test]
+    fn artifact_download_rejects_non_200_signed_responses_through_request_path() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        for status in [
+            reqwest::StatusCode::PARTIAL_CONTENT,
+            reqwest::StatusCode::NO_CONTENT,
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server_base = base.clone();
+            let status_line = format!("{} {}", status.as_u16(), status.canonical_reason().unwrap());
+            let server = std::thread::spawn(move || {
+                for index in 0..3 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = [0_u8; 4096];
+                    let _ = stream.read(&mut request).unwrap();
+                    let body = match index {
+                        0 => serde_json::json!({
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                        })
+                        .to_string(),
+                        1 => serde_json::json!({"signed_url": format!("{server_base}/signed.zip")}).to_string(),
+                        _ => String::new(),
+                    };
+                    let response_status = if index == 2 { &status_line } else { "200 OK" };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+
+            let error = download_artifacts_blocking(
+                &base,
+                "runtime-token",
+                "plan",
+                "consumer",
+                "release",
+                "",
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(&format!("status={status}")));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn results_service_download_rejects_zip_path_traversal() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("../escape.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"must not escape").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip");
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let (content_type, body) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                        }))
+                        .unwrap(),
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                    ),
+                    _ => ("application/zip", zip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let error =
+            download_artifacts_blocking(&base, "runtime-token", "plan", "job", "release", "")
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("unsafe archive path"),
+            "{error:#}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn results_service_download_cleans_temp_file_after_copy_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "velnor-artifact-download-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&temp_root).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip");
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let (content_type, body, content_length) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                        }))
+                        .unwrap(),
+                        None,
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                        None,
+                    ),
+                    _ => ("application/zip", b"truncated artifact".to_vec(), Some(1024)),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    content_length.unwrap_or(body.len())
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let error = download_artifacts_blocking_in_temp_dir(
+            &base,
+            "runtime-token",
+            "plan",
+            "job",
+            "release",
+            "",
+            &temp_root,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("write downloaded artifact zip"),
+            "{error:#}"
+        );
+        server.join().unwrap();
+        assert!(temp_root.read_dir().unwrap().next().is_none());
+        std::fs::remove_dir(temp_root).unwrap();
     }
 
     #[test]
@@ -5058,10 +5306,10 @@ mod tests {
     }
 
     #[test]
-    fn results_service_download_skips_non_zip_artifacts() {
-        // Regression: an unfiltered download-all (merge-multiple) in a run with
-        // a non-zip `.dockerbuild` build-record artifact skips that artifact
-        // with a warning instead of failing with "invalid Zip archive: EOCD".
+    fn results_service_download_preserves_selected_raw_artifacts() {
+        // Regression: an unfiltered download-all (merge-multiple) preserves a
+        // non-zip `.dockerbuild` build-record artifact instead of silently
+        // dropping it after ZIP parsing fails.
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -5072,6 +5320,7 @@ mod tests {
         let zip_bytes = zip.finish().unwrap().into_inner();
         // .dockerbuild build records are gzip blobs, not zips.
         let gzip_bytes = b"\x1f\x8b\x08\x00dockerbuild-record-not-a-zip".to_vec();
+        let expected_gzip_bytes = gzip_bytes.clone();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let signed_url = format!("{base}/signed.bin?credential=secret");
@@ -5130,7 +5379,7 @@ mod tests {
             download_artifacts_blocking(&base, "runtime-token", "plan", "consumer", "", "")
                 .unwrap();
         server.join().unwrap();
-        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads.len(), 2);
         assert_eq!(downloads[0].name, "release-linux");
         assert_eq!(
             downloads[0].files,
@@ -5139,6 +5388,60 @@ mod tests {
                 b"artifact-v4\n".to_vec()
             )]
         );
+        assert_eq!(downloads[1].name, ".dockerbuild");
+        assert_eq!(
+            downloads[1].files,
+            vec![(
+                std::path::PathBuf::from(".dockerbuild"),
+                expected_gzip_bytes
+            )]
+        );
+    }
+
+    #[test]
+    fn artifact_temp_file_removes_path_when_guard_drops() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-cleanup-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let (_guard, _file) = open_artifact_temp_file(path.clone()).unwrap();
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn artifact_temp_file_collision_preserves_preexisting_file() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-collision-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let original = b"file owned by another operation";
+        std::fs::write(&path, original).unwrap();
+
+        let error = match write_artifact_temp_file(path.clone(), b"replacement") {
+            Ok(_) => panic!("collision unexpectedly accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn artifact_temp_file_failed_open_does_not_leave_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-missing-parent-{}/artifact.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let error = match write_artifact_temp_file(path.clone(), b"secret artifact bytes") {
+            Ok(_) => panic!("missing parent unexpectedly accepted"),
+            Err(error) => error,
+        };
+        assert!(error.kind() == std::io::ErrorKind::NotFound);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -5160,7 +5463,7 @@ mod tests {
         assert_eq!(classify_broker_poll(403, ""), BrokerPollClass::Error);
         assert_eq!(classify_broker_poll(404, ""), BrokerPollClass::Error);
         assert_eq!(classify_broker_poll(500, "oops"), BrokerPollClass::Error);
-        // curl transport failure yields status 0 and must be an error too.
+        // A transport failure without an HTTP status must be an error too.
         assert_eq!(classify_broker_poll(0, ""), BrokerPollClass::Error);
     }
 
@@ -5191,7 +5494,7 @@ mod tests {
 
     #[test]
     fn completion_retry_classification() {
-        // Transport/5xx/curl-0 retry; throttling retries.
+        // Transport/5xx/status-less failures retry; throttling retries.
         assert!(is_retriable_completion_status(0));
         assert!(is_retriable_completion_status(500));
         assert!(is_retriable_completion_status(502));
@@ -5591,7 +5894,7 @@ mod tests {
     fn acquire_failure_classifies_local_faults_separately_from_transport() {
         let permission = anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "private curl directory",
+            "private transport directory",
         ));
         assert!(!acquire_failure_is_transient(&permission));
 
@@ -5620,6 +5923,8 @@ mod tests {
         };
         use wiremock::{matchers::method, Mock, MockServer, Request, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         let attempts = Arc::new(AtomicUsize::new(0));
         let responder_attempts = Arc::clone(&attempts);
@@ -5661,6 +5966,8 @@ mod tests {
     async fn acquire_job_rejects_malformed_success_without_retrying_or_swallowing() {
         use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
 
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/run/jobs/123/acquirejob"))
@@ -6069,6 +6376,7 @@ mod tests {
     fn github_retry_headers_drive_reset_aware_delay() {
         let hint = parse_github_retry_headers(
             b"HTTP/2 403\r\nRetry-After: 17\r\nX-RateLimit-Reset: 1060\r\nX-RateLimit-Remaining: 0\r\n\r\n",
+            1_000,
         );
         assert_eq!(hint.retry_after_seconds, Some(17));
         assert_eq!(hint.rate_limit_reset_epoch, Some(1060));
@@ -6076,10 +6384,43 @@ mod tests {
         assert_eq!(hint.delay(1000), Some(std::time::Duration::from_secs(60)));
 
         let error = github_api_error_with_retry("quota", 403, "exhausted", hint);
-        assert!(github_api_retry_delay(&error).is_some());
+        assert_eq!(
+            github_api_retry_delay_at(&error, 1_000),
+            Some(std::time::Duration::from_secs(60))
+        );
         assert_eq!(
             github_api_quota_status(&error).and_then(|status| status.remaining),
             Some(0)
+        );
+
+        let reset_only = github_api_error_with_retry(
+            "quota",
+            403,
+            "reset",
+            GitHubRetryHint {
+                retry_after_seconds: None,
+                rate_limit_reset_epoch: Some(1060),
+                remaining: Some(0),
+            },
+        );
+        assert_eq!(
+            github_api_retry_delay_at(&reset_only, 1_000),
+            Some(std::time::Duration::from_secs(60))
+        );
+
+        let retry_after_only = github_api_error_with_retry(
+            "quota",
+            403,
+            "retry",
+            GitHubRetryHint {
+                retry_after_seconds: Some(17),
+                rate_limit_reset_epoch: None,
+                remaining: Some(0),
+            },
+        );
+        assert_eq!(
+            github_api_retry_delay_at(&retry_after_only, 1_000),
+            Some(std::time::Duration::from_secs(17))
         );
     }
 
@@ -6100,7 +6441,7 @@ mod tests {
             "permission 403 with remaining>0 must not fleet-hold"
         );
         assert!(
-            github_api_retry_delay(&permission).is_some(),
+            github_api_retry_delay_at(&permission, 1_700_000_000).is_some(),
             "reset headers may still delay the failing slot"
         );
 
@@ -6135,7 +6476,7 @@ mod tests {
         headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
 
         assert_eq!(
-            github_retry_hint_from_header_map(&headers),
+            github_retry_hint_from_header_map(&headers, 1_000),
             GitHubRetryHint {
                 retry_after_seconds: Some(29),
                 rate_limit_reset_epoch: Some(123456),
@@ -6183,6 +6524,7 @@ mod tests {
     fn malformed_retry_headers_are_ignored_without_exposing_values() {
         let hint = parse_github_retry_headers(
             b"Retry-After: later\r\nX-RateLimit-Reset: invalid\r\nAuthorization: secret\r\n",
+            1_000,
         );
         assert_eq!(hint, GitHubRetryHint::default());
         assert_eq!(hint.delay(1000), None);
