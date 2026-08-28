@@ -33,7 +33,6 @@ defaults:
 jobs:
   cache-off:
   cache-sccache:
-  cache-kache:
   services-postgres:
     services:
       postgres:
