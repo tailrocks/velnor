@@ -269,16 +269,15 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-27T23:30:15Z
+### Current baseline — 2026-08-28T00:24:44Z
 
 - Repository: branch `fix/watchdog-registration-deadline`, HEAD
-  `f9d689faa3b774dbae6cf456fa7f6964ff980c71`, clean worktree, remote
+  `3b9eabc9fb813653e6e2a5aa6e01e23c224fa9ce`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
   of `origin/main` and equal to its pushed branch tip.
-- Open Velnor PR: #411 at this HEAD. Current-SHA CI run `33126505088` and
-  Guest image run `33126504755` are queued; neither is green-main proof.
-  Superseded runs `33126029601` and `33126029298` stalled in build/download
-  work and were cancelled at `2026-08-27T23:29:53Z`.
+- Open Velnor PR: #411 at this HEAD. Current-SHA CI run `33129071766` and
+  Guest image run `33129071359` stalled in hosted validation and were
+  cancelled; neither is green-main proof. No validation is active.
 - Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
   migration README, and `plans/TASKS.md`; its six atomic criteria remain
   unchecked because current-SHA fixture proof and independent sign-off are
@@ -296,6 +295,12 @@ evidence and requires a fresh baseline.
   `ee7ecca`. Current remote #408 behavior `eaf772d` was ported as bounded
   kernel-download retry/timeout hardening at `8f660ad`; its forced HTTP/1.1
   downgrade was intentionally omitted under the modern-protocol rule.
+- Follow-up inventory found 42 additional non-ancestor local/recovery tips.
+  Recovery refs exist for every tip. Semantic audit classified most as
+  equivalent/evolved or release-only; unresolved unique behavior remains in
+  Firecracker safety, early JIT/warm-copy, release `v0.1.199`, journal/lease
+  performance, and package-guardian branches. No conflicting code was merged
+  blindly; Plan079 and current trust/storage contracts remain authoritative.
 - Current-SHA local evidence: `rtk mise run check` passed, exit 0, with
   actionlint, cargo deny, cargo fmt, fleet generation, clippy `-D warnings`,
   and workspace nextest `1508/1508` (nextest run ID
