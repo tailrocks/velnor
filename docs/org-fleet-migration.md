@@ -2,13 +2,14 @@
 
 Velnor uses GitHub's current organization-scoped JIT configuration endpoint so
 one same-trust fleet can serve multiple repositories without changing workflow
-labels. Complete the storage capacity and GC gates before migrating production
-organizations.
+labels. The reviewed generated fleet policy is the active authority for group,
+repository, workflow, and ref changes. Complete the storage capacity and GC
+gates before migrating production organizations.
 
 ## Target pools
 
-Create restricted runner groups with repository allowlists and the persistent
-`velnor-target-mvp` label:
+Reconcile restricted runner groups through the reviewed generated fleet policy,
+with repository allowlists and the persistent `velnor-target-mvp` label:
 
 | Organization | Initial slots |
 |---|---:|
@@ -22,37 +23,92 @@ mount trusted stores or the host Docker socket.
 
 ## Migration
 
-1. Confirm every repository is granted access to its group and record the group
-   name. Keep the existing `velnor-target-mvp` label throughout the migration.
-2. Cancel queued/in-progress verification attempts, then send SIGTERM to each
-   per-repository daemon. Wait for graceful drain and confirm no busy slots.
-3. Delete only the stopped fleet's stale/offline registrations. Configure the
-   replacement daemon with `--url https://github.com/<org> --pool-name <group>`
-   and the same labels. Velnor resolves the name to GitHub's numeric group id.
-4. Start the organization daemon and run `velnor-runner doctor` against the
-   organization URL. Dispatch the fixture or repository smoke only after every
-   expected slot is online.
-5. Repeat for the next organization after the first fleet has remained healthy
-   and a second run confirms warm-store reuse.
+For each organization, use the reviewed `velnor-tools fleet-policy` boundary
+sequentially:
+
+1. Regenerate and validate the deterministic policy from the approved ledger:
+   `rtk mise run fleet-generate`. Do not edit repository ids or workflow entries
+   by hand.
+2. Produce the read-only desired/observed diff and digest:
+
+   ```sh
+   rtk cargo run -p velnor-tools --locked -- fleet-policy plan \
+     --policy fleet/policies/<org>-desired-policy.json \
+     --ledger fleet/release-refs.toml
+   ```
+
+3. Save a sanitized pre-change capture, review the exact repository,
+   workflow/ref, group, and guard diff, and record the plan digest. A changed
+   digest requires a new review. Stop if the ledger is absent, the group is
+   missing/default/inherited/read-only, closure is ambiguous, or a removal has
+   no reviewed closure evidence.
+4. Route new verification to GitHub-hosted, cancel older verification runs,
+   drain the Velnor daemon, and prove that no slot is busy. Delete only stale
+   or offline registrations owned by validation.
+5. After explicit approval of that exact digest, apply only the named
+   organization. `apply` writes workflow restrictions first, replaces the
+   exact repository set, and requires readback equality:
+
+   ```sh
+   rtk cargo run -p velnor-tools --locked -- fleet-policy apply \
+     --policy fleet/policies/<org>-desired-policy.json \
+     --ledger fleet/release-refs.toml \
+     --organization <org> \
+     --plan-digest <REVIEWED_PLAN_DIGEST>
+   ```
+
+6. Run the read-only audit and require a clean result before resuming the
+   organization:
+
+   ```sh
+   rtk cargo run -p velnor-tools --locked -- fleet-policy audit \
+     --policy fleet/policies/<org>-desired-policy.json \
+     --organization <org>
+   ```
+
+7. Configure the organization daemon with the stable group name, run
+   `velnor-runner doctor`, and dispatch smoke only after the pending
+   runner-registration/assignment and full guard-state acceptance evidence is
+   captured. Require a non-empty runner and group assignment within two
+   minutes, then complete the warm rerun proof before touching the next
+   organization.
+
+Do not use direct GitHub group mutations as a parallel path. If any apply,
+readback, routing, capacity, storage, or GC gate fails, keep the organization
+drained, use the explicit GitHub lane, and preserve the STOP conditions.
 
 ## Tailrocks access repair checklist
 
-Current evidence (2026-07-21): the `tailrocks` organization has zero registered
-runners. Its `Default` runner group has `visibility=all`, so repository access is
-not the blocker. Five healthy `velnor-dogfood-slot-*` registrations instead live
-under the `tailrocks/velnor` repository. The daemon must be drained and migrated
-from repository scope to organization scope before estate smoke dispatches.
+Historical evidence (2026-07-21; superseded for active decisions): the
+`tailrocks` organization had zero registered runners. Its `Default` runner group
+had `visibility=all`, so repository access was not the blocker. Five healthy
+`velnor-dogfood-slot-*` registrations instead lived under the
+`tailrocks/velnor` repository. Do not use this snapshot as current
+runner-state evidence.
+
+Plan 039's fresh snapshot is limited to runner-group policy fields. Current
+runner registration/assignment state and full guard-state acceptance remain
+pending evidence; neither is implied by a group existing or a daemon being
+active. The daemon must be drained and migrated from repository scope to
+organization scope before estate smoke dispatches.
 
 The authenticated operator token now carries `admin:org`, `repo`, and
 `workflow`; no further GitHub scope expansion is required for this migration.
 
-1. With explicit operator approval, create the currently missing restricted
-   group and its complete allowlist in one request. The proposed exact name is
-   `velnor-trusted`; all listed repositories are public, so GitHub requires
-   `allows_public_repositories=true`. Selection remains repository-scoped and
-   fork execution remains governed by the separate untrusted-pool rule above.
+### Historical direct REST examples — non-executable
+
+> Historical/non-executable. These snippets document the superseded manual
+> create-group and per-repository `PUT` path. Do not copy or run them. Active
+> reconciliation is only through reviewed `fleet-policy plan`, `apply`, and
+> `audit`; the generated policy owns the exact repository and workflow/ref
+> boundary.
+
+The 2026-08-24 read-only snapshot found all three `velnor-trusted` groups
+present, but workflow restrictions were not enabled. The old create-group
+procedure below is retained only as historical context; it is not a remedy.
 
    ```sh
+   # HISTORICAL / NON-EXECUTABLE — do not run.
    args=()
    for repository in \
      $(jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json)
@@ -74,23 +130,21 @@ The authenticated operator token now carries `admin:org`, `repo`, and
    `tailrocks-desired-policy.json`.
 
    [GitHub documents](https://docs.github.com/en/rest/actions/self-hosted-runner-groups?apiVersion=2026-03-10#create-a-self-hosted-runner-group-for-an-organization)
-   `POST /orgs/{org}/actions/runner-groups` for this operation; classic
-   OAuth/PAT authentication requires `admin:org`, which the current
-   authenticated identity now has. Do not run this command before approval.
+   `POST /orgs/{org}/actions/runner-groups` for this historical operation. The
+   endpoint reference does not authorize this snippet; do not run it.
 
-2. Find the trusted group id and confirm its visibility is `selected`:
+The following direct lookup and per-repository `PUT` are historical/non-
+executable as well:
 
    ```sh
+   # HISTORICAL / NON-EXECUTABLE — do not run.
    gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
      orgs/tailrocks/actions/runner-groups \
      --jq '.runner_groups[] | [.id, .name, .visibility] | @tsv'
    ```
 
-3. Set `trusted_group_id` to that numeric id, then add every tailrocks estate
-   repository listed in the generated policy. Derive each numeric id at run
-   time from its full name in `fleet/policies/tailrocks-desired-policy.json`:
-
    ```sh
+   # HISTORICAL / NON-EXECUTABLE — do not run.
    trusted_group_id=<TRUSTED_GROUP_ID>
    for repository in \
      $(jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json)
@@ -103,26 +157,41 @@ The authenticated operator token now carries `admin:org`, `repo`, and
    done
    ```
 
-   The allowlist is owned by the generated policy, never by this page:
-   `fleet/release-refs.toml` is the release-ref ledger, `mise run
-   fleet-generate` regenerates the per-org policy JSONs under
-   `fleet/policies/`, `mise run fleet-digests` prints their digests, and the
-   audit-ci rule `fleet-policy-current` fails when committed policy bytes are
-   stale. If membership changes, regenerate and commit the policy instead of
-   editing repository ids here.
+The allowlist is owned by the generated policy, never by this page:
+`fleet/release-refs.toml` is the release-ref ledger, `rtk mise run
+fleet-generate` regenerates the per-org policy JSONs under `fleet/policies/`,
+`rtk mise run fleet-digests` prints their digests, and the audit-ci rule
+`fleet-policy-current` fails when committed policy bytes are stale.
 
-4. Verify the allowlist before dispatching anything:
+### Active Tailrocks procedure
+
+1. Run `fleet-policy plan` with the generated Tailrocks policy and the release-
+   ref ledger; save the sanitized diff and digest. The plan is read-only.
+2. Review the exact diff. If the desired repository set removes any live
+   selection, stop until reviewed closure evidence exists. If the group is
+   missing, Default, inherited, or workflow restrictions are read-only, stop
+   and escalate; do not create or mutate it from this page.
+3. Route verification to GitHub-hosted, drain Velnor, and prove no busy slot.
+   With explicit approval of the unchanged digest, run `fleet-policy apply` for
+   `tailrocks` only. It applies the complete workflow restriction, replaces the
+   exact generated repository set, and performs final readback.
+4. Run `fleet-policy audit` for `tailrocks`; resume only after exact semantic
+   equality. Then start the organization daemon with `--pool-name
+   velnor-trusted`, run `velnor-runner doctor`, and collect the pending runner-
+   state, full guard-state, routing/denial, and warm-run acceptance evidence.
+5. Cancel every older active verification run before smoke. Dispatch one
+   `lane=both` run, monitor only its returned id, and require a non-empty runner
+   and group assignment within two minutes. Never declare migration complete
+   from group readback or daemon health alone.
+
+For reference only, the old direct allowlist lookup was:
 
    ```sh
+   # HISTORICAL / NON-EXECUTABLE — do not run.
    gh api --paginate -H 'X-GitHub-Api-Version: 2026-03-10' \
      "orgs/tailrocks/actions/runner-groups/${trusted_group_id}/repositories" \
      --jq '.repositories[].full_name'
    ```
-
-5. Cancel every older active verification run. Dispatch one `lane=both` run
-   per repository, monitor only its returned id, and require a non-empty runner
-   and group assignment within two minutes. Then run `velnor-runner doctor`
-   and the warm rerun proof before declaring migration complete.
 
 ## Allowlist drift incident (2026-08-24)
 
@@ -136,10 +205,11 @@ the removal is unrecorded.
 
 Membership was restored by re-adding every repository whose default-branch
 workflows reference `velnor-target-mvp`. Standing rule: **every repository
-onboarded to the Velnor lane must be added to the group allowlist in the same
-change**, and `scripts/runner_group_doctor.sh` must be run after onboarding
-batches — it fails loudly listing the exact remediation `PUT` per missing
-repository:
+onboarded to the Velnor lane must enter the generated policy in the same
+change**. Run `scripts/runner_group_doctor.sh` after onboarding batches as a
+read-only diagnostic; its printed direct `PUT` remediation lines are
+historical/non-executable and are not authorization to mutate GitHub. Use the
+reviewed `fleet-policy plan`, `apply`, and `audit` flow instead:
 
 ```sh
 scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group velnor-trusted
@@ -147,10 +217,11 @@ scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group ve
 
 The authoritative allowlist is the `selected_repositories` field of
 `fleet/policies/tailrocks-desired-policy.json` — generated from
-`fleet/release-refs.toml`, digest-reported by `mise run fleet-digests`, and
+`fleet/release-refs.toml`, digest-reported by `rtk mise run fleet-digests`, and
 byte-compared against the ledger by the audit-ci `fleet-policy-current` rule.
-Do not mirror it as a hand-maintained table here; inspect the generated policy
-and live state directly:
+Do not mirror it as a hand-maintained table here; obtain live policy state
+through `fleet-policy plan`/`audit` and treat runner-state and full guard-state
+as pending acceptance evidence:
 
 ```sh
 jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json
@@ -159,6 +230,9 @@ scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group ve
 
 ## Rollback
 
-Drain the organization daemon, remove only its registrations, and restart the
-unchanged per-repository units. Because workflow labels remain constant, no YAML
-rollback is needed. Do not run both fleet shapes with the same runner names.
+If reconciliation fails, keep the organization drained and route new
+verification to the explicit GitHub lane. Use the reviewed plan/audit output to
+diagnose; never restore broad access. Then remove only registrations owned by
+validation and restart the unchanged per-repository units. Because workflow
+labels remain constant, no YAML rollback is needed. Do not run both fleet
+shapes with the same runner names.

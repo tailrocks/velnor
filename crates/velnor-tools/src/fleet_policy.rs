@@ -3,9 +3,10 @@
 //! Deterministic generation surface: strict validation, canonical JSON,
 //! sha256 digests, and the release-ref ledger schema. `generate` is fully
 //! offline: it reads the release-ref ledger and emits byte-stable per-org
-//! policy JSON (see [`generate_policies_from_ledger`]). `plan` prints a
-//! desired-policy summary offline. `audit` and `apply` reach live GitHub
-//! runner-group state through [`crate::fleet_policy_client::FleetGateway`]
+//! policy JSON (see [`generate_policies_from_ledger`]). `plan` requires the
+//! release-ref ledger, validates current approval, and reads live GitHub
+//! runner-group state without mutation. `audit` and `apply` also reach live
+//! state through [`crate::fleet_policy_client::FleetGateway`]
 //! (`ReqwestFleetHttp`); apply stays manual and digest-gated.
 
 use anyhow::{bail, Context, Result};
@@ -17,7 +18,7 @@ use std::{
     fmt, fs,
     path::{Path, PathBuf},
 };
-use time::{Date, Month};
+use time::{Date, Month, OffsetDateTime};
 
 use crate::fleet_policy_client::{
     FleetGateway, ReqwestFleetHttp, RetryPolicy, DEFAULT_GITHUB_API_URL,
@@ -33,7 +34,7 @@ pub const RELEASE_REF_LEDGER_SCHEMA_VERSION: i64 = 1;
 pub const REQUIRED_RUNNER_LABEL: &str = "velnor-target-mvp";
 /// Required non-default runner group name.
 pub const REQUIRED_GROUP_NAME: &str = "velnor-trusted";
-/// GitHub REST API version targeted by future live operations.
+/// GitHub REST API version used by live fleet-policy operations.
 #[allow(dead_code)]
 pub const GITHUB_API_VERSION: &str = "2026-03-10";
 
@@ -196,8 +197,22 @@ pub fn validate_policy(policy: &OrgPolicy) -> Result<()> {
             GENERATOR_VERSION
         );
     }
-    if policy.organization.trim().is_empty() {
-        bail!("field 'organization': value must be a non-empty organization login");
+    let organization = policy.organization.as_bytes();
+    let valid_organization = !organization.is_empty()
+        && organization.len() <= 39
+        && matches!(organization.first(), Some(byte) if byte.is_ascii_alphanumeric())
+        && matches!(organization.last(), Some(byte) if byte.is_ascii_alphanumeric())
+        && organization
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        && !organization
+            .windows(2)
+            .any(|window| window[0] == b'-' && window[1] == b'-');
+    if !valid_organization {
+        bail!(
+            "field 'organization': value '{}' must be a single safe GitHub login segment",
+            policy.organization
+        );
     }
     if policy.group_name != REQUIRED_GROUP_NAME {
         bail!(
@@ -254,6 +269,13 @@ pub fn validate_policy(policy: &OrgPolicy) -> Result<()> {
     }
     for repository in &policy.selected_repositories {
         ensure_slug("selected_repositories", repository)?;
+        let repository_owner = repository.split('/').next().unwrap_or_default();
+        if repository_owner != policy.organization {
+            bail!(
+                "field 'selected_repositories': value '{repository}' has owner '{repository_owner}', expected organization '{}'",
+                policy.organization
+            );
+        }
     }
 
     let mut seen_paths: BTreeMap<String, String> = BTreeMap::new();
@@ -267,6 +289,13 @@ pub fn validate_policy(policy: &OrgPolicy) -> Result<()> {
         ensure_no_wildcard("selected_workflows", &value)?;
         ensure_qualified_ref("selected_workflows", &value, &identity.git_ref)?;
         let (owner_repo, _) = split_identity_path("selected_workflows", &value, &identity.path)?;
+        let workflow_owner = owner_repo.split('/').next().unwrap_or_default();
+        if workflow_owner != policy.organization {
+            bail!(
+                "field 'selected_workflows': entry '{value}' has owner '{workflow_owner}', expected organization '{}'",
+                policy.organization
+            );
+        }
         if !policy.selected_repositories.contains(&owner_repo) {
             bail!(
                 "field 'selected_workflows': entry '{value}' references repository '{owner_repo}' absent from field 'selected_repositories'"
@@ -363,18 +392,21 @@ fn ensure_no_wildcard(field: &str, value: &str) -> Result<()> {
 
 /// Validate a `YYYY-MM-DD` calendar date (real month/day bounds).
 fn ensure_calendar_date(value: &str) -> std::result::Result<(), String> {
+    parse_calendar_date(value).map(|_| ())
+}
+
+fn parse_calendar_date(value: &str) -> std::result::Result<Date, String> {
     let shape = "must be a real YYYY-MM-DD date";
     let mut parts = value.splitn(3, '-');
     let (year, month, day) = match (parts.next(), parts.next(), parts.next()) {
         (Some(y), Some(m), Some(d)) if y.len() == 4 && m.len() == 2 && d.len() == 2 => (y, m, d),
         _ => return Err(shape.to_owned()),
     };
-    let year: i32 = year.parse().map_err(|_| shape)?;
-    let month: u8 = month.parse().map_err(|_| shape)?;
-    let day: u8 = day.parse().map_err(|_| shape)?;
-    let month = Month::try_from(month).map_err(|_| shape)?;
-    Date::from_calendar_date(year, month, day).map_err(|_| shape)?;
-    Ok(())
+    let year: i32 = year.parse().map_err(|_| shape.to_owned())?;
+    let month: u8 = month.parse().map_err(|_| shape.to_owned())?;
+    let day: u8 = day.parse().map_err(|_| shape.to_owned())?;
+    let month = Month::try_from(month).map_err(|_| shape.to_owned())?;
+    Date::from_calendar_date(year, month, day).map_err(|_| shape.to_owned())
 }
 
 fn ensure_qualified_ref(field: &str, value: &str, git_ref: &str) -> Result<()> {
@@ -441,7 +473,7 @@ impl ReleaseRefLedger {
     pub fn approved_workflow_identities(&self) -> Result<Vec<WorkflowIdentity>> {
         let mut identities = Vec::new();
         for entry in &self.entries {
-            if !matches!(entry.review_state, ReviewState::Approved) {
+            if !approved_entry_is_currently_admitted(entry)? {
                 continue;
             }
             identities.push(WorkflowIdentity {
@@ -455,6 +487,27 @@ impl ReleaseRefLedger {
         identities.sort();
         Ok(identities)
     }
+}
+
+fn approved_entry_is_currently_admitted(entry: &ReleaseRefEntry) -> Result<bool> {
+    let expiry_is_current = if let Some(expiry) = entry.expiry.as_deref() {
+        let expiry_date = parse_calendar_date(expiry).map_err(|message| {
+            anyhow::anyhow!(
+                "field 'entries.expiry': value '{expiry}' for '{}' {message}",
+                format_args!(
+                    "{}/{}/{}",
+                    entry.owner, entry.repository, entry.workflow_path
+                )
+            )
+        })?;
+        expiry_date >= OffsetDateTime::now_utc().date()
+    } else {
+        true
+    };
+    if !matches!(entry.review_state, ReviewState::Approved) {
+        return Ok(false);
+    }
+    Ok(expiry_is_current)
 }
 
 pub fn validate_ledger(ledger: &ReleaseRefLedger) -> Result<()> {
@@ -664,7 +717,7 @@ pub struct FleetPolicyArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum FleetPolicyCommand {
-    /// Print the deterministic desired-policy summary and digest (no mutation).
+    /// Read live desired/observed state and print a deterministic summary/digest (requires --ledger; no mutation).
     Plan(FleetPlanArgs),
     /// Compare desired policy against live state (requires the live client).
     Audit(FleetAuditArgs),
@@ -679,9 +732,9 @@ pub struct FleetPlanArgs {
     /// Generated policy JSON to plan from.
     #[arg(long)]
     pub policy: PathBuf,
-    /// Optional release-ref ledger to cross-check.
+    /// Required release-ref ledger; entries must be currently approved before live observation.
     #[arg(long)]
-    pub ledger: Option<PathBuf>,
+    pub ledger: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -699,6 +752,9 @@ pub struct FleetApplyArgs {
     /// Generated policy JSON to apply.
     #[arg(long)]
     pub policy: PathBuf,
+    /// Release-ref ledger to validate before applying.
+    #[arg(long)]
+    pub ledger: PathBuf,
     /// Exact organization to mutate; the whole operation is rejected otherwise.
     #[arg(long)]
     pub organization: String,
@@ -716,9 +772,6 @@ pub struct FleetGenerateArgs {
     #[arg(long, default_value = "fleet/policies")]
     pub out_dir: PathBuf,
 }
-
-const NOT_IMPLEMENTED_LIVE: &str =
-    "live GitHub API client not implemented in this build (Plan 039 Step 2 continues)";
 
 /// Read the maintainer GitHub token from the environment. The value is never
 /// echoed; errors name only the variable.
@@ -752,7 +805,7 @@ async fn live_gateway<'a>(
 
 pub async fn fleet_policy(command: FleetPolicyCommand) -> Result<()> {
     match command {
-        FleetPolicyCommand::Plan(args) => fleet_plan(args),
+        FleetPolicyCommand::Plan(args) => fleet_plan(args).await,
         FleetPolicyCommand::Audit(args) => fleet_audit(args).await,
         FleetPolicyCommand::Apply(args) => fleet_apply(args).await,
         FleetPolicyCommand::Generate(args) => fleet_generate(args),
@@ -763,17 +816,17 @@ pub async fn fleet_policy(command: FleetPolicyCommand) -> Result<()> {
 /// ledger.
 ///
 /// Review-state mechanism (exact behavior that produced the committed
-/// 2026-08-24 snapshots): [`validate_ledger`] rejects `expired` entries
-/// outright, so every entry surviving validation — both `approved` and
-/// `seed-pending-review` — flows into its organization's policy. The seed
-/// ledger is entirely `seed-pending-review`, and the committed snapshots were
-/// generated from it with all entries included; operator approval gates live
-/// plan/audit/apply runs, not byte generation. Entries are grouped by owner;
-/// repositories and workflow identities are sorted and de-duplicated by
-/// [`OrgPolicy::normalized`] before canonical serialization.
+/// 2026-08-24 snapshots): only currently admitted (`approved` with no expiry,
+/// or an expiry today/future) entries flow into their organization's policy.
+/// Entries are grouped by owner; repositories and workflow identities are
+/// sorted and de-duplicated by [`OrgPolicy::normalized`] before canonical
+/// serialization.
 pub fn generate_policies_from_ledger(ledger: &ReleaseRefLedger) -> Result<Vec<OrgPolicy>> {
     let mut by_org: BTreeMap<&str, Vec<&ReleaseRefEntry>> = BTreeMap::new();
     for entry in &ledger.entries {
+        if !approved_entry_is_currently_admitted(entry)? {
+            continue;
+        }
         by_org.entry(entry.owner.as_str()).or_default().push(entry);
     }
     let mut policies = Vec::new();
@@ -1038,6 +1091,9 @@ async fn fleet_audit(args: FleetAuditArgs) -> Result<()> {
 async fn fleet_apply(args: FleetApplyArgs) -> Result<()> {
     let policy = load_policy(&args.policy)?;
     ensure_organization(&policy, &args.organization)?;
+    let ledger = ReleaseRefLedger::load(&args.ledger)?;
+    ensure_live_plan_ledger_approved(&ledger)?;
+    ensure_policy_matches_ledger(&policy, &ledger)?;
     // Digest gate before any HTTP call happens inside apply_reviewed_policy;
     // verify here too so a stale digest never even builds a transport.
     verify_plan_digest(&args.plan_digest, policy.digest()?.as_str())?;
@@ -1084,12 +1140,40 @@ fn ensure_policy_matches_ledger(policy: &OrgPolicy, ledger: &ReleaseRefLedger) -
     Ok(())
 }
 
-fn fleet_plan(args: FleetPlanArgs) -> Result<()> {
-    let policy = load_policy(&args.policy)?;
-    if let Some(ledger_path) = &args.ledger {
-        let ledger = ReleaseRefLedger::load(ledger_path)?;
-        ensure_policy_matches_ledger(&policy, &ledger)?;
+fn ensure_live_plan_ledger_approved(ledger: &ReleaseRefLedger) -> Result<()> {
+    for entry in &ledger.entries {
+        let review_state = match entry.review_state {
+            ReviewState::Approved => {
+                if !approved_entry_is_currently_admitted(entry)? {
+                    bail!(
+                        "fleet plan: ledger entry '{}/{}/{}@{}' has expired; live plan requires a currently admitted approved entry",
+                        entry.owner,
+                        entry.repository,
+                        entry.workflow_path,
+                        entry.git_ref
+                    );
+                }
+                continue;
+            }
+            ReviewState::SeedPendingReview => "seed-pending-review",
+            ReviewState::Expired => "expired",
+        };
+        bail!(
+            "fleet plan: ledger entry '{}/{}/{}@{}' has review_state '{review_state}'; live plan requires 'approved'",
+            entry.owner,
+            entry.repository,
+            entry.workflow_path,
+            entry.git_ref
+        );
     }
+    Ok(())
+}
+
+async fn fleet_plan(args: FleetPlanArgs) -> Result<()> {
+    let policy = load_policy(&args.policy)?;
+    let ledger = ReleaseRefLedger::load(&args.ledger)?;
+    ensure_live_plan_ledger_approved(&ledger)?;
+    ensure_policy_matches_ledger(&policy, &ledger)?;
     println!("organization: {}", policy.organization);
     println!("group: {}", policy.group_name);
     println!(
@@ -1102,7 +1186,20 @@ fn fleet_plan(args: FleetPlanArgs) -> Result<()> {
         println!("  {identity}");
     }
     println!("digest: {}", policy.digest()?);
-    println!("note: observed-state section unavailable; {NOT_IMPLEMENTED_LIVE}");
+
+    let http = ReqwestFleetHttp::new(DEFAULT_GITHUB_API_URL, &fleet_github_token()?)?;
+    let gateway = live_gateway(&http).await?;
+    let observed = gateway
+        .observe_group(&policy.organization, &policy.group_name)
+        .await?;
+    match observed {
+        Some(observed) => {
+            for line in semantic_diff(&policy, &policy.organization, &observed)? {
+                println!("{line}");
+            }
+        }
+        None => println!("group_name: want '{}' got '<missing>'", policy.group_name),
+    }
     Ok(())
 }
 
@@ -1143,6 +1240,14 @@ mod tests {
                 expiry: None,
             }],
         }
+    }
+
+    fn approved_sample_ledger() -> ReleaseRefLedger {
+        let mut ledger = sample_ledger();
+        for entry in &mut ledger.entries {
+            entry.review_state = ReviewState::Approved;
+        }
+        ledger
     }
 
     #[test]
@@ -1199,6 +1304,48 @@ mod tests {
         assert_eq!(
             validate_policy(&policy).unwrap_err().to_string(),
             "field 'selected_repositories': value must be non-empty"
+        );
+    }
+
+    #[test]
+    fn reject_unsafe_organization_login() {
+        for value in [
+            "",
+            "tailrocks/other",
+            "-tailrocks",
+            "tailrocks-",
+            "tailrocks--ops",
+            "tailrocks?x",
+        ] {
+            let mut policy = sample_policy();
+            policy.organization = value.to_owned();
+            let err = validate_policy(&policy).unwrap_err().to_string();
+            assert!(
+                err.contains("field 'organization'")
+                    && err.contains("single safe GitHub login segment"),
+                "organization '{value}' was accepted: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_cross_organization_repository_and_workflow() {
+        let mut policy = sample_policy();
+        policy.selected_repositories[0] = "other-org/ruxel".to_owned();
+        let err = validate_policy(&policy).unwrap_err().to_string();
+        assert!(
+            err.contains("field 'selected_repositories'")
+                && err.contains("expected organization 'tailrocks'"),
+            "{err}"
+        );
+
+        let mut policy = sample_policy();
+        policy.selected_workflows[0].path = "other-org/ruxel/.github/workflows/ci.yml".to_owned();
+        let err = validate_policy(&policy).unwrap_err().to_string();
+        assert!(
+            err.contains("field 'selected_workflows'")
+                && err.contains("expected organization 'tailrocks'"),
+            "{err}"
         );
     }
 
@@ -1374,6 +1521,15 @@ mod tests {
                 git_ref: "refs/heads/main".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn live_plan_rejects_unapproved_ledger_entries() {
+        let err = ensure_live_plan_ledger_approved(&sample_ledger())
+            .expect_err("live plan must reject seed-pending entries")
+            .to_string();
+        assert!(err.contains("review_state 'seed-pending-review'"), "{err}");
+        assert!(err.contains("live plan requires 'approved'"), "{err}");
     }
 
     #[test]
@@ -1720,10 +1876,10 @@ mod tests {
 
         // Policy-layer backstop: even an unvalidated in-memory ledger cannot
         // reach canonical bytes with two refs for one workflow path.
-        let mut ledger = sample_ledger();
+        let mut ledger = approved_sample_ledger();
         ledger.entries.push(ReleaseRefEntry {
             git_ref: "refs/heads/release".to_owned(),
-            ..sample_ledger().entries[0].clone()
+            ..approved_sample_ledger().entries[0].clone()
         });
         let err = generate_policies_from_ledger(&ledger)
             .map(|policies| policies[0].canonical_json().expect("canonical"))
@@ -1759,7 +1915,7 @@ mod tests {
 
     #[test]
     fn plan_policy_actions_classifies_write_skip_and_remove() {
-        let mut ledger = sample_ledger();
+        let mut ledger = approved_sample_ledger();
         let mut second = ledger.entries[0].clone();
         second.owner = "ChainArgos".to_owned();
         second.repository = "velnor".to_owned();
@@ -1963,7 +2119,7 @@ mod tests {
 
     #[test]
     fn plan_bails_on_case_insensitive_collision_with_existing_stem() {
-        let ledger = sample_ledger();
+        let ledger = approved_sample_ledger();
         let policies = generate_policies_from_ledger(&ledger).expect("policies");
         let org = policies[0].organization.as_str();
         let mut existing = BTreeMap::new();
@@ -2028,7 +2184,7 @@ mod tests {
             .set_modified(pinned)
             .expect("pin mtime");
 
-        let mut ledger = sample_ledger();
+        let mut ledger = approved_sample_ledger();
         let mut upper = ledger.entries[0].clone();
         upper.owner = "Tailrocks".to_owned();
         ledger.entries.push(upper);

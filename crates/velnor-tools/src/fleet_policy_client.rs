@@ -264,20 +264,13 @@ pub struct RunnerGroupDetail {
     #[allow(dead_code)]
     pub id: i64,
     pub name: String,
-    #[serde(default)]
     pub default: bool,
-    #[serde(default)]
     pub inherited: bool,
-    #[serde(default)]
     pub allows_public_repositories: bool,
-    #[serde(default)]
     pub restricted_to_workflows: bool,
-    #[serde(default)]
     pub workflow_restrictions_read_only: bool,
-    #[serde(default)]
-    pub visibility: Option<String>,
-    #[serde(default)]
-    pub selected_workflows: Option<Vec<String>>,
+    pub visibility: String,
+    pub selected_workflows: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -595,14 +588,10 @@ impl<'a, H: FleetHttp> FleetGateway<'a, H> {
         let repositories = self
             .list_selected_repositories(organization, summary.id)
             .await?;
-        let selected_workflows: BTreeSet<String> = detail
-            .selected_workflows
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let selected_workflows: BTreeSet<String> = detail.selected_workflows.into_iter().collect();
         Ok(Some(ObservedGroup {
             name: detail.name,
-            visibility: detail.visibility.unwrap_or_default(),
+            visibility: detail.visibility,
             allows_public_repositories: detail.allows_public_repositories,
             restricted_to_workflows: detail.restricted_to_workflows,
             selected_repositories: repositories,
@@ -681,7 +670,7 @@ impl<'a, H: FleetHttp> FleetGateway<'a, H> {
     /// set may legitimately still be unapplied at this point).
     fn restriction_readback_diff(detail: &RunnerGroupDetail, policy: &OrgPolicy) -> Vec<String> {
         let mut lines = Vec::new();
-        let visibility = detail.visibility.clone().unwrap_or_default();
+        let visibility = detail.visibility.clone();
         if visibility != policy.visibility.to_string() {
             lines.push(format!(
                 "visibility: want '{}' got '{visibility}'",
@@ -700,12 +689,7 @@ impl<'a, H: FleetHttp> FleetGateway<'a, H> {
                 policy.restricted_to_workflows, detail.restricted_to_workflows
             ));
         }
-        let got: BTreeSet<String> = detail
-            .selected_workflows
-            .clone()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        let got: BTreeSet<String> = detail.selected_workflows.iter().cloned().collect();
         let want: BTreeSet<String> = policy
             .selected_workflows
             .iter()
@@ -1253,6 +1237,44 @@ mod tests {
             assert!(
                 api.mutation_calls().is_empty(),
                 "{field} blocks all mutations"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn omitted_group_policy_readback_fields_fail_before_mutation() {
+        let policy = desired_policy();
+        let digest = policy.digest().expect("digest");
+        for field in [
+            "allows_public_repositories",
+            "restricted_to_workflows",
+            "visibility",
+            "selected_workflows",
+        ] {
+            let mut state = base_state(&policy);
+            state
+                .group_detail
+                .as_object_mut()
+                .expect("group detail object")
+                .remove(field);
+            let api = FakeApi::new(state);
+
+            let result = FleetGateway::new(&api, TOKEN, RetryPolicy::default())
+                .apply_reviewed_policy(&policy, ORG, &digest)
+                .await;
+            assert!(
+                result.is_err(),
+                "omitted {field} unexpectedly allowed apply: {result:?}"
+            );
+            let err = result.expect_err("missing readback field must fail closed");
+            let error_chain = format!("{err:#}");
+            assert!(
+                error_chain.contains(&format!("missing field `{field}`")),
+                "{error_chain}"
+            );
+            assert!(
+                api.mutation_calls().is_empty(),
+                "omitted {field} must fail before PATCH/PUT: {error_chain}"
             );
         }
     }
