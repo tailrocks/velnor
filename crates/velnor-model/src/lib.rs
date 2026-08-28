@@ -39,7 +39,7 @@ pub use guest_plan::{
 };
 pub use job_summary::{
     InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobSummary,
-    NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
+    NormalizedJob, ProductionFailureCategory, Slug, TriggerEvent, MAX_SLUG_LEN,
 };
 pub use lifecycle::{transition_target, EventReason, InvalidLifecycleToken, JobState};
 pub use microvm::{
