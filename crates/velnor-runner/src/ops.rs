@@ -742,6 +742,32 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_event_writes_consume_one_injected_failure_deterministically() {
+        let (_dir, sink) = temp_sink("concurrent-injected-failure");
+        sink.fail_next_store_write(ExitClass::Operation, "store.test.disk-full");
+
+        let workers: Vec<_> = (0..8)
+            .map(|sequence| {
+                let sink = Arc::clone(&sink);
+                std::thread::spawn(move || {
+                    sink.emit(
+                        EventReason::ReadinessDegraded,
+                        &format!("concurrent-{sequence}"),
+                        Some("concurrent write".to_owned()),
+                    );
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert!(sink.degraded());
+        assert_eq!(sink.forensic_failures().len(), 1);
+        assert_eq!(sink.store.accounting().unwrap().event_rows, 7);
+    }
+
+    #[test]
     fn atomic_admission_rolls_back_summary_when_transition_fails() {
         let (_dir, sink) = temp_sink("atomic-admission");
         let summary = admission(131, None).model_summary().unwrap();
