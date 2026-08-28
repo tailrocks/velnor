@@ -1341,21 +1341,25 @@ mod tests {
     }
 
     #[test]
-    fn ledger_seed_file_parses_and_is_pending_review() {
+    fn production_ledger_parses_with_all_entries_approved() {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let path = Path::new(manifest)
             .join("../..")
             .join("fleet/release-refs.toml");
-        let ledger = ReleaseRefLedger::load(&path).expect("seed ledger parses");
+        let ledger = ReleaseRefLedger::load(&path).expect("production ledger parses");
         assert_eq!(ledger.schema_version, 1);
+        assert_eq!(ledger.entries.len(), 157);
         assert!(ledger
             .entries
             .iter()
-            .all(|entry| matches!(entry.review_state, ReviewState::SeedPendingReview)));
-        assert!(ledger
-            .approved_workflow_identities()
-            .expect("identities")
-            .is_empty());
+            .all(|entry| matches!(entry.review_state, ReviewState::Approved)));
+        assert_eq!(
+            ledger
+                .approved_workflow_identities()
+                .expect("identities")
+                .len(),
+            157
+        );
     }
 
     #[test]
