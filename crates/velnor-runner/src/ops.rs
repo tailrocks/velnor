@@ -179,6 +179,27 @@ fn sanitize_slug(raw: &str) -> String {
     }
 }
 
+/// Admission token held by exactly one retention worker.
+///
+/// Dropping the token releases admission even when a blocking task is
+/// cancelled before it starts or unwinds after a panic.
+pub(crate) struct PruneAdmission {
+    in_flight: Arc<AtomicBool>,
+    now_unix: u64,
+}
+
+impl PruneAdmission {
+    pub(crate) fn now_unix(&self) -> u64 {
+        self.now_unix
+    }
+}
+
+impl Drop for PruneAdmission {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
 /// Per-process handle over the shared operational database.
 pub struct OpsSink {
     store: Store,
@@ -190,6 +211,7 @@ pub struct OpsSink {
     last_prune_unix: AtomicU64,
     next_prune_attempt_unix: AtomicU64,
     prune_retry_delay_secs: AtomicU64,
+    prune_in_flight: Arc<AtomicBool>,
     budget: RetentionBudget,
     #[cfg(test)]
     injected_write_failure: Mutex<Option<(ExitClass, &'static str)>>,
@@ -217,6 +239,7 @@ impl OpsSink {
             last_prune_unix: AtomicU64::new(0),
             next_prune_attempt_unix: AtomicU64::new(0),
             prune_retry_delay_secs: AtomicU64::new(0),
+            prune_in_flight: Arc::new(AtomicBool::new(false)),
             budget: RetentionBudget::default(),
             #[cfg(test)]
             injected_write_failure: Mutex::new(None),
@@ -364,19 +387,22 @@ impl OpsSink {
         true
     }
 
-    /// Daemon-side bounded retention pass, time-gated per process; safe to
-    /// call from every slot cycle because the atomic claim permits only one
-    /// pass. Callers with an async runtime must place this synchronous method
-    /// behind a blocking boundary.
-    pub fn prune_if_due(&self) {
+    pub(crate) fn try_admit_prune(&self) -> Option<PruneAdmission> {
         let now_unix = Timestamp::now()
             .as_offset_datetime()
             .unix_timestamp()
             .unsigned_abs();
-        self.prune_if_due_at(now_unix);
+        self.try_admit_prune_at(now_unix)
     }
 
+    #[cfg(test)]
     fn prune_if_due_at(&self, now_unix: u64) {
+        if let Some(admission) = self.try_admit_prune_at(now_unix) {
+            self.run_admitted_prune(admission);
+        }
+    }
+
+    fn try_admit_prune_at(&self, now_unix: u64) -> Option<PruneAdmission> {
         let last = self.last_prune_unix.load(Ordering::Relaxed);
         let next_attempt = self.next_prune_attempt_unix.load(Ordering::Acquire);
         let due = if next_attempt > 0 {
@@ -385,15 +411,34 @@ impl OpsSink {
             now_unix.saturating_sub(last) >= PRUNE_INTERVAL.as_secs()
         };
         if !due {
-            return;
+            return None;
+        }
+        if self
+            .prune_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
         }
         if self
             .last_prune_unix
             .compare_exchange(last, now_unix, Ordering::Relaxed, Ordering::Relaxed)
             .is_err()
         {
-            return;
+            self.prune_in_flight.store(false, Ordering::Release);
+            return None;
         }
+        Some(PruneAdmission {
+            in_flight: Arc::clone(&self.prune_in_flight),
+            now_unix,
+        })
+    }
+
+    pub(crate) fn run_admitted_prune(&self, admission: PruneAdmission) {
+        self.prune_once(admission.now_unix);
+    }
+
+    fn prune_once(&self, now_unix: u64) {
         let report = match self.store.prune_history(&self.budget) {
             Ok(report) => report,
             Err(error) => {
@@ -433,6 +478,31 @@ impl OpsSink {
             report.oldest_retained_at.as_deref().unwrap_or("none"),
         );
         self.clear_prune_retry();
+    }
+
+    pub(crate) fn record_prune_worker_failure(&self, now_unix: u64, detail: &str) {
+        self.schedule_prune_retry(now_unix);
+        self.absorb("store.prune-worker", detail);
+    }
+
+    pub(crate) fn prune_wait_duration(&self) -> Duration {
+        let now_unix = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .unsigned_abs();
+        self.prune_wait_duration_at(now_unix)
+    }
+
+    fn prune_wait_duration_at(&self, now_unix: u64) -> Duration {
+        let next_attempt = self.next_prune_attempt_unix.load(Ordering::Acquire);
+        let due_at = if next_attempt > 0 {
+            next_attempt
+        } else {
+            self.last_prune_unix
+                .load(Ordering::Relaxed)
+                .saturating_add(PRUNE_INTERVAL.as_secs())
+        };
+        Duration::from_secs(due_at.saturating_sub(now_unix))
     }
 
     fn schedule_prune_retry(&self, now_unix: u64) {
@@ -956,7 +1026,11 @@ mod tests {
         let workers: Vec<_> = (0..8)
             .map(|_| {
                 let sink = Arc::clone(&sink);
-                std::thread::spawn(move || sink.prune_if_due_at(now))
+                std::thread::spawn(move || {
+                    if let Some(admission) = sink.try_admit_prune_at(now) {
+                        sink.run_admitted_prune(admission);
+                    }
+                })
             })
             .collect();
         for worker in workers {
@@ -965,6 +1039,33 @@ mod tests {
         assert!(!sink.degraded());
         assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), now);
         assert_eq!(sink.next_prune_attempt_unix.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn prune_admission_rejects_overlap_and_releases_after_long_pass() {
+        let (_dir, sink) = temp_sink("prune-admission");
+        let first = sink.try_admit_prune_at(10_000).unwrap();
+
+        assert!(sink.try_admit_prune_at(10_000).is_none());
+        assert!(sink.prune_in_flight.load(Ordering::Acquire));
+
+        drop(first);
+
+        assert!(!sink.prune_in_flight.load(Ordering::Acquire));
+        assert!(sink.try_admit_prune_at(10_900).is_some());
+    }
+
+    #[test]
+    fn prune_wait_uses_retry_deadline_instead_of_fixed_polling() {
+        let (_dir, sink) = temp_sink("prune-deadline");
+        let first = sink.try_admit_prune_at(20_000).unwrap();
+        drop(first);
+
+        assert_eq!(sink.prune_wait_duration_at(20_000), PRUNE_INTERVAL);
+
+        sink.schedule_prune_retry(20_000);
+        assert_eq!(sink.prune_wait_duration_at(20_000), PRUNE_RETRY_INITIAL);
+        assert_eq!(sink.prune_wait_duration_at(20_014), Duration::from_secs(1));
     }
 
     #[test]

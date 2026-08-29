@@ -428,12 +428,12 @@ fn persist_and_announce_daemon_readiness(
     total_slots: usize,
 ) -> Result<()> {
     persist_daemon_instance(sink, total_slots)?;
-    notify_daemon_ready(total_slots, total_slots);
     sink.emit(
         velnor_model::EventReason::ReadinessReady,
         sink.instance_slug(),
         Some(format!("daemon pass ready pid={}", std::process::id())),
     );
+    notify_daemon_ready(total_slots, total_slots);
     Ok(())
 }
 
@@ -1186,6 +1186,7 @@ fn daemon_forensic_log(config_base: &Path, message: &str) {
 /// wait for running jobs, with systemd's TimeoutStopSec as the only bound.
 static DRAINING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DAEMON_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RETENTION_READY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
@@ -1215,6 +1216,7 @@ fn notify_daemon_ready(usable_slots: usize, slots: usize) {
     crate::sd_notify::status(&format!(
         "configured: {usable_slots}/{slots} runner slot(s); control READY follows a local cycle"
     ));
+    RETENTION_READY.notify_waiters();
 }
 
 fn gha_cache_root(layout: Option<crate::storage::StorageLayout>) -> Result<PathBuf> {
@@ -1338,14 +1340,22 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         return daemon_pass(&args, slots).await;
     }
 
+    // Retention belongs to the daemon lifetime, not an individual retryable
+    // pass. It waits for the first successful readiness announcement and is
+    // explicitly joined on every supervised return path.
+    let mut retention_lifecycle = Some(start_retention_lifecycle());
     let mut attempt: u32 = 0;
     loop {
         if draining() {
+            stop_retention_lifecycle(&mut retention_lifecycle).await;
             println!("drain complete during registration retry: exiting");
             return Ok(());
         }
         match daemon_pass(&args, slots).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                stop_retention_lifecycle(&mut retention_lifecycle).await;
+                return Ok(());
+            }
             Err(error) => {
                 attempt += 1;
                 let delay = supervised_retry_delay(attempt);
@@ -1368,6 +1378,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                 ));
                 for _ in 0..delay.as_secs().max(1) {
                     if draining() {
+                        stop_retention_lifecycle(&mut retention_lifecycle).await;
                         println!("drain complete during registration backoff: exiting");
                         return Ok(());
                     }
@@ -1418,7 +1429,6 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
                 sink.instance_slug(),
                 Some(format!("daemon_id={daemon_id}")),
             );
-            run_retention_pass(std::sync::Arc::clone(sink)).await;
         }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
@@ -1443,15 +1453,9 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // emitting the readiness event. In supervised mode this error returns to
     // the retry loop above; no daemon pass may continue with unrecorded state.
     persist_and_announce_daemon_readiness(sink, total_slots)?;
-    // Time-gated retention passes continue while slots are supervised.
-    let retention_sink = std::sync::Arc::clone(sink);
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
-        loop {
-            ticker.tick().await;
-            run_retention_pass(std::sync::Arc::clone(&retention_sink)).await;
-        }
-    });
+    // The daemon-level retention lifecycle is started by `daemon` and waits
+    // for this readiness announcement. Keeping ownership outside this retryable
+    // pass prevents detached ticker duplication across retries.
     println!(
         "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
         if total_slots == 1 { "" } else { "es" }
@@ -1495,13 +1499,90 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     result
 }
 
-/// Keep synchronous SQLite retention work off Tokio workers. Awaiting the
-/// blocking task preserves one pass at a time in this daemon loop while the
-/// sink's atomic claim gates any other caller.
-async fn run_retention_pass(sink: std::sync::Arc<crate::ops::OpsSink>) {
-    if let Err(error) = tokio::task::spawn_blocking(move || sink.prune_if_due()).await {
+struct RetentionLifecycle {
+    stop: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+fn start_retention_lifecycle() -> RetentionLifecycle {
+    let (stop, signal) = oneshot::channel();
+    let task = tokio::spawn(retention_lifecycle(signal));
+    RetentionLifecycle {
+        stop: Some(stop),
+        task,
+    }
+}
+
+async fn stop_retention_lifecycle(lifecycle: &mut Option<RetentionLifecycle>) {
+    let Some(mut lifecycle) = lifecycle.take() else {
+        return;
+    };
+    if let Some(stop) = lifecycle.stop.take() {
+        let _ = stop.send(());
+    }
+    let _ = lifecycle.task.await;
+}
+
+async fn retention_lifecycle(stop: oneshot::Receiver<()>) {
+    retention_lifecycle_with_sink(stop, None).await;
+}
+
+async fn retention_lifecycle_with_sink(
+    mut stop: oneshot::Receiver<()>,
+    injected_sink: Option<std::sync::Arc<crate::ops::OpsSink>>,
+) {
+    if !DAEMON_READY.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::select! {
+            _ = &mut stop => return,
+            _ = RETENTION_READY.notified() => {}
+        }
+    }
+    if draining() {
+        return;
+    }
+    let Some(sink) = injected_sink.or_else(|| crate::ops::global().cloned()) else {
+        eprintln!("forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness");
+        return;
+    };
+    loop {
+        if draining() {
+            return;
+        }
+        let delay = sink.prune_wait_duration();
+        tokio::select! {
+            _ = &mut stop => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        if draining() {
+            return;
+        }
+        if !run_retention_pass(std::sync::Arc::clone(&sink)).await {
+            tokio::select! {
+                _ = &mut stop => return,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    }
+}
+
+/// Admit retention before submitting synchronous SQLite work to Tokio's
+/// blocking pool. The admission token releases on normal completion, task
+/// cancellation, and worker panic.
+async fn run_retention_pass(sink: std::sync::Arc<crate::ops::OpsSink>) -> bool {
+    let Some(admission) = sink.try_admit_prune() else {
+        return false;
+    };
+    let now_unix = admission.now_unix();
+    let worker_sink = std::sync::Arc::clone(&sink);
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        worker_sink.run_admitted_prune(admission);
+    })
+    .await
+    {
+        sink.record_prune_worker_failure(now_unix, &error.to_string());
         eprintln!("forensics.ops event=retention-worker-failed reason={error}");
     }
+    true
 }
 
 /// Capped exponential backoff with deterministic jitter for the never-exit
@@ -10157,6 +10238,36 @@ mod tests {
         assert_eq!(layout.run_root, PathBuf::from("/config/slot-1/run"));
         assert_eq!(layout.log_root, PathBuf::from("/config/slot-1/logs"));
         assert_eq!(layout.mode, "explicit-config");
+    }
+
+    #[tokio::test]
+    async fn retention_lifecycle_joins_and_releases_sink_on_stop() {
+        let base = unique_temp_dir("retention-lifecycle-stop");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+        let weak_sink = Arc::downgrade(&sink);
+        let previous_ready = DAEMON_READY.swap(true, Ordering::SeqCst);
+        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
+        let (stop, signal) = oneshot::channel();
+        let task = tokio::spawn(retention_lifecycle_with_sink(
+            signal,
+            Some(Arc::clone(&sink)),
+        ));
+
+        tokio::task::yield_now().await;
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        drop(sink);
+        assert!(weak_sink.upgrade().is_none());
+        DAEMON_READY.store(previous_ready, Ordering::SeqCst);
+        DRAINING.store(previous_draining, Ordering::SeqCst);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
