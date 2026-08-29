@@ -189,7 +189,12 @@ pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     }
     match url.scheme() {
         "https" => Ok(url),
-        "http" if cfg!(test) && url.host_str().is_some_and(is_loopback_host) => Ok(url),
+        "http"
+            if (cfg!(test) || cfg!(feature = "test-support"))
+                && url.host_str().is_some_and(is_loopback_host) =>
+        {
+            Ok(url)
+        }
         _ => bail!("authenticated endpoint must use HTTPS: {safe}"),
     }
 }

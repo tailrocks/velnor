@@ -23,14 +23,14 @@ run = "cargo fmt --all --check"
 run = "cargo fmt --all"
 
 [tasks.lint]
-run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+run = "cargo clippy --workspace --all-targets --locked --features velnor-runner/test-support -- -D warnings"
 
 [tasks.test]
-run = "cargo nextest run --workspace --locked --color=always"
+run = "cargo nextest run --workspace --locked --features velnor-runner/test-support --color=always"
 
 [tasks.test-focused]
 description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
-run = "cargo nextest run --locked --color=always"
+run = "cargo nextest run --locked --features velnor-runner/test-support --color=always"
 
 [tasks.actionlint]
 run = "actionlint"
@@ -105,4 +105,4 @@ depends = ["fmt", "actionlint", "deny", "fleet-generate", "lint", "test"]
 depends = ["actionlint", "deny", "fleet-generate"]
 # The generated CI workflow owns separate test, lint, and format gates. Keep
 # this task build-only so those gates are not executed twice on every run.
-run = "cargo check --workspace --all-targets --locked"
+run = "cargo check --workspace --all-targets --locked --features velnor-runner/test-support"

@@ -8,6 +8,9 @@
 //! interim [`scaffold`] facade exposes bootstrap and dispatch helpers until
 //! Plan 079 deletes the crate after its runtime modules move.
 
+#[cfg(all(feature = "release-build", feature = "test-support"))]
+compile_error!("test-support must never be combined with release-build");
+
 mod action;
 mod admission;
 pub mod args;
