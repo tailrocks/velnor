@@ -215,6 +215,23 @@ struct RetentionSnapshot {
     maintenance_status: MaintenanceStatus,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct PruneCounts {
+    deleted_events: u64,
+    deleted_jobs: u64,
+    deleted_transitions: u64,
+}
+
+impl PruneCounts {
+    fn add(&mut self, other: Self) {
+        self.deleted_events = self.deleted_events.saturating_add(other.deleted_events);
+        self.deleted_jobs = self.deleted_jobs.saturating_add(other.deleted_jobs);
+        self.deleted_transitions = self
+            .deleted_transitions
+            .saturating_add(other.deleted_transitions);
+    }
+}
+
 /// Test seam phases; production callers pass `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrunePhase {
@@ -335,12 +352,10 @@ impl Store {
                 "retention lease generation must be a nonnegative SQLite integer",
             ));
         }
-        let live_foreign_owner = held_owner.as_deref().is_some_and(|held| {
-            !held.is_empty()
-                && held != owner
-                && held_expires_at.is_some_and(|expires| expires > now)
+        let live_owner = held_owner.as_deref().is_some_and(|held| {
+            !held.is_empty() && held_expires_at.is_some_and(|expires| expires > now)
         });
-        if live_foreign_owner {
+        if live_owner {
             transaction.commit()?;
             return Ok(None);
         }
@@ -436,6 +451,26 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(changed == 1)
+    }
+
+    fn renew_retention_lease(&self, lease: &RetentionLease) -> StoreResult<()> {
+        let now = Timestamp::now().as_offset_datetime().unix_timestamp();
+        let now = u64::try_from(now).map_err(|_| {
+            retention_lease_error(
+                "store.retention.lease.clock",
+                "retention lease clock is before the Unix epoch",
+            )
+        })?;
+        if self.renew_retention_lease_at(lease, now, MAX_RETENTION_LEASE_DURATION)? {
+            Ok(())
+        } else {
+            Err(
+                StoreError::new(ExitClass::Conflict, "store.retention.lease.lost")
+                    .with_remediation(
+                        "retention ownership expired or was fenced by a newer generation",
+                    ),
+            )
+        }
     }
 
     /// Try to own retention maintenance using the current Unix-second clock.
@@ -581,48 +616,99 @@ impl Store {
                 error,
             })?;
         let now = Timestamp::now();
+        let mut totals = PruneCounts::default();
+        let mut committed = false;
 
-        let (deleted_events, deleted_jobs, deleted_transitions) = {
-            let result: StoreResult<(u64, u64, u64)> = (|| {
-                let mut conn = self.lock_conn()?;
-                let transaction =
-                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                Self::require_retention_lease_connection(&transaction, lease)?;
-                let deleted_events = Self::prune_expired_events(&transaction, budget, now, lease)?;
-                if let Some(hook) = hook {
-                    hook(PrunePhase::AfterEventPrune)?;
+        if budget.max_event_age.is_some() {
+            for _ in 0..prune_pass_batch_limit(budget) {
+                let batch =
+                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                        Self::prune_expired_event_batch(transaction, budget, now, lease)
+                    })?;
+                let had_work = batch.deleted_events > 0;
+                totals.add(batch);
+                committed = true;
+                if !had_work {
+                    break;
                 }
-                let (more_events, deleted_jobs, deleted_transitions) =
-                    Self::prune_terminal_jobs(&transaction, &self.path, budget, now, lease)?;
-                let deleted_events = deleted_events.saturating_add(more_events);
-                if let Some(hook) = hook {
-                    hook(PrunePhase::AfterJobPrune)?;
+            }
+        }
+        if budget.max_event_rows > 0 {
+            for _ in 0..prune_pass_batch_limit(budget) {
+                let batch =
+                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                        Self::prune_event_row_batch(transaction, budget, now, lease)
+                    })?;
+                let had_work = batch.deleted_events > 0;
+                totals.add(batch);
+                committed = true;
+                if !had_work {
+                    break;
                 }
-                Self::require_retention_lease_connection(&transaction, lease)?;
-                transaction.execute(
-                    "UPDATE retention_state
-                     SET last_prune_at = ?1, deleted_events = ?2, deleted_jobs = ?3
-                     WHERE singleton = 0",
-                    params![
-                        rfc3339(now),
-                        i64::try_from(deleted_events).unwrap_or(i64::MAX),
-                        i64::try_from(deleted_jobs).unwrap_or(i64::MAX),
-                    ],
-                )?;
-                transaction.commit()?;
-                Ok((deleted_events, deleted_jobs, deleted_transitions))
-            })();
-            result.map_err(|error| {
-                if error.envelope.reason == "store.retention.lease.lost" {
-                    PruneFailure::LeaseLost {
-                        committed: false,
-                        error,
-                    }
-                } else {
-                    PruneFailure::PreCommit(error)
+            }
+        }
+        if !committed {
+            let batch = self.execute_prune_batch(lease, now, false, &totals, |_transaction| {
+                Ok(PruneCounts::default())
+            })?;
+            totals.add(batch);
+            committed = true;
+        }
+        if let Some(hook) = hook {
+            hook(PrunePhase::AfterEventPrune).map_err(PruneFailure::PostCommit)?;
+        }
+
+        if budget.max_terminal_job_age.is_some() {
+            for _ in 0..prune_pass_batch_limit(budget) {
+                let batch =
+                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                        Self::prune_terminal_job_age_batch(transaction, budget, now, lease)
+                    })?;
+                let had_work = batch.deleted_jobs > 0
+                    || batch.deleted_events > 0
+                    || batch.deleted_transitions > 0;
+                totals.add(batch);
+                committed = true;
+                if !had_work {
+                    break;
                 }
-            })?
-        };
+            }
+        }
+        if budget.max_terminal_job_rows > 0 {
+            for _ in 0..prune_pass_batch_limit(budget) {
+                let batch =
+                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                        Self::prune_terminal_job_row_batch(transaction, budget, now, lease)
+                    })?;
+                let had_work = batch.deleted_jobs > 0
+                    || batch.deleted_events > 0
+                    || batch.deleted_transitions > 0;
+                totals.add(batch);
+                committed = true;
+                if !had_work {
+                    break;
+                }
+            }
+        }
+        if budget.max_database_bytes > 0 {
+            for _ in 0..prune_pass_batch_limit(budget) {
+                let batch =
+                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                        Self::prune_byte_pressure_batch(transaction, &self.path, budget, now, lease)
+                    })?;
+                let had_work = batch.deleted_jobs > 0
+                    || batch.deleted_events > 0
+                    || batch.deleted_transitions > 0;
+                totals.add(batch);
+                committed = true;
+                if !had_work {
+                    break;
+                }
+            }
+        }
+        if let Some(hook) = hook {
+            hook(PrunePhase::AfterJobPrune).map_err(PruneFailure::PostCommit)?;
+        }
 
         // Maintenance uses a separate zero-wait connection. Checkpointing is
         // intentionally deferred because SQLite cannot bound its frame work.
@@ -638,9 +724,9 @@ impl Store {
         })?;
 
         Ok(PruneReport {
-            deleted_events,
-            deleted_jobs,
-            deleted_transitions,
+            deleted_events: totals.deleted_events,
+            deleted_jobs: totals.deleted_jobs,
+            deleted_transitions: totals.deleted_transitions,
             database_bytes: snapshot.database_bytes,
             wal_bytes: snapshot.wal_bytes,
             total_bytes: snapshot.total_bytes,
@@ -651,11 +737,101 @@ impl Store {
         })
     }
 
+    fn execute_prune_batch<F>(
+        &self,
+        lease: &RetentionLease,
+        now: Timestamp,
+        committed_before: bool,
+        totals: &PruneCounts,
+        operation: F,
+    ) -> Result<PruneCounts, PruneFailure>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> StoreResult<PruneCounts>,
+    {
+        self.renew_retention_lease(lease)
+            .map_err(|error| PruneFailure::LeaseLost {
+                committed: committed_before,
+                error,
+            })?;
+        let mut conn = self.lock_conn().map_err(|error| {
+            if committed_before {
+                PruneFailure::PostCommit(error)
+            } else {
+                PruneFailure::PreCommit(error)
+            }
+        })?;
+        let transaction = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| {
+                let error = StoreError::from(error);
+                if committed_before {
+                    PruneFailure::PostCommit(error)
+                } else {
+                    PruneFailure::PreCommit(error)
+                }
+            })?;
+        Self::require_retention_lease_connection(&transaction, lease).map_err(|error| {
+            PruneFailure::LeaseLost {
+                committed: committed_before,
+                error,
+            }
+        })?;
+        let batch = operation(&transaction).map_err(|error| {
+            if error.envelope.reason == "store.retention.lease.lost" {
+                PruneFailure::LeaseLost {
+                    committed: committed_before,
+                    error,
+                }
+            } else if committed_before {
+                PruneFailure::PostCommit(error)
+            } else {
+                PruneFailure::PreCommit(error)
+            }
+        })?;
+        Self::require_retention_lease_connection(&transaction, lease).map_err(|error| {
+            PruneFailure::LeaseLost {
+                committed: committed_before,
+                error,
+            }
+        })?;
+        let cumulative_events = totals.deleted_events.saturating_add(batch.deleted_events);
+        let cumulative_jobs = totals.deleted_jobs.saturating_add(batch.deleted_jobs);
+        transaction
+            .execute(
+                "UPDATE retention_state
+                 SET last_prune_at = ?1, deleted_events = ?2, deleted_jobs = ?3
+                 WHERE singleton = 0",
+                params![
+                    rfc3339(now),
+                    i64::try_from(cumulative_events).unwrap_or(i64::MAX),
+                    i64::try_from(cumulative_jobs).unwrap_or(i64::MAX),
+                ],
+            )
+            .map_err(|error| {
+                let error = StoreError::from(error);
+                if committed_before {
+                    PruneFailure::PostCommit(error)
+                } else {
+                    PruneFailure::PreCommit(error)
+                }
+            })?;
+        transaction.commit().map_err(|error| {
+            let error = StoreError::from(error);
+            if committed_before {
+                PruneFailure::PostCommit(error)
+            } else {
+                PruneFailure::PreCommit(error)
+            }
+        })?;
+        Ok(batch)
+    }
+
     fn maintain_after_prune(
         &self,
         budget: &RetentionBudget,
         lease: &RetentionLease,
     ) -> StoreResult<RetentionSnapshot> {
+        self.renew_retention_lease(lease)?;
         let mut maintenance = self
             .open_maintenance_connection()
             .map_err(|error| maintenance_error("open", error))?;
@@ -746,208 +922,162 @@ impl Store {
         Ok((Self::database_bytes(conn)?, Self::wal_bytes_for_path(path)?))
     }
 
-    /// Delete expired events, protecting events whose subject is still an
-    /// active or unknown-phase job. Bounded by the effective batch size per
-    /// statement.
-    fn prune_expired_events(
-        conn: &rusqlite::Connection,
+    /// One event batch. Age and row-cap phases are deliberately separate so
+    /// each phase commits before the next starts.
+    fn prune_expired_event_batch(
+        conn: &rusqlite::Transaction<'_>,
         budget: &RetentionBudget,
         now: Timestamp,
         lease: &RetentionLease,
-    ) -> StoreResult<u64> {
-        let mut deleted = 0u64;
-        if let Some(max_age) = budget.max_event_age {
-            let cutoff = minus_age(now, max_age);
-            let mut cursor = 0_i64;
-            for _ in 0..prune_pass_batch_limit(budget) {
-                Self::require_retention_lease_connection(conn, lease)?;
-                let batch = protected_expired_older_than(
-                    conn,
-                    "events",
-                    "occurred_at",
-                    prune_batch_size(budget),
-                    cutoff,
-                    cursor,
-                )?;
-                deleted += delete_events_by_ids(conn, &batch.ids, now)?;
-                let Some(last_id) = batch.last_id else { break };
-                cursor = last_id;
-                if batch.exhausted {
-                    break;
-                }
-            }
+    ) -> StoreResult<PruneCounts> {
+        let cutoff = budget.max_event_age.map(|age| minus_age(now, age));
+        if let Some(cutoff) = cutoff {
+            reject_malformed_timestamp_rows(conn, "events", "occurred_at")?;
+            let ids = select_expired_event_ids(conn, cutoff, prune_batch_size(budget))?;
+            Self::require_retention_lease_connection(conn, lease)?;
+            return Ok(PruneCounts {
+                deleted_events: delete_events_by_ids(conn, &ids, now)?,
+                ..PruneCounts::default()
+            });
         }
-        if budget.max_event_rows > 0 {
-            let keep_from_id = newest_window_start(
-                conn,
-                "events",
-                None,
-                budget.max_event_rows,
-                prune_batch_size(budget),
-            )?;
-            if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
-                // Bounded batches move toward the cap; repeated passes finish
-                // larger backlogs without one pass monopolizing the store.
-                for _ in 0..prune_pass_batch_limit(budget) {
-                    Self::require_retention_lease_connection(conn, lease)?;
-                    let victims = protected_ids_below(
-                        conn,
-                        "events",
-                        keep_from_id,
-                        prune_batch_size(budget),
-                    )?;
-                    if victims.is_empty() {
-                        break;
-                    }
-                    deleted += delete_events_by_ids(conn, &victims, now)?;
-                    if (victims.len() as u64) < prune_batch_size(budget) {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(deleted)
+        Ok(PruneCounts::default())
     }
 
-    /// Delete terminal jobs that are past their age budget or past the
-    /// retention row cap, together with their transitions and their own job
-    /// events (ancestry stays referentially valid or goes entirely).
-    /// Active/nonterminal jobs are untouchable.
-    fn prune_terminal_jobs(
-        conn: &rusqlite::Connection,
+    fn prune_event_row_batch(
+        conn: &rusqlite::Transaction<'_>,
+        budget: &RetentionBudget,
+        now: Timestamp,
+        lease: &RetentionLease,
+    ) -> StoreResult<PruneCounts> {
+        let keep_from_id = newest_window_start(conn, "events", None, budget.max_event_rows, 1)?;
+        let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) else {
+            return Ok(PruneCounts::default());
+        };
+        Self::require_retention_lease_connection(conn, lease)?;
+        let ids = protected_ids_below(conn, "events", keep_from_id, prune_batch_size(budget))?;
+        Ok(PruneCounts {
+            deleted_events: delete_events_by_ids(conn, &ids, now)?,
+            ..PruneCounts::default()
+        })
+    }
+
+    fn prune_terminal_job_age_batch(
+        conn: &rusqlite::Transaction<'_>,
+        budget: &RetentionBudget,
+        now: Timestamp,
+        lease: &RetentionLease,
+    ) -> StoreResult<PruneCounts> {
+        let Some(max_age) = budget.max_terminal_job_age else {
+            return Ok(PruneCounts::default());
+        };
+        let cutoff = minus_age(now, max_age);
+        reject_malformed_timestamp_rows(conn, "jobs", "updated_at")?;
+        let ids = select_expired_terminal_job_ids(conn, cutoff)?;
+        let Some(id) = ids.first().copied() else {
+            return Ok(PruneCounts::default());
+        };
+        Self::require_retention_lease_connection(conn, lease)?;
+        let (deleted_jobs, deleted_transitions, deleted_events) =
+            delete_job_with_ancestry(conn, id, now)?;
+        Ok(PruneCounts {
+            deleted_events,
+            deleted_jobs,
+            deleted_transitions,
+        })
+    }
+
+    fn prune_terminal_job_row_batch(
+        conn: &rusqlite::Transaction<'_>,
+        budget: &RetentionBudget,
+        now: Timestamp,
+        lease: &RetentionLease,
+    ) -> StoreResult<PruneCounts> {
+        let keep_from_id = newest_window_start(
+            conn,
+            "jobs",
+            Some(&format!("phase IN {CANONICAL_TERMINAL_PHASES}")),
+            budget.max_terminal_job_rows,
+            1,
+        )?;
+        let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) else {
+            return Ok(PruneCounts::default());
+        };
+        let id: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT id FROM jobs
+                     WHERE id < ?1 AND phase IN {CANONICAL_TERMINAL_PHASES}
+                       AND NOT EXISTS (
+                           SELECT 1 FROM reconciliations r
+                           WHERE r.instance_slug = jobs.instance_slug
+                             AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
+                       )
+                     ORDER BY id ASC LIMIT 1"
+                ),
+                [keep_from_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(id) = id else {
+            return Ok(PruneCounts::default());
+        };
+        Self::require_retention_lease_connection(conn, lease)?;
+        let (deleted_jobs, deleted_transitions, deleted_events) =
+            delete_job_with_ancestry(conn, id, now)?;
+        Ok(PruneCounts {
+            deleted_events,
+            deleted_jobs,
+            deleted_transitions,
+        })
+    }
+
+    /// Logical pressure pruning is intentionally truthful: it removes one
+    /// bounded candidate when the measured DB+WAL bytes exceed the requested
+    /// threshold, but does not claim to enforce a physical ceiling because
+    /// checkpointing remains deferred.
+    fn prune_byte_pressure_batch(
+        conn: &rusqlite::Transaction<'_>,
         path: &Path,
         budget: &RetentionBudget,
         now: Timestamp,
         lease: &RetentionLease,
-    ) -> StoreResult<(u64, u64, u64)> {
-        let mut deleted_jobs = 0u64;
-        let mut deleted_transitions = 0u64;
-        let mut deleted_events = 0u64;
-
-        // Age rule: bounded scans continue past fresh rows because insertion
-        // order and event time are independent.
-        if let Some(max_age) = budget.max_terminal_job_age {
-            let cutoff = minus_age(now, max_age);
-            let mut cursor = 0_i64;
-            for _ in 0..prune_pass_batch_limit(budget) {
-                Self::require_retention_lease_connection(conn, lease)?;
-                let batch = unprotected_expired_batch(
-                    conn,
-                    &format!(
-                        "SELECT id, updated_at FROM jobs
-                         WHERE phase IN {CANONICAL_TERMINAL_PHASES}
-                           AND id > ?2 ORDER BY id ASC LIMIT ?1"
-                    ),
-                    prune_batch_size(budget),
-                    cutoff,
-                    cursor,
-                )?;
-
-                for id in &batch.ids {
-                    Self::require_retention_lease_connection(conn, lease)?;
-                    let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id, now)?;
-                    deleted_jobs += jobs;
-                    deleted_transitions += transitions;
-                    deleted_events += events;
-                }
-                let Some(last_id) = batch.last_id else { break };
-                cursor = last_id;
-                if batch.exhausted {
-                    break;
-                }
-            }
+    ) -> StoreResult<PruneCounts> {
+        let (database_bytes, wal_bytes) = Self::total_database_bytes(conn, path)?;
+        if database_bytes.saturating_add(wal_bytes) <= budget.max_database_bytes {
+            return Ok(PruneCounts::default());
         }
-
-        // Row-cap rule: everything strictly below the newest-N window is
-        // eligible. The bounded pass may require another invocation.
-        if budget.max_terminal_job_rows > 0 {
-            let keep_from_id = newest_window_start(
-                conn,
-                "jobs",
-                Some(&format!("phase IN {CANONICAL_TERMINAL_PHASES}")),
-                budget.max_terminal_job_rows,
-                prune_batch_size(budget),
-            )?;
-            if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
-                for _ in 0..prune_pass_batch_limit(budget) {
-                    Self::require_retention_lease_connection(conn, lease)?;
-                    let victims: Vec<i64> = {
-                        let mut statement = conn.prepare_cached(&format!(
-                            "SELECT id FROM jobs
-                             WHERE id < ?1 AND phase IN {CANONICAL_TERMINAL_PHASES}
-                             ORDER BY id ASC LIMIT ?2"
-                        ))?;
-                        let mut rows = statement.query(params![
-                            keep_from_id,
-                            i64::try_from(prune_batch_size(budget)).unwrap_or(i64::MAX),
-                        ])?;
-                        let mut ids = Vec::new();
-                        while let Some(row) = rows.next()? {
-                            ids.push(row.get(0)?);
-                        }
-                        ids
-                    };
-                    if victims.is_empty() {
-                        break;
-                    }
-                    for id in &victims {
-                        Self::require_retention_lease_connection(conn, lease)?;
-                        let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id, now)?;
-                        deleted_jobs += jobs;
-                        deleted_transitions += transitions;
-                        deleted_events += events;
-                    }
-                }
-            }
+        let id: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT id FROM jobs
+                     WHERE phase IN {CANONICAL_TERMINAL_PHASES}
+                       AND NOT EXISTS (
+                           SELECT 1 FROM reconciliations r
+                           WHERE r.instance_slug = jobs.instance_slug
+                             AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
+                       )
+                     ORDER BY id ASC LIMIT 1"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = id {
+            Self::require_retention_lease_connection(conn, lease)?;
+            let (deleted_jobs, deleted_transitions, deleted_events) =
+                delete_job_with_ancestry(conn, id, now)?;
+            return Ok(PruneCounts {
+                deleted_events,
+                deleted_jobs,
+                deleted_transitions,
+            });
         }
-
-        // Byte-ceiling passes with hard iteration bounds so one pathological
-        // database cannot hold the write lock forever.
-        if budget.max_database_bytes > 0 {
-            for _ in 0..prune_pass_batch_limit(budget) {
-                Self::require_retention_lease_connection(conn, lease)?;
-                let (database_bytes, wal_bytes) = Self::total_database_bytes(conn, path)?;
-                if database_bytes.saturating_add(wal_bytes) <= budget.max_database_bytes {
-                    break;
-                }
-                let victim: Option<i64> = conn
-                    .query_row(
-                        &format!(
-                            "SELECT id FROM jobs
-                             WHERE phase IN {CANONICAL_TERMINAL_PHASES}
-                             ORDER BY id ASC LIMIT 1"
-                        ),
-                        [],
-                        |r| r.get(0),
-                    )
-                    .map(Some)
-                    .or_else(|error| match error {
-                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                        other => Err(other),
-                    })?;
-                let Some(victim) = victim else { break };
-                Self::require_retention_lease_connection(conn, lease)?;
-                let (jobs, transitions, events) = delete_job_with_ancestry(conn, victim, now)?;
-                deleted_jobs += jobs;
-                deleted_transitions += transitions;
-                deleted_events += events;
-            }
-            for _ in 0..prune_pass_batch_limit(budget) {
-                Self::require_retention_lease_connection(conn, lease)?;
-                let (database_bytes, wal_bytes) = Self::total_database_bytes(conn, path)?;
-                if database_bytes.saturating_add(wal_bytes) <= budget.max_database_bytes {
-                    break;
-                }
-                let victims =
-                    protected_ids_below(conn, "events", i64::MAX, prune_batch_size(budget))?;
-                if victims.is_empty() {
-                    break;
-                }
-                Self::require_retention_lease_connection(conn, lease)?;
-                deleted_events += delete_events_by_ids(conn, &victims, now)?;
-            }
-        }
-        Ok((deleted_events, deleted_jobs, deleted_transitions))
+        let ids = protected_ids_below(conn, "events", i64::MAX, prune_batch_size(budget))?;
+        Self::require_retention_lease_connection(conn, lease)?;
+        Ok(PruneCounts {
+            deleted_events: delete_events_by_ids(conn, &ids, now)?,
+            ..PruneCounts::default()
+        })
     }
 }
 
@@ -1022,9 +1152,10 @@ fn read_retention_snapshot(
 fn oldest_retained_at(conn: &rusqlite::Connection) -> StoreResult<(Option<String>, bool)> {
     let malformed: bool = conn.query_row(
         "SELECT EXISTS(
-             SELECT 1 FROM events WHERE julianday(occurred_at) IS NULL
+             SELECT 1 FROM events WHERE julianday(occurred_at) IS NULL LIMIT 1
          ) OR EXISTS(
-             SELECT 1 FROM job_transitions WHERE julianday(transition_time) IS NULL
+             SELECT 1 FROM job_transitions
+             WHERE julianday(transition_time) IS NULL LIMIT 1
          )",
         [],
         |row| row.get(0),
@@ -1158,10 +1289,11 @@ fn delete_job_with_ancestry(
     // The transition correlation is the exact lifecycle ancestry key. Do not
     // delete by subject/event-kind: generic operational events may reuse a job
     // UID or a lifecycle-looking kind and must survive job deletion.
+    let bounded_transition_ids =
+        &transition_ids[..transition_ids.len().min(MAX_PRUNE_BATCH_SIZE as usize)];
     let event_ids = select_transition_event_ids(
         conn,
-        &instance_slug,
-        &job_uid,
+        bounded_transition_ids,
         MAX_PRUNE_BATCH_SIZE.saturating_add(1),
     )?;
     let mut events = 0;
@@ -1209,28 +1341,22 @@ fn select_transition_ids(
 
 fn select_transition_event_ids(
     conn: &rusqlite::Connection,
-    instance_slug: &str,
-    job_uid: &str,
+    transition_ids: &[i64],
     limit: u64,
 ) -> StoreResult<Vec<i64>> {
-    let mut statement = conn.prepare_cached(
-        "SELECT e.id FROM events e
-         WHERE e.instance_slug = ?1
-           AND EXISTS (
-               SELECT 1 FROM job_transitions t
-               WHERE t.instance_slug = ?1
-                 AND t.job_uid = ?2
-                 AND t.correlation_id = e.correlation_id
-                 AND e.subject = t.job_uid
-                 AND e.event_kind = 'job.transition.' || t.reason
-           )
-         ORDER BY e.id ASC LIMIT ?3",
-    )?;
-    let mut rows = statement.query(params![
-        instance_slug,
-        job_uid,
-        i64::try_from(limit).unwrap_or(i64::MAX)
-    ])?;
+    if transition_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; transition_ids.len()].join(",");
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT id FROM events
+             WHERE transition_id IN ({placeholders})
+             ORDER BY id ASC LIMIT ?{}",
+        transition_ids.len() + 1
+    ))?;
+    let mut values: Vec<i64> = transition_ids.to_vec();
+    values.push(i64::try_from(limit).unwrap_or(i64::MAX));
+    let mut rows = statement.query(params_from_iter(values.iter()))?;
     let mut ids = Vec::new();
     while let Some(row) = rows.next()? {
         ids.push(row.get(0)?);
@@ -1249,87 +1375,80 @@ fn delete_transition_rows_by_ids(conn: &rusqlite::Connection, ids: &[i64]) -> St
     )? as u64)
 }
 
-struct ExpiredBatch {
-    ids: Vec<i64>,
-    last_id: Option<i64>,
-    /// Whether the scan reached the end of the candidate rows.
-    exhausted: bool,
-}
-
-/// Oldest-first `(id, time)` batch kept only while strictly older than
-/// `cutoff`, judged in Rust so RFC 3339 rendering variance cannot mis-order
-/// deletions. `sql` yields `(id, timestamp_text)` rows.
-fn scan_expired_batch(
-    conn: &rusqlite::Connection,
-    sql: &str,
-    batch: u64,
-    cutoff: Timestamp,
-    cursor: i64,
-) -> StoreResult<ExpiredBatch> {
-    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
-    let mut statement = conn.prepare_cached(sql)?;
-    let mut rows = statement.query(params![i64::try_from(batch).unwrap_or(i64::MAX), cursor])?;
-    let mut ids = Vec::new();
-    let mut last_id = None;
-    let mut row_count = 0;
-    while let Some(row) = rows.next()? {
-        let id: i64 = row.get(0)?;
-        last_id = Some(id);
-        row_count += 1;
-        let raw: String = row.get(1)?;
-        let parsed = Timestamp::parse(&raw).map_err(|_| stale_timestamp_error())?;
-        if parsed < cutoff {
-            ids.push(id);
-        }
-    }
-    Ok(ExpiredBatch {
-        ids,
-        last_id,
-        exhausted: row_count < batch,
-    })
-}
-
-/// Events version of [`scan_expired_batch`]: additionally skips (and scans
-/// past) events whose subject belongs to a nonterminal or unknown-phase job,
-/// or to an open/unknown reconciliation. A long-running job's early events
-/// never get deleted themselves.
-fn protected_expired_older_than(
+fn reject_malformed_timestamp_rows(
     conn: &rusqlite::Connection,
     table: &str,
     column: &str,
-    batch: u64,
-    cutoff: Timestamp,
-    cursor: i64,
-) -> StoreResult<ExpiredBatch> {
+) -> StoreResult<()> {
     let sql = format!(
-        "SELECT id, {column} FROM {table}
-         WHERE NOT EXISTS (
-             SELECT 1 FROM jobs j
-             WHERE j.instance_slug = {table}.instance_slug
-               AND j.job_uid = {table}.subject
-               AND j.phase NOT IN {terminal}
-         ) AND NOT EXISTS (
-             SELECT 1 FROM reconciliations r
-             WHERE r.instance_slug = {table}.instance_slug
-               AND r.status NOT IN {reconciliation_terminal}
-         ) AND {table}.id > ?2
-         ORDER BY id ASC LIMIT ?1",
-        terminal = CANONICAL_TERMINAL_PHASES,
-        reconciliation_terminal = CLOSED_RECONCILIATION_STATUSES,
+        "SELECT 1 FROM {table}
+         WHERE julianday({column}) IS NULL
+         LIMIT 1"
     );
-    scan_expired_batch(conn, &sql, batch, cutoff, cursor)
+    if conn
+        .query_row(&sql, [], |row| row.get::<_, i64>(0))
+        .optional()?
+        .is_some()
+    {
+        return Err(stale_timestamp_error());
+    }
+    Ok(())
 }
 
-/// Jobs version of [`scan_expired_batch`]: the terminal-state filter is part
-/// of the supplied SQL, so no subject protection applies here.
-fn unprotected_expired_batch(
+fn select_expired_event_ids(
     conn: &rusqlite::Connection,
-    sql: &str,
-    batch: u64,
     cutoff: Timestamp,
-    cursor: i64,
-) -> StoreResult<ExpiredBatch> {
-    scan_expired_batch(conn, sql, batch, cutoff, cursor)
+    batch: u64,
+) -> StoreResult<Vec<i64>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT id FROM events
+         WHERE julianday(occurred_at) < julianday(?1)
+           AND NOT EXISTS (
+               SELECT 1 FROM jobs j
+               WHERE j.instance_slug = events.instance_slug
+                 AND j.job_uid = events.subject
+                 AND j.phase NOT IN {CANONICAL_TERMINAL_PHASES}
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM reconciliations r
+               WHERE r.instance_slug = events.instance_slug
+                 AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
+           )
+         ORDER BY julianday(occurred_at) ASC, id ASC LIMIT ?2"
+    ))?;
+    let mut rows = statement.query(params![
+        rfc3339(cutoff),
+        i64::try_from(batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE))
+            .unwrap_or(i64::MAX),
+    ])?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next()? {
+        ids.push(row.get(0)?);
+    }
+    Ok(ids)
+}
+
+fn select_expired_terminal_job_ids(
+    conn: &rusqlite::Connection,
+    cutoff: Timestamp,
+) -> StoreResult<Vec<i64>> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT id FROM jobs
+         WHERE phase IN {CANONICAL_TERMINAL_PHASES}
+           AND julianday(updated_at) < julianday(?1)
+           AND NOT EXISTS (
+               SELECT 1 FROM reconciliations r
+               WHERE r.instance_slug = jobs.instance_slug
+                 AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
+           )
+         ORDER BY julianday(updated_at) ASC, id ASC LIMIT 1"
+    ))?;
+    let mut rows = statement.query([rfc3339(cutoff)])?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next()? {
+        ids.push(row.get(0)?);
+    }
+    Ok(ids)
 }
 
 /// IDs strictly below `keep_from_id`, excluding rows protected by a
@@ -1482,6 +1601,23 @@ mod tests {
             .unwrap());
         assert!(!first.release_retention_lease(&first_lease).unwrap());
         assert!(second.release_retention_lease(&second_lease).unwrap());
+    }
+
+    #[test]
+    fn live_same_owner_reacquisition_does_not_fence_capability() {
+        let (_dir, store) = temp_store("lease-same-owner");
+        let lease = store
+            .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .try_acquire_retention_lease_at("owner-a-1", 101, Duration::from_secs(30))
+            .unwrap()
+            .is_none());
+        assert!(store
+            .renew_retention_lease_at(&lease, 101, Duration::from_secs(30))
+            .unwrap());
+        assert!(store.release_retention_lease(&lease).unwrap());
     }
 
     #[test]
@@ -1815,6 +1951,53 @@ mod tests {
     }
 
     #[test]
+    fn state_machine_event_keeps_exact_transition_identity() {
+        let (_dir, store) = temp_store("exact-transition-event");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO jobs
+                 (instance_slug, job_uid, repository, workflow, job_name, phase, updated_at)
+                 VALUES ('exact', 'job-1', 'repo', 'workflow', 'job', 'started',
+                         '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let applied = store
+            .record_job_transition(
+                "exact",
+                "job-1",
+                &crate::store::Transition {
+                    token: "token-1".to_owned(),
+                    correlation_id: velnor_model::Slug::validate("correlation_id", "corr-exact")
+                        .unwrap(),
+                    reason: velnor_model::EventReason::JobCompleted,
+                    message: None,
+                    transition_time: Timestamp::now(),
+                    conclusion: Some("success".to_owned()),
+                    infrastructure_category: None,
+                },
+            )
+            .unwrap();
+        assert!(applied);
+
+        let connection = test_connection(&store);
+        let linkage: (i64, i64) = connection
+            .query_row(
+                "SELECT t.id, e.transition_id
+                 FROM job_transitions t
+                 JOIN events e ON e.transition_id = t.id
+                 WHERE t.instance_slug = 'exact' AND t.job_uid = 'job-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(linkage.0, linkage.1);
+    }
+
+    #[test]
     fn malformed_candidate_rolls_back_before_commit() {
         let (_dir, store) = temp_store("malformed-candidate");
         let connection = test_connection(&store);
@@ -1867,29 +2050,26 @@ mod tests {
                 [],
             )
             .unwrap();
-        for (kind, detail) in [
-            ("job.transition.job.completed", "job ancestry"),
-            ("capacity.pressure", "unrelated operational event"),
-        ] {
-            connection
-                .execute(
-                    "INSERT INTO events
-                     (instance_slug, event_kind, subject, correlation_id,
-                      occurred_at, detail)
-                     VALUES ('shared', ?1, 'same-subject', ?3,
-                             '2000-01-01T00:00:00Z', ?2)",
-                    params![
-                        kind,
-                        detail,
-                        if kind == "job.transition.job.completed" {
-                            Some("corr-shared")
-                        } else {
-                            None
-                        },
-                    ],
-                )
-                .unwrap();
-        }
+        let transition_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, correlation_id,
+                  occurred_at, detail, transition_id)
+                 VALUES ('shared', 'job.transition.job.completed', 'same-subject',
+                         'corr-shared', '2000-01-01T00:00:00Z', 'job ancestry', ?1)",
+                [transition_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at, detail)
+                 VALUES ('shared', 'capacity.pressure', 'same-subject',
+                         '2000-01-01T00:00:00Z', 'unrelated operational event')",
+                [],
+            )
+            .unwrap();
         drop(connection);
 
         let budget = RetentionBudget {
@@ -1935,13 +2115,15 @@ mod tests {
                     params![format!("token-{index}"), correlation],
                 )
                 .unwrap();
+            let transition_id = connection.last_insert_rowid();
             connection
                 .execute(
                     "INSERT INTO events
-                     (instance_slug, event_kind, subject, correlation_id, occurred_at)
+                     (instance_slug, event_kind, subject, correlation_id, occurred_at,
+                      transition_id)
                      VALUES ('fanout', 'job.transition.job.completed', 'job-1', ?1,
-                             '2000-01-01T00:00:00Z')",
-                    [correlation],
+                             '2000-01-01T00:00:00Z', ?2)",
+                    params![correlation, transition_id],
                 )
                 .unwrap();
         }
@@ -1956,17 +2138,10 @@ mod tests {
             batch_size: 1,
         };
 
-        let first = store.prune_history(&budget).unwrap();
-        assert_eq!(first.deleted_jobs, 0);
-        assert_eq!(first.deleted_events, MAX_PRUNE_BATCH_SIZE);
-        assert!(store.accounting().unwrap().job_rows == 1);
-
-        let second = store.prune_history(&budget).unwrap();
-        assert_eq!(second.deleted_jobs, 0);
-        assert!(second.deleted_transitions <= MAX_PRUNE_BATCH_SIZE);
-
-        let third = store.prune_history(&budget).unwrap();
-        assert_eq!(third.deleted_jobs, 1);
+        let report = store.prune_history(&budget).unwrap();
+        assert_eq!(report.deleted_jobs, 1);
+        assert_eq!(report.deleted_events, MAX_PRUNE_BATCH_SIZE + 6);
+        assert_eq!(report.deleted_transitions, MAX_PRUNE_BATCH_SIZE + 6);
         assert_eq!(store.accounting().unwrap().job_rows, 0);
         assert_eq!(store.accounting().unwrap().transition_rows, 0);
         assert_eq!(store.accounting().unwrap().event_rows, 0);
@@ -2008,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_after_event_prune_rolls_everything_back() {
+    fn failure_after_event_prune_preserves_committed_batch() {
         let (_dir, store) = temp_store("rollback-events");
         seed_expired_events(&store, 3);
         let before = store.accounting().unwrap().event_rows;
@@ -2028,12 +2203,15 @@ mod tests {
             .expect_err("injected failure surfaces");
 
         assert_eq!(error.envelope.reason, "test.injected");
-        // The transaction rolled back: nothing was deleted.
-        assert_eq!(store.accounting().unwrap().event_rows, before);
+        // The hook runs after the committed event batch. The injected error
+        // stops later phases, but cannot roll back durable partial progress.
+        assert_eq!(store.accounting().unwrap().event_rows, 0);
+        assert_eq!(before, 3);
+        assert!(store.accounting().unwrap().last_prune_at.is_some());
     }
 
     #[test]
-    fn failure_after_job_prune_still_deletes_nothing() {
+    fn failure_after_job_prune_preserves_prior_committed_batches() {
         let (_dir, store) = temp_store("rollback-jobs");
         seed_expired_events(&store, 2);
         let before = store.accounting().unwrap().event_rows;
@@ -2052,9 +2230,9 @@ mod tests {
             }),
         );
 
-        assert_eq!(store.accounting().unwrap().event_rows, before);
-        // And the recorded last-prune marker was not committed either.
-        assert!(store.accounting().unwrap().last_prune_at.is_none());
+        assert_eq!(store.accounting().unwrap().event_rows, 0);
+        assert_eq!(before, 2);
+        assert!(store.accounting().unwrap().last_prune_at.is_some());
     }
 
     #[test]

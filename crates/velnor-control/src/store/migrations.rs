@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 11;
+pub const LATEST_SCHEMA_VERSION: u32 = 12;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -322,6 +322,29 @@ ALTER TABLE retention_lease
     ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// Exact ownership for lifecycle events. Existing events remain generic with
+/// NULL ownership; only new state-machine writes receive a transition ID.
+/// Retention must never infer ancestry from subject, correlation, or kind.
+const SCHEMA_V12: &str = "
+ALTER TABLE events ADD COLUMN transition_id INTEGER REFERENCES job_transitions(id);
+ALTER TABLE events ADD COLUMN reconciliation_id INTEGER REFERENCES reconciliations(id);
+CREATE INDEX IF NOT EXISTS idx_events_transition_id
+ON events (transition_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_reconciliation_id
+ON events (reconciliation_id, id);
+CREATE INDEX IF NOT EXISTS idx_transitions_instance_job_id
+ON job_transitions (instance_slug, job_uid, id);
+";
+
+const SCHEMA_V12_REPLAY: &str = "
+CREATE INDEX IF NOT EXISTS idx_events_transition_id
+ON events (transition_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_reconciliation_id
+ON events (reconciliation_id, id);
+CREATE INDEX IF NOT EXISTS idx_transitions_instance_job_id
+ON job_transitions (instance_slug, job_uid, id);
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -407,6 +430,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 11,
         name: "fenced-retention-lease-generation",
         sql: SCHEMA_V11,
+    },
+    Migration {
+        version: 12,
+        name: "exact-lifecycle-event-ancestry",
+        sql: SCHEMA_V12,
     },
 ];
 
@@ -589,6 +617,8 @@ pub(crate) fn apply_pending(
             migration.version == 9 && has_column(&transaction, "retention_state", "job_rows")?;
         let retention_generation_exists =
             migration.version == 11 && has_column(&transaction, "retention_lease", "generation")?;
+        let event_ancestry_columns_exist =
+            migration.version == 12 && has_column(&transaction, "events", "transition_id")?;
         if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
             && !slot_column_exists
             && !retention_generation_exists
@@ -599,6 +629,8 @@ pub(crate) fn apply_pending(
                 ""
             } else if retention_columns_exist {
                 SCHEMA_V9_REPLAY
+            } else if event_ancestry_columns_exist {
+                SCHEMA_V12_REPLAY
             } else {
                 migration.sql
             };

@@ -695,10 +695,25 @@ impl Store {
         transaction: &rusqlite::Transaction<'_>,
         row: &EventRow,
     ) -> StoreResult<u64> {
+        Self::append_event_with_ancestry_in_transaction(transaction, row, None, None)
+    }
+
+    /// Insert an event with durable lifecycle ownership. Generic callers keep
+    /// both ownership columns NULL; state-machine events pass the exact
+    /// transition row ID and are the only events retention may remove with a
+    /// deleted job.
+    fn append_event_with_ancestry_in_transaction(
+        transaction: &rusqlite::Transaction<'_>,
+        row: &EventRow,
+        transition_id: Option<i64>,
+        reconciliation_id: Option<i64>,
+    ) -> StoreResult<u64> {
         validate_event_row(row)?;
         transaction.execute(
-            "INSERT INTO events (instance_slug, event_kind, subject, correlation_id, occurred_at, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO events
+                (instance_slug, event_kind, subject, correlation_id, occurred_at, detail,
+                 transition_id, reconciliation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 row.instance_slug,
                 row.event_kind,
@@ -706,6 +721,8 @@ impl Store {
                 row.correlation_id,
                 rfc3339(row.occurred_at),
                 row.detail,
+                transition_id,
+                reconciliation_id,
             ],
         )?;
         let id = u64::try_from(transaction.last_insert_rowid())
@@ -1409,6 +1426,12 @@ fn record_job_transition_in_transaction(
     if inserted == 0 {
         return Ok(false);
     }
+    let transaction_id: i64 = transaction.query_row(
+        "SELECT id FROM job_transitions
+         WHERE instance_slug = ?1 AND job_uid = ?2 AND transition_token = ?3",
+        params![instance_slug, job_uid, transition.token],
+        |row| row.get(0),
+    )?;
     let from = JobState::try_from(current_phase.as_str()).map_err(|_| {
         StoreError::new(ExitClass::Operation, "store.job.state.unknown")
             .with_remediation("stored phase is not part of the closed job state taxonomy")
@@ -1432,7 +1455,7 @@ fn record_job_transition_in_transaction(
         return Err(StoreError::new(ExitClass::Unavailable, "store.job.missing")
             .with_remediation(format!("job {job_uid} is not recorded for this instance")));
     }
-    Store::append_event_in_transaction(
+    Store::append_event_with_ancestry_in_transaction(
         transaction,
         &EventRow {
             instance_slug: instance_slug.to_owned(),
@@ -1442,6 +1465,8 @@ fn record_job_transition_in_transaction(
             occurred_at: transition.transition_time,
             detail: transition.message.clone(),
         },
+        Some(transaction_id),
+        None,
     )?;
     Ok(true)
 }
