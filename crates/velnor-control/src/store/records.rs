@@ -14,6 +14,7 @@ use velnor_model::{
 };
 
 use super::error::{StoreError, StoreResult};
+use super::retention::{PhysicalBudgetStatus, RetentionMaintenanceBudget};
 use super::rfc3339;
 use super::Store;
 
@@ -576,6 +577,40 @@ impl Store {
         record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Atomically admit a new job only while the measured physical store is
+    /// within its configured budget. The immediate transaction is opened
+    /// before measurement, so competing SQLite writers cannot grow the store
+    /// between the capacity check and this admission commit. A denied or
+    /// unmeasurable status rolls the transaction back without row writes.
+    pub fn persist_summary_and_transition_with_budget(
+        &self,
+        summary: &ModelJobSummary,
+        instance_slug: &str,
+        job_uid: &str,
+        transition: &Transition,
+        budget: &RetentionMaintenanceBudget,
+    ) -> StoreResult<PhysicalBudgetStatus> {
+        if summary.instance_slug() != instance_slug || summary.job_uid() != job_uid {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.job.identity.mismatch")
+                    .with_remediation(
+                        "use one normalized instance and job identity for both records",
+                    ),
+            );
+        }
+        let mut conn = self.lock_conn()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let status = self.physical_budget_status_with_connection(&transaction, budget)?;
+        if !status.admits_job() {
+            return Ok(status);
+        }
+        insert_summary(&transaction, summary)?;
+        record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
+        transaction.commit()?;
+        Ok(status)
     }
 
     /// Fetch one persisted sanitized summary by its identity triple.

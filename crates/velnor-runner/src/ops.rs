@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use velnor_control::store::{
-    EventRow, InstanceRow, RetentionBudget, RetentionLease, Store, StoreError, Transition,
-    DEFAULT_STATE_DB_PATH,
+    EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
+    RetentionMaintenanceBudget, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
 #[cfg(test)]
 use velnor_model::ExitClass;
@@ -361,12 +361,6 @@ impl OpsSink {
                 "admission instance does not match the installed operational-store sink",
             );
         }
-        if !self.remember_masks(&admission.masks) {
-            return self.required_failure(
-                "store.masks",
-                "event mask registry is unavailable; admission rejected",
-            );
-        }
         let token = format!("t-acquired-{job_uid}");
         let correlation_id = match Slug::validate("correlation_id", &format!("corr-{token}")) {
             Ok(value) => value,
@@ -383,16 +377,37 @@ impl OpsSink {
             conclusion: None,
             infrastructure_category: None,
         };
+        let budget = RetentionMaintenanceBudget::from(&self.budget);
+        // Register masks before the physical gate and store write. Retaining
+        // masks when capacity denies admission is conservative; it prevents
+        // later projections from losing protection and avoids any
+        // post-commit mask-registration failure path.
+        if !self.remember_masks(&admission.masks) {
+            return self.required_failure(
+                "store.masks",
+                "event mask registry is unavailable; admission rejected",
+            );
+        }
         if let Err(error) = self.before_store_write() {
             return self.required_failure("store.admission.persist", &error.to_string());
         }
-        if let Err(error) = self.store.persist_summary_and_transition(
+        match self.store.persist_summary_and_transition_with_budget(
             &summary,
             &self.instance_slug,
             &job_uid,
             &transition,
+            &budget,
         ) {
-            return self.required_failure("store.admission.persist", &error.to_string());
+            Ok(status) if status.admits_job() => {}
+            Ok(status) => {
+                return self.required_failure(
+                    "store.admission.physical-budget",
+                    physical_budget_rejection(status),
+                );
+            }
+            Err(error) => {
+                return self.required_failure("store.admission.persist", &error.to_string());
+            }
         }
         true
     }
@@ -853,6 +868,29 @@ impl OpsSink {
     }
 }
 
+fn physical_budget_rejection(status: PhysicalBudgetStatus) -> &'static str {
+    match status {
+        PhysicalBudgetStatus::Exceeded => {
+            "database plus WAL exceeds max_database_bytes; new job admission rejected"
+        }
+        PhysicalBudgetStatus::ReserveViolation => {
+            "filesystem free space is below min_free_bytes; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Unmeasurable => {
+            "database or filesystem capacity is unmeasurable; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Deferred => {
+            "physical retention maintenance is deferred; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Unconfigured => {
+            "physical storage budget is unconfigured; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Disabled | PhysicalBudgetStatus::WithinBudget => {
+            "physical storage budget did not reject admission"
+        }
+    }
+}
+
 fn forensic_failure_line(code: &str, detail: &str) -> String {
     format!(
         "forensics.ops event=store-write-failed code={} error={}",
@@ -1016,6 +1054,118 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn admission_rejects_physical_overage_before_masks_or_store_writes() {
+        let (_dir, mut sink) = temp_sink("admission-physical-overage");
+        Arc::get_mut(&mut sink)
+            .expect("test sink is uniquely owned")
+            .budget
+            .max_database_bytes = 1;
+        let mut admission = admission(112, Some("admission-secret"));
+        admission.job_name = "physical-overage".to_owned();
+
+        assert!(!sink.record_admission(&admission));
+        assert!(sink.degraded());
+        assert!(sink
+            .store
+            .job_summaries("test-instance")
+            .unwrap()
+            .is_empty());
+        assert!(sink
+            .event_masks()
+            .unwrap()
+            .iter()
+            .any(|mask| mask == "admission-secret"));
+    }
+
+    #[test]
+    fn concurrent_physical_rejections_have_no_admission_side_effects() {
+        use std::sync::Barrier;
+
+        let (_dir, mut sink) = temp_sink("admission-physical-concurrent");
+        Arc::get_mut(&mut sink)
+            .expect("test sink is uniquely owned")
+            .budget
+            .max_database_bytes = 1;
+        let barrier = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|run_id| {
+                let sink = Arc::clone(&sink);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    assert!(!sink
+                        .record_admission(&admission(113 + run_id, Some("concurrent-secret"),)));
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("admission worker must not panic");
+        }
+
+        assert!(sink
+            .store
+            .job_summaries("test-instance")
+            .unwrap()
+            .is_empty());
+        assert!(sink
+            .event_masks()
+            .unwrap()
+            .iter()
+            .any(|mask| mask == "concurrent-secret"));
+    }
+
+    #[test]
+    fn running_job_can_complete_after_new_admission_is_denied() {
+        let (_dir, mut sink) = temp_sink("admission-completion-under-pressure");
+        let existing = admission(119, None);
+        assert!(sink.record_admission(&existing));
+        let existing_uid = existing.job_uid().unwrap();
+        Arc::get_mut(&mut sink)
+            .expect("test sink is uniquely owned")
+            .budget
+            .max_database_bytes = 1;
+
+        assert!(!sink.record_admission(&admission(120, None)));
+        assert!(sink.transition(
+            &existing_uid,
+            &format!("t-waiting-{existing_uid}"),
+            EventReason::JobWaiting,
+            None,
+            None,
+            None,
+        ));
+        assert!(sink.transition(
+            &existing_uid,
+            &format!("t-started-{existing_uid}"),
+            EventReason::JobStarted,
+            None,
+            None,
+            None,
+        ));
+        assert!(sink.transition(
+            &existing_uid,
+            &format!("t-completed-{existing_uid}"),
+            EventReason::JobCompleted,
+            Some("done".to_owned()),
+            Some("success".to_owned()),
+            None,
+        ));
+        assert_eq!(
+            sink.store
+                .fetch_summary("test-instance", 119, 1)
+                .unwrap()
+                .unwrap()
+                .phase(),
+            JobPhase::Completed
+        );
+        assert!(sink
+            .store
+            .fetch_summary("test-instance", 120, 1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

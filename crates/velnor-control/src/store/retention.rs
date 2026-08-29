@@ -121,6 +121,16 @@ pub enum PhysicalBudgetStatus {
     Unconfigured,
 }
 
+impl PhysicalBudgetStatus {
+    /// Only a measured in-budget store, or an explicitly disabled physical
+    /// ceiling, may admit a new job. Existing jobs do not call this gate and
+    /// therefore remain free to complete and persist their terminal state.
+    #[must_use]
+    pub const fn admits_job(self) -> bool {
+        matches!(self, Self::Disabled | Self::WithinBudget)
+    }
+}
+
 /// Result of the explicit bounded post-prune maintenance operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionMaintenanceReport {
@@ -756,6 +766,32 @@ impl Store {
         self.maintain_after_prune(budget, lease, deadline)
     }
 
+    /// Evaluate the physical admission budget on an already-held primary
+    /// connection. The caller can use the result before any new-job write;
+    /// the connection lock makes the measurement and the subsequent
+    /// admission transaction one serialized per-process operation.
+    pub(crate) fn physical_budget_status_with_connection(
+        &self,
+        connection: &rusqlite::Connection,
+        budget: &RetentionMaintenanceBudget,
+    ) -> StoreResult<PhysicalBudgetStatus> {
+        let (database_bytes, wal_bytes) = Self::total_database_bytes(connection, &self.path)?;
+        Ok(evaluate_admission_physical_budget(
+            database_bytes.saturating_add(wal_bytes),
+            filesystem_free_bytes(&self.path),
+            budget,
+        ))
+    }
+
+    /// Sample the physical admission budget without mutating the store.
+    pub fn physical_budget_status(
+        &self,
+        budget: &RetentionMaintenanceBudget,
+    ) -> StoreResult<PhysicalBudgetStatus> {
+        let connection = self.lock_conn()?;
+        self.physical_budget_status_with_connection(&connection, budget)
+    }
+
     #[cfg(test)]
     pub(crate) fn prune_history_inner(
         &self,
@@ -1351,18 +1387,19 @@ impl Store {
         let free_bytes_after = filesystem_free_bytes(&self.path);
         let reserve_violation =
             free_bytes_after.is_some_and(|free_bytes| free_bytes < budget.min_free_bytes);
-        let physical_budget_status = if budget.max_database_bytes == 0 {
-            PhysicalBudgetStatus::Disabled
-        } else if free_bytes_after.is_none() || free_bytes_before.is_none() {
+        let measured_status = if free_bytes_after.is_none() || free_bytes_before.is_none() {
             PhysicalBudgetStatus::Unmeasurable
-        } else if reserve_violation {
-            PhysicalBudgetStatus::ReserveViolation
-        } else if deferred_reason.is_some() {
-            PhysicalBudgetStatus::Deferred
-        } else if total_bytes_after > budget.max_database_bytes {
-            PhysicalBudgetStatus::Exceeded
         } else {
-            PhysicalBudgetStatus::WithinBudget
+            evaluate_physical_budget(total_bytes_after, free_bytes_after, budget)
+        };
+        let physical_budget_status = if matches!(
+            measured_status,
+            PhysicalBudgetStatus::WithinBudget | PhysicalBudgetStatus::Exceeded
+        ) && deferred_reason.is_some()
+        {
+            PhysicalBudgetStatus::Deferred
+        } else {
+            measured_status
         };
         let maintenance_deferred = !matches!(
             physical_budget_status,
@@ -1689,6 +1726,45 @@ fn filesystem_free_bytes(path: &Path) -> Option<u64> {
 #[cfg(not(unix))]
 fn filesystem_free_bytes(_path: &Path) -> Option<u64> {
     None
+}
+
+fn evaluate_physical_budget(
+    total_bytes: u64,
+    free_bytes: Option<u64>,
+    budget: &RetentionMaintenanceBudget,
+) -> PhysicalBudgetStatus {
+    if budget.max_database_bytes == 0 {
+        PhysicalBudgetStatus::Disabled
+    } else if free_bytes.is_none() {
+        PhysicalBudgetStatus::Unmeasurable
+    } else if free_bytes.is_some_and(|free| free < budget.min_free_bytes) {
+        PhysicalBudgetStatus::ReserveViolation
+    } else if total_bytes > budget.max_database_bytes {
+        PhysicalBudgetStatus::Exceeded
+    } else {
+        PhysicalBudgetStatus::WithinBudget
+    }
+}
+
+fn evaluate_admission_physical_budget(
+    total_bytes: u64,
+    free_bytes: Option<u64>,
+    budget: &RetentionMaintenanceBudget,
+) -> PhysicalBudgetStatus {
+    // The byte ceiling may be disabled, but the existing free-space reserve
+    // remains an admission invariant. Capacity must be measurable before a
+    // new job can create more durable state.
+    if free_bytes.is_none() {
+        PhysicalBudgetStatus::Unmeasurable
+    } else if free_bytes.is_some_and(|free| free < budget.min_free_bytes) {
+        PhysicalBudgetStatus::ReserveViolation
+    } else if budget.max_database_bytes == 0 {
+        PhysicalBudgetStatus::Disabled
+    } else if total_bytes > budget.max_database_bytes {
+        PhysicalBudgetStatus::Exceeded
+    } else {
+        PhysicalBudgetStatus::WithinBudget
+    }
 }
 
 fn release_retention_lease_connection(
@@ -3117,6 +3193,62 @@ mod tests {
             PhysicalBudgetStatus::Unconfigured
         );
         assert!(!accounting.checkpoint.attempted);
+    }
+
+    #[test]
+    fn physical_budget_status_distinguishes_allowed_denied_and_unmeasurable() {
+        let budget = RetentionMaintenanceBudget {
+            max_database_bytes: 100,
+            min_free_bytes: 50,
+            ..RetentionMaintenanceBudget::default()
+        };
+
+        assert_eq!(
+            evaluate_admission_physical_budget(100, Some(50), &budget),
+            PhysicalBudgetStatus::WithinBudget
+        );
+        assert_eq!(
+            evaluate_admission_physical_budget(101, Some(50), &budget),
+            PhysicalBudgetStatus::Exceeded
+        );
+        assert_eq!(
+            evaluate_admission_physical_budget(100, Some(49), &budget),
+            PhysicalBudgetStatus::ReserveViolation
+        );
+        assert_eq!(
+            evaluate_admission_physical_budget(100, None, &budget),
+            PhysicalBudgetStatus::Unmeasurable
+        );
+        assert!(!PhysicalBudgetStatus::Unmeasurable.admits_job());
+
+        let disabled_ceiling = RetentionMaintenanceBudget {
+            max_database_bytes: 0,
+            min_free_bytes: 50,
+            ..budget
+        };
+        assert_eq!(
+            evaluate_admission_physical_budget(0, Some(50), &disabled_ceiling),
+            PhysicalBudgetStatus::Disabled
+        );
+        assert_eq!(
+            evaluate_admission_physical_budget(0, Some(49), &disabled_ceiling),
+            PhysicalBudgetStatus::ReserveViolation
+        );
+    }
+
+    #[test]
+    fn physical_admission_sampler_rejects_a_violated_free_space_reserve() {
+        let (_dir, store) = temp_store("admission-reserve");
+        let budget = RetentionMaintenanceBudget {
+            max_database_bytes: u64::MAX,
+            min_free_bytes: u64::MAX,
+            ..RetentionMaintenanceBudget::default()
+        };
+
+        assert_eq!(
+            store.physical_budget_status(&budget).unwrap(),
+            PhysicalBudgetStatus::ReserveViolation
+        );
     }
 
     #[test]
