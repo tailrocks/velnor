@@ -452,6 +452,95 @@ mod tests {
     }
 
     #[test]
+    fn retention_lease_migration_is_present_after_reopen_and_replay() {
+        let temp = TempDb::new("retention-lease-migration");
+        {
+            let store = Store::open(&temp.path).expect("fresh migration");
+            let lease_rows: u32 = test_connection(&store)
+                .query_row(
+                    "SELECT COUNT(*) FROM retention_lease WHERE singleton = 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(lease_rows, 1);
+        }
+
+        let reopened = Store::open(&temp.path).expect("reopen migration");
+        assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let lease_rows: u32 = test_connection(&reopened)
+            .query_row("SELECT COUNT(*) FROM retention_lease", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(lease_rows, 1);
+
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        conn.execute("UPDATE schema_version SET version = 9", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "retention-lease-replay", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "retention-lease-replay", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "retention-lease-replay").unwrap();
+        let lease_rows: u32 = conn
+            .query_row("SELECT COUNT(*) FROM retention_lease", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(lease_rows, 1);
+    }
+
+    #[test]
+    fn retention_lease_migration_rolls_back_ddl_and_version() {
+        let temp = TempDb::new("retention-lease-rollback");
+        let store = Store::open(&temp.path).expect("initial migration");
+        drop(store);
+
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        conn.execute("DROP TABLE retention_lease", []).unwrap();
+        conn.execute("UPDATE schema_version SET version = 9", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "retention-lease-rollback", Duration::from_secs(1))
+            .unwrap();
+
+        let failure = migrations::apply_pending(
+            &mut conn,
+            "retention-lease-rollback",
+            Some(&|version| {
+                if version == 10 {
+                    Err(StoreError::new(
+                        velnor_model::ExitClass::Operation,
+                        "store.test.retention-lease-rollback",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.envelope.reason,
+            "store.test.retention-lease-rollback"
+        );
+        assert_eq!(migrations::current_version(&conn).unwrap(), 9);
+        let lease_table_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'retention_lease'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lease_table_count, 0);
+
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "retention-lease-rollback", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "retention-lease-rollback").unwrap();
+    }
+
+    #[test]
     fn upgrades_v1_schema_preserving_rows_and_indexes() {
         let temp = TempDb::new("v1-upgrade");
         let mut conn = Connection::open(&temp.path).unwrap();

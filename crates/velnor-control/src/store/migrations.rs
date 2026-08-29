@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 9;
+pub const LATEST_SCHEMA_VERSION: u32 = 10;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -302,6 +302,18 @@ BEGIN
 END;
 ";
 
+/// Durable cross-process retention ownership. The singleton table keeps lease
+/// state separate from retention counters so this migration is naturally
+/// idempotent on fresh, reopened, and partially initialized databases.
+const SCHEMA_V10: &str = "
+CREATE TABLE IF NOT EXISTS retention_lease (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+    owner TEXT,
+    expires_at INTEGER
+);
+INSERT OR IGNORE INTO retention_lease (singleton) VALUES (0);
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -377,6 +389,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 9,
         name: "bounded-retention-counters-and-indexes",
         sql: SCHEMA_V9,
+    },
+    Migration {
+        version: 10,
+        name: "durable-retention-lease",
+        sql: SCHEMA_V10,
     },
 ];
 

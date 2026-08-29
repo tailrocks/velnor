@@ -69,6 +69,9 @@ const MAX_PRUNE_BATCHES: u64 = 8;
 /// by the migration's indexed ID ordering.
 const MAX_RETENTION_WINDOW_ROWS: u64 = 100_000;
 
+/// Lease owner tokens are operational identities, not arbitrary payloads.
+const MAX_RETENTION_LEASE_OWNER_BYTES: usize = 128;
+
 fn prune_batch_size(budget: &RetentionBudget) -> u64 {
     budget
         .batch_size
@@ -180,6 +183,77 @@ fn validate_budget(budget: &RetentionBudget) -> StoreResult<()> {
 }
 
 impl Store {
+    /// Try to own retention maintenance at a supplied clock value. A live
+    /// foreign owner blocks; an empty, missing, or expired lease is replaced
+    /// by an atomic update. The owner token is operational identity only and
+    /// must never contain a secret.
+    pub fn try_acquire_retention_lease_at(
+        &self,
+        owner: &str,
+        now_unix: u64,
+        lease_duration: Duration,
+    ) -> StoreResult<bool> {
+        if owner.is_empty() || owner.len() > MAX_RETENTION_LEASE_OWNER_BYTES {
+            return Err(StoreError::new(
+                ExitClass::Usage,
+                "store.retention.lease.owner",
+            )
+            .with_remediation(format!(
+                "retention lease owner must be 1..={MAX_RETENTION_LEASE_OWNER_BYTES} bytes and contain no secret"
+            )));
+        }
+        let now = sqlite_i64(now_unix);
+        let expires_at = sqlite_i64(now_unix.saturating_add(lease_duration.as_secs()));
+        let mut conn = self.open_maintenance_connection()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE retention_lease
+             SET owner = ?1, expires_at = ?2
+             WHERE singleton = 0
+               AND (owner IS NULL
+                    OR owner = ''
+                    OR expires_at IS NULL
+                    OR expires_at <= ?3
+                    OR owner = ?1)",
+            params![owner, expires_at, now],
+        )?;
+        if changed == 0 {
+            let lease_row_exists: bool = transaction.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM retention_lease WHERE singleton = 0
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            if !lease_row_exists {
+                return Err(StoreError::new(
+                    ExitClass::Unavailable,
+                    "store.retention.lease.missing",
+                ));
+            }
+        }
+        transaction.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Release the lease only when its owner still matches. This is
+    /// idempotent and cannot clear a successor that took over after expiry.
+    pub fn release_retention_lease(&self, owner: &str) -> StoreResult<bool> {
+        let mut conn = self.open_maintenance_connection()?;
+        release_retention_lease_connection(&mut conn, owner)
+    }
+
+    /// Try to own retention maintenance using the current Unix-second clock.
+    pub fn try_acquire_retention_lease(
+        &self,
+        owner: &str,
+        lease_duration: Duration,
+    ) -> StoreResult<bool> {
+        let now = Timestamp::now().as_offset_datetime().unix_timestamp();
+        self.try_acquire_retention_lease_at(owner, u64::try_from(now).unwrap_or(0), lease_duration)
+    }
+
     /// Run one bounded prune pass with the given budget.
     ///
     /// Every candidate query is limited to `MAX_PRUNE_BATCH_SIZE`, every
@@ -529,6 +603,23 @@ impl Store {
         }
         Ok((deleted_events, deleted_jobs, deleted_transitions))
     }
+}
+
+fn sqlite_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn release_retention_lease_connection(
+    conn: &mut rusqlite::Connection,
+    owner: &str,
+) -> StoreResult<bool> {
+    let changed = conn.execute(
+        "UPDATE retention_lease
+         SET owner = NULL, expires_at = NULL
+         WHERE singleton = 0 AND owner = ?1",
+        [owner],
+    )?;
+    Ok(changed == 1)
 }
 
 fn read_retention_snapshot(
@@ -997,6 +1088,92 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.db");
         (dir, Store::open(&path).unwrap())
+    }
+
+    #[test]
+    fn retention_lease_allows_one_same_path_owner() {
+        let (_dir, first) = temp_store("lease-competing");
+        let second = Store::open(first.path()).unwrap();
+
+        assert!(first
+            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(30))
+            .unwrap());
+        assert!(!second
+            .try_acquire_retention_lease_at("owner-b", 101, Duration::from_secs(30))
+            .unwrap());
+
+        let connection = test_connection(&first);
+        let lease: (Option<String>, Option<i64>) = connection
+            .query_row(
+                "SELECT owner, expires_at FROM retention_lease WHERE singleton = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(lease, (Some("owner-a".to_owned()), Some(130)));
+    }
+
+    #[test]
+    fn retention_lease_expired_owner_is_taken_over_atomically() {
+        let (_dir, first) = temp_store("lease-takeover");
+        let second = Store::open(first.path()).unwrap();
+
+        assert!(first
+            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(10))
+            .unwrap());
+        assert!(second
+            .try_acquire_retention_lease_at("owner-b", 110, Duration::from_secs(20))
+            .unwrap());
+        assert!(!first
+            .try_acquire_retention_lease_at("owner-a", 111, Duration::from_secs(10))
+            .unwrap());
+    }
+
+    #[test]
+    fn retention_lease_rejects_non_owner_release() {
+        let (_dir, store) = temp_store("lease-release");
+
+        assert!(store
+            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(30))
+            .unwrap());
+        assert!(!store.release_retention_lease("owner-b").unwrap());
+        assert!(store.release_retention_lease("owner-a").unwrap());
+        assert!(!store.release_retention_lease("owner-a").unwrap());
+    }
+
+    #[test]
+    fn retention_lease_expiry_saturates_without_overflow() {
+        let (_dir, store) = temp_store("lease-overflow");
+
+        assert!(store
+            .try_acquire_retention_lease_at("owner-a", u64::MAX, Duration::from_secs(u64::MAX),)
+            .unwrap());
+        let connection = test_connection(&store);
+        let expires_at: i64 = connection
+            .query_row(
+                "SELECT expires_at FROM retention_lease WHERE singleton = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(expires_at, i64::MAX);
+    }
+
+    #[test]
+    fn retention_lease_contention_and_sql_validation_are_distinguishable() {
+        let (_dir, store) = temp_store("lease-errors");
+
+        let usage = store
+            .try_acquire_retention_lease_at("", 100, Duration::from_secs(30))
+            .expect_err("invalid owner is a SQL-independent validation failure");
+        assert_eq!(usage.envelope.reason, "store.retention.lease.owner");
+
+        assert!(store
+            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(30))
+            .unwrap());
+        assert!(!store
+            .try_acquire_retention_lease_at("owner-b", 101, Duration::from_secs(30))
+            .unwrap());
     }
 
     #[test]
