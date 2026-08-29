@@ -47,6 +47,12 @@ impl From<rusqlite::Error> for StoreError {
     fn from(error: rusqlite::Error) -> Self {
         match &error {
             rusqlite::Error::SqliteFailure(inner, _)
+                if inner.code == rusqlite::ErrorCode::OperationInterrupted =>
+            {
+                Self::new(ExitClass::Operation, "store.sqlite.interrupted")
+                    .with_remediation("the SQLite operation was interrupted by its owning deadline")
+            }
+            rusqlite::Error::SqliteFailure(inner, _)
                 if inner.code == rusqlite::ErrorCode::DatabaseBusy
                     || inner.code == rusqlite::ErrorCode::DatabaseLocked =>
             {

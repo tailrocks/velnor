@@ -165,42 +165,29 @@ impl Store {
         &self,
         deadline: Instant,
     ) -> StoreResult<std::sync::MutexGuard<'_, Connection>> {
-        loop {
-            match self.conn.try_lock() {
-                Ok(connection) => {
-                    if Instant::now() >= deadline {
-                        drop(connection);
-                        return Err(StoreError::new(
-                            ExitClass::Timeout,
-                            "store.retention.deadline",
-                        )
-                        .with_remediation(
-                            "retention maintenance exceeded its bounded connection wait",
-                        ));
-                    }
-                    return Ok(connection);
-                }
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    return Err(StoreError::new(ExitClass::Operation, "store.lock.poisoned"));
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(StoreError::new(
-                            ExitClass::Timeout,
-                            "store.retention.deadline",
-                        )
-                        .with_remediation(
-                            "retention maintenance exceeded its bounded connection wait",
-                        ));
-                    }
-                    std::thread::sleep(
-                        deadline
-                            .saturating_duration_since(now)
-                            .min(Duration::from_millis(1)),
+        match self.conn.try_lock() {
+            Ok(connection) => {
+                if Instant::now() >= deadline {
+                    drop(connection);
+                    return Err(
+                        StoreError::new(ExitClass::Timeout, "store.retention.deadline")
+                            .with_remediation(
+                                "retention maintenance exceeded its bounded connection wait",
+                            ),
                     );
                 }
+                Ok(connection)
             }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(StoreError::new(ExitClass::Operation, "store.lock.poisoned"))
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Err(StoreError::new(
+                ExitClass::Timeout,
+                "store.retention.deadline",
+            )
+            .with_remediation(
+                "retention maintenance found the primary connection busy; retry later",
+            )),
         }
     }
 

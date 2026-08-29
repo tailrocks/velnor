@@ -14,6 +14,8 @@
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::path::Path;
+use std::sync::mpsc::{self, Sender};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, params_from_iter, OptionalExtension};
@@ -431,6 +433,73 @@ fn require_retention_deadline(deadline: Instant) -> StoreResult<()> {
         Err(retention_deadline_error())
     } else {
         Ok(())
+    }
+}
+
+fn retention_sql_error(error: rusqlite::Error) -> StoreError {
+    if matches!(
+        &error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if inner.code == rusqlite::ErrorCode::OperationInterrupted
+    ) {
+        retention_deadline_error()
+    } else {
+        StoreError::from(error)
+    }
+}
+
+/// Interrupt one SQLite connection at the absolute retention deadline. This
+/// covers pager work such as WAL checkpointing that does not invoke a VDBE
+/// progress callback. The sender is closed before joining, so completed
+/// operations do not leave timer threads behind.
+struct SqliteDeadlineInterrupt {
+    cancel: Option<Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SqliteDeadlineInterrupt {
+    fn start(connection: &rusqlite::Connection, deadline: Instant) -> StoreResult<Self> {
+        let handle = connection.get_interrupt_handle();
+        let (cancel, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("velnor-retention-deadline".to_owned())
+            .spawn(move || {
+                if receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .is_err()
+                {
+                    handle.interrupt();
+                }
+            })
+            .map_err(|error| {
+                StoreError::new(ExitClass::Unavailable, "store.retention.deadline.timer")
+                    .with_remediation(format!(
+                        "start the retention deadline timer before SQLite maintenance: {error}"
+                    ))
+            })?;
+        Ok(Self {
+            cancel: Some(cancel),
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for SqliteDeadlineInterrupt {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn map_retention_interruption(error: StoreError) -> StoreError {
+    if error.envelope.reason == "store.sqlite.interrupted" {
+        retention_deadline_error()
+    } else {
+        error
     }
 }
 
@@ -1030,11 +1099,20 @@ impl Store {
                 PruneFailure::PreCommit(error)
             }
         })?;
+        if let Err(error) = conn.progress_handler(1_000, Some(move || Instant::now() >= deadline)) {
+            let _ = conn.busy_timeout(super::BUSY_TIMEOUT);
+            let error = StoreError::from(error);
+            return Err(if committed_before {
+                PruneFailure::PostCommit(error)
+            } else {
+                PruneFailure::PreCommit(error)
+            });
+        }
         let transaction_result = (|| {
             let transaction = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|error| {
-                    let error = StoreError::from(error);
+                    let error = retention_sql_error(error);
                     if committed_before {
                         PruneFailure::PostCommit(error)
                     } else {
@@ -1049,12 +1127,21 @@ impl Store {
                 }
             })?;
             Self::require_retention_lease_connection(&transaction, lease).map_err(|error| {
+                let error = map_retention_interruption(error);
+                if error.envelope.reason == "store.retention.deadline" {
+                    return if committed_before {
+                        PruneFailure::PostCommit(error)
+                    } else {
+                        PruneFailure::PreCommit(error)
+                    };
+                }
                 PruneFailure::LeaseLost {
                     committed: committed_before,
                     error,
                 }
             })?;
             let batch = operation(&transaction).map_err(|error| {
+                let error = map_retention_interruption(error);
                 if error.envelope.reason == "store.retention.lease.lost" {
                     PruneFailure::LeaseLost {
                         committed: committed_before,
@@ -1074,6 +1161,14 @@ impl Store {
                 }
             })?;
             Self::fence_retention_lease_for_commit(&transaction, lease).map_err(|error| {
+                let error = map_retention_interruption(error);
+                if error.envelope.reason == "store.retention.deadline" {
+                    return if committed_before {
+                        PruneFailure::PostCommit(error)
+                    } else {
+                        PruneFailure::PreCommit(error)
+                    };
+                }
                 PruneFailure::LeaseLost {
                     committed: committed_before,
                     error,
@@ -1093,7 +1188,7 @@ impl Store {
                     ],
                 )
                 .map_err(|error| {
-                    let error = StoreError::from(error);
+                    let error = retention_sql_error(error);
                     if committed_before {
                         PruneFailure::PostCommit(error)
                     } else {
@@ -1108,7 +1203,7 @@ impl Store {
                 }
             })?;
             transaction.commit().map_err(|error| {
-                let error = StoreError::from(error);
+                let error = retention_sql_error(error);
                 // SQLite commit errors have an ambiguous outcome. Treat the
                 // batch as post-commit/unknown so callers never repeat a
                 // deletion that may already be durable.
@@ -1116,14 +1211,20 @@ impl Store {
             })?;
             Ok(batch)
         })();
+        let clear_progress = conn.progress_handler(0, None::<fn() -> bool>);
         let restore = conn.busy_timeout(super::BUSY_TIMEOUT).map_err(|error| {
             let error = StoreError::from(error);
             PruneFailure::PostCommit(error)
         });
-        match (transaction_result, restore) {
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Ok(batch), Ok(())) => Ok(batch),
+        match (transaction_result, clear_progress, restore) {
+            // The transaction result owns the commit phase. Cleanup errors
+            // are deliberately not allowed to relabel a pre-commit or lease
+            // failure; both cleanup attempts have already run, and the next
+            // use re-establishes the bounded connection settings.
+            (Err(error), _, _) => Err(error),
+            (Ok(_), Err(error), _) => Err(PruneFailure::PostCommit(StoreError::from(error))),
+            (Ok(_), Ok(()), Err(error)) => Err(error),
+            (Ok(batch), Ok(()), Ok(())) => Ok(batch),
         }
     }
 
@@ -1132,12 +1233,23 @@ impl Store {
         let mut connection = self
             .open_maintenance_connection()
             .map_err(|error| maintenance_error("open accounting connection", error))?;
+        let _deadline_interrupt = SqliteDeadlineInterrupt::start(&connection, deadline)?;
         let result = read_retention_snapshot(&mut connection, &self.path);
         require_retention_deadline(deadline)?;
-        result
+        result.map_err(map_retention_interruption)
     }
 
     fn maintain_after_prune(
+        &self,
+        budget: &RetentionMaintenanceBudget,
+        lease: &RetentionLease,
+        deadline: Instant,
+    ) -> StoreResult<RetentionMaintenanceReport> {
+        self.maintain_after_prune_inner(budget, lease, deadline)
+            .map_err(map_retention_interruption)
+    }
+
+    fn maintain_after_prune_inner(
         &self,
         budget: &RetentionMaintenanceBudget,
         lease: &RetentionLease,
@@ -1148,12 +1260,14 @@ impl Store {
         require_retention_deadline(deadline)?;
         let maintenance = self
             .open_maintenance_connection()
-            .map_err(|error| maintenance_error("open", error))?;
+            .map_err(|error| maintenance_error_preserving("open", error))?;
+        let _deadline_interrupt = SqliteDeadlineInterrupt::start(&maintenance, deadline)?;
         require_retention_deadline(deadline)?;
         Self::require_retention_lease_connection(&maintenance, lease)?;
         let (database_bytes_before, wal_bytes_before) =
-            Self::total_database_bytes(&maintenance, &self.path)
-                .map_err(|error| maintenance_error("database accounting before", error))?;
+            Self::total_database_bytes(&maintenance, &self.path).map_err(|error| {
+                maintenance_error_preserving("database accounting before", error)
+            })?;
         require_retention_deadline(deadline)?;
         let total_bytes_before = database_bytes_before.saturating_add(wal_bytes_before);
         let free_bytes_before = filesystem_free_bytes(&self.path);
@@ -1180,8 +1294,9 @@ impl Store {
             for _ in 0..attempts {
                 require_retention_deadline(deadline)?;
                 Self::require_retention_lease_connection(&maintenance, lease)?;
-                checkpoint = Self::passive_checkpoint(&maintenance)
-                    .map_err(|error| maintenance_error("PASSIVE WAL checkpoint", error))?;
+                checkpoint = Self::passive_checkpoint(&maintenance).map_err(|error| {
+                    maintenance_error_preserving("PASSIVE WAL checkpoint", error)
+                })?;
                 require_retention_deadline(deadline)?;
             }
             if !checkpoint.complete() {
@@ -1194,7 +1309,9 @@ impl Store {
             } else {
                 let auto_vacuum: i64 = maintenance
                     .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
-                    .map_err(|error| maintenance_error("read auto-vacuum mode", error))?;
+                    .map_err(|error| {
+                        maintenance_error_preserving("read auto-vacuum mode", error)
+                    })?;
                 let vacuum_pages = budget.max_vacuum_pages.min(MAX_MAINTENANCE_VACUUM_PAGES);
                 if budget.max_database_bytes > 0
                     && total_bytes_before > budget.max_database_bytes
@@ -1205,15 +1322,19 @@ impl Store {
                     Self::require_retention_lease_connection(&maintenance, lease)?;
                     let before: i64 = maintenance
                         .query_row("PRAGMA freelist_count", [], |row| row.get(0))
-                        .map_err(|error| maintenance_error("read free pages", error))?;
+                        .map_err(|error| maintenance_error_preserving("read free pages", error))?;
                     vacuum_pages_attempted = vacuum_pages;
                     maintenance
                         .execute_batch(&format!("PRAGMA incremental_vacuum({});", vacuum_pages))
-                        .map_err(|error| maintenance_error("incremental vacuum", error))?;
+                        .map_err(|error| {
+                            maintenance_error_preserving("incremental vacuum", error)
+                        })?;
                     require_retention_deadline(deadline)?;
                     let after: i64 = maintenance
                         .query_row("PRAGMA freelist_count", [], |row| row.get(0))
-                        .map_err(|error| maintenance_error("read reclaimed pages", error))?;
+                        .map_err(|error| {
+                            maintenance_error_preserving("read reclaimed pages", error)
+                        })?;
                     vacuum_pages_reclaimed =
                         before.saturating_sub(after).max(0).try_into().unwrap_or(0);
                 }
@@ -1223,8 +1344,9 @@ impl Store {
         require_retention_deadline(deadline)?;
         Self::require_retention_lease_connection(&maintenance, lease)?;
         let (database_bytes_after, wal_bytes_after) =
-            Self::total_database_bytes(&maintenance, &self.path)
-                .map_err(|error| maintenance_error("database accounting after", error))?;
+            Self::total_database_bytes(&maintenance, &self.path).map_err(|error| {
+                maintenance_error_preserving("database accounting after", error)
+            })?;
         let total_bytes_after = database_bytes_after.saturating_add(wal_bytes_after);
         let free_bytes_after = filesystem_free_bytes(&self.path);
         let reserve_violation =
@@ -2142,6 +2264,18 @@ fn maintenance_error(operation: &str, detail: impl std::fmt::Display) -> StoreEr
     StoreError::new(ExitClass::Operation, "store.retention.maintenance").with_remediation(format!(
         "retention maintenance {operation} failed; a prior prune commit is not rolled back: {detail}"
     ))
+}
+
+fn maintenance_error_preserving<E>(operation: &str, detail: E) -> StoreError
+where
+    E: Into<StoreError>,
+{
+    let detail = detail.into();
+    if detail.envelope.reason == "store.sqlite.interrupted" {
+        retention_deadline_error()
+    } else {
+        maintenance_error(operation, detail)
+    }
 }
 
 #[cfg(test)]

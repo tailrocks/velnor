@@ -38,7 +38,7 @@ reqwest = { version = "0.13.0", default-features = false, features = ["json", "n
 zip = { version = "8", default-features = false, features = ["deflate"] }
 rsa = { version = "0.9.8", features = ["pem"] }
 # bundled: compile SQLite from source so cross/deb release legs stay hermetic.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = { package = "noyalib", version = "0.0.27", features = ["compat-serde-yaml"] }
