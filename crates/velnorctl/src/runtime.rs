@@ -184,7 +184,7 @@ struct InstanceLock {
 impl InstanceLock {
     fn acquire(socket_path: &Path) -> std::io::Result<Self> {
         use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         let parent = socket_path.parent().ok_or_else(|| {
             std::io::Error::new(
@@ -192,6 +192,7 @@ impl InstanceLock {
                 "socket must have a parent for the instance lock",
             )
         })?;
+        crate::http::prepare_instance_dir(parent)?;
         let lock_path = parent.join(".daemon.lock");
         let file = OpenOptions::new()
             .create(true)
@@ -199,7 +200,20 @@ impl InstanceLock {
             .read(true)
             .write(true)
             .mode(0o660)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(lock_path)?;
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let owner = unsafe { libc::geteuid() } as u32;
+        if !metadata.is_file()
+            || (metadata.uid() != 0 && metadata.uid() != owner)
+            || metadata.mode() & 0o002 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "instance lock is not a trusted regular file",
+            ));
+        }
         // SAFETY: the descriptor remains open in `InstanceLock` for the
         // entire daemon lifetime; libc only reads the descriptor and flags.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {

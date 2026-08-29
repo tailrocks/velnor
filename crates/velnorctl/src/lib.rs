@@ -665,6 +665,7 @@ async fn execute_describe(
             "use <resource>/<name>",
         )
     })?;
+    validate_resource_name(name)?;
     let resource = resource.strip_suffix('s').unwrap_or(resource);
     let plural = match resource {
         "host" => "hosts",
@@ -696,6 +697,23 @@ async fn execute_describe(
             "resource name is ambiguous",
         )),
     }
+}
+
+fn validate_resource_name(name: &str) -> Result<(), CommandError> {
+    if name.is_empty()
+        || name.len() > 128
+        || matches!(name, "." | "..")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "resource.invalid",
+            "resource name contains an unsupported character",
+        ));
+    }
+    Ok(())
 }
 
 fn named_resource_query(name: &str) -> velnor_client::ResourceQuery {
@@ -760,6 +778,7 @@ async fn execute_wait(globals: &GlobalArgs, args: commands::WaitArgs) -> Result<
             "use <resource>/<name>",
         )
     })?;
+    validate_resource_name(name)?;
     let plural = format!("{resource}s");
     let client = client_for(globals)?;
     let mut matching = named_resources(&client, &plural, name).await?;
