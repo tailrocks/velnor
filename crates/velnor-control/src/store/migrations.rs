@@ -741,15 +741,52 @@ fn has_index_columns(
     if actual_table.as_deref() != Some(table) {
         return Ok(false);
     }
-    let mut statement = conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")?;
+    let index_list: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT \"unique\", origin FROM pragma_index_list(?1) WHERE name = ?2",
+            rusqlite::params![table, index],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((unique, origin)) = index_list else {
+        return Ok(false);
+    };
+    if unique != 0 || origin != "c" {
+        return Ok(false);
+    }
+
+    // `index_info` checks names and order only. `index_xinfo` also exposes
+    // DESC flags, collations, expressions, and implicit rowid entries, so a
+    // same-named but semantically different index cannot satisfy migration
+    // replay by accident.
+    let mut statement = conn.prepare(
+        "SELECT seqno, cid, name, \"desc\", coll, key
+         FROM pragma_index_xinfo(?1)
+         WHERE key = 1
+         ORDER BY seqno",
+    )?;
     let actual = statement
-        .query_map([index], |row| row.get::<_, Option<String>>(0))?
+        .query_map([index], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(actual.len() == expected.len()
         && actual
             .iter()
-            .zip(expected)
-            .all(|(actual, expected)| actual.as_deref() == Some(*expected)))
+            .enumerate()
+            .all(|(position, (seqno, cid, name, desc, coll))| {
+                *seqno == position as i64
+                    && *cid >= 0
+                    && *desc == 0
+                    && coll.as_deref() == Some("BINARY")
+                    && name.as_deref() == Some(expected[position])
+            }))
 }
 
 fn v12_schema_complete(conn: &Connection) -> StoreResult<bool> {
@@ -901,6 +938,27 @@ mod tests {
         let connection = store.lock_conn().expect("store lock");
         connection
             .execute("DROP INDEX idx_events_instance_transition_id", [])
+            .unwrap();
+
+        let error = current_version(&connection).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+    }
+
+    #[test]
+    fn recorded_v12_with_semantically_wrong_identity_index_fails_closed() {
+        let temp = TempDb::new("wrong-v12-index-semantics");
+        let store = Store::open(&temp.path).expect("initial migration");
+        let connection = store.lock_conn().expect("store lock");
+
+        connection
+            .execute("DROP INDEX idx_events_transition_id", [])
+            .unwrap();
+        connection
+            .execute(
+                "CREATE UNIQUE INDEX idx_events_transition_id
+                 ON events (transition_id COLLATE NOCASE, id DESC)",
+                [],
+            )
             .unwrap();
 
         let error = current_version(&connection).unwrap_err();

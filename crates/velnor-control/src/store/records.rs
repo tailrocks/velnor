@@ -712,6 +712,7 @@ impl Store {
         validate_event_ancestry_in_transaction(
             transaction,
             row.instance_slug.as_str(),
+            row.subject.as_str(),
             transition_id,
             reconciliation_id,
         )?;
@@ -981,6 +982,7 @@ impl Store {
 fn validate_event_ancestry_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     instance_slug: &str,
+    subject: &str,
     transition_id: Option<i64>,
     reconciliation_id: Option<i64>,
 ) -> StoreResult<()> {
@@ -988,16 +990,16 @@ fn validate_event_ancestry_in_transaction(
         let owned: bool = transaction.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM job_transitions
-                 WHERE id = ?1 AND instance_slug = ?2
+                 WHERE id = ?1 AND instance_slug = ?2 AND job_uid = ?3
              )",
-            params![transition_id, instance_slug],
+            params![transition_id, instance_slug, subject],
             |row| row.get(0),
         )?;
         if !owned {
             return Err(StoreError::new(ExitClass::Conflict, "store.event.ancestry")
                 .with_remediation(
-                    "event transition ownership must match the event instance exactly",
-                ));
+                "event transition ownership must match the event instance and subject job exactly",
+            ));
         }
     }
     if let Some(reconciliation_id) = reconciliation_id {
@@ -1021,16 +1023,40 @@ fn validate_event_ancestry_in_transaction(
 
 pub(crate) const MAX_EVENT_TEXT_BYTES: usize = 512;
 pub(crate) const MAX_EVENT_DETAIL_BYTES: usize = 4 * 1024;
-const EVENT_SECRET_KEYS: &[&str] = &["authorization", "password", "passwd", "secret", "token"];
+const EVENT_SECRET_KEYS: &[&str] = &[
+    "authorization",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "access_token",
+    "client_secret",
+    "credential",
+    "credentials",
+    "cookie",
+    "private_key",
+    "session",
+];
 const EVENT_SECRET_MARKERS: &[&str] = &[
-    "bearer ",
+    "bearer",
     "ghp_",
     "gho_",
     "ghu_",
     "ghs_",
     "ghr_",
     "github_pat_",
+    "gh_api_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "npm_",
+    "sk-",
+    "akia",
+    "asia",
     "begin private key",
+    "begin-private-key",
 ];
 
 /// Validate the shared event contract before either memory or durable writes.
@@ -1077,7 +1103,9 @@ pub(crate) fn validate_event_contract(
         .map(|(value, _)| *value)
         .chain(correlation_id)
         .chain(detail)
-        .any(event_text_has_secret_marker)
+        .any(|value| {
+            event_text_has_forbidden_character(value) || event_text_has_secret_marker(value)
+        })
     {
         return Err(StoreError::new(
             ExitClass::Operation,
@@ -1121,7 +1149,16 @@ fn decode_stored_event(
 }
 
 fn event_text_has_secret_marker(value: &str) -> bool {
+    // Callers validate this limit first, but keep this helper safe at every
+    // boundary so a future caller cannot make normalization allocate from an
+    // unbounded diagnostic string.
+    if value.len() > MAX_EVENT_DETAIL_BYTES {
+        return true;
+    }
     let normalized = normalize_escaped_text(value);
+    if event_text_has_forbidden_character(&normalized) {
+        return true;
+    }
     let lowered = normalized.to_ascii_lowercase();
     if EVENT_SECRET_MARKERS
         .iter()
@@ -1137,6 +1174,24 @@ fn event_text_has_secret_marker(value: &str) -> bool {
     }
     serde_json::from_str::<serde_json::Value>(&normalized)
         .is_ok_and(|json| json_contains_secret(&json))
+}
+
+fn event_text_has_forbidden_character(value: &str) -> bool {
+    value.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '\u{061c}'
+                    | '\u{180e}'
+                    | '\u{200b}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'..='\u{206f}'
+                    | '\u{feff}'
+                    | '\u{fff9}'..='\u{fffb}'
+                    | '\u{e0001}'
+                    | '\u{e0020}'..='\u{e007f}'
+            )
+    })
 }
 
 fn normalize_escaped_text(value: &str) -> String {
@@ -1851,6 +1906,48 @@ mod event_tests {
         .expect_err("cross-instance event ancestry must fail closed");
         assert_eq!(error.envelope.reason, "store.event.ancestry");
         transaction.rollback().expect("rollback test transaction");
+    }
+
+    #[test]
+    fn event_ancestry_rejects_same_instance_cross_job_transition_identity() {
+        let temp = TempDb::new();
+        let store = Store::open(&temp.path).expect("open store");
+        let mut connection = test_connection(&store);
+        let transaction = connection.transaction().expect("transaction");
+        transaction
+            .execute(
+                "INSERT INTO job_transitions
+                 (instance_slug, job_uid, transition_token, correlation_id, reason,
+                  transition_time)
+                 VALUES ('instance-a', 'job-a', 'token-a', 'corr-a', 'job.started',
+                         '1970-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("seed transition");
+        let transition_id = transaction.last_insert_rowid();
+
+        let error = Store::append_event_with_ancestry_in_transaction(
+            &transaction,
+            &event("instance-a", "job-b", "job.started"),
+            Some(transition_id),
+            None,
+        )
+        .expect_err("same-instance cross-job ancestry must fail closed");
+        assert_eq!(error.envelope.reason, "store.event.ancestry");
+        transaction.rollback().expect("rollback test transaction");
+    }
+
+    #[test]
+    fn event_contract_rejects_escaped_format_controls_and_credential_forms() {
+        let mut row = event("a", "job-a", "job.started");
+        row.detail = Some(r"Bearer\tghp_secret".to_owned());
+        assert!(validate_event_row(&row).is_err());
+
+        row.detail = Some(r"visible\u202ehidden".to_owned());
+        assert!(validate_event_row(&row).is_err());
+
+        row.detail = Some("x".repeat(MAX_EVENT_DETAIL_BYTES + 1));
+        assert!(validate_event_row(&row).is_err());
     }
 }
 

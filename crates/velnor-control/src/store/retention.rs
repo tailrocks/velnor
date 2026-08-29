@@ -178,6 +178,8 @@ const MAX_PRUNE_BATCH_SIZE: u64 = 64;
 const MIN_PRUNE_BATCHES: u64 = 8;
 const MAX_PRUNE_BATCHES: u64 = 8;
 const MAX_MAINTENANCE_VACUUM_PAGES: u64 = 500;
+const MAX_RELEASE_RETRY_ATTEMPTS: u8 = 2;
+const RELEASE_RETRY_BACKOFF: Duration = Duration::from_millis(25);
 /// Configured defaults are valid, but an unbounded newest-N query is not. A
 /// caller above this explicit supported ceiling gets a typed error instead of
 /// silently disabling row retention. The query returns one row and is backed
@@ -351,6 +353,7 @@ const EXACT_EVENT_OWNERSHIP: &str = "(
         SELECT 1 FROM job_transitions t
         WHERE t.id = events.transition_id
           AND t.instance_slug = events.instance_slug
+          AND t.job_uid = events.subject
     )
 ) AND (
     events.reconciliation_id IS NULL OR EXISTS (
@@ -419,7 +422,7 @@ impl Store {
     /// foreign owner is a normal non-admission result. A successful update
     /// returns an opaque capability fenced by a monotonically increasing
     /// generation.
-    pub fn try_acquire_retention_lease_at(
+    pub(crate) fn try_acquire_retention_lease_at(
         &self,
         owner: &str,
         now_unix: u64,
@@ -524,7 +527,7 @@ impl Store {
 
     /// Renew a capability without changing its fencing generation. A stale or
     /// expired capability returns `false` and cannot extend a successor.
-    pub fn renew_retention_lease_at(
+    pub(crate) fn renew_retention_lease_at(
         &self,
         lease: &RetentionLease,
         now_unix: u64,
@@ -630,11 +633,12 @@ impl Store {
             .acquire_private_retention_lease()
             .map_err(PruneFailure::PreCommit)?;
         let result = self.prune_history_outcome_with_lease(budget, &lease);
-        let release = self.release_retention_lease(&lease);
+        let release = self.release_retention_lease_final(&lease);
         match (result, release) {
-            (Ok(report), Ok(_)) => Ok(report),
+            (Ok(report), Ok(())) => Ok(report),
             (Ok(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
-            (Err(failure), _) => Err(failure),
+            (Err(failure), Ok(())) => Err(failure),
+            (Err(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
         }
     }
 
@@ -672,11 +676,12 @@ impl Store {
             .map_err(PruneFailure::PreCommit)
             .map_err(PruneFailure::into_store_error)?;
         let result = self.prune_history_outcome_inner(budget, hook, &lease);
-        let release = self.release_retention_lease(&lease);
+        let release = self.release_retention_lease_final(&lease);
         let result = match (result, release) {
-            (Ok(report), Ok(_)) => Ok(report),
+            (Ok(report), Ok(())) => Ok(report),
             (Ok(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
-            (Err(failure), _) => Err(failure),
+            (Err(failure), Ok(())) => Err(failure),
+            (Err(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
         };
         result.map_err(PruneFailure::into_store_error)
     }
@@ -1409,6 +1414,50 @@ fn release_retention_lease_connection(
     Ok(changed == 1)
 }
 
+fn release_retention_lease_failure(detail: impl Into<String>) -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.retention.lease.finalize").with_remediation(detail)
+}
+
+impl Store {
+    /// Finalize a prune-owned lease without treating a lost release as a
+    /// successful pass. Only transient SQLite contention is retried, and the
+    /// exact owner/generation predicate makes every retry idempotent. Any
+    /// failure is surfaced as post-commit finalization failure so callers do
+    /// not re-run logical deletion as if it had rolled back.
+    fn release_retention_lease_final(&self, lease: &RetentionLease) -> StoreResult<()> {
+        let mut last_error = None;
+        for attempt in 0..MAX_RELEASE_RETRY_ATTEMPTS {
+            match self.release_retention_lease(lease) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    return Err(release_retention_lease_failure(
+                        "retention lease release matched no live owner/generation; the prune result is finalization-failed and must not be retried as pre-commit",
+                    ));
+                }
+                Err(error)
+                    if error.envelope.reason == "store.locked"
+                        && attempt + 1 < MAX_RELEASE_RETRY_ATTEMPTS =>
+                {
+                    last_error = Some(error);
+                    std::thread::sleep(RELEASE_RETRY_BACKOFF);
+                }
+                Err(error) => {
+                    return Err(release_retention_lease_failure(format!(
+                        "retention lease release failed after bounded finalization attempt; the prune result is finalization-failed and must not be retried as pre-commit (reason={})",
+                        error.envelope.reason
+                    )));
+                }
+            }
+        }
+        let reason = last_error
+            .as_ref()
+            .map_or("store.locked", |error| error.envelope.reason.as_str());
+        Err(release_retention_lease_failure(format!(
+            "retention lease release remained contended after {MAX_RELEASE_RETRY_ATTEMPTS} bounded attempts; the prune result is finalization-failed and must not be retried as pre-commit (reason={reason})"
+        )))
+    }
+}
+
 fn read_retention_snapshot(
     conn: &mut rusqlite::Connection,
     path: &Path,
@@ -2069,6 +2118,30 @@ mod tests {
         assert!(!store.release_retention_lease(&stale).unwrap());
         assert!(store.release_retention_lease(&lease).unwrap());
         assert!(!store.release_retention_lease(&lease).unwrap());
+    }
+
+    #[test]
+    fn prune_lease_finalization_rejects_unmatched_release() {
+        let (_dir, store) = temp_store("lease-finalization");
+        let lease = store
+            .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let stale = RetentionLease {
+            owner: "owner-b-1".to_owned(),
+            generation: lease.generation,
+        };
+
+        let error = store
+            .release_retention_lease_final(&stale)
+            .expect_err("unmatched release must fail finalization");
+        assert_eq!(error.envelope.reason, "store.retention.lease.finalize");
+        assert!(error
+            .envelope
+            .remediation
+            .as_deref()
+            .is_some_and(|detail| detail.contains("must not be retried as pre-commit")));
+        assert!(store.release_retention_lease(&lease).unwrap());
     }
 
     #[test]
