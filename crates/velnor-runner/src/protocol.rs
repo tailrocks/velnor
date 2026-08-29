@@ -180,7 +180,7 @@ impl GitHubRetryHint {
 /// GitHub response data and job messages can supply URLs. HTTPS is mandatory
 /// for remote endpoints so bearer tokens, PATs, and OAuth assertions cannot
 /// be sent in cleartext. Loopback HTTP remains available for local protocol
-/// tests and explicitly local development servers.
+/// tests only; production daemons never send credentials over cleartext HTTP.
 pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     let safe = redacted_authenticated_url(raw);
     let url = Url::parse(raw).with_context(|| format!("parse authenticated URL '{safe}'"))?;
@@ -189,7 +189,7 @@ pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     }
     match url.scheme() {
         "https" => Ok(url),
-        "http" if url.host_str().is_some_and(is_loopback_host) => Ok(url),
+        "http" if cfg!(test) && url.host_str().is_some_and(is_loopback_host) => Ok(url),
         _ => bail!("authenticated endpoint must use HTTPS: {safe}"),
     }
 }
@@ -209,6 +209,10 @@ fn validate_known_service_url(raw: &str, field: &str, hosts: &[&str]) -> Result<
         );
     }
     Ok(url)
+}
+
+fn validate_signed_blob_url(raw: &str, field: &str) -> Result<Url> {
+    validate_authenticated_url(raw).with_context(|| format!("validate {field} signed blob URL"))
 }
 
 pub(crate) fn redacted_authenticated_url(raw: &str) -> String {
@@ -997,7 +1001,10 @@ async fn github_http_request(
     }
     let response = request.send().await.map_err(|error| {
         github_transport_error(
-            &format!("send native GitHub request {method_name} {url}"),
+            &format!(
+                "send native GitHub request {method_name} {}",
+                redacted_authenticated_url(url)
+            ),
             error,
         )
     })?;
@@ -1005,7 +1012,10 @@ async fn github_http_request(
     let headers = response.headers().clone();
     let body = response.text().await.map_err(|error| {
         github_transport_error(
-            &format!("read native GitHub response body {method_name} {url}"),
+            &format!(
+                "read native GitHub response body {method_name} {}",
+                redacted_authenticated_url(url)
+            ),
             error,
         )
     })?;
@@ -1439,10 +1449,12 @@ async fn native_json_request(
             .header("Content-Type", "application/json")
             .body(body);
     }
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
+    let response = request.send().await.with_context(|| {
+        format!(
+            "send native GitHub request {method_name} {}",
+            redacted_authenticated_url(url)
+        )
+    })?;
     let status = response.status().as_u16();
     let body = response
         .text()
@@ -1475,10 +1487,12 @@ async fn native_json_request_with_rate_limit(
             .header("Content-Type", "application/json")
             .body(body);
     }
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
+    let response = request.send().await.with_context(|| {
+        format!(
+            "send native GitHub request {method_name} {}",
+            redacted_authenticated_url(url)
+        )
+    })?;
     let status = response.status().as_u16();
     let rate_limit = github_retry_hint_from_header_map(response.headers(), unix_epoch_now()).into();
     let body = response
@@ -3933,11 +3947,12 @@ impl TwirpResultsClient {
         let logs_url = resp
             .logs_url
             .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GetJobLogsSignedBlobURL returned empty URL"))?;
+            .ok_or_else(|| anyhow::anyhow!("GetJobLogsSignedBlobURL returned empty URL"))
+            .and_then(|url| validate_signed_blob_url(&url, "job log"))?;
 
         let put_resp = self
             .http
-            .put(&logs_url)
+            .put(logs_url)
             .header("Content-Type", "text/plain")
             .header("Content-Length", content.len().to_string())
             .header("x-ms-blob-type", "BlockBlob")
@@ -4021,12 +4036,13 @@ impl TwirpResultsClient {
         let logs_url = resp
             .logs_url
             .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))?;
+            .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))
+            .and_then(|url| validate_signed_blob_url(&url, "step log"))?;
 
         // 2. PUT log content to Azure blob (single block; reqwest — not GitHub infra).
         let put_resp = self
             .http
-            .put(&logs_url)
+            .put(logs_url)
             .header("Content-Type", "text/plain")
             .header("Content-Length", content.len().to_string())
             .header("x-ms-blob-type", "BlockBlob")
@@ -4116,14 +4132,15 @@ impl TwirpResultsClient {
         let blob_url = resp
             .blob_url
             .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GetStepSummarySignedBlobURL returned empty URL"))?;
+            .ok_or_else(|| anyhow::anyhow!("GetStepSummarySignedBlobURL returned empty URL"))
+            .and_then(|url| validate_signed_blob_url(&url, "step summary"))?;
 
         // 2. Upload summary content.
         let content_bytes = content.as_bytes().to_vec();
         let content_len = content_bytes.len();
         let put_resp = self
             .http
-            .put(&blob_url)
+            .put(blob_url)
             .header("Content-Type", "text/plain")
             .header("Content-Length", content_len.to_string())
             .header("x-ms-blob-type", "BlockBlob")
@@ -4351,6 +4368,7 @@ pub fn upload_artifact_blocking(
         .filter(|u| !u.is_empty())
         .context("CreateArtifact: empty signed_upload_url")?
         .to_string();
+    let upload_url = validate_signed_blob_url(&upload_url, "artifact upload")?;
 
     // 2. Create zip archive and PUT to signed URL.
     let zip_bytes = artifact_zip_bytes(files, options.store_uncompressed)?;
@@ -4363,7 +4381,7 @@ pub fn upload_artifact_blocking(
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build artifact upload HTTP client")?
-        .put(&upload_url)
+        .put(upload_url)
         .header("Content-Type", "application/zip")
         .header("Content-Length", zip_size)
         .header("x-ms-blob-type", "BlockBlob")
@@ -4639,6 +4657,7 @@ fn download_artifacts_blocking_in_temp_dir(
             .and_then(serde_json::Value::as_str)
             .filter(|url| !url.is_empty())
             .context("GetSignedArtifactURL returned no signed URL")?;
+        let signed_url = validate_signed_blob_url(signed_url, "artifact download")?;
         let artifact_path = tmp_dir.join(format!(
             "velnor-artifact-download-{}.zip",
             uuid::Uuid::new_v4()
@@ -4648,7 +4667,7 @@ fn download_artifacts_blocking_in_temp_dir(
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build artifact download HTTP client")?
-            .get(signed_url)
+            .get(signed_url.as_str())
             .timeout(Duration::from_secs(120))
             .send()
             .context("download Results Service artifact zip")?;
@@ -4675,7 +4694,7 @@ fn download_artifacts_blocking_in_temp_dir(
                 // their bytes under the artifact name; never silently drop a
                 // selected artifact. A ZIP content type with invalid bytes is
                 // still a protocol failure.
-                if artifact_response_is_zip(content_type.as_deref(), signed_url) {
+                if artifact_response_is_zip(content_type.as_deref(), signed_url.as_str()) {
                     bail!("artifact '{artifact_name}' is not a valid ZIP archive: {err}");
                 }
                 let raw = std::fs::read(artifact_path.path()).context("read raw artifact")?;
@@ -6767,5 +6786,21 @@ mod tests {
             .to_string()
             .contains("userinfo"));
         assert!(validate_authenticated_url("http://127.0.0.1:8080/api").is_ok());
+    }
+
+    #[test]
+    fn signed_blob_validation_requires_secure_url_and_redacts_credentials() {
+        assert!(validate_signed_blob_url("http://127.0.0.1:8080/blob", "artifact").is_ok());
+        assert!(validate_signed_blob_url("http://blob.example.com/blob", "artifact").is_err());
+        assert!(
+            validate_signed_blob_url("https://user:pass@blob.example.com/blob", "artifact")
+                .is_err()
+        );
+
+        let safe = redacted_authenticated_url(
+            "https://user:pass@blob.example.com/blob?sig=secret&token=secret#fragment",
+        );
+        assert_eq!(safe, "https://blob.example.com/blob");
+        assert!(!safe.contains("secret"));
     }
 }
