@@ -4280,11 +4280,10 @@ async fn handle_job_request(
             } else {
                 WORKER_FAILURE_REASON
             };
-            sink.emit(
-                velnor_model::EventReason::JobRejected,
-                &job.job_id,
-                Some(reason.to_owned()),
-            );
+            // No admission row exists on either failure path. Writing a
+            // JobRejected event would amplify an over-budget store or recurse
+            // into an unavailable store. Completion below is the truthful
+            // run-service diagnostic and is always attempted.
             let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),

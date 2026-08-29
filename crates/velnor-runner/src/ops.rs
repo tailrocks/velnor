@@ -38,6 +38,11 @@ const PRUNE_RETRY_MAX: Duration = PRUNE_INTERVAL;
 /// The lease is longer than the bounded store pass, but remains finite so an
 /// abandoned process cannot suppress maintenance indefinitely.
 const PRUNE_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
+/// Bound process-resident secret patterns. Exceeding either limit rejects the
+/// admission before execution; truncating patterns would permit unsanitized
+/// projections to reach the operational store.
+const MAX_RETAINED_MASK_COUNT: usize = 256;
+const MAX_RETAINED_MASK_BYTES: usize = 64 * 1024;
 
 static OPS: OnceLock<Arc<OpsSink>> = OnceLock::new();
 
@@ -831,11 +836,32 @@ impl OpsSink {
             self.absorb("store.masks", "mask registry lock poisoned");
             return false;
         };
+
+        let retained_bytes = masks.iter().map(String::len).sum::<usize>();
+        let mut additions = Vec::new();
+        let mut addition_bytes = 0usize;
         for value in values.iter().filter(|value| !value.is_empty()) {
-            if !masks.iter().any(|known| known == value) {
-                masks.push(value.clone());
+            if masks.iter().any(|known| known == value)
+                || additions.iter().any(|known| known == value)
+            {
+                continue;
             }
+            if masks.len().saturating_add(additions.len()) >= MAX_RETAINED_MASK_COUNT
+                || retained_bytes
+                    .saturating_add(addition_bytes)
+                    .saturating_add(value.len())
+                    > MAX_RETAINED_MASK_BYTES
+            {
+                self.absorb(
+                    "store.masks",
+                    "secret mask registry limit exceeded; admission rejected",
+                );
+                return false;
+            }
+            addition_bytes = addition_bytes.saturating_add(value.len());
+            additions.push(value.clone());
         }
+        masks.extend(additions);
         true
     }
 
@@ -1078,6 +1104,16 @@ mod tests {
             .unwrap()
             .iter()
             .any(|mask| mask == "admission-secret"));
+    }
+
+    #[test]
+    fn admission_rejects_mask_registry_overflow_before_store_write() {
+        let (_dir, sink) = temp_sink("admission-mask-overflow");
+        let masks = vec!["m".repeat(MAX_RETAINED_MASK_BYTES + 1)];
+
+        assert!(!sink.remember_masks(&masks));
+        assert!(sink.degraded());
+        assert!(sink.event_masks().unwrap().is_empty());
     }
 
     #[test]
