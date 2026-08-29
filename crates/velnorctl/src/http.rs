@@ -371,9 +371,7 @@ fn peer_groups(stream: &tokio::net::UnixStream) -> (Box<[u32]>, bool) {
             &mut length,
         )
     };
-    if result != 0
-        || !(length as usize).is_multiple_of(std::mem::size_of::<libc::gid_t>())
-    {
+    if result != 0 || !(length as usize).is_multiple_of(std::mem::size_of::<libc::gid_t>()) {
         return (Box::new([]), false);
     }
     let byte_length = length as usize;
