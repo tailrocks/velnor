@@ -4569,6 +4569,78 @@ pub struct ResultsArtifactDownload {
     pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
 }
 
+trait ArtifactDownloadSink {
+    fn begin_artifact(&mut self, name: &str) -> Result<()>;
+    fn write_file(
+        &mut self,
+        artifact_name: &str,
+        relative: std::path::PathBuf,
+        content: Vec<u8>,
+    ) -> Result<()>;
+}
+
+struct MemoryArtifactDownloadSink {
+    downloads: Vec<ResultsArtifactDownload>,
+}
+
+impl ArtifactDownloadSink for MemoryArtifactDownloadSink {
+    fn begin_artifact(&mut self, name: &str) -> Result<()> {
+        self.downloads.push(ResultsArtifactDownload {
+            name: name.to_owned(),
+            files: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn write_file(
+        &mut self,
+        artifact_name: &str,
+        relative: std::path::PathBuf,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        let download = self
+            .downloads
+            .last_mut()
+            .filter(|download| download.name == artifact_name)
+            .context("artifact download sink lost current artifact")?;
+        download.files.push((relative, content));
+        Ok(())
+    }
+}
+
+struct DirectoryArtifactDownloadSink<'a> {
+    destination: &'a std::path::Path,
+    merge_multiple: bool,
+    exact_name: &'a str,
+}
+
+impl ArtifactDownloadSink for DirectoryArtifactDownloadSink<'_> {
+    fn begin_artifact(&mut self, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn write_file(
+        &mut self,
+        artifact_name: &str,
+        relative: std::path::PathBuf,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        let target = if self.merge_multiple || !self.exact_name.is_empty() {
+            self.destination.to_owned()
+        } else {
+            self.destination.join(artifact_name)
+        };
+        let output = target.join(relative);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create artifact target {}", parent.display()))?;
+        }
+        std::fs::write(&output, content)
+            .with_context(|| format!("write artifact file {}", output.display()))?;
+        Ok(())
+    }
+}
+
 fn safe_raw_artifact_path(name: &str) -> Result<std::path::PathBuf> {
     let path = std::path::Path::new(name);
     let file_name = path
@@ -4815,7 +4887,10 @@ pub fn download_artifacts_blocking(
     name: &str,
     pattern: &str,
 ) -> Result<Vec<ResultsArtifactDownload>> {
-    download_artifacts_blocking_in_temp_dir(
+    let mut sink = MemoryArtifactDownloadSink {
+        downloads: Vec::new(),
+    };
+    download_artifacts_with_sink(
         results_service_url,
         token,
         plan_id,
@@ -4823,9 +4898,12 @@ pub fn download_artifacts_blocking(
         name,
         pattern,
         &std::env::temp_dir(),
-    )
+        &mut sink,
+    )?;
+    Ok(sink.downloads)
 }
 
+#[cfg(test)]
 fn download_artifacts_blocking_in_temp_dir(
     results_service_url: &str,
     token: &str,
@@ -4835,6 +4913,63 @@ fn download_artifacts_blocking_in_temp_dir(
     pattern: &str,
     tmp_dir: &std::path::Path,
 ) -> Result<Vec<ResultsArtifactDownload>> {
+    let mut sink = MemoryArtifactDownloadSink {
+        downloads: Vec::new(),
+    };
+    download_artifacts_with_sink(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        pattern,
+        tmp_dir,
+        &mut sink,
+    )?;
+    Ok(sink.downloads)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn download_artifacts_to_dir_blocking(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    pattern: &str,
+    destination: &std::path::Path,
+    merge_multiple: bool,
+) -> Result<usize> {
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("create artifact download dir {}", destination.display()))?;
+    let mut sink = DirectoryArtifactDownloadSink {
+        destination,
+        merge_multiple,
+        exact_name: name,
+    };
+    download_artifacts_with_sink(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        pattern,
+        &std::env::temp_dir(),
+        &mut sink,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    pattern: &str,
+    tmp_dir: &std::path::Path,
+    sink: &mut S,
+) -> Result<usize> {
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let results_service_url = validate_known_service_url(
         results_service_url,
@@ -4871,7 +5006,7 @@ fn download_artifacts_blocking_in_temp_dir(
         .and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let mut downloads = Vec::new();
+    let mut selected_count = 0_usize;
     let mut total_returned_bytes = 0_u64;
     for artifact in artifacts {
         let Some(artifact_name) = artifact
@@ -4893,6 +5028,7 @@ fn download_artifacts_blocking_in_temp_dir(
         if !selected {
             continue;
         }
+        sink.begin_artifact(artifact_name)?;
         let artifact_plan = artifact
             .get("workflow_run_backend_id")
             .or_else(|| artifact.get("workflowRunBackendId"))
@@ -4995,13 +5131,12 @@ fn download_artifacts_blocking_in_temp_dir(
                     "narrow the artifact name or pattern selection",
                 )?;
                 let raw = std::fs::read(artifact_path.path()).context("read raw artifact")?;
-                downloads.push(ResultsArtifactDownload {
-                    name: artifact_name.to_string(),
-                    files: vec![(
-                        raw_artifact_filename(&response_headers, artifact_name)?,
-                        raw,
-                    )],
-                });
+                sink.write_file(
+                    artifact_name,
+                    raw_artifact_filename(&response_headers, artifact_name)?,
+                    raw,
+                )?;
+                selected_count += 1;
                 continue;
             }
         };
@@ -5010,7 +5145,6 @@ fn download_artifacts_blocking_in_temp_dir(
             archive.len(),
             RESULTS_ARTIFACT_MAX_ZIP_MEMBERS,
         )?;
-        let mut files = Vec::new();
         let mut zip_uncompressed_bytes = 0_u64;
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
@@ -5060,14 +5194,11 @@ fn download_artifacts_blocking_in_temp_dir(
                 RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
                 "narrow the artifact name or pattern selection",
             )?;
-            files.push((path, content));
+            sink.write_file(artifact_name, path, content)?;
         }
-        downloads.push(ResultsArtifactDownload {
-            name: artifact_name.to_string(),
-            files,
-        });
+        selected_count += 1;
     }
-    Ok(downloads)
+    Ok(selected_count)
 }
 
 #[cfg(test)]

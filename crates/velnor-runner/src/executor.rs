@@ -45,6 +45,9 @@ const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STEP_TIMEOUT_
 const TEARDOWN_RM_TIMEOUT: Duration = Duration::from_secs(20);
 const SETUP_QEMU_BINFMT_IMAGE: &str =
     "docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0";
+const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_UPLOAD_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_UPLOAD_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
@@ -5756,6 +5759,156 @@ fn cache_save_step_result(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ArtifactUploadSourceLimits {
+    files: usize,
+    file_bytes: u64,
+    total_bytes: u64,
+}
+
+const RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS: ArtifactUploadSourceLimits =
+    ArtifactUploadSourceLimits {
+        files: RESULTS_ARTIFACT_MAX_UPLOAD_FILES,
+        file_bytes: RESULTS_ARTIFACT_MAX_UPLOAD_FILE_BYTES,
+        total_bytes: RESULTS_ARTIFACT_MAX_UPLOAD_TOTAL_BYTES,
+    };
+
+#[derive(Debug)]
+struct ArtifactUploadSource {
+    path: PathBuf,
+    file_name: String,
+    metadata_bytes: u64,
+}
+
+fn artifact_upload_sources(
+    artifact_name: &str,
+    artifact_dir: &Path,
+    limits: ArtifactUploadSourceLimits,
+) -> Result<Vec<ArtifactUploadSource>> {
+    let entries = fs::read_dir(artifact_dir).with_context(|| {
+        format!(
+            "read local files for Results Service artifact '{artifact_name}' from {}",
+            artifact_dir.display()
+        )
+    })?;
+    let mut sources = Vec::new();
+    let mut total_bytes = 0_u64;
+
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "enumerate local files for Results Service artifact '{artifact_name}' in {}",
+                artifact_dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let metadata = fs::metadata(&path).with_context(|| {
+            format!(
+                "read metadata for Results Service artifact '{artifact_name}' source {}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let file_count = sources
+            .len()
+            .checked_add(1)
+            .context("Results Service artifact upload file count overflowed")?;
+        if file_count > limits.files {
+            bail!(
+                "Results Service artifact '{artifact_name}' contains {file_count} files, exceeding the {}-file upload limit; split it into artifacts with fewer files",
+                limits.files
+            );
+        }
+
+        let file_bytes = metadata.len();
+        if file_bytes > limits.file_bytes {
+            bail!(
+                "Results Service artifact '{artifact_name}' source {} is {file_bytes} bytes, exceeding the {}-byte per-file upload limit; split or reduce this file",
+                path.display(),
+                limits.file_bytes
+            );
+        }
+        total_bytes = total_bytes.checked_add(file_bytes).with_context(|| {
+            format!(
+                "Results Service artifact '{artifact_name}' source byte count overflowed while adding {}",
+                path.display()
+            )
+        })?;
+        if total_bytes > limits.total_bytes {
+            bail!(
+                "Results Service artifact '{artifact_name}' sources total {total_bytes} bytes, exceeding the {}-byte upload limit; split them into smaller artifacts",
+                limits.total_bytes
+            );
+        }
+
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| {
+                format!(
+                    "Results Service artifact '{artifact_name}' source {} has a non-UTF-8 file name",
+                    path.display()
+                )
+            })?
+            .to_string();
+        sources.push(ArtifactUploadSource {
+            path,
+            file_name,
+            metadata_bytes: file_bytes,
+        });
+    }
+
+    Ok(sources)
+}
+
+fn read_artifact_upload_sources(
+    artifact_name: &str,
+    sources: Vec<ArtifactUploadSource>,
+    limits: ArtifactUploadSourceLimits,
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::with_capacity(sources.len());
+    let mut total_bytes = 0_u64;
+    for source in sources {
+        let content = fs::read(&source.path).with_context(|| {
+            format!(
+                "read Results Service artifact '{artifact_name}' source {}",
+                source.path.display()
+            )
+        })?;
+        let actual_bytes = u64::try_from(content.len()).with_context(|| {
+            format!(
+                "Results Service artifact '{artifact_name}' source {} size does not fit in u64",
+                source.path.display()
+            )
+        })?;
+        if actual_bytes > limits.file_bytes {
+            bail!(
+                "Results Service artifact '{artifact_name}' source {} grew from {} to {actual_bytes} bytes after admission, exceeding the {}-byte per-file upload limit; retry after writes finish or reduce this file",
+                source.path.display(),
+                source.metadata_bytes,
+                limits.file_bytes
+            );
+        }
+        total_bytes = total_bytes.checked_add(actual_bytes).with_context(|| {
+            format!(
+                "Results Service artifact '{artifact_name}' source byte count overflowed while reading {}",
+                source.path.display()
+            )
+        })?;
+        if total_bytes > limits.total_bytes {
+            bail!(
+                "Results Service artifact '{artifact_name}' sources grew after admission to {total_bytes} bytes, exceeding the {}-byte upload limit; retry after writes finish or split them into smaller artifacts",
+                limits.total_bytes
+            );
+        }
+        files.push((source.file_name, content));
+    }
+    Ok(files)
+}
+
 fn native_upload_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
@@ -5789,18 +5942,20 @@ fn native_upload_artifact(
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("create artifact directory {}", artifact_dir.display()))?;
 
-    let mut uploaded = Vec::new();
+    let mut uploaded_count = 0_usize;
     for path in artifact_paths(&path_input) {
         for source in resolve_artifact_sources(state, &path)? {
             if !include_hidden_files && artifact_source_is_hidden(state, &source) {
                 continue;
             }
             copy_artifact_source(&source, &artifact_dir, include_hidden_files)?;
-            uploaded.push(source);
+            uploaded_count = uploaded_count
+                .checked_add(1)
+                .context("uploaded artifact path count overflowed")?;
         }
     }
 
-    if uploaded.is_empty() {
+    if uploaded_count == 0 {
         fs::remove_dir_all(&artifact_dir).ok();
         let message = format!("No files were found with the provided path: {path_input}\n");
         return Ok(StepExecutionResult {
@@ -5835,20 +5990,17 @@ fn native_upload_artifact(
     // access local artifacts.
     if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN") {
         if let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token) {
-            // Collect files from the local artifact store for the zip upload.
-            let mut zip_files: Vec<(String, Vec<u8>)> = Vec::new();
-            if let Ok(entries) = fs::read_dir(&artifact_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let (Ok(content), Some(file_name)) =
-                            (fs::read(&path), path.file_name().and_then(|n| n.to_str()))
-                        {
-                            zip_files.push((file_name.to_string(), content));
-                        }
-                    }
-                }
-            }
+            // Admit the complete source set by metadata before allocating any file bodies.
+            let upload_sources = artifact_upload_sources(
+                &name,
+                &artifact_dir,
+                RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
+            )?;
+            let zip_files = read_artifact_upload_sources(
+                &name,
+                upload_sources,
+                RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
+            )?;
             if !zip_files.is_empty() {
                 match crate::protocol::upload_artifact_blocking(
                     &results_url,
@@ -5874,7 +6026,7 @@ fn native_upload_artifact(
                             failure_ignored: false,
                             stdout: format!(
                                 "Saved local artifact '{name}' with {} path(s)\n",
-                                uploaded.len()
+                                uploaded_count
                             ),
                             stderr: message,
                         });
@@ -5903,7 +6055,7 @@ fn native_upload_artifact(
         failure_ignored: false,
         stdout: format!(
             "Uploaded artifact '{name}' with {} path(s)\n",
-            uploaded.len()
+            uploaded_count
         ),
         stderr: String::new(),
     })
@@ -5948,31 +6100,18 @@ fn native_download_artifact(
         // Name/pattern filtering happens inside the daemon download: artifacts
         // that were not requested are never signed or fetched (non-zip
         // `.dockerbuild` build records must not fail unrelated downloads).
-        let selected = crate::protocol::download_artifacts_blocking(
+        // Files are written directly to the destination one member at a time;
+        // the executor never retains all selected artifacts in memory.
+        crate::protocol::download_artifacts_to_dir_blocking(
             results_url,
             runtime_token,
             &plan_id,
             &job_id,
             &name,
             &pattern,
-        )?;
-        for artifact in &selected {
-            let target = if merge_multiple || !name.is_empty() {
-                destination.clone()
-            } else {
-                destination.join(&artifact.name)
-            };
-            for (relative, content) in &artifact.files {
-                let output = target.join(relative);
-                if let Some(parent) = output.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("create artifact target {}", parent.display()))?;
-                }
-                fs::write(&output, content)
-                    .with_context(|| format!("write artifact file {}", output.display()))?;
-            }
-        }
-        selected.len()
+            &destination,
+            merge_multiple,
+        )?
     } else {
         // Unit/offline fallback. Product jobs always carry Results Service
         // credentials and therefore use the host-independent v4 path above.
@@ -18239,6 +18378,99 @@ fi"#
             0o644
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn artifact_upload_sources_rejects_too_many_files_before_reading() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("first.txt"), "").unwrap();
+        fs::write(temp.join("second.txt"), "").unwrap();
+
+        let error = artifact_upload_sources(
+            "release",
+            &temp,
+            ArtifactUploadSourceLimits {
+                files: 1,
+                file_bytes: 10,
+                total_bytes: 10,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("artifact 'release' contains 2 files, exceeding the 1-file upload limit"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn artifact_upload_sources_rejects_oversized_file_before_reading() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("release.tar"), "four").unwrap();
+
+        let error = artifact_upload_sources(
+            "release",
+            &temp,
+            ArtifactUploadSourceLimits {
+                files: 1,
+                file_bytes: 3,
+                total_bytes: 10,
+            },
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("release.tar"));
+        assert!(message.contains("4 bytes, exceeding the 3-byte per-file upload limit"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn artifact_upload_sources_rejects_oversized_total_before_reading() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("first.txt"), "aa").unwrap();
+        fs::write(temp.join("second.txt"), "bb").unwrap();
+
+        let error = artifact_upload_sources(
+            "release",
+            &temp,
+            ArtifactUploadSourceLimits {
+                files: 2,
+                file_bytes: 2,
+                total_bytes: 3,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains(
+            "artifact 'release' sources total 4 bytes, exceeding the 3-byte upload limit"
+        ));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn artifact_upload_source_read_rechecks_growth_after_admission() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let source = temp.join("release.tar");
+        fs::write(&source, "aa").unwrap();
+        let limits = ArtifactUploadSourceLimits {
+            files: 1,
+            file_bytes: 3,
+            total_bytes: 3,
+        };
+        let sources = artifact_upload_sources("release", &temp, limits).unwrap();
+        fs::write(&source, "four").unwrap();
+
+        let error = read_artifact_upload_sources("release", sources, limits).unwrap_err();
+
+        assert!(error.to_string().contains(
+            "release.tar grew from 2 to 4 bytes after admission, exceeding the 3-byte per-file upload limit"
+        ));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
