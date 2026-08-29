@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use velnor_model::{ExitClass, Timestamp};
 
 use super::error::{StoreError, StoreResult};
@@ -334,6 +334,10 @@ CREATE INDEX IF NOT EXISTS idx_events_reconciliation_id
 ON events (reconciliation_id, id);
 CREATE INDEX IF NOT EXISTS idx_transitions_instance_job_id
 ON job_transitions (instance_slug, job_uid, id);
+CREATE INDEX IF NOT EXISTS idx_events_instance_transition_id
+ON events (instance_slug, transition_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_instance_reconciliation_id
+ON events (instance_slug, reconciliation_id, id);
 ";
 
 const SCHEMA_V12_REPLAY: &str = "
@@ -343,6 +347,10 @@ CREATE INDEX IF NOT EXISTS idx_events_reconciliation_id
 ON events (reconciliation_id, id);
 CREATE INDEX IF NOT EXISTS idx_transitions_instance_job_id
 ON job_transitions (instance_slug, job_uid, id);
+CREATE INDEX IF NOT EXISTS idx_events_instance_transition_id
+ON events (instance_slug, transition_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_instance_reconciliation_id
+ON events (instance_slug, reconciliation_id, id);
 ";
 
 const SCHEMA_V6_REPLAY: &str = "
@@ -475,6 +483,15 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
         [],
         |row| row.get(0),
     )?;
+    if version >= LATEST_SCHEMA_VERSION && !v12_schema_complete(conn)? {
+        return Err(StoreError::new(
+            ExitClass::Operation,
+            "store.schema.incomplete",
+        )
+        .with_remediation(
+            "schema version 12 is recorded but its exact lifecycle-event identity columns or indexes are incomplete; restore the database from a consistent backup or rerun the migration transaction",
+        ));
+    }
     Ok(version)
 }
 
@@ -617,8 +634,21 @@ pub(crate) fn apply_pending(
             migration.version == 9 && has_column(&transaction, "retention_state", "job_rows")?;
         let retention_generation_exists =
             migration.version == 11 && has_column(&transaction, "retention_lease", "generation")?;
-        let event_ancestry_columns_exist =
+        let event_transition_column_exists =
             migration.version == 12 && has_column(&transaction, "events", "transition_id")?;
+        let event_reconciliation_column_exists =
+            migration.version == 12 && has_column(&transaction, "events", "reconciliation_id")?;
+        if migration.version == 12
+            && event_transition_column_exists != event_reconciliation_column_exists
+        {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v12 exact lifecycle-event identity is partial; both transition_id and reconciliation_id must be present before the schema version can advance",
+            ));
+        }
         if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
             && !slot_column_exists
             && !retention_generation_exists
@@ -629,7 +659,7 @@ pub(crate) fn apply_pending(
                 ""
             } else if retention_columns_exist {
                 SCHEMA_V9_REPLAY
-            } else if event_ancestry_columns_exist {
+            } else if event_transition_column_exists && event_reconciliation_column_exists {
                 SCHEMA_V12_REPLAY
             } else {
                 migration.sql
@@ -681,6 +711,77 @@ fn has_column(conn: &rusqlite::Transaction<'_>, table: &str, column: &str) -> St
     Ok(conn.query_row(&sql, [column], |row| row.get(0))?)
 }
 
+fn has_column_connection(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)");
+    Ok(conn.query_row(&sql, [column], |row| row.get(0))?)
+}
+
+fn has_index_columns(
+    conn: &Connection,
+    index: &str,
+    table: &str,
+    expected: &[&str],
+) -> StoreResult<bool> {
+    let actual_table: Option<String> = conn
+        .query_row(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            [index],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual_table.as_deref() != Some(table) {
+        return Ok(false);
+    }
+    let mut statement = conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")?;
+    let actual = statement
+        .query_map([index], |row| row.get::<_, Option<String>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.as_deref() == Some(*expected)))
+}
+
+fn v12_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !has_column_connection(conn, "events", "transition_id")?
+        || !has_column_connection(conn, "events", "reconciliation_id")?
+    {
+        return Ok(false);
+    }
+    [
+        (
+            "idx_events_transition_id",
+            "events",
+            ["transition_id", "id"].as_slice(),
+        ),
+        (
+            "idx_events_reconciliation_id",
+            "events",
+            ["reconciliation_id", "id"].as_slice(),
+        ),
+        (
+            "idx_transitions_instance_job_id",
+            "job_transitions",
+            ["instance_slug", "job_uid", "id"].as_slice(),
+        ),
+        (
+            "idx_events_instance_transition_id",
+            "events",
+            ["instance_slug", "transition_id", "id"].as_slice(),
+        ),
+        (
+            "idx_events_instance_reconciliation_id",
+            "events",
+            ["instance_slug", "reconciliation_id", "id"].as_slice(),
+        ),
+    ]
+    .into_iter()
+    .try_fold(true, |complete, (index, table, columns)| {
+        Ok(complete && has_index_columns(conn, index, table, columns)?)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -725,6 +826,47 @@ mod tests {
             &Some("future-owner".to_owned()),
             &Some("2099-01-01T00:00:00Z".to_owned())
         ));
+    }
+
+    #[test]
+    fn partial_v12_identity_fails_closed_before_version_bump() {
+        let temp = TempDb::new("partial-v12");
+        let mut conn = Connection::open(&temp.path).expect("open database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(11) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN transition_id INTEGER REFERENCES job_transitions(id)",
+            [],
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "partial-v12-test", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(&mut conn, "partial-v12-test", None).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+        assert_eq!(current_version(&conn).unwrap(), 11);
+        assert!(!has_column_connection(&conn, "events", "reconciliation_id").unwrap());
+        release_lock(&conn, "partial-v12-test").unwrap();
+    }
+
+    #[test]
+    fn recorded_v12_without_exact_identity_index_fails_closed() {
+        let temp = TempDb::new("incomplete-v12-index");
+        let store = Store::open(&temp.path).expect("initial migration");
+        let connection = store.lock_conn().expect("store lock");
+        connection
+            .execute("DROP INDEX idx_events_instance_transition_id", [])
+            .unwrap();
+
+        let error = current_version(&connection).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
     }
 
     #[test]

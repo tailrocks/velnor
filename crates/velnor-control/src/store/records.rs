@@ -709,6 +709,12 @@ impl Store {
         reconciliation_id: Option<i64>,
     ) -> StoreResult<u64> {
         validate_event_row(row)?;
+        validate_event_ancestry_in_transaction(
+            transaction,
+            row.instance_slug.as_str(),
+            transition_id,
+            reconciliation_id,
+        )?;
         transaction.execute(
             "INSERT INTO events
                 (instance_slug, event_kind, subject, correlation_id, occurred_at, detail,
@@ -970,6 +976,47 @@ impl Store {
         )?;
         Ok(count)
     }
+}
+
+fn validate_event_ancestry_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    instance_slug: &str,
+    transition_id: Option<i64>,
+    reconciliation_id: Option<i64>,
+) -> StoreResult<()> {
+    if let Some(transition_id) = transition_id {
+        let owned: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM job_transitions
+                 WHERE id = ?1 AND instance_slug = ?2
+             )",
+            params![transition_id, instance_slug],
+            |row| row.get(0),
+        )?;
+        if !owned {
+            return Err(StoreError::new(ExitClass::Conflict, "store.event.ancestry")
+                .with_remediation(
+                    "event transition ownership must match the event instance exactly",
+                ));
+        }
+    }
+    if let Some(reconciliation_id) = reconciliation_id {
+        let owned: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM reconciliations
+                 WHERE id = ?1 AND instance_slug = ?2
+             )",
+            params![reconciliation_id, instance_slug],
+            |row| row.get(0),
+        )?;
+        if !owned {
+            return Err(StoreError::new(ExitClass::Conflict, "store.event.ancestry")
+                .with_remediation(
+                    "event reconciliation ownership must match the event instance exactly",
+                ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) const MAX_EVENT_TEXT_BYTES: usize = 512;
@@ -1775,6 +1822,35 @@ mod event_tests {
         let mut invalid_identity = valid;
         invalid_identity.subject = "job name".to_owned();
         assert!(validate_event_row(&invalid_identity).is_err());
+    }
+
+    #[test]
+    fn event_ancestry_rejects_cross_instance_transition_identity() {
+        let temp = TempDb::new();
+        let store = Store::open(&temp.path).expect("open store");
+        let mut connection = test_connection(&store);
+        let transaction = connection.transaction().expect("transaction");
+        transaction
+            .execute(
+                "INSERT INTO job_transitions
+                 (instance_slug, job_uid, transition_token, correlation_id, reason,
+                  transition_time)
+                 VALUES ('instance-a', 'job-a', 'token-a', 'corr-a', 'job.started',
+                         '1970-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("seed transition");
+        let transition_id = transaction.last_insert_rowid();
+
+        let error = Store::append_event_with_ancestry_in_transaction(
+            &transaction,
+            &event("instance-b", "job-b", "job.started"),
+            Some(transition_id),
+            None,
+        )
+        .expect_err("cross-instance event ancestry must fail closed");
+        assert_eq!(error.envelope.reason, "store.event.ancestry");
+        transaction.rollback().expect("rollback test transaction");
     }
 }
 

@@ -346,6 +346,19 @@ const CANONICAL_TERMINAL_PHASES: &str = "('completed','canceled','rejected')";
 /// unknown. Their instance's events stay protected until an explicit terminal
 /// state is recorded.
 const CLOSED_RECONCILIATION_STATUSES: &str = "('completed','canceled','failed','rejected')";
+const EXACT_EVENT_OWNERSHIP: &str = "(
+    events.transition_id IS NULL OR EXISTS (
+        SELECT 1 FROM job_transitions t
+        WHERE t.id = events.transition_id
+          AND t.instance_slug = events.instance_slug
+    )
+) AND (
+    events.reconciliation_id IS NULL OR EXISTS (
+        SELECT 1 FROM reconciliations r
+        WHERE r.id = events.reconciliation_id
+          AND r.instance_slug = events.instance_slug
+    )
+)";
 
 fn retention_budget_error(detail: impl Into<String>) -> StoreError {
     StoreError::new(ExitClass::Operation, "store.retention.budget").with_remediation(detail)
@@ -1586,13 +1599,14 @@ fn delete_job_with_ancestry(
         &transition_ids[..transition_ids.len().min(MAX_PRUNE_BATCH_SIZE as usize)];
     let event_ids = select_transition_event_ids(
         conn,
+        &instance_slug,
         bounded_transition_ids,
         MAX_PRUNE_BATCH_SIZE.saturating_add(1),
     )?;
     let mut events = 0;
     if !event_ids.is_empty() {
         let bounded_ids = &event_ids[..event_ids.len().min(MAX_PRUNE_BATCH_SIZE as usize)];
-        events = delete_events_by_ids(conn, bounded_ids, now)?;
+        events = delete_events_for_instance_by_ids(conn, &instance_slug, bounded_ids, now)?;
     }
     if event_ids.len() > MAX_PRUNE_BATCH_SIZE as usize {
         return Ok((0, 0, events));
@@ -1600,12 +1614,18 @@ fn delete_job_with_ancestry(
 
     if transition_ids.len() > MAX_PRUNE_BATCH_SIZE as usize {
         let bounded_ids = &transition_ids[..MAX_PRUNE_BATCH_SIZE as usize];
-        let transitions = delete_transition_rows_by_ids(conn, bounded_ids)?;
+        let transitions =
+            delete_transition_rows_by_ids(conn, &instance_slug, &job_uid, bounded_ids)?;
         return Ok((0, transitions, events));
     }
 
-    let transitions = delete_transition_rows_by_ids(conn, &transition_ids)?;
-    let jobs = conn.execute("DELETE FROM jobs WHERE id = ?1", [id])? as u64;
+    let transitions =
+        delete_transition_rows_by_ids(conn, &instance_slug, &job_uid, &transition_ids)?;
+    let jobs = conn.execute(
+        "DELETE FROM jobs
+         WHERE id = ?1 AND instance_slug = ?2 AND job_uid = ?3",
+        params![id, instance_slug, job_uid],
+    )? as u64;
     Ok((jobs, transitions, events))
 }
 
@@ -1634,6 +1654,7 @@ fn select_transition_ids(
 
 fn select_transition_event_ids(
     conn: &rusqlite::Connection,
+    instance_slug: &str,
     transition_ids: &[i64],
     limit: u64,
 ) -> StoreResult<Vec<i64>> {
@@ -1642,13 +1663,23 @@ fn select_transition_event_ids(
     }
     let placeholders = vec!["?"; transition_ids.len()].join(",");
     let mut statement = conn.prepare_cached(&format!(
-        "SELECT id FROM events
-             WHERE transition_id IN ({placeholders})
-             ORDER BY id ASC LIMIT ?{}",
-        transition_ids.len() + 1
+        "SELECT e.id FROM events e
+             WHERE e.instance_slug = ?1
+               AND e.transition_id IN ({placeholders})
+               AND EXISTS (
+                   SELECT 1 FROM job_transitions t
+                   WHERE t.id = e.transition_id
+                     AND t.instance_slug = e.instance_slug
+               )
+             ORDER BY e.id ASC LIMIT ?{}",
+        transition_ids.len() + 2
     ))?;
-    let mut values: Vec<i64> = transition_ids.to_vec();
-    values.push(i64::try_from(limit).unwrap_or(i64::MAX));
+    let instance = instance_slug.to_owned();
+    let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(transition_ids.len() + 2);
+    values.push(&instance);
+    values.extend(transition_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    values.push(&limit);
     let mut rows = statement.query(params_from_iter(values.iter()))?;
     let mut ids = Vec::new();
     while let Some(row) = rows.next()? {
@@ -1657,14 +1688,35 @@ fn select_transition_event_ids(
     Ok(ids)
 }
 
-fn delete_transition_rows_by_ids(conn: &rusqlite::Connection, ids: &[i64]) -> StoreResult<u64> {
+fn delete_transition_rows_by_ids(
+    conn: &rusqlite::Connection,
+    instance_slug: &str,
+    job_uid: &str,
+    ids: &[i64],
+) -> StoreResult<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
     let placeholders = vec!["?"; ids.len()].join(",");
+    let instance = instance_slug.to_owned();
+    let job = job_uid.to_owned();
+    let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 2);
+    values.push(&instance);
+    values.push(&job);
+    values.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
     Ok(conn.execute(
-        &format!("DELETE FROM job_transitions WHERE id IN ({placeholders})"),
-        params_from_iter(ids.iter()),
+        &format!(
+            "DELETE FROM job_transitions
+             WHERE instance_slug = ?1 AND job_uid = ?2
+               AND id IN ({})",
+            placeholders
+                .split(',')
+                .enumerate()
+                .map(|(index, _)| format!("?{}", index + 3))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        params_from_iter(values.iter()),
     )? as u64)
 }
 
@@ -1696,6 +1748,7 @@ fn select_expired_event_ids(
     let mut statement = conn.prepare_cached(&format!(
         "SELECT id FROM events
          WHERE julianday(occurred_at) < julianday(?1)
+           AND {EXACT_EVENT_OWNERSHIP}
            AND NOT EXISTS (
                SELECT 1 FROM jobs j
                WHERE j.instance_slug = events.instance_slug
@@ -1757,6 +1810,7 @@ fn protected_ids_below(
     let sql = format!(
         "SELECT id FROM {table}
          WHERE id < ?1
+           AND {EXACT_EVENT_OWNERSHIP}
            AND NOT EXISTS (
                SELECT 1 FROM jobs j
                WHERE j.instance_slug = {table}.instance_slug
@@ -1794,7 +1848,8 @@ fn delete_events_by_ids(
     let placeholders = vec!["?"; ids.len()].join(",");
     let instances: BTreeSet<String> = {
         let mut statement = conn.prepare_cached(&format!(
-            "SELECT DISTINCT instance_slug FROM events WHERE id IN ({placeholders})"
+            "SELECT DISTINCT events.instance_slug FROM events
+             WHERE events.id IN ({placeholders}) AND {EXACT_EVENT_OWNERSHIP}"
         ))?;
         let mut rows = statement.query(params_from_iter(ids.iter()))?;
         let mut instances = BTreeSet::new();
@@ -1804,12 +1859,44 @@ fn delete_events_by_ids(
         instances
     };
     let deleted = conn.execute(
-        &format!("DELETE FROM events WHERE id IN ({placeholders})"),
+        &format!(
+            "DELETE FROM events
+             WHERE id IN ({placeholders}) AND {EXACT_EVENT_OWNERSHIP}"
+        ),
         params_from_iter(ids.iter()),
     )? as u64;
     for instance_slug in instances {
         refresh_event_stream_state_for_instance(conn, &instance_slug, now)?;
     }
+    Ok(deleted)
+}
+
+fn delete_events_for_instance_by_ids(
+    conn: &rusqlite::Connection,
+    instance_slug: &str,
+    ids: &[i64],
+    now: Timestamp,
+) -> StoreResult<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = (0..ids.len())
+        .map(|index| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    let instance = instance_slug.to_owned();
+    let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 1);
+    values.push(&instance);
+    values.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+    let deleted = conn.execute(
+        &format!(
+            "DELETE FROM events
+             WHERE instance_slug = ?1 AND id IN ({placeholders})
+               AND {EXACT_EVENT_OWNERSHIP}"
+        ),
+        params_from_iter(values),
+    )? as u64;
+    refresh_event_stream_state_for_instance(conn, instance_slug, now)?;
     Ok(deleted)
 }
 

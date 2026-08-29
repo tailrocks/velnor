@@ -3,7 +3,6 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -23,6 +22,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
+use velnor_model::Timestamp;
 
 use crate::{
     action::{
@@ -1175,8 +1175,44 @@ fn daemon_forensic_log(config_base: &Path, message: &str) {
         &config_base.join("logs"),
         slot_log::DAEMON_LOG,
         &format!("daemon pid={}", std::process::id()),
-        message,
+        &sanitize_forensic_log_message(message),
     );
+}
+
+fn sanitize_forensic_log_message(raw: &str) -> String {
+    const MAX_FORENSIC_LOG_BYTES: usize = 2048;
+    let lower = raw.to_ascii_lowercase();
+    if [
+        "authorization:",
+        "bearer ",
+        "password",
+        "secret",
+        "token=",
+        "token:",
+        "fingerprint=",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return "redacted-sensitive-diagnostic".to_owned();
+    }
+    let mut output = String::with_capacity(raw.len().min(MAX_FORENSIC_LOG_BYTES));
+    for character in raw.chars() {
+        let character = if character.is_control() || character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_FORENSIC_LOG_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    if output.is_empty() {
+        "unknown".to_owned()
+    } else {
+        output
+    }
 }
 
 /// Set on SIGTERM/SIGINT: the daemon drains instead of dying. Idle slots exit
@@ -1572,15 +1608,20 @@ async fn run_retention_pass(sink: std::sync::Arc<crate::ops::OpsSink>) -> bool {
     let Some(admission) = sink.try_admit_prune() else {
         return false;
     };
-    let now_unix = admission.now_unix();
     let worker_sink = std::sync::Arc::clone(&sink);
-    if let Err(error) = tokio::task::spawn_blocking(move || {
+    if let Err(_error) = tokio::task::spawn_blocking(move || {
         worker_sink.run_admitted_prune(admission);
     })
     .await
     {
-        sink.record_prune_worker_failure(now_unix, &error.to_string());
-        eprintln!("forensics.ops event=retention-worker-failed reason={error}");
+        let completion_unix = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .unsigned_abs();
+        sink.record_prune_worker_failure(completion_unix, "retention worker task failed");
+        eprintln!(
+            "forensics.ops event=retention-worker-failed reason=retention-worker-task-failed"
+        );
     }
     true
 }
@@ -1699,13 +1740,6 @@ fn free_space_bytes(path: &Path) -> Option<u64> {
 
 /// Classify an operator-supplied GitHub token. `None` means the shape is
 /// plausible; `Some(message)` is a precise, actionable problem description.
-fn token_fingerprint(token: &str) -> String {
-    Sha256::digest(token.as_bytes())[..6]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
     let token = token.unwrap_or("").trim();
     if token.is_empty() {
@@ -1716,13 +1750,11 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
         );
     }
     if token.contains("${") || token.contains("$(") {
-        let fingerprint = token_fingerprint(token);
         return Some(format!(
-            "GITHUB_TOKEN is a literal unexpanded placeholder (class=placeholder, length={}, fingerprint={}). systemd \
+            "GITHUB_TOKEN is a literal unexpanded placeholder (class=placeholder, length={}). systemd \
              EnvironmentFile does NOT expand variables — put the real token value \
              in the file.",
-            token.len(),
-            fingerprint
+            token.len()
         ));
     }
     let plausible = token.starts_with("ghp_")
@@ -1732,13 +1764,11 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
         || token.starts_with("ghr_")
         || token.starts_with("github_pat_");
     if !plausible {
-        let fingerprint = token_fingerprint(token);
         return Some(format!(
-            "GITHUB_TOKEN does not look like a GitHub token (class=unknown, length={}, fingerprint={}; expected a \
+            "GITHUB_TOKEN does not look like a GitHub token (class=unknown, length={}; expected a \
              ghp_/gho_/ghs_/github_pat_ prefix). Verify the value in the \
              EnvironmentFile.",
-            token.len(),
-            fingerprint
+            token.len()
         ));
     }
     None
@@ -10322,11 +10352,21 @@ mod tests {
         let placeholder = diagnose_github_token(Some("${VELNOR_GITHUB_TOKEN}")).unwrap();
         assert!(placeholder.contains("unexpanded placeholder"));
         assert!(placeholder.contains("class=placeholder"));
+        assert!(!placeholder.contains("fingerprint"));
         assert!(!placeholder.contains("VELNOR_GITHUB_TOKEN"));
         let garbage = diagnose_github_token(Some("hunter2")).unwrap();
         assert!(garbage.contains("does not look like a GitHub token"));
         assert!(garbage.contains("class=unknown"));
         assert!(!garbage.contains("hunter2"));
+    }
+
+    #[test]
+    fn forensic_log_messages_are_single_line_and_token_safe() {
+        let sanitized = sanitize_forensic_log_message("failure\nfield\tfingerprint=secret");
+        assert_eq!(sanitized, "redacted-sensitive-diagnostic");
+
+        let sanitized = sanitize_forensic_log_message("failure\nfield\tvalue");
+        assert_eq!(sanitized, "failure field value");
     }
 
     #[test]

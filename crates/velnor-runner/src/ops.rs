@@ -199,13 +199,24 @@ pub(crate) struct PruneAdmission {
 struct RetentionLeaseGuard<'a> {
     store: &'a Store,
     lease: Option<RetentionLease>,
+    telemetry: Option<&'a OpsSink>,
 }
 
 impl<'a> RetentionLeaseGuard<'a> {
+    #[cfg(test)]
     fn new(store: &'a Store, lease: RetentionLease) -> Self {
         Self {
             store,
             lease: Some(lease),
+            telemetry: None,
+        }
+    }
+
+    fn with_sink(sink: &'a OpsSink, lease: RetentionLease) -> Self {
+        Self {
+            store: &sink.store,
+            lease: Some(lease),
+            telemetry: Some(sink),
         }
     }
 
@@ -226,14 +237,20 @@ impl<'a> RetentionLeaseGuard<'a> {
 impl Drop for RetentionLeaseGuard<'_> {
     fn drop(&mut self) {
         if let Some(lease) = self.lease.take() {
-            let _ = self.store.release_retention_lease(&lease);
+            if self.store.release_retention_lease(&lease).is_err() {
+                if let Some(sink) = self.telemetry {
+                    sink.report_lease_finalization_failure();
+                } else {
+                    eprintln!(
+                        "{}",
+                        forensic_failure_line(
+                            "store.prune-lease-release",
+                            "bounded finalization attempt failed",
+                        )
+                    );
+                }
+            }
         }
-    }
-}
-
-impl PruneAdmission {
-    pub(crate) fn now_unix(&self) -> u64 {
-        self.now_unix
     }
 }
 
@@ -511,14 +528,14 @@ impl OpsSink {
             Err(error) => {
                 self.schedule_prune_retry(completion_now());
                 if error.envelope.reason == "store.locked" {
-                    self.record_forensic_failure("store.prune-lease-busy", &error.to_string());
+                    self.record_forensic_failure("store.prune-lease-busy", &error.envelope.reason);
                 } else {
-                    self.absorb("store.prune-lease", &error.to_string());
+                    self.absorb("store.prune-lease", &error.envelope.reason);
                 }
                 return;
             }
         };
-        let mut lease_guard = RetentionLeaseGuard::new(&self.store, lease);
+        let mut lease_guard = RetentionLeaseGuard::with_sink(self, lease);
 
         let mut committed = false;
         let mut maintenance_retry = false;
@@ -559,27 +576,27 @@ impl OpsSink {
                 committed = true;
                 completion = completion_now();
                 self.clear_prune_retry();
-                self.absorb("store.prune-post-commit", &failure.error().to_string());
+                self.absorb("store.prune-post-commit", &failure.error().envelope.reason);
             }
             Err(failure) if failure.is_lease_lost() => {
                 if failure.is_post_commit() {
                     committed = true;
                     completion = completion_now();
                     self.clear_prune_retry();
-                    self.absorb("store.prune-lease-lost", &failure.error().to_string());
+                    self.absorb("store.prune-lease-lost", &failure.error().envelope.reason);
                 } else {
                     completion = completion_now();
                     self.schedule_prune_retry(completion);
                     self.record_forensic_failure(
                         "store.prune-lease-lost",
-                        &failure.error().to_string(),
+                        &failure.error().envelope.reason,
                     );
                 }
             }
             Err(failure) => {
                 completion = completion_now();
                 self.schedule_prune_retry(completion);
-                self.absorb("store.prune", &failure.error().to_string());
+                self.absorb("store.prune", &failure.error().envelope.reason);
             }
         }
         #[cfg(test)]
@@ -607,8 +624,8 @@ impl OpsSink {
                 self.clear_prune_retry();
             }
         }
-        if let Err(error) = lease_guard.release() {
-            self.absorb("store.prune-lease-release", &error.to_string());
+        if lease_guard.release().is_err() {
+            self.report_lease_finalization_failure();
         }
     }
 
@@ -723,10 +740,11 @@ impl OpsSink {
     }
 
     fn required_failure(&self, code: &str, detail: &str) -> bool {
+        let detail = sanitize_forensic_detail(detail);
         eprintln!("REQUIRED operational-store write failed ({code}): {detail}");
         self.degraded.store(true, Ordering::Relaxed);
-        self.record_forensic_failure(code, detail);
-        eprintln!("{}", forensic_failure_line(code, detail));
+        self.record_forensic_failure(code, &detail);
+        eprintln!("{}", forensic_failure_line(code, &detail));
         false
     }
 
@@ -804,13 +822,81 @@ impl OpsSink {
     fn absorb(&self, code: &str, detail: &str) {
         self.degraded.store(true, Ordering::Relaxed);
         self.record_forensic_failure(code, detail);
-        tracing::error!(target: "velnor::ops", code, "{code}: {detail}");
-        eprintln!("{}", forensic_failure_line(code, detail));
+        let detail = sanitize_forensic_detail(detail);
+        tracing::error!(target: "velnor::ops", code, error = %detail, "operational store failure");
+        eprintln!("{}", forensic_failure_line(code, &detail));
+    }
+
+    fn report_lease_finalization_failure(&self) {
+        self.degraded.store(true, Ordering::Relaxed);
+        const DETAIL: &str = "bounded finalization attempt failed";
+        self.record_forensic_failure("store.prune-lease-release", DETAIL);
+        eprintln!(
+            "{}",
+            forensic_failure_line("store.prune-lease-release", DETAIL)
+        );
     }
 }
 
 fn forensic_failure_line(code: &str, detail: &str) -> String {
-    format!("forensics.ops event=store-write-failed code={code} error={detail}")
+    format!(
+        "forensics.ops event=store-write-failed code={} error={}",
+        sanitize_forensic_code(code),
+        sanitize_forensic_detail(detail)
+    )
+}
+
+fn sanitize_forensic_code(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len().min(128));
+    for character in raw.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+            output.push(character);
+        }
+        if output.len() >= 128 {
+            break;
+        }
+    }
+    if output.is_empty() {
+        "unknown".to_owned()
+    } else {
+        output
+    }
+}
+
+fn sanitize_forensic_detail(raw: &str) -> String {
+    const MAX_FORENSIC_DETAIL_BYTES: usize = 512;
+    let lower = raw.to_ascii_lowercase();
+    if [
+        "authorization:",
+        "bearer ",
+        "password",
+        "secret",
+        "token=",
+        "token:",
+        "fingerprint=",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return "redacted-sensitive-diagnostic".to_owned();
+    }
+    let mut output = String::with_capacity(raw.len().min(MAX_FORENSIC_DETAIL_BYTES));
+    for character in raw.chars() {
+        let character = if character.is_control() || character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_FORENSIC_DETAIL_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    if output.is_empty() {
+        "unknown".to_owned()
+    } else {
+        output
+    }
 }
 
 fn sanitize_event_subject(raw: &str, masks: &[String]) -> String {
@@ -1374,6 +1460,53 @@ mod tests {
             .unwrap()
             .unwrap();
         probe.release_retention_lease(&replacement).unwrap();
+    }
+
+    #[test]
+    fn lease_finalization_failure_emits_bounded_sanitized_telemetry() {
+        let (dir, sink) = temp_sink("runtime-lease-finalization-telemetry");
+        let lease = sink
+            .store
+            .try_acquire_retention_lease(&sink.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let guard = RetentionLeaseGuard::with_sink(&sink, lease);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        drop(guard);
+
+        let lines = sink.forensic_failures();
+        assert!(lines.iter().any(|line| {
+            line.contains("store.prune-lease-release")
+                && line.contains("bounded finalization attempt failed")
+                && !line.contains('\n')
+        }));
+    }
+
+    #[test]
+    fn worker_failure_retry_uses_completion_time_and_sanitizes_detail() {
+        let (_dir, sink) = temp_sink("runtime-worker-failure");
+        let completion = 60_000;
+        sink.record_prune_worker_failure(completion, "worker\nfailed\ttoken=secret");
+
+        assert_eq!(
+            sink.next_prune_attempt_unix.load(Ordering::Acquire),
+            completion + PRUNE_RETRY_INITIAL.as_secs()
+        );
+        let lines = sink.forensic_failures();
+        assert!(lines.iter().any(|line| {
+            line.contains("store.prune-worker")
+                && line.contains("redacted-sensitive-diagnostic")
+                && !line.contains('\n')
+        }));
+    }
+
+    #[test]
+    fn forensic_failure_line_rejects_control_and_sensitive_fields() {
+        let line = forensic_failure_line("store.test\ncode", "first\nsecond\ttoken=do-not-log");
+        assert!(!line.contains('\n'));
+        assert!(line.contains("redacted-sensitive-diagnostic"));
+        assert!(!line.contains("do-not-log"));
     }
 
     #[test]
