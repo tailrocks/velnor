@@ -40,6 +40,11 @@ const GITHUB_MAX_TIME_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
+const RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_ZIP_MEMBERS: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_RAW_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
@@ -4282,11 +4287,15 @@ impl TwirpResultsClient {
     }
 }
 
-fn artifact_zip_bytes(files: &[(String, Vec<u8>)], store_uncompressed: bool) -> Result<Vec<u8>> {
+fn write_artifact_zip_temp_file(
+    path: std::path::PathBuf,
+    files: &[(String, Vec<u8>)],
+    store_uncompressed: bool,
+) -> Result<(ArtifactTempFile, u64, String)> {
     use std::io::Write;
 
-    let buf = std::io::Cursor::new(Vec::new());
-    let mut zip = zip::ZipWriter::new(buf);
+    let (temp, file) = open_artifact_temp_file(path).context("create artifact zip temp file")?;
+    let mut zip = zip::ZipWriter::new(file);
     let method = if store_uncompressed {
         zip::CompressionMethod::Stored
     } else {
@@ -4298,7 +4307,38 @@ fn artifact_zip_bytes(files: &[(String, Vec<u8>)], store_uncompressed: bool) -> 
             .context("zip start_file")?;
         zip.write_all(content).context("zip write")?;
     }
-    Ok(zip.finish().context("zip finish")?.into_inner())
+    let file = zip.finish().context("zip finish")?;
+    file.sync_all().context("sync artifact zip temp file")?;
+    let zip_size = file
+        .metadata()
+        .context("stat artifact zip temp file")?
+        .len();
+    drop(file);
+
+    let zip_hash = hash_artifact_file(temp.path())?;
+    Ok((temp, zip_size, zip_hash))
+}
+
+fn hash_artifact_file(path: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).context("open artifact zip for hashing")?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .context("read artifact zip for hashing")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn artifact_create_request(
@@ -4424,13 +4464,6 @@ pub fn upload_artifact_blocking(
     let base = results_service_url.as_str().trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
 
-    // Write a mode-0600 file. Construct the guard before any fallible I/O so
-    // failed open/write operations cannot leave secret artifact bytes behind.
-    let write_temp_file = |suffix: &str, content: &[u8]| -> std::io::Result<ArtifactTempFile> {
-        let p = tmp_dir.join(format!("velnor-artifact-{}.{suffix}", uuid::Uuid::new_v4()));
-        write_artifact_temp_file(p, content)
-    };
-
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(RUNNER_USER_AGENT)
@@ -4463,17 +4496,13 @@ pub fn upload_artifact_blocking(
         .to_string();
     let upload_url = validate_signed_blob_url(&upload_url, "artifact upload")?;
 
-    // 2. Create zip archive and PUT to signed URL.
-    let zip_bytes = artifact_zip_bytes(files, options.store_uncompressed)?;
-    let zip_size = zip_bytes.len() as u64;
-
-    let zip_path = write_temp_file("zip", &zip_bytes).context("write zip temp file")?;
+    // 2. Stream the zip archive into its mode-0600 temp file, hash that file,
+    // and PUT the same bytes without retaining a second full archive in RAM.
+    let zip_path = tmp_dir.join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
+    let (zip_path, zip_size, zip_hash) =
+        write_artifact_zip_temp_file(zip_path, files, options.store_uncompressed)?;
     let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
-    let put_response = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(RUNNER_USER_AGENT)
-        .build()
-        .context("build artifact upload HTTP client")?
+    let put_response = client
         .put(upload_url)
         .header("Content-Type", "application/zip")
         .header("Content-Length", zip_size)
@@ -4489,10 +4518,6 @@ pub fn upload_artifact_blocking(
 
     // 3. FinalizeArtifact.
     let finalize_url = format!("{base}/{SERVICE}/FinalizeArtifact");
-    let zip_hash = sha2::Sha256::digest(&zip_bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
     let finalize_body = serde_json::to_string(&serde_json::json!({
         "workflow_run_backend_id": plan_id,
         "workflow_job_run_backend_id": job_id,
@@ -4623,6 +4648,145 @@ fn artifact_download_status_is_ok(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::OK
 }
 
+fn ensure_artifact_size_limit(
+    artifact_name: &str,
+    resource: &str,
+    actual: u64,
+    limit: u64,
+    action: &str,
+) -> Result<()> {
+    if actual > limit {
+        bail!(
+            "artifact '{artifact_name}' {resource} is {actual} bytes, exceeding the {limit}-byte limit; {action}"
+        );
+    }
+    Ok(())
+}
+
+fn checked_artifact_size_add(
+    artifact_name: &str,
+    resource: &str,
+    current: u64,
+    additional: u64,
+    limit: u64,
+    action: &str,
+) -> Result<u64> {
+    let total = current
+        .checked_add(additional)
+        .with_context(|| format!("artifact '{artifact_name}' {resource} byte count overflowed"))?;
+    ensure_artifact_size_limit(artifact_name, resource, total, limit, action)?;
+    Ok(total)
+}
+
+fn ensure_artifact_zip_member_limit(
+    artifact_name: &str,
+    members: usize,
+    limit: usize,
+) -> Result<()> {
+    if members > limit {
+        bail!(
+            "artifact '{artifact_name}' contains {members} ZIP members, exceeding the {limit}-member limit; split it into artifacts with fewer files"
+        );
+    }
+    Ok(())
+}
+
+fn copy_artifact_response_bounded(
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    artifact_name: &str,
+    limit: u64,
+) -> Result<u64> {
+    const BUFFER_BYTES: usize = 64 * 1024;
+
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; BUFFER_BYTES];
+    loop {
+        let remaining = limit - copied;
+        let read_capacity = usize::try_from(
+            remaining
+                .saturating_add(1)
+                .min(u64::try_from(buffer.len()).unwrap_or(u64::MAX)),
+        )
+        .unwrap_or(buffer.len());
+        let read = reader
+            .read(&mut buffer[..read_capacity])
+            .with_context(|| format!("read artifact '{artifact_name}' download response"))?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        let read = u64::try_from(read).context("artifact response read size overflowed")?;
+        if read > remaining {
+            bail!(
+                "artifact '{artifact_name}' download response exceeds the {limit}-byte limit; split the artifact into smaller uploads"
+            );
+        }
+        writer
+            .write_all(&buffer[..usize::try_from(read).unwrap_or(buffer.len())])
+            .with_context(|| format!("write artifact '{artifact_name}' download temp file"))?;
+        copied += read;
+    }
+}
+
+fn read_bounded_response_preview(response: &mut impl std::io::Read) -> String {
+    use std::io::Read;
+
+    const PREVIEW_BYTES: u64 = 4096;
+
+    let mut bytes = Vec::with_capacity(PREVIEW_BYTES as usize);
+    let mut limited = response.take(PREVIEW_BYTES + 1);
+    if limited.read_to_end(&mut bytes).is_err() {
+        return "<response body unreadable>".to_string();
+    }
+    let truncated = bytes.len() > PREVIEW_BYTES as usize;
+    bytes.truncate(PREVIEW_BYTES as usize);
+    let mut preview = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        preview.push_str(" [truncated]");
+    }
+    sanitize_response_body(&preview)
+}
+
+fn read_zip_entry_bounded(
+    entry: &mut impl std::io::Read,
+    artifact_name: &str,
+    path: &std::path::Path,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    const BUFFER_BYTES: usize = 64 * 1024;
+
+    let mut content = Vec::new();
+    let mut read_total = 0_u64;
+    let mut buffer = [0_u8; BUFFER_BYTES];
+    loop {
+        let remaining = limit - read_total;
+        let read_capacity = usize::try_from(
+            remaining
+                .saturating_add(1)
+                .min(u64::try_from(buffer.len()).unwrap_or(u64::MAX)),
+        )
+        .unwrap_or(buffer.len());
+        let read = entry.read(&mut buffer[..read_capacity]).with_context(|| {
+            format!(
+                "read ZIP member '{}' from artifact '{artifact_name}'",
+                path.display()
+            )
+        })?;
+        if read == 0 {
+            return Ok(content);
+        }
+        let read = u64::try_from(read).context("ZIP member read size overflowed")?;
+        if read > remaining {
+            bail!(
+                "artifact '{artifact_name}' ZIP member '{}' exceeds the remaining {limit}-byte extraction allowance; split the artifact or reduce extracted content",
+                path.display()
+            );
+        }
+        content.extend_from_slice(&buffer[..usize::try_from(read).unwrap_or(buffer.len())]);
+        read_total += read;
+    }
+}
+
 /// Download artifacts visible to this workflow run through the Results
 /// Service v4 protocol used by `actions/download-artifact`.
 ///
@@ -4660,7 +4824,6 @@ fn download_artifacts_blocking_in_temp_dir(
     pattern: &str,
     tmp_dir: &std::path::Path,
 ) -> Result<Vec<ResultsArtifactDownload>> {
-    use std::io::Read;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let results_service_url = validate_known_service_url(
         results_service_url,
@@ -4698,6 +4861,7 @@ fn download_artifacts_blocking_in_temp_dir(
         .cloned()
         .unwrap_or_default();
     let mut downloads = Vec::new();
+    let mut total_returned_bytes = 0_u64;
     for artifact in artifacts {
         let Some(artifact_name) = artifact
             .get("name")
@@ -4755,32 +4919,40 @@ fn download_artifacts_blocking_in_temp_dir(
             "velnor-artifact-download-{}.zip",
             uuid::Uuid::new_v4()
         ));
-        let response = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(RUNNER_USER_AGENT)
-            .build()
-            .context("build artifact download HTTP client")?
+        let mut response = client
             .get(signed_url.as_str())
             .timeout(Duration::from_secs(120))
             .send()
             .context("download Results Service artifact zip")?;
         let status = response.status();
         if status != reqwest::StatusCode::OK {
-            let body = response.text().unwrap_or_default();
-            bail!(
-                "artifact zip download failed: status={status}, body={}",
-                sanitize_response_body(&body)
-            );
+            let body = read_bounded_response_preview(&mut response);
+            bail!("artifact '{artifact_name}' download failed: status={status}, body={body}");
         }
-        let content_type = response
-            .headers()
+        if let Some(content_length) = response.content_length() {
+            ensure_artifact_size_limit(
+                artifact_name,
+                "download response Content-Length",
+                content_length,
+                RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES,
+                "split the artifact into smaller uploads",
+            )?;
+        }
+        let response_headers = response.headers().clone();
+        let content_type = response_headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let mut response = response;
         let (artifact_path, mut output_file) =
             open_artifact_temp_file(artifact_path).context("create artifact zip temp file")?;
-        std::io::copy(&mut response, &mut output_file).context("write downloaded artifact zip")?;
+        copy_artifact_response_bounded(
+            &mut response,
+            &mut output_file,
+            artifact_name,
+            RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES,
+        )
+        .context("write downloaded artifact zip")?;
+        drop(output_file);
         let archive_file = std::fs::File::open(artifact_path.path())?;
         let mut archive = match zip::ZipArchive::new(archive_file) {
             Ok(archive) => archive,
@@ -4793,18 +4965,42 @@ fn download_artifacts_blocking_in_temp_dir(
                 if artifact_response_is_zip(content_type.as_deref(), signed_url.as_str()) {
                     bail!("artifact '{artifact_name}' is not a valid ZIP archive: {err}");
                 }
+                let raw_size = std::fs::metadata(artifact_path.path())
+                    .context("stat raw artifact")?
+                    .len();
+                ensure_artifact_size_limit(
+                    artifact_name,
+                    "raw payload",
+                    raw_size,
+                    RESULTS_ARTIFACT_MAX_RAW_BYTES,
+                    "split the raw artifact into smaller uploads",
+                )?;
+                total_returned_bytes = checked_artifact_size_add(
+                    artifact_name,
+                    "total selected download payload",
+                    total_returned_bytes,
+                    raw_size,
+                    RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
+                    "narrow the artifact name or pattern selection",
+                )?;
                 let raw = std::fs::read(artifact_path.path()).context("read raw artifact")?;
                 downloads.push(ResultsArtifactDownload {
                     name: artifact_name.to_string(),
                     files: vec![(
-                        raw_artifact_filename(response.headers(), artifact_name)?,
+                        raw_artifact_filename(&response_headers, artifact_name)?,
                         raw,
                     )],
                 });
                 continue;
             }
         };
+        ensure_artifact_zip_member_limit(
+            artifact_name,
+            archive.len(),
+            RESULTS_ARTIFACT_MAX_ZIP_MEMBERS,
+        )?;
         let mut files = Vec::new();
+        let mut zip_uncompressed_bytes = 0_u64;
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
             if entry.is_dir() {
@@ -4813,8 +5009,46 @@ fn download_artifacts_blocking_in_temp_dir(
             let Some(path) = entry.enclosed_name() else {
                 bail!("artifact '{artifact_name}' contains an unsafe archive path");
             };
-            let mut content = Vec::new();
-            entry.read_to_end(&mut content)?;
+            let declared_size = entry.size();
+            checked_artifact_size_add(
+                artifact_name,
+                "ZIP uncompressed payload",
+                zip_uncompressed_bytes,
+                declared_size,
+                RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES,
+                "split the artifact or reduce its uncompressed contents",
+            )?;
+            checked_artifact_size_add(
+                artifact_name,
+                "total selected download payload",
+                total_returned_bytes,
+                declared_size,
+                RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
+                "narrow the artifact name or pattern selection",
+            )?;
+            let extraction_allowance = (RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES
+                - zip_uncompressed_bytes)
+                .min(RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES - total_returned_bytes);
+            let content =
+                read_zip_entry_bounded(&mut entry, artifact_name, &path, extraction_allowance)?;
+            let content_size = u64::try_from(content.len())
+                .context("ZIP member content length does not fit u64")?;
+            zip_uncompressed_bytes = checked_artifact_size_add(
+                artifact_name,
+                "ZIP uncompressed payload",
+                zip_uncompressed_bytes,
+                content_size,
+                RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES,
+                "split the artifact or reduce its uncompressed contents",
+            )?;
+            total_returned_bytes = checked_artifact_size_add(
+                artifact_name,
+                "total selected download payload",
+                total_returned_bytes,
+                content_size,
+                RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
+                "narrow the artifact name or pattern selection",
+            )?;
             files.push((path, content));
         }
         downloads.push(ResultsArtifactDownload {
@@ -5061,10 +5295,86 @@ mod tests {
 
     #[test]
     fn artifact_compression_level_zero_uses_zip_stored() {
-        let bytes = artifact_zip_bytes(&[("seed.tar.zst".into(), vec![42; 64])], true).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-zip-test-{}.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let (temp, size, hash) =
+            write_artifact_zip_temp_file(path, &[("seed.tar.zst".into(), vec![42; 64])], true)
+                .unwrap();
+        let bytes = std::fs::read(temp.path()).unwrap();
+        let expected_hash = sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(size, bytes.len() as u64);
+        assert_eq!(hash, expected_hash);
+        assert_eq!(
+            std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let file = archive.by_index(0).unwrap();
         assert_eq!(file.compression(), zip::CompressionMethod::Stored);
+    }
+
+    #[test]
+    fn artifact_download_response_bound_stops_before_writing_excess_bytes() {
+        let mut response = std::io::Cursor::new(b"12345".to_vec());
+        let mut output = Vec::new();
+
+        let error =
+            copy_artifact_response_bounded(&mut response, &mut output, "release", 4).unwrap_err();
+
+        assert!(error.to_string().contains("4-byte limit"), "{error:#}");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn artifact_zip_entry_bound_rejects_excess_uncompressed_bytes() {
+        let mut entry = std::io::Cursor::new(b"12345".to_vec());
+
+        let error = read_zip_entry_bounded(
+            &mut entry,
+            "release",
+            std::path::Path::new("dist/output.bin"),
+            4,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("remaining 4-byte extraction allowance"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn artifact_member_and_returned_byte_bounds_are_actionable() {
+        let member_error = ensure_artifact_zip_member_limit("release", 3, 2).unwrap_err();
+        assert!(
+            member_error.to_string().contains("split it into artifacts"),
+            "{member_error:#}"
+        );
+
+        let size_error = checked_artifact_size_add(
+            "release",
+            "total selected download payload",
+            3,
+            2,
+            4,
+            "narrow the artifact name or pattern selection",
+        )
+        .unwrap_err();
+        assert!(
+            size_error
+                .to_string()
+                .contains("narrow the artifact name or pattern selection"),
+            "{size_error:#}"
+        );
     }
 
     #[test]
