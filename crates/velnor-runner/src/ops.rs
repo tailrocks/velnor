@@ -34,6 +34,9 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// post-commit/reporting failure to spin the retention path.
 const PRUNE_RETRY_INITIAL: Duration = Duration::from_secs(15);
 const PRUNE_RETRY_MAX: Duration = PRUNE_INTERVAL;
+/// The lease is longer than the bounded store pass, but remains finite so an
+/// abandoned process cannot suppress maintenance indefinitely.
+const PRUNE_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
 
 static OPS: OnceLock<Arc<OpsSink>> = OnceLock::new();
 
@@ -204,6 +207,7 @@ impl Drop for PruneAdmission {
 pub struct OpsSink {
     store: Store,
     instance_slug: String,
+    retention_owner: String,
     // Keep admitted masks for this sink lifetime: a later operational event
     // may repeat an earlier secret, so eviction would re-enable persistence.
     masks: Mutex<Vec<String>>,
@@ -219,6 +223,8 @@ pub struct OpsSink {
     forensic_failures: Mutex<Vec<String>>,
     #[cfg(test)]
     injected_prune_failure: AtomicBool,
+    #[cfg(test)]
+    injected_prune_store_failure: Mutex<Option<StoreError>>,
 }
 
 impl OpsSink {
@@ -234,6 +240,11 @@ impl OpsSink {
         Ok(Self {
             store,
             instance_slug,
+            retention_owner: format!(
+                "velnor-retention-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ),
             masks: Mutex::new(Vec::new()),
             degraded: AtomicBool::new(false),
             last_prune_unix: AtomicU64::new(0),
@@ -247,6 +258,8 @@ impl OpsSink {
             forensic_failures: Mutex::new(Vec::new()),
             #[cfg(test)]
             injected_prune_failure: AtomicBool::new(false),
+            #[cfg(test)]
+            injected_prune_store_failure: Mutex::new(None),
         })
     }
 
@@ -398,7 +411,7 @@ impl OpsSink {
     #[cfg(test)]
     fn prune_if_due_at(&self, now_unix: u64) {
         if let Some(admission) = self.try_admit_prune_at(now_unix) {
-            self.run_admitted_prune(admission);
+            self.prune_once(admission.now_unix, Some(now_unix));
         }
     }
 
@@ -420,14 +433,6 @@ impl OpsSink {
         {
             return None;
         }
-        if self
-            .last_prune_unix
-            .compare_exchange(last, now_unix, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            self.prune_in_flight.store(false, Ordering::Release);
-            return None;
-        }
         Some(PruneAdmission {
             in_flight: Arc::clone(&self.prune_in_flight),
             now_unix,
@@ -435,27 +440,97 @@ impl OpsSink {
     }
 
     pub(crate) fn run_admitted_prune(&self, admission: PruneAdmission) {
-        self.prune_once(admission.now_unix);
+        self.prune_once(admission.now_unix, None);
     }
 
-    fn prune_once(&self, now_unix: u64) {
-        let report = match self.store.prune_history(&self.budget) {
-            Ok(report) => report,
+    fn prune_once(&self, _scheduled_now_unix: u64, completion_override: Option<u64>) {
+        let completion_now = || {
+            completion_override.unwrap_or_else(|| {
+                Timestamp::now()
+                    .as_offset_datetime()
+                    .unix_timestamp()
+                    .unsigned_abs()
+            })
+        };
+        let acquired = match self
+            .store
+            .try_acquire_retention_lease(&self.retention_owner, PRUNE_LEASE_DURATION)
+        {
+            Ok(acquired) => acquired,
             Err(error) => {
-                self.schedule_prune_retry(now_unix);
-                self.absorb("store.prune", &error.to_string());
+                self.schedule_prune_retry(completion_now());
+                self.absorb("store.prune-lease", &error.to_string());
                 return;
             }
         };
+        if !acquired {
+            // A healthy foreign owner is expected contention, not degraded
+            // control state. It remains observable and retries with backoff.
+            self.schedule_prune_retry(completion_now());
+            self.record_forensic_failure(
+                "store.prune-lease-busy",
+                "retention lease is held by another daemon",
+            );
+            tracing::debug!(target: "velnor::ops", "retention lease is held by another daemon");
+            return;
+        }
+
+        let mut committed = false;
+        let completion;
+        let prune_result = {
+            #[cfg(test)]
+            if let Some(error) = self.injected_prune_store_failure.lock().unwrap().take() {
+                Err(velnor_control::store::retention::PruneFailure::PreCommit(
+                    error,
+                ))
+            } else {
+                self.store.prune_history_outcome(&self.budget)
+            }
+            #[cfg(not(test))]
+            {
+                self.store.prune_history_outcome(&self.budget)
+            }
+        };
+        match prune_result {
+            Ok(report) => {
+                committed = true;
+                completion = completion_now();
+                self.publish_prune_report(report);
+            }
+            Err(failure) if failure.is_post_commit() => {
+                committed = true;
+                completion = completion_now();
+                self.clear_prune_retry();
+                self.absorb("store.prune-post-commit", &failure.error().to_string());
+            }
+            Err(failure) => {
+                completion = completion_now();
+                self.schedule_prune_retry(completion);
+                self.absorb("store.prune", &failure.error().to_string());
+            }
+        }
         #[cfg(test)]
-        if self.injected_prune_failure.swap(false, Ordering::Relaxed) {
-            self.schedule_prune_retry(now_unix);
+        if committed && self.injected_prune_failure.swap(false, Ordering::Relaxed) {
+            committed = true;
+            self.clear_prune_retry();
             self.absorb(
                 "store.accounting",
                 "test-injected post-commit accounting failure",
             );
-            return;
         }
+
+        if committed {
+            // Completion is recorded before release. A release/reporting
+            // failure must not cause already durable deletions to run again.
+            self.last_prune_unix.store(completion, Ordering::Release);
+            self.clear_prune_retry();
+        }
+        if let Err(error) = self.store.release_retention_lease(&self.retention_owner) {
+            self.absorb("store.prune-lease-release", &error.to_string());
+        }
+    }
+
+    fn publish_prune_report(&self, report: velnor_control::store::PruneReport) {
         if report.maintenance_deferred {
             println!(
                 "forensics.ops event=retention-maintenance-deferred reason={}",
@@ -477,7 +552,6 @@ impl OpsSink {
             report.total_bytes,
             report.oldest_retained_at.as_deref().unwrap_or("none"),
         );
-        self.clear_prune_retry();
     }
 
     pub(crate) fn record_prune_worker_failure(&self, now_unix: u64, detail: &str) {
@@ -589,6 +663,14 @@ impl OpsSink {
     #[cfg(test)]
     fn fail_next_prune_accounting(&self) {
         self.injected_prune_failure.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn fail_next_prune_store(&self, class: ExitClass, reason: &'static str) {
+        self.injected_prune_store_failure
+            .lock()
+            .unwrap()
+            .replace(StoreError::new(class, reason));
     }
 
     #[cfg(test)]
@@ -1060,6 +1142,7 @@ mod tests {
         let (_dir, sink) = temp_sink("prune-deadline");
         let first = sink.try_admit_prune_at(20_000).unwrap();
         drop(first);
+        sink.last_prune_unix.store(20_000, Ordering::Release);
 
         assert_eq!(sink.prune_wait_duration_at(20_000), PRUNE_INTERVAL);
 
@@ -1069,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_if_due_backs_off_post_commit_failure_then_retries() {
+    fn prune_if_due_does_not_retry_post_commit_reporting_failure() {
         let (_dir, sink) = temp_sink("prune-retry");
         sink.fail_next_prune_accounting();
         let now = 10_000;
@@ -1077,23 +1160,18 @@ mod tests {
         sink.prune_if_due_at(now);
 
         assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), now);
-        let retry_at = sink.next_prune_attempt_unix.load(Ordering::Acquire);
-        assert_eq!(retry_at, now + PRUNE_RETRY_INITIAL.as_secs());
+        assert_eq!(sink.next_prune_attempt_unix.load(Ordering::Acquire), 0);
         assert!(sink.degraded());
         assert!(sink
             .forensic_failures()
             .iter()
             .any(|entry| entry.contains("store.accounting")));
 
-        sink.prune_if_due_at(retry_at - 1);
-        assert_eq!(
-            sink.next_prune_attempt_unix.load(Ordering::Acquire),
-            retry_at
-        );
-
-        sink.prune_if_due_at(retry_at);
-        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), retry_at);
-        assert_eq!(sink.next_prune_attempt_unix.load(Ordering::Acquire), 0);
+        let probe = Store::open(sink.store.path()).unwrap();
+        assert!(probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap());
+        probe.release_retention_lease("probe-owner-1").unwrap();
     }
 
     #[test]
@@ -1102,7 +1180,7 @@ mod tests {
         let mut now = 20_000;
 
         for _ in 0..16 {
-            sink.fail_next_prune_accounting();
+            sink.fail_next_prune_store(ExitClass::Operation, "test.injected.pre-commit");
             sink.prune_if_due_at(now);
             let retry_at = sink.next_prune_attempt_unix.load(Ordering::Acquire);
             assert!(retry_at.saturating_sub(now) <= PRUNE_RETRY_MAX.as_secs());
@@ -1113,6 +1191,64 @@ mod tests {
             sink.prune_retry_delay_secs.load(Ordering::Relaxed),
             PRUNE_RETRY_MAX.as_secs()
         );
+    }
+
+    #[test]
+    fn runtime_prune_lease_is_released_after_success_and_has_unique_owner() {
+        let (dir, first) = temp_sink("runtime-lease-success");
+        let second =
+            Arc::new(OpsSink::open(dir.join("state.db"), "second-instance".to_owned()).unwrap());
+
+        assert_ne!(first.retention_owner, second.retention_owner);
+        first.prune_if_due_at(30_000);
+
+        let probe = Store::open(first.store.path()).unwrap();
+        assert!(probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap());
+        probe.release_retention_lease("probe-owner-1").unwrap();
+        assert!(!second.degraded());
+    }
+
+    #[test]
+    fn runtime_prune_lease_blocks_competing_sink_with_bounded_retry() {
+        let (dir, first) = temp_sink("runtime-lease-competing");
+        let second =
+            Arc::new(OpsSink::open(dir.join("state.db"), "second-instance".to_owned()).unwrap());
+        assert!(first
+            .store
+            .try_acquire_retention_lease(&first.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap());
+
+        second.prune_if_due_at(40_000);
+
+        assert!(!second.degraded());
+        assert_eq!(
+            second.next_prune_attempt_unix.load(Ordering::Acquire),
+            40_000 + PRUNE_RETRY_INITIAL.as_secs()
+        );
+        first
+            .store
+            .release_retention_lease(&first.retention_owner)
+            .unwrap();
+    }
+
+    #[test]
+    fn runtime_prune_releases_lease_after_pre_commit_error() {
+        let (_dir, sink) = temp_sink("runtime-lease-pre-commit");
+        sink.fail_next_prune_store(ExitClass::Operation, "test.injected.pre-commit");
+
+        sink.prune_if_due_at(50_000);
+
+        assert_eq!(
+            sink.next_prune_attempt_unix.load(Ordering::Acquire),
+            50_000 + 15
+        );
+        let probe = Store::open(sink.store.path()).unwrap();
+        assert!(probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap());
+        probe.release_retention_lease("probe-owner-1").unwrap();
     }
 
     #[test]

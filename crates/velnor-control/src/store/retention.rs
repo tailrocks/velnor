@@ -70,7 +70,9 @@ const MAX_PRUNE_BATCHES: u64 = 8;
 const MAX_RETENTION_WINDOW_ROWS: u64 = 100_000;
 
 /// Lease owner tokens are operational identities, not arbitrary payloads.
+const MIN_RETENTION_LEASE_OWNER_BYTES: usize = 8;
 const MAX_RETENTION_LEASE_OWNER_BYTES: usize = 128;
+const MAX_RETENTION_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
 
 fn prune_batch_size(budget: &RetentionBudget) -> u64 {
     budget
@@ -100,6 +102,36 @@ pub struct PruneReport {
     /// job path. In particular, `wal_bytes` was not reclaimed.
     pub maintenance_deferred: bool,
     pub maintenance_reason: Option<String>,
+}
+
+/// Failure phase for one retention invocation.
+#[derive(Debug)]
+pub enum PruneFailure {
+    /// The deletion transaction did not commit; retry is safe.
+    PreCommit(StoreError),
+    /// Deletion committed, but reporting/maintenance failed; retrying can
+    /// repeat work and is therefore not implied to be safe.
+    PostCommit(StoreError),
+}
+
+impl PruneFailure {
+    #[must_use]
+    pub fn is_post_commit(&self) -> bool {
+        matches!(self, Self::PostCommit(_))
+    }
+
+    #[must_use]
+    pub fn error(&self) -> &StoreError {
+        match self {
+            Self::PreCommit(error) | Self::PostCommit(error) => error,
+        }
+    }
+
+    fn into_store_error(self) -> StoreError {
+        match self {
+            Self::PreCommit(error) | Self::PostCommit(error) => error,
+        }
+    }
 }
 
 /// Maintenance status after a prune commit. SQLite does not expose a bounded
@@ -168,6 +200,42 @@ fn retention_budget_error(detail: impl Into<String>) -> StoreError {
     StoreError::new(ExitClass::Operation, "store.retention.budget").with_remediation(detail)
 }
 
+fn retention_lease_error(reason: &str, detail: impl Into<String>) -> StoreError {
+    StoreError::new(ExitClass::Usage, reason).with_remediation(detail)
+}
+
+fn validate_retention_lease_owner(owner: &str) -> StoreResult<()> {
+    if !(MIN_RETENTION_LEASE_OWNER_BYTES..=MAX_RETENTION_LEASE_OWNER_BYTES).contains(&owner.len())
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(retention_lease_error(
+            "store.retention.lease.owner",
+            format!(
+                "retention lease owner must be {MIN_RETENTION_LEASE_OWNER_BYTES}..={MAX_RETENTION_LEASE_OWNER_BYTES} ASCII bytes using only letters, digits, '-', '_', or '.'"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_retention_lease_duration(lease_duration: Duration) -> StoreResult<u64> {
+    if lease_duration.is_zero()
+        || lease_duration.subsec_nanos() != 0
+        || lease_duration > MAX_RETENTION_LEASE_DURATION
+    {
+        return Err(retention_lease_error(
+            "store.retention.lease.duration",
+            format!(
+                "retention lease TTL must be a whole-second duration in 1..={:?}",
+                MAX_RETENTION_LEASE_DURATION
+            ),
+        ));
+    }
+    Ok(lease_duration.as_secs())
+}
+
 fn validate_budget(budget: &RetentionBudget) -> StoreResult<()> {
     for (field, value) in [
         ("max_event_rows", budget.max_event_rows),
@@ -193,17 +261,23 @@ impl Store {
         now_unix: u64,
         lease_duration: Duration,
     ) -> StoreResult<bool> {
-        if owner.is_empty() || owner.len() > MAX_RETENTION_LEASE_OWNER_BYTES {
-            return Err(StoreError::new(
-                ExitClass::Usage,
-                "store.retention.lease.owner",
+        validate_retention_lease_owner(owner)?;
+        let lease_seconds = validate_retention_lease_duration(lease_duration)?;
+        let now = i64::try_from(now_unix).map_err(|_| {
+            retention_lease_error(
+                "store.retention.lease.clock",
+                "retention lease clock value exceeds SQLite integer range",
             )
-            .with_remediation(format!(
-                "retention lease owner must be 1..={MAX_RETENTION_LEASE_OWNER_BYTES} bytes and contain no secret"
-            )));
-        }
-        let now = sqlite_i64(now_unix);
-        let expires_at = sqlite_i64(now_unix.saturating_add(lease_duration.as_secs()));
+        })?;
+        let expires_at = now_unix
+            .checked_add(lease_seconds)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| {
+                retention_lease_error(
+                    "store.retention.lease.clock",
+                    "retention lease expiry exceeds SQLite integer range",
+                )
+            })?;
         let mut conn = self.open_maintenance_connection()?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -240,6 +314,7 @@ impl Store {
     /// Release the lease only when its owner still matches. This is
     /// idempotent and cannot clear a successor that took over after expiry.
     pub fn release_retention_lease(&self, owner: &str) -> StoreResult<bool> {
+        validate_retention_lease_owner(owner)?;
         let mut conn = self.open_maintenance_connection()?;
         release_retention_lease_connection(&mut conn, owner)
     }
@@ -267,48 +342,74 @@ impl Store {
     /// post-commit maintenance failure is returned explicitly; committed
     /// deletions remain durable and are not rolled back.
     pub fn prune_history(&self, budget: &RetentionBudget) -> StoreResult<PruneReport> {
-        self.prune_history_inner(budget, None)
+        self.prune_history_outcome(budget)
+            .map_err(PruneFailure::into_store_error)
     }
 
+    /// Run pruning while preserving whether an error happened before or after
+    /// the durable deletion transaction committed. Callers must not retry a
+    /// post-commit failure as if the deletion had rolled back.
+    pub fn prune_history_outcome(
+        &self,
+        budget: &RetentionBudget,
+    ) -> Result<PruneReport, PruneFailure> {
+        self.prune_history_outcome_inner(budget, None)
+    }
+
+    #[cfg(test)]
     pub(crate) fn prune_history_inner(
         &self,
         budget: &RetentionBudget,
         hook: Option<&dyn Fn(PrunePhase) -> StoreResult<()>>,
     ) -> StoreResult<PruneReport> {
-        validate_budget(budget)?;
+        self.prune_history_outcome_inner(budget, hook)
+            .map_err(PruneFailure::into_store_error)
+    }
+
+    fn prune_history_outcome_inner(
+        &self,
+        budget: &RetentionBudget,
+        hook: Option<&dyn Fn(PrunePhase) -> StoreResult<()>>,
+    ) -> Result<PruneReport, PruneFailure> {
+        validate_budget(budget).map_err(PruneFailure::PreCommit)?;
         let now = Timestamp::now();
 
         let (deleted_events, deleted_jobs, deleted_transitions) = {
-            let mut conn = self.lock_conn()?;
-            let transaction =
-                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let deleted_events = Self::prune_expired_events(&transaction, budget, now)?;
-            if let Some(hook) = hook {
-                hook(PrunePhase::AfterEventPrune)?;
-            }
-            let (more_events, deleted_jobs, deleted_transitions) =
-                Self::prune_terminal_jobs(&transaction, &self.path, budget, now)?;
-            let deleted_events = deleted_events.saturating_add(more_events);
-            if let Some(hook) = hook {
-                hook(PrunePhase::AfterJobPrune)?;
-            }
-            transaction.execute(
-                "UPDATE retention_state
-                 SET last_prune_at = ?1, deleted_events = ?2, deleted_jobs = ?3
-                 WHERE singleton = 0",
-                params![
-                    rfc3339(now),
-                    i64::try_from(deleted_events).unwrap_or(i64::MAX),
-                    i64::try_from(deleted_jobs).unwrap_or(i64::MAX),
-                ],
-            )?;
-            transaction.commit()?;
-            (deleted_events, deleted_jobs, deleted_transitions)
+            let result: StoreResult<(u64, u64, u64)> = (|| {
+                let mut conn = self.lock_conn()?;
+                let transaction =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let deleted_events = Self::prune_expired_events(&transaction, budget, now)?;
+                if let Some(hook) = hook {
+                    hook(PrunePhase::AfterEventPrune)?;
+                }
+                let (more_events, deleted_jobs, deleted_transitions) =
+                    Self::prune_terminal_jobs(&transaction, &self.path, budget, now)?;
+                let deleted_events = deleted_events.saturating_add(more_events);
+                if let Some(hook) = hook {
+                    hook(PrunePhase::AfterJobPrune)?;
+                }
+                transaction.execute(
+                    "UPDATE retention_state
+                     SET last_prune_at = ?1, deleted_events = ?2, deleted_jobs = ?3
+                     WHERE singleton = 0",
+                    params![
+                        rfc3339(now),
+                        i64::try_from(deleted_events).unwrap_or(i64::MAX),
+                        i64::try_from(deleted_jobs).unwrap_or(i64::MAX),
+                    ],
+                )?;
+                transaction.commit()?;
+                Ok((deleted_events, deleted_jobs, deleted_transitions))
+            })();
+            result.map_err(PruneFailure::PreCommit)?
         };
 
         // Maintenance uses a separate zero-wait connection. Checkpointing is
         // intentionally deferred because SQLite cannot bound its frame work.
-        let snapshot = self.maintain_after_prune(budget)?;
+        let snapshot = self
+            .maintain_after_prune(budget)
+            .map_err(PruneFailure::PostCommit)?;
 
         Ok(PruneReport {
             deleted_events,
@@ -603,10 +704,6 @@ impl Store {
         }
         Ok((deleted_events, deleted_jobs, deleted_transitions))
     }
-}
-
-fn sqlite_i64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn release_retention_lease_connection(
@@ -1096,10 +1193,10 @@ mod tests {
         let second = Store::open(first.path()).unwrap();
 
         assert!(first
-            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(30))
+            .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
             .unwrap());
         assert!(!second
-            .try_acquire_retention_lease_at("owner-b", 101, Duration::from_secs(30))
+            .try_acquire_retention_lease_at("owner-b-1", 101, Duration::from_secs(30))
             .unwrap());
 
         let connection = test_connection(&first);
@@ -1110,7 +1207,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(lease, (Some("owner-a".to_owned()), Some(130)));
+        assert_eq!(lease, (Some("owner-a-1".to_owned()), Some(130)));
     }
 
     #[test]
@@ -1119,13 +1216,13 @@ mod tests {
         let second = Store::open(first.path()).unwrap();
 
         assert!(first
-            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(10))
+            .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(10))
             .unwrap());
         assert!(second
-            .try_acquire_retention_lease_at("owner-b", 110, Duration::from_secs(20))
+            .try_acquire_retention_lease_at("owner-b-1", 110, Duration::from_secs(20))
             .unwrap());
         assert!(!first
-            .try_acquire_retention_lease_at("owner-a", 111, Duration::from_secs(10))
+            .try_acquire_retention_lease_at("owner-a-1", 111, Duration::from_secs(10))
             .unwrap());
     }
 
@@ -1134,29 +1231,21 @@ mod tests {
         let (_dir, store) = temp_store("lease-release");
 
         assert!(store
-            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(30))
+            .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
             .unwrap());
-        assert!(!store.release_retention_lease("owner-b").unwrap());
-        assert!(store.release_retention_lease("owner-a").unwrap());
-        assert!(!store.release_retention_lease("owner-a").unwrap());
+        assert!(!store.release_retention_lease("owner-b-1").unwrap());
+        assert!(store.release_retention_lease("owner-a-1").unwrap());
+        assert!(!store.release_retention_lease("owner-a-1").unwrap());
     }
 
     #[test]
-    fn retention_lease_expiry_saturates_without_overflow() {
+    fn retention_lease_rejects_overflow_without_saturation() {
         let (_dir, store) = temp_store("lease-overflow");
 
-        assert!(store
-            .try_acquire_retention_lease_at("owner-a", u64::MAX, Duration::from_secs(u64::MAX),)
-            .unwrap());
-        let connection = test_connection(&store);
-        let expires_at: i64 = connection
-            .query_row(
-                "SELECT expires_at FROM retention_lease WHERE singleton = 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(expires_at, i64::MAX);
+        let error = store
+            .try_acquire_retention_lease_at("owner-a-1", u64::MAX, Duration::from_secs(u64::MAX))
+            .expect_err("oversized TTL and clock must not saturate");
+        assert_eq!(error.envelope.reason, "store.retention.lease.duration");
     }
 
     #[test]
@@ -1169,11 +1258,46 @@ mod tests {
         assert_eq!(usage.envelope.reason, "store.retention.lease.owner");
 
         assert!(store
-            .try_acquire_retention_lease_at("owner-a", 100, Duration::from_secs(30))
+            .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
             .unwrap());
         assert!(!store
-            .try_acquire_retention_lease_at("owner-b", 101, Duration::from_secs(30))
+            .try_acquire_retention_lease_at("owner-b-1", 101, Duration::from_secs(30))
             .unwrap());
+    }
+
+    #[test]
+    fn retention_lease_rejects_weak_or_unsafe_owner_tokens() {
+        let (_dir, store) = temp_store("lease-owner-validation");
+        for owner in ["short", "owner/token", "owner token"] {
+            let error = store
+                .try_acquire_retention_lease_at(owner, 100, Duration::from_secs(30))
+                .expect_err("owner validation must fail closed");
+            assert_eq!(error.envelope.reason, "store.retention.lease.owner");
+        }
+        let too_long = "x".repeat(MAX_RETENTION_LEASE_OWNER_BYTES + 1);
+        let error = store
+            .try_acquire_retention_lease_at(&too_long, 100, Duration::from_secs(30))
+            .expect_err("oversized owner must fail closed");
+        assert_eq!(error.envelope.reason, "store.retention.lease.owner");
+    }
+
+    #[test]
+    fn retention_lease_rejects_zero_subsecond_and_overlong_ttl() {
+        let (_dir, store) = temp_store("lease-duration-validation");
+        for duration in [
+            Duration::ZERO,
+            Duration::from_millis(999),
+            MAX_RETENTION_LEASE_DURATION + Duration::from_secs(1),
+        ] {
+            let error = store
+                .try_acquire_retention_lease_at("owner-a-1", 100, duration)
+                .expect_err("TTL validation must fail closed");
+            assert_eq!(error.envelope.reason, "store.retention.lease.duration");
+        }
+        let error = store
+            .try_acquire_retention_lease_at("owner-a-1", u64::MAX, Duration::from_secs(1))
+            .expect_err("clock overflow must not saturate");
+        assert_eq!(error.envelope.reason, "store.retention.lease.clock");
     }
 
     #[test]
