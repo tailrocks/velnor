@@ -32,9 +32,10 @@ pub struct RetentionBudget {
     pub max_terminal_job_age: Option<Duration>,
     /// Keep at most this many terminal jobs overall (newest first).
     pub max_terminal_job_rows: u64,
-    /// Best-effort byte ceiling: once total database bytes exceed it, oldest
-    /// prunable rows are removed in bounded batches until under the ceiling or
-    /// the pass limit is reached.
+    /// Logical pressure threshold for deleting oldest prunable rows. This is
+    /// not a physical byte ceiling: the job path defers WAL checkpointing, so
+    /// SQLite may retain file bytes above this value until bounded maintenance
+    /// runs separately.
     pub max_database_bytes: u64,
     /// Rows examined/deleted per batch; bounds transaction work per step.
     pub batch_size: u64,
@@ -56,13 +57,31 @@ impl Default for RetentionBudget {
 
 const MIN_EFFECTIVE_BATCH_SIZE: u64 = 1;
 const MAX_EFFECTIVE_BATCH_SIZE: u64 = 512;
+/// Prune SQL never fetches more than this many rows per statement. Keeping
+/// this below the public accounting batch cap makes the write-lock ceiling
+/// independent of hostile `RetentionBudget::batch_size` values.
+const MAX_PRUNE_BATCH_SIZE: u64 = 64;
 const MIN_PRUNE_BATCHES: u64 = 8;
 const MAX_PRUNE_BATCHES: u64 = 64;
+/// A newest-N window larger than this is deliberately not materialized while
+/// holding the immediate transaction. Skipping that row-cap rule is safe
+/// (retention may be temporarily looser) and keeps work bounded.
+const MAX_RETENTION_WINDOW_ROWS: u64 = 4096;
+/// RFC 3339 timestamps cannot be ordered safely as text because fractions may
+/// have different widths. Accounting therefore parses an indexed id prefix,
+/// with an honest incomplete status when a table exceeds this hard cap.
+const MAX_OLDEST_SCAN_ROWS: u64 = 4096;
 
 fn effective_batch_size(budget: &RetentionBudget) -> u64 {
     budget
         .batch_size
         .clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE)
+}
+
+fn prune_batch_size(budget: &RetentionBudget) -> u64 {
+    budget
+        .batch_size
+        .clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE)
 }
 
 fn prune_pass_batch_limit(budget: &RetentionBudget) -> u64 {
@@ -84,6 +103,11 @@ pub struct PruneReport {
     pub wal_bytes: u64,
     pub total_bytes: u64,
     pub oldest_retained_at: Option<String>,
+    /// False means the oldest timestamp is only a bounded observation and is
+    /// intentionally omitted from `oldest_retained_at`.
+    pub oldest_retained_at_complete: bool,
+    /// True when SQLite maintenance was intentionally not performed on this
+    /// job path. In particular, `wal_bytes` was not reclaimed.
     pub maintenance_deferred: bool,
     pub maintenance_reason: Option<String>,
 }
@@ -107,6 +131,13 @@ pub struct StoreAccounting {
     pub wal_bytes: u64,
     pub total_bytes: u64,
     pub oldest_retained_at: Option<String>,
+    /// False means the oldest timestamp is only a bounded observation and is
+    /// intentionally omitted from `oldest_retained_at`.
+    pub oldest_retained_at_complete: bool,
+    /// Accounting does not perform SQLite maintenance, so this is true and
+    /// the WAL is never claimed to have been reclaimed by this snapshot.
+    pub maintenance_deferred: bool,
+    pub maintenance_reason: Option<String>,
     pub last_prune_at: Option<String>,
     pub last_deleted_events: u64,
     pub last_deleted_jobs: u64,
@@ -121,6 +152,7 @@ struct RetentionSnapshot {
     wal_bytes: u64,
     total_bytes: u64,
     oldest_retained_at: Option<String>,
+    oldest_retained_at_complete: bool,
     last_prune_at: Option<String>,
     last_deleted_events: u64,
     last_deleted_jobs: u64,
@@ -137,15 +169,15 @@ pub enum PrunePhase {
 /// Only these exact spellings are terminal for retention. Any other value,
 /// including a future or malformed phase, protects its event ancestry.
 const CANONICAL_TERMINAL_PHASES: &str = "('completed','canceled','rejected')";
-const JOB_TRANSITION_EVENT_KINDS: &str = "('job.transition.job.acquired',
-    'job.transition.job.waiting',
-    'job.transition.job.started',
-    'job.transition.job.completed',
-    'job.transition.job.canceled',
-    'job.transition.job.rejected')";
 
 impl Store {
     /// Run one bounded prune pass with the given budget.
+    ///
+    /// Every candidate query is limited to `MAX_PRUNE_BATCH_SIZE`, every
+    /// repeated phase is capped at `MAX_PRUNE_BATCHES`, and newest-window
+    /// discovery is capped at `MAX_RETENTION_WINDOW_ROWS`. Thus configured
+    /// retention counts cannot extend the immediate write transaction without
+    /// bound; a later pass can continue safe over-retention.
     ///
     /// # Errors
     /// Pre-commit persistence failures roll back the prune transaction. A
@@ -203,6 +235,7 @@ impl Store {
             wal_bytes: snapshot.wal_bytes,
             total_bytes: snapshot.total_bytes,
             oldest_retained_at: snapshot.oldest_retained_at,
+            oldest_retained_at_complete: snapshot.oldest_retained_at_complete,
             maintenance_deferred: snapshot.maintenance_status.deferred,
             maintenance_reason: snapshot.maintenance_status.reason,
         })
@@ -227,21 +260,20 @@ impl Store {
                 .execute_batch("PRAGMA incremental_vacuum(500)")
                 .map_err(|error| maintenance_error("incremental vacuum", error))?;
         }
-        read_retention_snapshot(&mut maintenance, &self.path, effective_batch_size(budget)).map(
-            |snapshot| RetentionSnapshot {
-                job_rows: snapshot.job_rows,
-                event_rows: snapshot.event_rows,
-                transition_rows: snapshot.transition_rows,
-                last_prune_at: snapshot.last_prune_at,
-                last_deleted_events: snapshot.last_deleted_events,
-                last_deleted_jobs: snapshot.last_deleted_jobs,
-                database_bytes: snapshot.database_bytes,
-                wal_bytes: snapshot.wal_bytes,
-                total_bytes: snapshot.total_bytes,
-                oldest_retained_at: snapshot.oldest_retained_at,
-                maintenance_status,
-            },
-        )
+        read_retention_snapshot(&mut maintenance, &self.path).map(|snapshot| RetentionSnapshot {
+            job_rows: snapshot.job_rows,
+            event_rows: snapshot.event_rows,
+            transition_rows: snapshot.transition_rows,
+            last_prune_at: snapshot.last_prune_at,
+            last_deleted_events: snapshot.last_deleted_events,
+            last_deleted_jobs: snapshot.last_deleted_jobs,
+            database_bytes: snapshot.database_bytes,
+            wal_bytes: snapshot.wal_bytes,
+            total_bytes: snapshot.total_bytes,
+            oldest_retained_at: snapshot.oldest_retained_at,
+            oldest_retained_at_complete: snapshot.oldest_retained_at_complete,
+            maintenance_status,
+        })
     }
 
     /// Current accounting snapshot; never mutates resource state.
@@ -252,7 +284,7 @@ impl Store {
         let mut conn = self
             .open_maintenance_connection()
             .map_err(|error| maintenance_error("open", error))?;
-        let snapshot = read_retention_snapshot(&mut conn, &self.path, MAX_EFFECTIVE_BATCH_SIZE)
+        let snapshot = read_retention_snapshot(&mut conn, &self.path)
             .map_err(|error| maintenance_error("accounting snapshot", error))?;
         Ok(StoreAccounting {
             job_rows: snapshot.job_rows,
@@ -262,6 +294,12 @@ impl Store {
             wal_bytes: snapshot.wal_bytes,
             total_bytes: snapshot.total_bytes,
             oldest_retained_at: snapshot.oldest_retained_at,
+            oldest_retained_at_complete: snapshot.oldest_retained_at_complete,
+            maintenance_deferred: true,
+            maintenance_reason: Some(
+                "WAL checkpoint deferred: accounting does not perform unbounded SQLite maintenance"
+                    .to_owned(),
+            ),
             last_prune_at: snapshot.last_prune_at,
             last_deleted_events: snapshot.last_deleted_events,
             last_deleted_jobs: snapshot.last_deleted_jobs,
@@ -308,7 +346,7 @@ impl Store {
                     conn,
                     "events",
                     "occurred_at",
-                    effective_batch_size(budget),
+                    prune_batch_size(budget),
                     cutoff,
                     cursor,
                 )?;
@@ -326,7 +364,7 @@ impl Store {
                 "events",
                 None,
                 budget.max_event_rows,
-                effective_batch_size(budget),
+                prune_batch_size(budget),
             )?;
             if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
                 // Bounded batches move toward the cap; repeated passes finish
@@ -336,13 +374,13 @@ impl Store {
                         conn,
                         "events",
                         keep_from_id,
-                        effective_batch_size(budget),
+                        prune_batch_size(budget),
                     )?;
                     if victims.is_empty() {
                         break;
                     }
                     deleted += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &victims)?;
-                    if (victims.len() as u64) < effective_batch_size(budget) {
+                    if (victims.len() as u64) < prune_batch_size(budget) {
                         break;
                     }
                 }
@@ -378,7 +416,7 @@ impl Store {
                          WHERE phase IN {CANONICAL_TERMINAL_PHASES}
                            AND id > ?2 ORDER BY id ASC LIMIT ?1"
                     ),
-                    effective_batch_size(budget),
+                    prune_batch_size(budget),
                     cutoff,
                     cursor,
                 )?;
@@ -405,7 +443,7 @@ impl Store {
                 "jobs",
                 Some(&format!("phase IN {CANONICAL_TERMINAL_PHASES}")),
                 budget.max_terminal_job_rows,
-                effective_batch_size(budget),
+                prune_batch_size(budget),
             )?;
             if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
                 for _ in 0..prune_pass_batch_limit(budget) {
@@ -417,7 +455,7 @@ impl Store {
                         ))?;
                         let mut rows = statement.query(params![
                             keep_from_id,
-                            i64::try_from(effective_batch_size(budget)).unwrap_or(i64::MAX),
+                            i64::try_from(prune_batch_size(budget)).unwrap_or(i64::MAX),
                         ])?;
                         let mut ids = Vec::new();
                         while let Some(row) = rows.next()? {
@@ -473,7 +511,7 @@ impl Store {
                     break;
                 }
                 let victims =
-                    protected_ids_below(conn, "events", i64::MAX, effective_batch_size(budget))?;
+                    protected_ids_below(conn, "events", i64::MAX, prune_batch_size(budget))?;
                 if victims.is_empty() {
                     break;
                 }
@@ -487,7 +525,6 @@ impl Store {
 fn read_retention_snapshot(
     conn: &mut rusqlite::Connection,
     path: &Path,
-    batch_size: u64,
 ) -> StoreResult<RetentionSnapshot> {
     let transaction = conn.transaction()?;
     let job_rows: i64 = transaction.query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))?;
@@ -503,7 +540,7 @@ fn read_retention_snapshot(
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-    let oldest_retained_at = oldest_retained_at(&transaction, batch_size)?;
+    let (oldest_retained_at, oldest_retained_at_complete) = oldest_retained_at(&transaction)?;
     transaction.commit()?;
 
     Ok(RetentionSnapshot {
@@ -514,6 +551,7 @@ fn read_retention_snapshot(
         wal_bytes,
         total_bytes: database_bytes.saturating_add(wal_bytes),
         oldest_retained_at,
+        oldest_retained_at_complete,
         last_prune_at,
         last_deleted_events: last_deleted_events.max(0) as u64,
         last_deleted_jobs: last_deleted_jobs.max(0) as u64,
@@ -524,44 +562,40 @@ fn read_retention_snapshot(
     })
 }
 
-/// Find the oldest retained event/transition while keeping every SQL fetch
-/// bounded. The transaction gives all rows one read snapshot; Rust parsing
-/// preserves timestamp ordering even when RFC 3339 fractions vary.
-fn oldest_retained_at(conn: &rusqlite::Connection, batch_size: u64) -> StoreResult<Option<String>> {
-    let batch_size =
-        i64::try_from(batch_size.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE))
-            .unwrap_or(i64::MAX);
+/// Find the oldest retained event/transition from a bounded, id-indexed
+/// prefix. RFC 3339 fractions may have different widths, so SQL text MIN is
+/// not semantically safe; parsing the whole table would make accounting an
+/// unbounded Rust scan. A missing value with `complete == false` is deliberate
+/// and means the prefix was only a lower-bound observation.
+fn oldest_retained_at(conn: &rusqlite::Connection) -> StoreResult<(Option<String>, bool)> {
+    let scan_limit = i64::try_from(MAX_OLDEST_SCAN_ROWS.saturating_add(1)).unwrap_or(i64::MAX);
     let mut oldest: Option<Timestamp> = None;
+    let mut complete = true;
     for (table, column) in [
         ("events", "occurred_at"),
         ("job_transitions", "transition_time"),
     ] {
-        let sql =
-            format!("SELECT id, {column} FROM {table} WHERE id > ?1 ORDER BY id ASC LIMIT ?2");
-        let mut cursor = 0_i64;
-        loop {
-            let mut statement = conn.prepare_cached(&sql)?;
-            let mut rows = statement.query(params![cursor, batch_size])?;
-            let mut fetched = 0_i64;
-            let mut last_id = None;
-            while let Some(row) = rows.next()? {
-                let id: i64 = row.get(0)?;
-                let timestamp = Timestamp::parse(&row.get::<_, String>(1)?)
-                    .map_err(|_| stale_timestamp_error())?;
-                if oldest.is_none_or(|current| timestamp < current) {
-                    oldest = Some(timestamp);
-                }
-                fetched += 1;
-                last_id = Some(id);
-            }
-            let Some(last_id) = last_id else { break };
-            cursor = last_id;
-            if fetched < batch_size {
+        let sql = format!("SELECT {column} FROM {table} ORDER BY id ASC LIMIT ?1");
+        let mut statement = conn.prepare_cached(&sql)?;
+        let mut rows = statement.query([scan_limit])?;
+        let mut fetched = 0_u64;
+        while let Some(row) = rows.next()? {
+            if fetched == MAX_OLDEST_SCAN_ROWS {
+                complete = false;
                 break;
             }
+            let timestamp =
+                Timestamp::parse(&row.get::<_, String>(0)?).map_err(|_| stale_timestamp_error())?;
+            if oldest.is_none_or(|current| timestamp < current) {
+                oldest = Some(timestamp);
+            }
+            fetched = fetched.saturating_add(1);
+        }
+        if !complete {
+            break;
         }
     }
-    Ok(oldest.map(rfc3339))
+    Ok((oldest.map(rfc3339).filter(|_| complete), complete))
 }
 
 /// Find the oldest ID inside a newest-N retention window without ever
@@ -573,7 +607,10 @@ fn newest_window_start(
     keep_rows: u64,
     batch_size: u64,
 ) -> StoreResult<Option<i64>> {
-    let batch_size = batch_size.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE);
+    if keep_rows > MAX_RETENTION_WINDOW_ROWS {
+        return Ok(None);
+    }
+    let batch_size = batch_size.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
     let mut remaining = keep_rows;
     let mut cursor = i64::MAX;
     loop {
@@ -638,19 +675,24 @@ fn delete_job_with_ancestry(conn: &rusqlite::Connection, id: i64) -> StoreResult
     let Some((instance_slug, job_uid)) = identity else {
         return Ok((0, 0, 0));
     };
-    let transitions = conn.execute(
-        "DELETE FROM job_transitions WHERE instance_slug = ?1 AND job_uid = ?2",
+    // The transition correlation is the exact lifecycle ancestry key. Do not
+    // delete by subject/event-kind: generic operational events may reuse a job
+    // UID or a lifecycle-looking kind and must survive job deletion.
+    let events = conn.execute(
+        "DELETE FROM events
+         WHERE EXISTS (
+             SELECT 1 FROM job_transitions t
+             WHERE t.instance_slug = ?1
+               AND t.job_uid = ?2
+               AND t.instance_slug = events.instance_slug
+               AND t.correlation_id = events.correlation_id
+               AND events.subject = t.job_uid
+               AND events.event_kind = 'job.transition.' || t.reason
+         )",
         params![instance_slug, job_uid],
     )? as u64;
-    // Only events emitted by the lifecycle transition writer are job
-    // ancestry. Generic operational events may reuse a job UID as subject
-    // and must survive deletion of the job row.
-    let events = conn.execute(
-        &format!(
-            "DELETE FROM events
-             WHERE instance_slug = ?1 AND subject = ?2
-               AND event_kind IN {JOB_TRANSITION_EVENT_KINDS}"
-        ),
+    let transitions = conn.execute(
+        "DELETE FROM job_transitions WHERE instance_slug = ?1 AND job_uid = ?2",
         params![instance_slug, job_uid],
     )? as u64;
     let jobs = conn.execute("DELETE FROM jobs WHERE id = ?1", [id])? as u64;
@@ -674,7 +716,7 @@ fn scan_expired_batch(
     cutoff: Timestamp,
     cursor: i64,
 ) -> StoreResult<ExpiredBatch> {
-    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE);
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
     let mut statement = conn.prepare_cached(sql)?;
     let mut rows = statement.query(params![i64::try_from(batch).unwrap_or(i64::MAX), cursor])?;
     let mut ids = Vec::new();
@@ -744,7 +786,7 @@ fn protected_ids_below(
     keep_from_id: i64,
     batch: u64,
 ) -> StoreResult<Vec<i64>> {
-    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE);
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
     let sql = format!(
         "SELECT id FROM {table}
          WHERE id < ?1
@@ -842,6 +884,18 @@ mod tests {
         };
         assert_eq!(prune_pass_batch_limit(&huge_budget), MAX_PRUNE_BATCHES);
         assert_eq!(effective_batch_size(&huge_budget), MAX_EFFECTIVE_BATCH_SIZE);
+        assert_eq!(prune_batch_size(&huge_budget), MAX_PRUNE_BATCH_SIZE);
+    }
+
+    #[test]
+    fn newest_window_skips_unbounded_retention_counts() {
+        let (_dir, store) = temp_store("window-bound");
+        let connection = test_connection(&store);
+
+        assert_eq!(
+            newest_window_start(&connection, "events", None, u64::MAX, 1).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -948,10 +1002,39 @@ mod tests {
 
         assert_eq!(accounting.event_rows, 1);
         assert_eq!(accounting.transition_rows, 1);
+        assert!(accounting.maintenance_deferred);
+        assert!(accounting
+            .maintenance_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("checkpoint deferred")));
         assert_eq!(
             accounting.oldest_retained_at.as_deref(),
             Some("2020-01-01T00:00:00Z")
         );
+        assert!(accounting.oldest_retained_at_complete);
+    }
+
+    #[test]
+    fn accounting_reports_when_oldest_timestamp_is_bounded() {
+        let (_dir, store) = temp_store("oldest-bound");
+        let connection = test_connection(&store);
+        for _ in 0..=MAX_OLDEST_SCAN_ROWS {
+            connection
+                .execute(
+                    "INSERT INTO events
+                     (instance_slug, event_kind, subject, occurred_at)
+                     VALUES ('bounded', 'capacity.pressure', 'host',
+                             '2024-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let accounting = store.accounting().unwrap();
+
+        assert!(!accounting.oldest_retained_at_complete);
+        assert!(accounting.oldest_retained_at.is_none());
     }
 
     #[test]
@@ -967,6 +1050,16 @@ mod tests {
                 [],
             )
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO job_transitions
+                 (instance_slug, job_uid, transition_token, correlation_id, reason,
+                  transition_time)
+                 VALUES ('shared', 'same-subject', 'token-1', 'corr-shared',
+                         'job.completed', '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
         for (kind, detail) in [
             ("job.transition.job.completed", "job ancestry"),
             ("capacity.pressure", "unrelated operational event"),
@@ -974,9 +1067,19 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO events
-                     (instance_slug, event_kind, subject, occurred_at, detail)
-                     VALUES ('shared', ?1, 'same-subject', '2000-01-01T00:00:00Z', ?2)",
-                    params![kind, detail],
+                     (instance_slug, event_kind, subject, correlation_id,
+                      occurred_at, detail)
+                     VALUES ('shared', ?1, 'same-subject', ?3,
+                             '2000-01-01T00:00:00Z', ?2)",
+                    params![
+                        kind,
+                        detail,
+                        if kind == "job.transition.job.completed" {
+                            Some("corr-shared")
+                        } else {
+                            None
+                        },
+                    ],
                 )
                 .unwrap();
         }
