@@ -381,11 +381,7 @@ fn peer_groups(stream: &tokio::net::UnixStream) -> (Box<[u32]>, bool) {
     }
     let count = byte_length / std::mem::size_of::<libc::gid_t>();
     let complete = byte_length < buffer_length;
-    let groups = groups[..count]
-        .iter()
-        .copied()
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
+    let groups = groups[..count].to_vec().into_boxed_slice();
     (groups, complete)
 }
 
