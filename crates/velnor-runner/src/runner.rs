@@ -428,6 +428,11 @@ fn persist_and_announce_daemon_readiness(
     total_slots: usize,
 ) -> Result<()> {
     persist_daemon_instance(sink, total_slots)?;
+    let now_unix = Timestamp::now()
+        .as_offset_datetime()
+        .unix_timestamp()
+        .unsigned_abs();
+    sink.defer_initial_prune(now_unix);
     sink.emit(
         velnor_model::EventReason::ReadinessReady,
         sink.instance_slug(),

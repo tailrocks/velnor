@@ -469,6 +469,16 @@ impl OpsSink {
         self.try_admit_prune_at(now_unix)
     }
 
+    /// Defer the first retention pass until the normal interval after the
+    /// daemon has announced readiness. Readiness persistence/configuration is
+    /// still settling at that boundary, so an initial `last_prune_unix=0`
+    /// must not make retention immediately compete with supervision startup.
+    pub(crate) fn defer_initial_prune(&self, now_unix: u64) {
+        let _ =
+            self.last_prune_unix
+                .compare_exchange(0, now_unix, Ordering::AcqRel, Ordering::Acquire);
+    }
+
     #[cfg(test)]
     fn prune_if_due_at(&self, now_unix: u64) {
         if let Some(admission) = self.try_admit_prune_at(now_unix) {
@@ -1316,6 +1326,19 @@ mod tests {
 
         assert!(!sink.prune_in_flight.load(Ordering::Acquire));
         assert!(sink.try_admit_prune_at(10_900).is_some());
+    }
+
+    #[test]
+    fn initial_prune_is_deferred_until_the_normal_interval() {
+        let (_dir, sink) = temp_sink("prune-initial-deferred");
+        let now = 30_000;
+
+        sink.defer_initial_prune(now);
+
+        assert!(sink.try_admit_prune_at(now).is_none());
+        assert!(sink
+            .try_admit_prune_at(now + PRUNE_INTERVAL.as_secs())
+            .is_some());
     }
 
     #[test]
