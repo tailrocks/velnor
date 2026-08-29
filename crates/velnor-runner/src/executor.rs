@@ -1284,6 +1284,8 @@ where
             &container.workspace_host,
             temp_host,
         );
+        state.acceleration_degradations = container.compiler_cache.degradation.clone();
+        state.compiler_cache_origin = container.compiler_cache.origin;
         state.persistent_workspace_target = container.cargo_target_host.is_some();
         state.cargo_target_host = container
             .cargo_target_host
@@ -3377,14 +3379,16 @@ where
                 container.temp_host.display()
             )
         })?;
-        let cache_host = match container.compiler_cache_backend {
+        let cache_host = match container.compiler_cache.backend {
             crate::compiler_cache::CompilerCacheBackend::Sccache => {
                 Some(sccache_host(&container.temp_host))
             }
             crate::compiler_cache::CompilerCacheBackend::Kache => {
                 Some(kache_host(&container.temp_host))
             }
-            crate::compiler_cache::CompilerCacheBackend::Off => None,
+            // Auto is a policy value and never reaches a resolved spec.
+            crate::compiler_cache::CompilerCacheBackend::Auto
+            | crate::compiler_cache::CompilerCacheBackend::Off => None,
         };
         if let Some(cache_host) = cache_host {
             fs::create_dir_all(cache_host).with_context(|| {
@@ -8224,6 +8228,13 @@ pub(crate) struct JobExecutionState {
     persistent_workspace_target: bool,
     /// Job-local workspace target materialized from a persistent generation.
     cargo_target_host: Option<PathBuf>,
+    /// Acceleration degradations recorded while resolving this job's policy
+    /// (env overrides, disabled features). Kept on job state so the
+    /// acceleration report can be emitted from the executed job without
+    /// re-deriving decisions.
+    acceleration_degradations: crate::acceleration::DegradationLog,
+    /// Origin of the resolved compiler-cache backend, for the same report.
+    compiler_cache_origin: crate::compiler_cache::CompilerCacheOrigin,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
@@ -8298,6 +8309,8 @@ impl JobExecutionState {
             temp_host,
             persistent_workspace_target: false,
             cargo_target_host: None,
+            acceleration_degradations: crate::acceleration::DegradationLog::default(),
+            compiler_cache_origin: crate::compiler_cache::CompilerCacheOrigin::Off,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -8313,6 +8326,18 @@ impl JobExecutionState {
             .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
             .collect();
         state
+    }
+
+    /// Acceleration decisions for the executed job: recorded degradations and
+    /// the compiler-cache origin. The acceleration report (later workstream)
+    /// reads exactly this.
+    pub(crate) fn acceleration_report(
+        &self,
+    ) -> (
+        &crate::acceleration::DegradationLog,
+        crate::compiler_cache::CompilerCacheOrigin,
+    ) {
+        (&self.acceleration_degradations, self.compiler_cache_origin)
     }
 
     pub(crate) fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
@@ -8345,6 +8370,8 @@ impl JobExecutionState {
             temp_host: self.temp_host.clone(),
             persistent_workspace_target: self.persistent_workspace_target,
             cargo_target_host: self.cargo_target_host.clone(),
+            acceleration_degradations: self.acceleration_degradations.clone(),
+            compiler_cache_origin: self.compiler_cache_origin,
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -8370,6 +8397,8 @@ impl JobExecutionState {
             temp_host: self.temp_host.clone(),
             persistent_workspace_target: self.persistent_workspace_target,
             cargo_target_host: self.cargo_target_host.clone(),
+            acceleration_degradations: self.acceleration_degradations.clone(),
+            compiler_cache_origin: self.compiler_cache_origin,
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -11019,7 +11048,10 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
+            compiler_cache: crate::compiler_cache::ResolvedBackend::selected(
+                crate::compiler_cache::CompilerCacheBackend::Sccache,
+                crate::compiler_cache::CompilerCacheOrigin::PolicyExplicit,
+            ),
         }
     }
 

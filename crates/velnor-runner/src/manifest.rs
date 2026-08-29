@@ -8,7 +8,6 @@ use crate::action::{
     string_inputs, unsupported_action_error, NativeActionAdapter, NATIVE_ACTION_REF,
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
-use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
@@ -270,7 +269,12 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Forbidden("token"),
 ];
 const KACHE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["v0.10.0"]),
+    // The runner treats kache-action as a marker only: the binary comes from
+    // the job image (compiler_cache::KACHE_BINARY_VERSION, today 0.16.0) and
+    // is never downloaded. `v0.10.0` remains admissible while generated
+    // estate workflows still pass it; the pin must match the image once they
+    // move to `v0.16.0`.
+    InputRule::Literal("version", &["v0.10.0", "v0.16.0"]),
     InputRule::Literal("github-cache", &["false"]),
     InputRule::Literal("cache-executables", &["false"]),
     InputRule::Literal("pr-comment", &["false"]),
@@ -1124,12 +1128,17 @@ pub fn action_input_is_constrained(repository: &str, input_name: &str) -> bool {
 }
 
 pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
-    violations_with_context(job, &[])
+    violations_with_context(
+        job,
+        &[],
+        &crate::acceleration::AccelerationPolicy::maximum(),
+    )
 }
 
 pub fn violations_with_context(
     job: &AgentJobRequestMessage,
     context_data: &[(String, serde_json::Value)],
+    acceleration: &crate::acceleration::AccelerationPolicy,
 ) -> Vec<CapabilityViolation> {
     let mut violations = Vec::new();
     for (index, step) in job
@@ -1239,6 +1248,7 @@ pub fn violations_with_context(
         );
     }
     validate_compiler_cache_topology(job, &mut violations);
+    crate::compiler_cache::validate_wrapper_ownership(job, acceleration, &mut violations);
     validate_attestation_permissions(job, &mut violations);
     violations
 }
@@ -1309,26 +1319,6 @@ fn validate_attestation_permissions(
                 vec![accepted.into()],
             ));
         }
-    }
-}
-
-pub fn compiler_cache_backend(job: &AgentJobRequestMessage) -> CompilerCacheBackend {
-    let mut sccache = false;
-    let mut kache = false;
-    for step in job.steps.iter().filter(|step| step.enabled) {
-        let repository = step
-            .reference
-            .as_ref()
-            .and_then(|reference| reference.name.as_deref());
-        sccache |= repository
-            .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"));
-        kache |=
-            repository.is_some_and(|name| name.eq_ignore_ascii_case("kunobi-ninja/kache-action"));
-    }
-    match (sccache, kache) {
-        (true, false) => CompilerCacheBackend::Sccache,
-        (false, true) => CompilerCacheBackend::Kache,
-        _ => CompilerCacheBackend::Off,
     }
 }
 
@@ -1438,7 +1428,7 @@ fn collect_environment_names(value: &serde_json::Value, names: &mut Vec<String>)
     }
 }
 
-fn template_literal(value: &serde_json::Value) -> Option<&str> {
+pub(crate) fn template_literal(value: &serde_json::Value) -> Option<&str> {
     value.as_str().or_else(|| {
         value
             .as_object()
@@ -1541,8 +1531,9 @@ fn violation(
 pub fn validate_job_with_context(
     job: &AgentJobRequestMessage,
     context_data: &[(String, serde_json::Value)],
+    acceleration: &crate::acceleration::AccelerationPolicy,
 ) -> Result<()> {
-    if let Some(violation) = violations_with_context(job, context_data)
+    if let Some(violation) = violations_with_context(job, context_data, acceleration)
         .into_iter()
         .next()
     {
@@ -1697,6 +1688,10 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    fn maximum_policy() -> crate::acceleration::AccelerationPolicy {
+        crate::acceleration::AccelerationPolicy::maximum()
     }
 
     fn job(
@@ -2434,6 +2429,7 @@ mod tests {
                 }),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
     }
@@ -2447,6 +2443,7 @@ mod tests {
                 serde_json::json!({}),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
         validate_job_with_context(
@@ -2456,6 +2453,7 @@ mod tests {
                 serde_json::json!({}),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
     }
@@ -2473,6 +2471,7 @@ mod tests {
                 }),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
 
@@ -2483,6 +2482,7 @@ mod tests {
                 serde_json::json!({"username": "masked", "password": "masked"}),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
     }
@@ -2535,7 +2535,7 @@ mod tests {
             Some("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
             serde_json::json!({"name": "seed", "path": "target.tar.zst", "compression-level": "0", "retention-days": "7"}),
         );
-        validate_job_with_context(&approved, &[]).unwrap();
+        validate_job_with_context(&approved, &[], &maximum_policy()).unwrap();
 
         let errors = violations(&job(
             "actions/upload-artifact",
@@ -2563,6 +2563,7 @@ mod tests {
                 serde_json::json!({"filters": "docs: docs/**", "token": ""}),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
 
@@ -2585,6 +2586,7 @@ mod tests {
                 serde_json::json!({"buildkitd-config-inline": approved}),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
 
@@ -2606,6 +2608,7 @@ mod tests {
                 serde_json::json!({"cleanup": false, "keep-state": true}),
             ),
             &[],
+            &maximum_policy(),
         )
         .unwrap();
     }
@@ -2623,6 +2626,7 @@ mod tests {
                     serde_json::json!({"github-token": "masked", "script": script}),
                 ),
                 &[],
+                &maximum_policy(),
             )
             .unwrap();
         }
@@ -2654,7 +2658,7 @@ mod tests {
             "matrix".to_string(),
             serde_json::json!({"package": "arbitrum"}),
         )];
-        validate_job_with_context(&job, &context).unwrap();
+        validate_job_with_context(&job, &context, &maximum_policy()).unwrap();
     }
 
     #[test]
@@ -2720,7 +2724,14 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.field == "compiler-cache.backend"));
-        assert_eq!(compiler_cache_backend(&target), CompilerCacheBackend::Off);
+        let resolved = crate::compiler_cache::resolve_backend(
+            &crate::acceleration::AccelerationPolicy::maximum(),
+            &target,
+        );
+        assert_eq!(
+            resolved.backend,
+            crate::compiler_cache::CompilerCacheBackend::Off
+        );
     }
 
     #[test]
@@ -2757,11 +2768,21 @@ mod tests {
         );
         let mut off = sccache.clone();
         off.steps.clear();
+        let policy = crate::acceleration::AccelerationPolicy::maximum();
+        let resolve = |job: &AgentJobRequestMessage| {
+            crate::compiler_cache::resolve_backend(&policy, job).backend
+        };
         assert_eq!(
-            compiler_cache_backend(&sccache),
-            CompilerCacheBackend::Sccache
+            resolve(&sccache),
+            crate::compiler_cache::CompilerCacheBackend::Sccache
         );
-        assert_eq!(compiler_cache_backend(&kache), CompilerCacheBackend::Kache);
-        assert_eq!(compiler_cache_backend(&off), CompilerCacheBackend::Off);
+        assert_eq!(
+            resolve(&kache),
+            crate::compiler_cache::CompilerCacheBackend::Kache
+        );
+        assert_eq!(
+            resolve(&off),
+            crate::compiler_cache::CompilerCacheBackend::Off
+        );
     }
 }

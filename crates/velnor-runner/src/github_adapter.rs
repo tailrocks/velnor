@@ -26,6 +26,7 @@ pub struct GitHubJobContainerPaths {
     pub execution_backend: velnor_model::ExecutionBackendKind,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn github_job_container_spec(
     job: &AgentJobRequestMessage,
     paths: GitHubJobContainerPaths,
@@ -34,6 +35,7 @@ pub fn github_job_container_spec(
     node_action_image: &str,
     daemon_id: String,
     trust_scope: &str,
+    acceleration: &crate::acceleration::AccelerationPolicy,
 ) -> JobContainerSpec {
     // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
@@ -70,7 +72,7 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        compiler_cache_backend: crate::manifest::compiler_cache_backend(job),
+        compiler_cache: crate::compiler_cache::resolve_backend(acceleration, job),
     }
 }
 
@@ -923,7 +925,10 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
-            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
+            compiler_cache: crate::compiler_cache::ResolvedBackend::selected(
+                crate::compiler_cache::CompilerCacheBackend::Sccache,
+                crate::compiler_cache::CompilerCacheOrigin::PolicyExplicit,
+            ),
         };
         let plan = github_normalized_job_plan(
             &job,
@@ -1060,6 +1065,7 @@ mod tests {
             "",
             "daemon".into(),
             "public-forks",
+            &crate::acceleration::AccelerationPolicy::maximum(),
         );
 
         assert!(!spec.mount_docker_socket);
@@ -1092,6 +1098,7 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
+            &crate::acceleration::AccelerationPolicy::maximum(),
         );
         assert!(!spec.mount_docker_socket);
     }

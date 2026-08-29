@@ -4154,7 +4154,28 @@ async fn handle_job_request(
         // flat job-level checks run first, then the transitively-closed action
         // admission graph is completed here — before lease renewal, leases,
         // checkout, downloads, containers, caches, or credentials.
-        if let Err(error) = crate::manifest::validate_job_with_context(&job, &early_context) {
+        // The acceleration policy rides along because admission owns the
+        // RUSTC_WRAPPER conflict check: a workflow fighting the resolved
+        // compiler wrapper fails here, never silently at execution time.
+        let acceleration = match crate::acceleration::AccelerationPolicy::load(config_dir) {
+            Ok(policy) => policy,
+            Err(error) => {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some(&job),
+                    Some("acceleration_policy".to_string()),
+                    &format!("{error:#}"),
+                )
+                .await?;
+                clear_in_flight_job(config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
+                bail!("{error:#}");
+            }
+        };
+        if let Err(error) =
+            crate::manifest::validate_job_with_context(&job, &early_context, &acceleration)
+        {
             complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
@@ -5665,9 +5686,10 @@ fn execute_script_job(
     daemon_id: String,
     reserved_bytes: u64,
 ) -> Result<ScriptJobResult> {
-    let execution_backend = crate::execution::load_execution_file(config_dir, None)
-        .map_err(|error| anyhow::anyhow!("{error}"))?
-        .backend();
+    let execution_file = crate::execution::load_execution_file(config_dir, None)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let acceleration = crate::acceleration::AccelerationPolicy::from_file(&execution_file);
+    let execution_backend = execution_file.backend();
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let result = execute_script_job_inner(
         &job_dir,
@@ -5686,6 +5708,7 @@ fn execute_script_job(
         daemon_id,
         reserved_bytes,
         execution_backend,
+        &acceleration,
     );
     if result.is_err() {
         if let Err(e) = fs::remove_dir_all(&job_dir) {
@@ -5754,6 +5777,7 @@ impl<R: CommandRunner> crate::execution::ProductionDockerEngine for RunnerDocker
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_microvm_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
@@ -5762,6 +5786,7 @@ fn execute_microvm_script_job(
     trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
+    acceleration: &crate::acceleration::AccelerationPolicy,
 ) -> Result<ScriptJobResult> {
     let run_root = std::path::PathBuf::from("/run/velnor");
     let container = crate::github_adapter::github_job_container_spec(
@@ -5780,6 +5805,7 @@ fn execute_microvm_script_job(
         node_action_image,
         "microvm".into(),
         trust_scope,
+        acceleration,
     );
     if container.mount_docker_socket {
         return Err(microvm_capability_error(
@@ -5819,6 +5845,7 @@ fn execute_microvm_script_job(
         execution: velnor_model::ExecutionSection {
             backend: velnor_model::ExecutionBackendKind::MicroVm,
         },
+        acceleration: velnor_model::AccelerationSection::default(),
     };
     let mut world = crate::execution::ExecutionWorld {
         kvm: &kvm,
@@ -6175,6 +6202,7 @@ fn execute_script_job_inner(
     daemon_id: String,
     reserved_bytes: u64,
     execution_backend: velnor_model::ExecutionBackendKind,
+    acceleration: &crate::acceleration::AccelerationPolicy,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         return execute_microvm_script_job(
@@ -6185,6 +6213,7 @@ fn execute_script_job_inner(
             trust_scope,
             run_service_url,
             billing_owner_id,
+            acceleration,
         );
     }
     let execution_started = Instant::now();
@@ -6237,6 +6266,7 @@ fn execute_script_job_inner(
         node_action_image,
         daemon_id,
         trust_scope,
+        acceleration,
     );
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
@@ -6536,6 +6566,7 @@ fn execute_script_job_inner(
         execution: velnor_model::ExecutionSection {
             backend: velnor_model::ExecutionBackendKind::Docker,
         },
+        acceleration: velnor_model::AccelerationSection::default(),
     };
     let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
     let mut fs = crate::execution::RealHostFs;
@@ -10356,6 +10387,7 @@ mod tests {
             "trusted",
             "https://run.service/jobs/1",
             None,
+            &crate::acceleration::AccelerationPolicy::maximum(),
         )
         .unwrap_err()
         .to_string();
@@ -10382,6 +10414,7 @@ mod tests {
             "trusted",
             "https://run.service/jobs/1",
             None,
+            &crate::acceleration::AccelerationPolicy::maximum(),
         )
         .unwrap_err();
         let text = error.to_string();
@@ -15063,7 +15096,7 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Off,
+            compiler_cache: crate::compiler_cache::ResolvedBackend::off(),
         }
     }
 

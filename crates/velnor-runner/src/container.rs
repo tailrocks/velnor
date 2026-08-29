@@ -7,7 +7,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::compiler_cache::CompilerCacheBackend;
+use crate::compiler_cache::{
+    CompilerCacheBackend, ResolvedBackend, DEFAULT_COMPILER_CACHE_MAX_SIZE,
+    KACHE_RUNTIME_DIR_CONTAINER,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -47,28 +50,41 @@ pub struct JobContainerSpec {
     /// one would make rename(2) across `target` return EXDEV even though the
     /// same workflow succeeds on GitHub-hosted runners.
     pub cargo_target_host: Option<PathBuf>,
-    /// Exactly one compiler-cache store is exposed to a job.
-    pub compiler_cache_backend: CompilerCacheBackend,
+    /// The resolved compiler-cache decision for this job (backend, origin,
+    /// degradation records) — the single source of truth for mounts, setup,
+    /// and the job acceleration report. The backend is never `Auto`.
+    pub compiler_cache: ResolvedBackend,
 }
 
 impl JobContainerSpec {
     fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
-        let (host, container, env) = match self.compiler_cache_backend {
+        let (host, container, env) = match self.compiler_cache.backend {
             CompilerCacheBackend::Sccache => (
                 sccache_host(&self.temp_host),
                 "/var/cache/sccache",
-                vec!["SCCACHE_DIR=/var/cache/sccache"],
+                vec!["SCCACHE_DIR=/var/cache/sccache".to_string()],
             ),
             CompilerCacheBackend::Kache => (
                 kache_host(&self.temp_host),
                 "/var/cache/kache",
-                vec!["KACHE_CACHE_DIR=/var/cache/kache", "KACHE_MAX_SIZE=20GiB"],
+                vec![
+                    "KACHE_CACHE_DIR=/var/cache/kache".to_string(),
+                    format!("KACHE_MAX_SIZE={DEFAULT_COMPILER_CACHE_MAX_SIZE}"),
+                    // Runtime state (socket/locks/logs) is per-job under the
+                    // /__t job-temp mount; concurrent jobs never share it.
+                    format!("KACHE_RUNTIME_DIR={KACHE_RUNTIME_DIR_CONTAINER}"),
+                    // RUSTC_WRAPPER at container level engages the cache for
+                    // jobs resolved without a workflow setup action; the
+                    // wrapper is owned by Velnor, admission rejects conflicts.
+                    "RUSTC_WRAPPER=kache".to_string(),
+                ],
             ),
-            CompilerCacheBackend::Off => return,
+            // Auto is a policy value and never reaches a resolved spec.
+            CompilerCacheBackend::Auto | CompilerCacheBackend::Off => return,
         };
         args.extend(["-v".into(), self.mount_arg(&host, container)]);
         for value in env {
-            args.extend(["-e".into(), value.into()]);
+            args.extend(["-e".into(), value]);
         }
     }
 
@@ -1271,7 +1287,10 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
-            compiler_cache_backend: CompilerCacheBackend::Sccache,
+            compiler_cache: ResolvedBackend::selected(
+                CompilerCacheBackend::Sccache,
+                crate::compiler_cache::CompilerCacheOrigin::PolicyExplicit,
+            ),
         }
     }
 
@@ -1325,12 +1344,15 @@ mod tests {
         assert!(sccache.contains("/var/cache/sccache"));
         assert!(!sccache.contains("/var/cache/kache"));
 
-        job.compiler_cache_backend = CompilerCacheBackend::Kache;
+        job.compiler_cache = ResolvedBackend::selected(
+            CompilerCacheBackend::Kache,
+            crate::compiler_cache::CompilerCacheOrigin::WorkflowAction,
+        );
         let kache = job.start_args().join(" ");
         assert!(kache.contains("/var/cache/kache"));
         assert!(!kache.contains("/var/cache/sccache"));
 
-        job.compiler_cache_backend = CompilerCacheBackend::Off;
+        job.compiler_cache = ResolvedBackend::off();
         let off = job.start_args().join(" ");
         assert!(!off.contains("/var/cache/sccache"));
         assert!(!off.contains("/var/cache/kache"));

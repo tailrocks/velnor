@@ -8,6 +8,7 @@
 //! interim [`scaffold`] facade exposes bootstrap and dispatch helpers until
 //! Plan 079 deletes the crate after its runtime modules move.
 
+pub mod acceleration;
 mod action;
 mod admission;
 pub mod args;
@@ -16,7 +17,7 @@ mod cache;
 mod capacity;
 mod checkout;
 mod command_files;
-mod compiler_cache;
+pub mod compiler_cache;
 mod config;
 mod container;
 mod docker_lease;
