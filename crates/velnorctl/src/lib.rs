@@ -516,12 +516,9 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             }
             run_runtime(velnor_runner::args::Command::Status((*args).into())).await
         }
-        Command::Daemon(args) => {
-            run_runtime(velnor_runner::args::Command::Daemon(Box::new(
-                (*args).into(),
-            )))
+        Command::Daemon(args) => runtime::run_daemon((*args).clone())
             .await
-        }
+            .map_err(|_| CommandError::operation("daemon.start_failed: unable to start daemon")),
         Command::Storage(args) => {
             if matches!(
                 &args.command,
