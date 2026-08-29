@@ -143,10 +143,9 @@ wiremock = "=0.6.5"
 
 [features]
 default = []
-# Test-only loopback HTTP support for wiremock integration fixtures. Never
-# enabled by release or package builds; production authenticated endpoints
-# remain HTTPS-only.
-test-insecure-http = []
+# Explicitly enabled by repository test tasks so integration fixtures can use
+# loopback HTTP. Release binaries reject this feature at compile time.
+test-support = []
 # Plan 010: embed the exact git source SHA + release tag at compile time and
 # fail the build unless tag == crate version == Cargo.lock (see build.rs). OFF by
 # default so the normal build/test path never touches git and never fails on an
