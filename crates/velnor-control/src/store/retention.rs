@@ -11,6 +11,7 @@
 //! current instance/slot/registration state, and records its result in the
 //! `retention_state` singleton for accounting.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -205,7 +206,6 @@ impl Store {
             let (more_events, deleted_jobs, deleted_transitions) =
                 Self::prune_terminal_jobs(&transaction, &self.path, budget, now)?;
             let deleted_events = deleted_events.saturating_add(more_events);
-            refresh_event_stream_state(&transaction, now)?;
             if let Some(hook) = hook {
                 hook(PrunePhase::AfterJobPrune)?;
             }
@@ -350,7 +350,7 @@ impl Store {
                     cutoff,
                     cursor,
                 )?;
-                deleted += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &batch.ids)?;
+                deleted += delete_events_by_ids(conn, &batch.ids, now)?;
                 let Some(last_id) = batch.last_id else { break };
                 cursor = last_id;
                 if batch.exhausted {
@@ -379,7 +379,7 @@ impl Store {
                     if victims.is_empty() {
                         break;
                     }
-                    deleted += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &victims)?;
+                    deleted += delete_events_by_ids(conn, &victims, now)?;
                     if (victims.len() as u64) < prune_batch_size(budget) {
                         break;
                     }
@@ -422,7 +422,7 @@ impl Store {
                 )?;
 
                 for id in &batch.ids {
-                    let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id)?;
+                    let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id, now)?;
                     deleted_jobs += jobs;
                     deleted_transitions += transitions;
                     deleted_events += events;
@@ -467,7 +467,7 @@ impl Store {
                         break;
                     }
                     for id in &victims {
-                        let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id)?;
+                        let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id, now)?;
                         deleted_jobs += jobs;
                         deleted_transitions += transitions;
                         deleted_events += events;
@@ -500,7 +500,7 @@ impl Store {
                         other => Err(other),
                     })?;
                 let Some(victim) = victim else { break };
-                let (jobs, transitions, events) = delete_job_with_ancestry(conn, victim)?;
+                let (jobs, transitions, events) = delete_job_with_ancestry(conn, victim, now)?;
                 deleted_jobs += jobs;
                 deleted_transitions += transitions;
                 deleted_events += events;
@@ -515,7 +515,7 @@ impl Store {
                 if victims.is_empty() {
                     break;
                 }
-                deleted_events += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &victims)?;
+                deleted_events += delete_events_by_ids(conn, &victims, now)?;
             }
         }
         Ok((deleted_events, deleted_jobs, deleted_transitions))
@@ -640,8 +640,14 @@ fn newest_window_start(
 }
 
 /// Keep cursor validity independent from currently retained rows. A fully
-/// pruned stream still rejects cursors below its high-water mark.
-fn refresh_event_stream_state(conn: &rusqlite::Connection, now: Timestamp) -> StoreResult<()> {
+/// pruned stream still rejects cursors below its high-water mark. Refresh only
+/// instances changed by a bounded delete batch; refreshing every stream row
+/// would turn a bounded prune into a fleet-wide scan.
+fn refresh_event_stream_state_for_instance(
+    conn: &rusqlite::Connection,
+    instance_slug: &str,
+    now: Timestamp,
+) -> StoreResult<()> {
     conn.execute(
         "UPDATE event_stream_state
          SET first_retained_id = COALESCE(
@@ -652,15 +658,20 @@ fn refresh_event_stream_state(conn: &rusqlite::Connection, now: Timestamp) -> St
                  high_water_id,
                  COALESCE((SELECT MAX(id) FROM events WHERE events.instance_slug = event_stream_state.instance_slug), 0)
              ),
-             updated_at = ?1",
-        [rfc3339(now)],
+             updated_at = ?1
+         WHERE instance_slug = ?2",
+        params![rfc3339(now), instance_slug],
     )?;
     Ok(())
 }
 
 /// Delete one job row plus its transitions and its own job events; returns
 /// `(deleted_jobs, deleted_transitions, deleted_events)`.
-fn delete_job_with_ancestry(conn: &rusqlite::Connection, id: i64) -> StoreResult<(u64, u64, u64)> {
+fn delete_job_with_ancestry(
+    conn: &rusqlite::Connection,
+    id: i64,
+    now: Timestamp,
+) -> StoreResult<(u64, u64, u64)> {
     let identity: Option<(String, String)> = conn
         .query_row(
             "SELECT instance_slug, job_uid FROM jobs WHERE id = ?1",
@@ -691,6 +702,9 @@ fn delete_job_with_ancestry(conn: &rusqlite::Connection, id: i64) -> StoreResult
          )",
         params![instance_slug, job_uid],
     )? as u64;
+    if events > 0 {
+        refresh_event_stream_state_for_instance(conn, &instance_slug, now)?;
+    }
     let transitions = conn.execute(
         "DELETE FROM job_transitions WHERE instance_slug = ?1 AND job_uid = ?2",
         params![instance_slug, job_uid],
@@ -811,13 +825,34 @@ fn protected_ids_below(
     Ok(ids)
 }
 
-fn delete_by_ids(conn: &rusqlite::Connection, prefix: &str, ids: &[i64]) -> StoreResult<u64> {
+fn delete_events_by_ids(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+    now: Timestamp,
+) -> StoreResult<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
     let placeholders = vec!["?"; ids.len()].join(",");
-    let sql = format!("{prefix} ({placeholders})");
-    Ok(conn.execute(&sql, params_from_iter(ids.iter()))? as u64)
+    let instances: BTreeSet<String> = {
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT DISTINCT instance_slug FROM events WHERE id IN ({placeholders})"
+        ))?;
+        let mut rows = statement.query(params_from_iter(ids.iter()))?;
+        let mut instances = BTreeSet::new();
+        while let Some(row) = rows.next()? {
+            instances.insert(row.get(0)?);
+        }
+        instances
+    };
+    let deleted = conn.execute(
+        &format!("DELETE FROM events WHERE id IN ({placeholders})"),
+        params_from_iter(ids.iter()),
+    )? as u64;
+    for instance_slug in instances {
+        refresh_event_stream_state_for_instance(conn, &instance_slug, now)?;
+    }
+    Ok(deleted)
 }
 
 fn minus_age(now: Timestamp, age: Duration) -> Timestamp {
