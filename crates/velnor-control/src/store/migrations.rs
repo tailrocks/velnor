@@ -666,6 +666,15 @@ pub(crate) fn apply_pending(
             };
             transaction.execute_batch(sql)?;
         }
+        if migration.version == 12 && !v12_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v12 exact lifecycle-event identity columns and indexes did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
         if let Some(hook) = hook {
             hook(migration.version)?;
         }
@@ -854,6 +863,35 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 11);
         assert!(!has_column_connection(&conn, "events", "reconciliation_id").unwrap());
         release_lock(&conn, "partial-v12-test").unwrap();
+    }
+
+    #[test]
+    fn wrong_v12_identity_index_fails_closed_before_version_bump() {
+        let temp = TempDb::new("wrong-v12-index");
+        let mut conn = Connection::open(&temp.path).expect("open database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(11) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "ALTER TABLE events ADD COLUMN transition_id INTEGER;
+             ALTER TABLE events ADD COLUMN reconciliation_id INTEGER;
+             CREATE INDEX idx_events_instance_transition_id
+                 ON events (transition_id);",
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "wrong-v12-test", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(&mut conn, "wrong-v12-test", None).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+        assert_eq!(current_version(&conn).unwrap(), 11);
+        release_lock(&conn, "wrong-v12-test").unwrap();
     }
 
     #[test]
