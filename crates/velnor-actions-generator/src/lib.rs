@@ -13,6 +13,7 @@ pub mod composite;
 pub mod model;
 pub mod package;
 pub mod render;
+pub mod tools;
 
 /// One of the five normalized repository classes the fleet generator maps every
 /// canonical repository onto exactly once.
@@ -100,6 +101,7 @@ pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
     let manifest = model::FleetManifest::load(root)?;
     let caches = cache::CacheContract::load(&root.join("fleet").join("caches.toml"))?;
     let packages = package::PackagePolicy::load(root)?;
+    let registry = tools::ToolRegistry::load(&tools::registry_path(root))?;
     let mut written = Vec::new();
 
     // Composite building blocks: canonical bytes live in `composite`, so they are
@@ -122,6 +124,16 @@ pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
         write_if_changed(&path, &body)?;
         written.push(path);
     }
+
+    let tools_template = root.join("templates").join("tools").join("mise.toml");
+    let tool_names = registry.entries().keys().map(String::as_str);
+    let tools_body = registry.render_tools_block(tool_names)?;
+    if let Some(parent) = tools_template.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    write_if_changed(&tools_template, &tools_body)?;
+    written.push(tools_template);
 
     let block_sha_path = root.join("fleet").join("block-sha");
     if block_sha_path.exists() {
@@ -193,6 +205,17 @@ pub fn render_consumer_to_dir(
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = dir.join("ci.yml");
     std::fs::write(&path, &body).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    let mise_path = output.join("mise.toml");
+    if mise_path.is_file() {
+        let registry = tools::ToolRegistry::load(&tools::registry_path(root))?;
+        let existing = std::fs::read_to_string(&mise_path)
+            .map_err(|e| format!("reading {}: {e}", mise_path.display()))?;
+        let normalized = registry.normalize_mise_file(&existing)?;
+        if normalized != existing {
+            std::fs::write(&mise_path, normalized)
+                .map_err(|e| format!("writing {}: {e}", mise_path.display()))?;
+        }
+    }
     Ok(path)
 }
 

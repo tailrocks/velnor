@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use velnor_actions_generator::{
     ALL_CLASSES, REQUIRED_LAYOUT, audit, generate, render_consumer_to_dir,
-    render_package_consumer_to_dir, validate_layout,
+    render_package_consumer_to_dir, tools, validate_layout,
 };
 
 fn main() -> ExitCode {
@@ -40,6 +40,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
         Some("render-package-consumer") => run_render_package_consumer(args),
         Some("audit") => run_audit(args),
         Some("verify-remote") => run_verify_remote(args),
+        Some("tool-registry") => run_tool_registry(args),
         Some(other) => Err(format!("unknown subcommand: {other}")),
         None => Err(
             "missing subcommand (expected: check, generate, render-consumer, or audit)".to_string(),
@@ -170,6 +171,36 @@ fn run_audit(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     }
     let root = root.ok_or("audit requires --root PATH")?;
     audit::audit(&root)
+}
+
+fn run_tool_registry(mut args: impl Iterator<Item = String>) -> Result<String, String> {
+    let mut root = PathBuf::from(".");
+    let mut registry_path = None;
+    let mut fleet_path = None;
+    let mut mise_path = None;
+    let mut lock_path = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => root = PathBuf::from(require_value(&mut args, "--root")?),
+            "--registry" => {
+                registry_path = Some(PathBuf::from(require_value(&mut args, "--registry")?))
+            }
+            "--fleet" => fleet_path = Some(PathBuf::from(require_value(&mut args, "--fleet")?)),
+            "--mise" => mise_path = Some(PathBuf::from(require_value(&mut args, "--mise")?)),
+            "--lock" => lock_path = Some(PathBuf::from(require_value(&mut args, "--lock")?)),
+            other => return Err(format!("unexpected argument: {other}")),
+        }
+    }
+    let registry =
+        tools::ToolRegistry::load(&registry_path.unwrap_or_else(|| tools::registry_path(&root)))?;
+    let count = match fleet_path {
+        Some(path) => registry.check_fleet(&root, &path)?,
+        None => registry.check_files(
+            &mise_path.unwrap_or_else(|| root.join("mise.toml")),
+            &lock_path.unwrap_or_else(|| root.join("mise.lock")),
+        )?,
+    };
+    Ok(format!("tool registry valid: {count} effective tools"))
 }
 
 fn run_render_consumer(mut args: impl Iterator<Item = String>) -> Result<String, String> {

@@ -1,0 +1,7 @@
+[[tools.actionlint]]
+version = "1.7"
+backend = "aqua:rhysd/actionlint"
+
+[[tools.gh]]
+version = "2.96.0"
+backend = "aqua:cli/cli"

@@ -1,0 +1,6 @@
+[tools]
+actionlint = "1.7.12"
+gh = "2.96.0"
+
+[settings]
+lockfile = true

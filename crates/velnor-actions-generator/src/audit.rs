@@ -19,6 +19,7 @@ use crate::render::{
     self, ACTIONS_REPO, CALVER_PLACEHOLDER, CANONICAL_OWNER, FLEET_SHA_PLACEHOLDER,
     OWNER_SHA_PLACEHOLDERS,
 };
+use crate::tools::{self, ToolRegistry};
 use crate::{ALL_CLASSES, RepositoryClass};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -61,6 +62,7 @@ pub fn audit(root: &Path) -> Result<String, String> {
     let manifest = FleetManifest::load(root)?;
     let caches = CacheContract::load(&root.join("fleet").join("caches.toml"))?;
     let packages = PackagePolicy::load(root)?;
+    let registry = ToolRegistry::load(&tools::registry_path(root))?;
     let remote_closure = load_remote_closure(root)?;
 
     // Composite building blocks must exist and match their canonical bytes exactly
@@ -75,6 +77,24 @@ pub fn audit(root: &Path) -> Result<String, String> {
         let committed = read_committed(&template_path(root, class))?;
         require_equal(&committed, &rendered, &template_path_display(class))?;
         audit_consumer_structure(class, &rendered)?;
+    }
+
+    let tools_template = root.join("templates").join("tools").join("mise.toml");
+    let tool_names = registry.entries().keys().map(String::as_str);
+    let expected_tools = registry.render_tools_block(tool_names)?;
+    let committed_tools = read_committed(&tools_template)?;
+    require_equal(
+        &committed_tools,
+        &expected_tools,
+        &tools_template.display().to_string(),
+    )?;
+    let mise_path = root.join("mise.toml");
+    let lock_path = root.join("mise.lock");
+    if mise_path.is_file() || lock_path.is_file() {
+        if !(mise_path.is_file() && lock_path.is_file()) {
+            return Err("mise.toml and mise.lock must appear together".into());
+        }
+        registry.check_generator_files(&mise_path, &lock_path)?;
     }
 
     // Materialize all 28 repositories and prove each equals its class template.

@@ -12,6 +12,9 @@ Canonical source of the Velnor Actions fleet.
 - **No hand edits.** Workflows and templates are generated from the shared class
   model and declared repository data. Per-repository workflow forks are not a
   baseline; change the class model or the declared data instead.
+- **Mise-only tools.** Languages and executables are installed through the
+  locked `mise.toml`/`mise.lock` graph. Do not add Homebrew, rustup, `cargo
+  install`, or another package manager as an installation path.
 - **Full-SHA pins.** Every external Action reference resolves to an immutable full
   40-hex commit SHA. Mutable refs (tags or branches) are never used.
 
@@ -43,6 +46,9 @@ Canonical source of the Velnor Actions fleet.
 
 - `generate --root .` — render the five templates (and, once `block-sha` is bound,
   the five callable workflows).
+- `tool-registry --root . --fleet fleet/repositories.toml` — validate the
+  generator-owned tool registry, root mise graph, lockfile, and 28-repository
+  manifest shape.
 - `render-consumer --root . --repository OWNER/REPO --jackin-release-sha <40-hex>
   --tailrocks-release-sha <40-hex> --chainargos-release-sha <40-hex> --calver
   <CalVer> --output DIR` — materialize one consumer's
@@ -61,7 +67,13 @@ with:
 mise install --locked
 mise run generate       # re-render from data (should be a no-op on a clean tree)
 mise run ci
+mise run ci:contract    # registry + fleet contract gate
+bash tools/check-tool-registry.sh --fixtures tests/fixtures/tools/
 ```
 
 `mise run ci` runs `fmt`, `lint` (clippy `-D warnings`), `test` (cargo-nextest),
-`actionlint`, `deny` (advisory audit), and `generator-check` (the fleet audit).
+`actionlint`, `deny` (advisory audit), `generator-check` (the fleet audit),
+and the tool-registry contract. The registry lives at
+`fleet/fleet-tools.toml`; `templates/tools/mise.toml` is its deterministic
+full-policy projection. Consumer rendering normalizes only the tools already
+used by that consumer, preserving the other `mise.toml` sections.
