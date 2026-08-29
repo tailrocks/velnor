@@ -115,7 +115,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml && \
     # Baked bootstrap of the mise binary at the fleet-pinned version. This is
     # the read-only /opt/mise/bin bootstrap; runtime never rewrites it.
-    curl -fsSL https://mise.run | MISE_VERSION="v2026.8.11" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
+    curl -fsSL https://mise.run | MISE_VERSION="v2026.8.14" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
     mise trust /opt/mise/config/mise.toml && \
     # Install the native compiler cache first. Cargo-backed mise tools may
     # compile during installation, so the wrapper must already be executable.
