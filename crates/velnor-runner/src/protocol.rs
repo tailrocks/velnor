@@ -40,6 +40,7 @@ const GITHUB_MAX_TIME_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
+const MAX_RESULTS_SERVICE_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_ZIP_MEMBERS: usize = 100_000;
 const RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
@@ -4412,6 +4413,8 @@ fn results_service_post(
     body: &str,
     operation: &str,
 ) -> Result<String> {
+    use std::io::Read;
+
     let response = client
         .post(url)
         .bearer_auth(token)
@@ -4422,9 +4425,17 @@ fn results_service_post(
         .send()
         .with_context(|| format!("send Results Service {operation}"))?;
     let status = response.status();
-    let response_body = response
-        .text()
+    let mut bytes = Vec::new();
+    let mut limited = response.take(MAX_RESULTS_SERVICE_RESPONSE_BYTES + 1);
+    limited
+        .read_to_end(&mut bytes)
         .with_context(|| format!("read Results Service {operation} response"))?;
+    if bytes.len() > usize::try_from(MAX_RESULTS_SERVICE_RESPONSE_BYTES).unwrap_or(usize::MAX) {
+        bail!(
+            "Results Service {operation} response exceeds the {MAX_RESULTS_SERVICE_RESPONSE_BYTES}-byte limit"
+        );
+    }
+    let response_body = String::from_utf8_lossy(&bytes).into_owned();
     if !status.is_success() {
         bail!(
             "Results Service {operation}: status={status}, body={}",
@@ -4858,7 +4869,7 @@ fn download_artifacts_blocking_in_temp_dir(
     let artifacts = listed
         .get("artifacts")
         .and_then(serde_json::Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     let mut downloads = Vec::new();
     let mut total_returned_bytes = 0_u64;
