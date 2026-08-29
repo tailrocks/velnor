@@ -13,6 +13,9 @@ Slice=velnor-control.slice
 Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
+Environment=MISE_LOCKFILE=1
+Environment=MISE_LOCKED=1
+Environment=MISE_LOCKED_VERIFY_PROVENANCE=1
 ExecStartPre=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner release verify-installed
 ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner controller --state-dir /var/lib/velnor --scope %i --desired-ready ${VELNOR_SLOTS}
 Restart=always

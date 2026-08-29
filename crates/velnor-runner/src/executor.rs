@@ -3841,7 +3841,7 @@ fn setup_mise_script(
 }
 
 const MISE_SETUP_TEMPLATE: &str = r#"set -e
-# Use the euid's home (/root) so rustup-init doesn't fail the $HOME vs euid check.
+# Use the euid's home (/root) for the image-baked mise tool store.
 export HOME=/root
 # mise_home and the env-export dir default to the production mounts; tests point
 # them at isolated dirs (no /opt or /__t write on the test host).
@@ -3990,27 +3990,15 @@ if [ -n "$install_requested" ]; then
   else
     "$mise_bin" install --locked --yes
   fi
-  # A job image may already contain the exact rustup toolchain with a minimal
-  # component profile. mise correctly treats that version as installed, but a
-  # missing mandatory `cargo` component makes every Rust project command fail.
-  # Repair and validate through the repository-selected mise environment; this
-  # never chooses an unpinned toolchain or bypasses the committed lockfile.
+  # Validate the repository-selected Rust environment. If a shared image store
+  # is incomplete, reinstall the exact lockfile/toolchain declaration through
+  # mise; never repair it with a direct rustup mutation.
   if "$mise_bin" current rust >/dev/null 2>&1; then
-    "$mise_bin" exec -- rustup component add cargo clippy rustfmt
     if ! "$mise_bin" exec -- cargo --version >/dev/null 2>&1 \
       || ! "$mise_bin" exec -- cargo clippy --version >/dev/null 2>&1 \
       || ! "$mise_bin" exec -- cargo fmt --version >/dev/null 2>&1; then
-      # rustup can report a component "up to date" while its proxy says the
-      # component is not applicable when a persisted minimal/incomplete
-      # toolchain predates the locked mise install.  That state is not usable
-      # and must not be accepted merely because the version directory exists.
-      # Rebuild the exact committed Rust pin through mise, then add and prove
-      # the mandatory components again.  No live version selection occurs.
-      rust_toolchain=$("$mise_bin" current rust)
-      echo "mise: Rust $rust_toolchain component probes failed; rebuilding locked toolchain" >&2
-      "$mise_bin" exec -- rustup toolchain uninstall "$rust_toolchain"
+      echo "mise: Rust component probes failed; reinstalling the locked toolchain" >&2
       "$mise_bin" install --locked --yes --force rust
-      "$mise_bin" exec -- rustup component add cargo clippy rustfmt
     fi
     "$mise_bin" exec -- cargo --version
     "$mise_bin" exec -- cargo clippy --version
@@ -4086,11 +4074,9 @@ fn mise_step_path(output: &str) -> Vec<String> {
             }
         }
     }
-    // Rust installed by mise is backed by rustup under /root/.cargo/bin. Keep
-    // those real, root-owned proxies ahead of mise's generic shims: rustfmt
-    // asks `rustup component list`, and resolving that command back to the
-    // mise shim recursively re-enters the same probe until the host exhausts
-    // its process table. Direct pinned tool bins above still take precedence.
+    // Rust installed by mise may use root-owned backend proxies. Keep that
+    // backend bin directory ahead of generic shims; direct pinned tool bins
+    // above still take precedence.
     path.push("/root/.cargo/bin".to_string());
     path.push("/opt/mise/shims".to_string());
     path
@@ -10913,9 +10899,9 @@ mod tests {
         // Locked, fail-closed install — never plain `mise install`, never a
         // network mise.run bootstrap or self-update of /opt/mise/bin.
         assert!(script.contains(r#""$mise_bin" install --locked --yes"#));
-        assert!(script.contains(r#""$mise_bin" exec -- rustup component add cargo clippy rustfmt"#));
         assert!(script.contains(r#""$mise_bin" install --locked --yes --force rust"#));
-        assert!(script.contains(r#"rustup toolchain uninstall "$rust_toolchain""#));
+        assert!(!script.contains("rustup component"));
+        assert!(!script.contains("rustup toolchain"));
         assert!(script.contains(r#""$mise_bin" exec -- cargo --version"#));
         assert!(script.contains(r#""$mise_bin" exec -- cargo clippy --version"#));
         assert!(script.contains(r#""$mise_bin" exec -- cargo fmt --version"#));
