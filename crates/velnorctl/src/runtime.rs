@@ -5,6 +5,7 @@
 //! [`velnor_runner::args`] is exhaustive `From`, never a second argv walk.
 //! `daemon` is the service entrypoint; `run` is the workflow-run namespace.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -101,12 +102,14 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
     let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
     let admin_path = endpoint.socket_path(velnor_client::SocketKind::Admin);
+    let _instance_lock = InstanceLock::acquire(&control_path)?;
     let state_path = args
         .state_db
         .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH));
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
-    let services = velnor_control::application::ApplicationServices::with_store(store);
-    let api_state = crate::http::ApiState::from_services(&services);
+    let services =
+        velnor_control::application::ApplicationServices::with_store(Arc::clone(&store), instance)?;
+    let api_state = crate::http::ApiState::from_services_for_instance(&services, instance);
     let control_listener = OwnedUnixListener::new(
         crate::http::bind_unix(
             &control_path,
@@ -162,6 +165,41 @@ struct OwnedUnixListener {
     listener: Option<tokio::net::UnixListener>,
     path: PathBuf,
     identity: SocketIdentity,
+}
+
+/// Advisory singleton for one daemon instance. The lock is held for the
+/// complete listener lifetime, so compliant siblings cannot race pathname
+/// cleanup or bind a second control plane for the same instance.
+struct InstanceLock {
+    _file: File,
+}
+
+impl InstanceLock {
+    fn acquire(socket_path: &Path) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let parent = socket_path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "socket must have a parent for the instance lock",
+            )
+        })?;
+        let lock_path = parent.join(".daemon.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o660)
+            .open(lock_path)?;
+        // SAFETY: the descriptor remains open in `InstanceLock` for the
+        // entire daemon lifetime; libc only reads the descriptor and flags.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { _file: file })
+    }
 }
 
 impl OwnedUnixListener {

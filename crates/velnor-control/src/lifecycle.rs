@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use velnor_model::Slug;
+
 use crate::ports::{MutationKind, MutationPort, MutationRequest, MutationResult, PortError};
 use crate::store::Store;
 
@@ -29,6 +31,8 @@ pub struct LifecycleState {
 struct State {
     next_operation: u64,
     instances: BTreeMap<String, LifecycleState>,
+    /// Bounded only for the in-memory implementation. Durable services use
+    /// SQLite for replay and therefore do not retain a second operation copy.
     operations: BTreeMap<String, MutationResult>,
 }
 
@@ -37,6 +41,7 @@ struct State {
 pub struct LifecycleService {
     state: Arc<Mutex<State>>,
     store: Option<Arc<Store>>,
+    instance: Option<String>,
 }
 
 impl LifecycleService {
@@ -46,21 +51,42 @@ impl LifecycleService {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             store: None,
+            instance: None,
         }
     }
 
     /// Create a lifecycle service backed by the host-shared operational store.
+    #[cfg(test)]
     #[must_use]
     pub fn with_store(store: Arc<Store>) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             store: Some(store),
+            instance: None,
         }
+    }
+
+    /// Create a durable lifecycle service restricted to one daemon instance.
+    ///
+    /// # Errors
+    /// Returns a store configuration error when `instance` is not a canonical
+    /// instance identity.
+    pub fn with_store_for_instance(
+        store: Arc<Store>,
+        instance: impl Into<String>,
+    ) -> crate::store::StoreResult<Self> {
+        let instance = instance.into();
+        validate_configured_instance(&instance)?;
+        Ok(Self {
+            state: Arc::new(Mutex::new(State::default())),
+            store: Some(store),
+            instance: Some(instance),
+        })
     }
 
     /// Register an instance without changing its desired state.
     pub fn register(&self, instance: &str) -> Result<LifecycleState, PortError> {
-        validate_target(instance)?;
+        self.validate_target(instance)?;
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         Ok(state
             .instances
@@ -77,6 +103,7 @@ impl LifecycleService {
 
     /// Read one instance state.
     pub fn get(&self, instance: &str) -> Result<LifecycleState, PortError> {
+        self.validate_target(instance)?;
         let state = self.state.lock().map_err(|_| unavailable())?;
         if let Some(value) = state.instances.get(instance) {
             return Ok(value.clone());
@@ -105,19 +132,8 @@ impl LifecycleService {
 
 impl MutationPort for LifecycleService {
     fn mutate(&self, request: MutationRequest) -> Result<MutationResult, PortError> {
-        validate_target(&request.target)?;
-        if request.reason.trim().is_empty() {
-            return Err(PortError::Invalid {
-                field: "reason".to_owned(),
-                message: "mutation reason is required".to_owned(),
-            });
-        }
-        if request.idempotency_key.trim().is_empty() {
-            return Err(PortError::Invalid {
-                field: "idempotency_key".to_owned(),
-                message: "mutation idempotency key is required".to_owned(),
-            });
-        }
+        validate_request(&request)?;
+        self.validate_target(&request.target)?;
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         let desired = desired_state(&request.kind).to_owned();
         if let Some(store) = &self.store {
@@ -161,13 +177,13 @@ impl MutationPort for LifecycleService {
                 phase: operation.phase,
                 resource: None,
             };
-            state
-                .operations
-                .insert(request.idempotency_key, result.clone());
             return Ok(result);
         }
         if let Some(result) = state.operations.get(&request.idempotency_key) {
             return Ok(result.clone());
+        }
+        if state.operations.len() >= crate::store::records::MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE {
+            return Err(operation_quota_exhausted());
         }
         let instance = state
             .instances
@@ -205,6 +221,21 @@ impl MutationPort for LifecycleService {
     }
 }
 
+impl LifecycleService {
+    fn validate_target(&self, target: &str) -> Result<(), PortError> {
+        validate_target(target)?;
+        if let Some(instance) = &self.instance {
+            if target != instance {
+                return Err(PortError::Invalid {
+                    field: "target".to_owned(),
+                    message: "target must match the configured lifecycle instance".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 fn desired_state(kind: &MutationKind) -> &'static str {
     match kind {
         MutationKind::Cordon => "cordoned",
@@ -230,7 +261,9 @@ fn kind_name(kind: &MutationKind) -> &'static str {
 }
 
 fn store_error(error: crate::store::StoreError) -> PortError {
-    if error.envelope.class == velnor_model::ExitClass::Conflict.as_str() {
+    if error.envelope.reason == "store.lifecycle.operation_quota" {
+        operation_quota_exhausted()
+    } else if error.envelope.class == velnor_model::ExitClass::Conflict.as_str() {
         PortError::Conflict {
             operation: "durable lifecycle precondition changed".to_owned(),
         }
@@ -241,6 +274,12 @@ fn store_error(error: crate::store::StoreError) -> PortError {
     }
 }
 
+fn operation_quota_exhausted() -> PortError {
+    PortError::Unavailable {
+        resource: "lifecycle operation quota exhausted".to_owned(),
+    }
+}
+
 impl Default for LifecycleService {
     fn default() -> Self {
         Self::new()
@@ -248,10 +287,61 @@ impl Default for LifecycleService {
 }
 
 fn validate_target(target: &str) -> Result<(), PortError> {
-    if target.is_empty() || target.contains('/') || target.contains("..") {
+    if Slug::validate("target", target).is_err() {
         return Err(PortError::Invalid {
             field: "target".to_owned(),
             message: "target must be a canonical instance identity".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_configured_instance(instance: &str) -> crate::store::StoreResult<()> {
+    if Slug::validate("instance", instance).is_err() {
+        return Err(crate::store::StoreError::new(
+            velnor_model::ExitClass::Usage,
+            "lifecycle.instance.invalid",
+        ));
+    }
+    Ok(())
+}
+
+const MAX_LIFECYCLE_TEXT_BYTES: usize = 512;
+const MAX_SCALE_SLOTS: u32 = 4_096;
+
+fn validate_request(request: &MutationRequest) -> Result<(), PortError> {
+    validate_bounded_text("reason", &request.reason, true)?;
+    validate_bounded_text("idempotency_key", &request.idempotency_key, true)?;
+    match (&request.kind, request.scale_to) {
+        (MutationKind::Scale, Some(slots)) if (1..=MAX_SCALE_SLOTS).contains(&slots) => Ok(()),
+        (MutationKind::Scale, None) => Err(PortError::Invalid {
+            field: "scale_to".to_owned(),
+            message: "scale requires between 1 and 4096 slots".to_owned(),
+        }),
+        (MutationKind::Scale, Some(_)) => Err(PortError::Invalid {
+            field: "scale_to".to_owned(),
+            message: "scale requires between 1 and 4096 slots".to_owned(),
+        }),
+        (_, Some(_)) => Err(PortError::Invalid {
+            field: "scale_to".to_owned(),
+            message: "scale_to is only valid for scale".to_owned(),
+        }),
+        (_, None) => Ok(()),
+    }
+}
+
+fn validate_bounded_text(
+    field: &'static str,
+    value: &str,
+    required: bool,
+) -> Result<(), PortError> {
+    if (required && value.trim().is_empty())
+        || value.len() > MAX_LIFECYCLE_TEXT_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(PortError::Invalid {
+            field: field.to_owned(),
+            message: "must be non-empty, control-free, and at most 512 bytes".to_owned(),
         });
     }
     Ok(())
@@ -313,5 +403,101 @@ mod tests {
         assert_eq!(first, replay);
         assert_eq!(recreated.get("primary").expect("state").desired, "draining");
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn mutation_validation_bounds_text_and_scale_requests() {
+        let service = LifecycleService::new();
+        let base = MutationRequest {
+            kind: MutationKind::Cordon,
+            target: "primary".to_owned(),
+            reason: "maintenance".to_owned(),
+            idempotency_key: "request-1".to_owned(),
+            expected_version: None,
+            scale_to: None,
+        };
+
+        let mut oversized = base.clone();
+        oversized.reason = "x".repeat(MAX_LIFECYCLE_TEXT_BYTES + 1);
+        assert!(service.mutate(oversized).is_err());
+
+        let mut control = base.clone();
+        control.idempotency_key = "request\n1".to_owned();
+        assert!(service.mutate(control).is_err());
+
+        let mut missing_scale = base.clone();
+        missing_scale.kind = MutationKind::Scale;
+        assert!(service.mutate(missing_scale).is_err());
+
+        let mut oversized_scale = base;
+        oversized_scale.kind = MutationKind::Scale;
+        oversized_scale.scale_to = Some(MAX_SCALE_SLOTS + 1);
+        assert!(service.mutate(oversized_scale).is_err());
+    }
+
+    #[test]
+    fn instance_scoped_service_rejects_foreign_targets() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-scope-{}-{}",
+            std::process::id(),
+            velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let store = Arc::new(crate::store::Store::open(directory.join("state.db")).expect("store"));
+        let service =
+            LifecycleService::with_store_for_instance(store, "primary").expect("scoped service");
+        let request = MutationRequest {
+            kind: MutationKind::Cordon,
+            target: "secondary".to_owned(),
+            reason: "maintenance".to_owned(),
+            idempotency_key: "scope-1".to_owned(),
+            expected_version: None,
+            scale_to: None,
+        };
+
+        assert!(
+            matches!(service.mutate(request), Err(PortError::Invalid { field, .. }) if field == "target")
+        );
+        assert!(
+            matches!(service.get("secondary"), Err(PortError::Invalid { field, .. }) if field == "target")
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn in_memory_operation_cache_is_bounded_and_replayable_at_capacity() {
+        let service = LifecycleService::new();
+        service.register("primary").expect("register");
+        let base = MutationRequest {
+            kind: MutationKind::Cordon,
+            target: "primary".to_owned(),
+            reason: "test".to_owned(),
+            idempotency_key: String::new(),
+            expected_version: None,
+            scale_to: None,
+        };
+
+        let mut first_result = None;
+        for index in 0..crate::store::records::MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE {
+            let mut request = base.clone();
+            request.idempotency_key = format!("key-{index}");
+            let result = service.mutate(request).expect("within operation quota");
+            if index == 0 {
+                first_result = Some(result);
+            }
+        }
+
+        let mut fresh = base.clone();
+        fresh.idempotency_key = "new-key".to_owned();
+        assert_eq!(service.mutate(fresh), Err(operation_quota_exhausted()));
+
+        let mut replay = base;
+        replay.idempotency_key = "key-0".to_owned();
+        assert_eq!(
+            service.mutate(replay),
+            Ok(first_result.expect("first result"))
+        );
     }
 }

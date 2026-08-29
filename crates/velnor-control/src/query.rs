@@ -15,12 +15,18 @@ const MAX_PAGE_SIZE: u32 = 1_000;
 const PAGE_PREFIX: &str = "v1:";
 
 /// In-memory read projection with generation-safe opaque page tokens.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct QueryService {
     state: Arc<RwLock<QueryState>>,
 }
 
-#[derive(Default)]
+impl Default for QueryService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Default)]
 struct QueryState {
     generation: u64,
     resources: Vec<AnyResource>,
@@ -30,11 +36,21 @@ impl QueryService {
     /// Create an empty projection.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            state: Arc::new(RwLock::new(QueryState::default())),
+        }
     }
 
     /// Replace the projection and advance its cursor generation.
     pub fn replace(&self, mut resources: Vec<AnyResource>) -> Result<(), PortError> {
+        if resources.iter().any(|resource| {
+            resource.meta().name.trim().is_empty() || resource.meta().name.len() > 512
+        }) {
+            return Err(PortError::Invalid {
+                field: "resource.meta.name".to_owned(),
+                message: "resource names must be 1..512 bytes".to_owned(),
+            });
+        }
         resources.sort_by(|left, right| {
             (left.kind(), left.meta().name.as_str())
                 .cmp(&(right.kind(), right.meta().name.as_str()))
@@ -42,7 +58,8 @@ impl QueryService {
         let mut state = self.state.write().map_err(|_| PortError::Unavailable {
             resource: "query projection".to_owned(),
         })?;
-        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation.saturating_add(1);
+        state.generation = generation;
         state.resources = resources;
         Ok(())
     }
@@ -120,6 +137,12 @@ impl QueryPort for QueryService {
                 page.push(resource.clone());
             }
             total = total.saturating_add(1);
+            // The page contract needs only one look-ahead match. Avoid
+            // rescanning the remainder of a large projection to discover
+            // whether a continuation token is needed.
+            if total > page_end {
+                break;
+            }
         }
         let start = offset.min(total);
         let end = start.saturating_add(request.limit as usize).min(total);

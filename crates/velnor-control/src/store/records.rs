@@ -4,7 +4,9 @@
 //! the atomic current-state-plus-event seam. Events are append-only: no
 //! update or delete helper exists for them.
 
-use rusqlite::{params, OptionalExtension, Transaction};
+use std::time::Duration;
+
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use velnor_model::{
     transition_target, EventReason, ExitClass, InfrastructureCategory, InvalidJobSummaryField,
     JobConclusion, JobPhase, JobState, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
@@ -113,6 +115,27 @@ pub struct EventRow {
     pub occurred_at: Timestamp,
     pub detail: Option<String>,
 }
+
+/// One normalized event row with its opaque host-local database id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEvent {
+    pub id: u64,
+    pub row: EventRow,
+}
+
+/// One atomically read event window and its cursor validity watermarks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventWindow {
+    pub first_retained_id: Option<u64>,
+    pub high_water_id: Option<u64>,
+    pub events: Vec<StoredEvent>,
+}
+
+/// Maximum number of unique lifecycle idempotency records retained per
+/// instance. The quota is checked in the same SQLite transaction as a fresh
+/// insert; replays are looked up first and remain valid after the cap is hit.
+pub(crate) const MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE: usize = 4_096;
+const LIFECYCLE_OPERATION_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// One reconciliation pass record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,7 +283,7 @@ impl Store {
         request: &LifecycleOperationRequest,
     ) -> StoreResult<(LifecycleOperationRow, bool)> {
         let mut conn = self.lock_conn()?;
-        let transaction = conn.transaction()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = lifecycle_operation_query(
             &transaction,
             &request.instance_slug,
@@ -280,6 +303,38 @@ impl Store {
             transaction.commit()?;
             return Ok((existing, false));
         }
+        let mut operation_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM lifecycle_operations WHERE instance_slug = ?1",
+            [&request.instance_slug],
+            |row| row.get(0),
+        )?;
+        if operation_count >= MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE as i64 {
+            // Nonterminal idempotency records remain durable until resolution.
+            // Reclaim only terminal records older than the replay window, and
+            // only for this instance, before enforcing the hard quota.
+            let cutoff = rfc3339(Timestamp::now().minus(LIFECYCLE_OPERATION_RETENTION));
+            transaction.execute(
+                "DELETE FROM lifecycle_operations
+                 WHERE instance_slug = ?1
+                   AND created_at < ?2
+                   AND phase COLLATE NOCASE IN ('completed', 'canceled', 'cancelled', 'rejected')",
+                params![request.instance_slug, cutoff],
+            )?;
+            operation_count = transaction.query_row(
+                "SELECT COUNT(*) FROM lifecycle_operations WHERE instance_slug = ?1",
+                [&request.instance_slug],
+                |row| row.get(0),
+            )?;
+            if operation_count >= MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE as i64 {
+                return Err(
+                    StoreError::new(ExitClass::Unavailable, "store.lifecycle.operation_quota")
+                        .with_remediation(
+                            "wait for pending operations to become terminal or for the terminal replay window to expire before submitting a new operation",
+                        ),
+                );
+            }
+        }
+        let accepted_at = Timestamp::now();
         let current_version = transaction
             .query_row(
                 "SELECT resource_version FROM instances WHERE instance_slug = ?1",
@@ -309,7 +364,7 @@ impl Store {
                  updated_at = excluded.updated_at",
             params![
                 request.instance_slug,
-                rfc3339(request.created_at),
+                rfc3339(accepted_at),
                 request.desired_state,
                 next_version as i64,
                 request.desired_slots.map(i64::from),
@@ -330,7 +385,7 @@ impl Store {
                 request.desired_state,
                 request.desired_slots.map(i64::from),
                 next_version as i64,
-                rfc3339(request.created_at),
+                rfc3339(accepted_at),
             ],
         )?;
         transaction.commit()?;
@@ -346,7 +401,7 @@ impl Store {
                 desired_slots: request.desired_slots,
                 resource_version: next_version,
                 phase: "accepted".to_owned(),
-                created_at: request.created_at,
+                created_at: accepted_at,
             },
             true,
         ))
@@ -626,9 +681,22 @@ impl Store {
     ///
     /// # Errors
     /// Envelope-classified persistence failures.
-    pub fn append_event(&self, row: &EventRow) -> StoreResult<()> {
-        let conn = self.lock_conn()?;
-        conn.execute(
+    pub fn append_event(&self, row: &EventRow) -> StoreResult<u64> {
+        let mut conn = self.lock_conn()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let id = Self::append_event_in_transaction(&transaction, row)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    /// Insert one validated event into an already-open transaction.
+    fn append_event_in_transaction(
+        transaction: &rusqlite::Transaction<'_>,
+        row: &EventRow,
+    ) -> StoreResult<u64> {
+        validate_event_row(row)?;
+        transaction.execute(
             "INSERT INTO events (instance_slug, event_kind, subject, correlation_id, occurred_at, detail)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -640,7 +708,152 @@ impl Store {
                 row.detail,
             ],
         )?;
-        Ok(())
+        let id = u64::try_from(transaction.last_insert_rowid())
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.event.id.range"))?;
+        let id_i64 = i64::try_from(id)
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.event.id.range"))?;
+        transaction.execute(
+            "INSERT INTO event_stream_state
+                (instance_slug, first_retained_id, high_water_id, updated_at)
+             VALUES (?1, ?2, ?2, ?3)
+             ON CONFLICT (instance_slug) DO UPDATE SET
+                first_retained_id = CASE
+                    WHEN event_stream_state.first_retained_id > event_stream_state.high_water_id
+                    THEN excluded.first_retained_id
+                    ELSE event_stream_state.first_retained_id
+                END,
+                high_water_id = excluded.high_water_id,
+                updated_at = excluded.updated_at",
+            params![row.instance_slug, id_i64, rfc3339(Timestamp::now())],
+        )?;
+        Ok(id)
+    }
+
+    /// Read a bounded instance-scoped event window and its cursor watermarks
+    /// under one SQLite read transaction.
+    pub fn event_window(
+        &self,
+        instance_slug: &str,
+        after_id: u64,
+        resource_kind: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<EventWindow> {
+        if limit == 0 || limit > 4_096 {
+            return Err(StoreError::new(ExitClass::Usage, "store.event.limit"));
+        }
+        let after_id = i64::try_from(after_id)
+            .map_err(|_| StoreError::new(ExitClass::Usage, "store.event.cursor"))?;
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction()?;
+        let (first, high): (i64, i64) = transaction
+            .query_row(
+                "SELECT first_retained_id, high_water_id
+                 FROM event_stream_state WHERE instance_slug = ?1",
+                [instance_slug],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((1, 0));
+        let first_retained_id = u64::try_from(first)
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.event.id.range"))?;
+        let high_water_id = u64::try_from(high)
+            .map_err(|_| StoreError::new(ExitClass::Operation, "store.event.id.range"))?;
+        let mut events = Vec::new();
+        if let Some(kind) = resource_kind {
+            // Query the two indexed predicates independently. SQLite cannot
+            // use both `(instance, kind, id)` and `(instance, subject, id)`
+            // efficiently for one OR expression. `limit` rows from each
+            // predicate are sufficient: any omitted row has at least `limit`
+            // rows from the same predicate ahead of it.
+            let mut kind_statement = transaction.prepare(
+                "SELECT id, event_kind, subject, correlation_id, occurred_at, detail
+                 FROM events
+                 WHERE instance_slug = ?1 AND event_kind = ?3 COLLATE NOCASE AND id > ?2
+                 ORDER BY id ASC LIMIT ?4",
+            )?;
+            let mut kind_rows =
+                kind_statement.query(params![instance_slug, after_id, kind, limit])?;
+            while let Some(row) = kind_rows.next()? {
+                events.push(decode_stored_event(row, instance_slug)?);
+            }
+            drop(kind_rows);
+            drop(kind_statement);
+
+            let mut subject_statement = transaction.prepare(
+                "SELECT id, event_kind, subject, correlation_id, occurred_at, detail
+                 FROM events
+                 WHERE instance_slug = ?1 AND subject = ?3 COLLATE NOCASE AND id > ?2
+                 ORDER BY id ASC LIMIT ?4",
+            )?;
+            let mut subject_rows =
+                subject_statement.query(params![instance_slug, after_id, kind, limit])?;
+            while let Some(row) = subject_rows.next()? {
+                events.push(decode_stored_event(row, instance_slug)?);
+            }
+            drop(subject_rows);
+            drop(subject_statement);
+            events.sort_unstable_by_key(|event| event.id);
+            events.dedup_by_key(|event| event.id);
+            events.truncate(limit as usize);
+        } else {
+            let mut statement = transaction.prepare(
+                "SELECT id, event_kind, subject, correlation_id, occurred_at, detail
+                 FROM events
+                 WHERE instance_slug = ?1 AND id > ?2
+                 ORDER BY id ASC LIMIT ?3",
+            )?;
+            let mut rows = statement.query(params![instance_slug, after_id, limit])?;
+            while let Some(row) = rows.next()? {
+                events.push(decode_stored_event(row, instance_slug)?);
+            }
+            drop(rows);
+            drop(statement);
+        }
+        transaction.commit()?;
+        Ok(EventWindow {
+            first_retained_id: (high_water_id > 0).then_some(first_retained_id),
+            high_water_id: (high_water_id > 0).then_some(high_water_id),
+            events,
+        })
+    }
+
+    /// Read a bounded instance-scoped event window by its opaque row id.
+    pub fn events_after(
+        &self,
+        instance_slug: &str,
+        after_id: u64,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredEvent>> {
+        Ok(self
+            .event_window(instance_slug, after_id, None, limit)?
+            .events)
+    }
+
+    /// Return the retained and high-water id bounds for one instance.
+    pub fn event_bounds(&self, instance_slug: &str) -> StoreResult<(Option<u64>, Option<u64>)> {
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction()?;
+        let bounds: Option<(i64, i64)> = transaction
+            .query_row(
+                "SELECT first_retained_id, high_water_id
+                 FROM event_stream_state WHERE instance_slug = ?1",
+                [instance_slug],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        transaction.commit()?;
+        bounds
+            .map(|(first, high)| {
+                Ok((
+                    Some(u64::try_from(first).map_err(|_| {
+                        StoreError::new(ExitClass::Operation, "store.event.id.range")
+                    })?),
+                    Some(u64::try_from(high).map_err(|_| {
+                        StoreError::new(ExitClass::Operation, "store.event.id.range")
+                    })?),
+                ))
+            })
+            .unwrap_or(Ok((None, None)))
     }
 
     /// Record the start of a reconciliation pass and return its row id.
@@ -740,6 +953,280 @@ impl Store {
         )?;
         Ok(count)
     }
+}
+
+pub(crate) const MAX_EVENT_TEXT_BYTES: usize = 512;
+pub(crate) const MAX_EVENT_DETAIL_BYTES: usize = 4 * 1024;
+const EVENT_SECRET_KEYS: &[&str] = &["authorization", "password", "passwd", "secret", "token"];
+const EVENT_SECRET_MARKERS: &[&str] = &[
+    "bearer ",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "begin private key",
+];
+
+/// Validate the shared event contract before either memory or durable writes.
+///
+/// Identity fields use the model's closed slug contract. Details are bounded,
+/// control-free, and reject credential-shaped content except for an exact
+/// `[REDACTED]` value. Keeping this seam shared prevents the in-memory stream
+/// from accepting data that the durable store would later reject.
+pub(crate) fn validate_event_contract(
+    instance_slug: &str,
+    event_kind: &str,
+    subject: &str,
+    correlation_id: Option<&str>,
+    detail: Option<&str>,
+) -> StoreResult<()> {
+    let required = [
+        (instance_slug, "instance_slug"),
+        (event_kind, "event_kind"),
+        (subject, "subject"),
+    ];
+    if required
+        .iter()
+        .any(|(value, _)| value.trim().is_empty() || value.len() > MAX_EVENT_TEXT_BYTES)
+        || correlation_id
+            .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_EVENT_TEXT_BYTES)
+        || detail.is_some_and(|value| {
+            value.len() > MAX_EVENT_DETAIL_BYTES || value.chars().any(char::is_control)
+        })
+    {
+        return Err(StoreError::new(ExitClass::Usage, "store.event.invalid"));
+    }
+    for (value, field) in required {
+        if Slug::validate(field, value).is_err() {
+            return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
+        }
+    }
+    if let Some(value) = correlation_id {
+        if Slug::validate("correlation_id", value).is_err() {
+            return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
+        }
+    }
+    if required
+        .iter()
+        .map(|(value, _)| *value)
+        .chain(correlation_id)
+        .chain(detail)
+        .any(event_text_has_secret_marker)
+    {
+        return Err(StoreError::new(
+            ExitClass::Operation,
+            "store.event.secret_marker",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_event_row(row: &EventRow) -> StoreResult<()> {
+    validate_event_contract(
+        &row.instance_slug,
+        &row.event_kind,
+        &row.subject,
+        row.correlation_id.as_deref(),
+        row.detail.as_deref(),
+    )
+}
+
+fn decode_stored_event(
+    row: &rusqlite::Row<'_>,
+    instance_slug: &str,
+) -> rusqlite::Result<StoredEvent> {
+    let id = row.get::<_, i64>(0)?;
+    let id = u64::try_from(id).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, id))?;
+    let occurred_at_raw = row.get::<_, String>(4)?;
+    let occurred_at = Timestamp::parse(&occurred_at_raw)
+        .map_err(|_| rusqlite::Error::InvalidParameterName("event occurred_at".to_owned()))?;
+    let event = EventRow {
+        instance_slug: instance_slug.to_owned(),
+        event_kind: row.get(1)?,
+        subject: row.get(2)?,
+        correlation_id: row.get(3)?,
+        occurred_at,
+        detail: row.get(5)?,
+    };
+    validate_event_row(&event).map_err(|_| {
+        rusqlite::Error::InvalidParameterName("event violates sanitized contract".to_owned())
+    })?;
+    Ok(StoredEvent { id, row: event })
+}
+
+fn event_text_has_secret_marker(value: &str) -> bool {
+    let normalized = normalize_escaped_text(value);
+    let lowered = normalized.to_ascii_lowercase();
+    if EVENT_SECRET_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return true;
+    }
+    if EVENT_SECRET_KEYS
+        .iter()
+        .any(|key| secret_key_has_value(&lowered, key))
+    {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(&normalized)
+        .is_ok_and(|json| json_contains_secret(&json))
+}
+
+fn normalize_escaped_text(value: &str) -> String {
+    let mut normalized = value.to_owned();
+    // Each successful pass consumes at least one escape sequence, so this
+    // reaches a fixed point without imposing a depth that an attacker can
+    // exceed with repeatedly escaped input.
+    loop {
+        let next = decode_escaped_text_once(&normalized);
+        if next == normalized {
+            break;
+        }
+        normalized = next;
+    }
+    normalized
+}
+
+fn decode_escaped_text_once(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut normalized = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            if let Some((decoded, consumed)) = decode_escape(bytes, index) {
+                normalized.push(decoded);
+                index += consumed;
+                continue;
+            }
+        }
+        if let Some(character) = value[index..].chars().next() {
+            normalized.push(character);
+            index += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    normalized
+}
+
+fn decode_escape(bytes: &[u8], index: usize) -> Option<(char, usize)> {
+    let marker = *bytes.get(index + 1)?;
+    if marker == b'\\' {
+        return Some(('\\', 2));
+    }
+    let (digits_start, digits) = match marker {
+        b'x' => (index + 2, 2),
+        b'u' => {
+            if bytes.get(index + 2) == Some(&b'{') {
+                let end = bytes[index + 3..].iter().position(|byte| *byte == b'}')? + index + 3;
+                let digits = end.checked_sub(index + 3)?;
+                if !(1..=6).contains(&digits) {
+                    return None;
+                }
+                let codepoint = parse_hex(&bytes[index + 3..end])?;
+                return char::from_u32(codepoint).map(|character| (character, end + 1 - index));
+            }
+            (index + 2, 4)
+        }
+        b'U' => (index + 2, 8),
+        _ => return None,
+    };
+    let end = digits_start.checked_add(digits)?;
+    let codepoint = parse_hex(bytes.get(digits_start..end)?)?;
+    char::from_u32(codepoint).map(|character| (character, end - index))
+}
+
+fn parse_hex(bytes: &[u8]) -> Option<u32> {
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' => u32::from(byte - b'a' + 10),
+            b'A'..=b'F' => u32::from(byte - b'A' + 10),
+            _ => return None,
+        };
+        value.checked_mul(16)?.checked_add(digit)
+    })
+}
+
+fn json_contains_secret(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            let sensitive = EVENT_SECRET_KEYS
+                .iter()
+                .any(|candidate| key.eq_ignore_ascii_case(candidate));
+            (sensitive && !json_value_is_exact_redaction(value)) || json_contains_secret(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(json_contains_secret),
+        serde_json::Value::String(text) => event_text_has_secret_marker(text),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+fn json_value_is_exact_redaction(value: &serde_json::Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|text| text.eq_ignore_ascii_case("[REDACTED]"))
+}
+
+fn secret_key_has_value(text: &str, key: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = text[offset..].find(key) {
+        let start = offset + index;
+        let preceded_by_name_char = text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'));
+        if !preceded_by_name_char {
+            let mut suffix = text[start + key.len()..].trim_start();
+            if suffix.starts_with('"') {
+                suffix = suffix[1..].trim_start();
+            }
+            if suffix.starts_with('=') || suffix.starts_with(':') {
+                suffix = suffix[1..].trim_start();
+                if !is_exact_redaction(suffix) {
+                    return true;
+                }
+            }
+        }
+        offset = start + key.len();
+        if offset >= text.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn is_exact_redaction(value: &str) -> bool {
+    let mut suffix = value.trim_start();
+    let quote = suffix
+        .as_bytes()
+        .first()
+        .copied()
+        .filter(|byte| matches!(byte, b'"' | b'\''));
+    if quote.is_some() {
+        suffix = &suffix[1..];
+    }
+    let Some(rest) = suffix.strip_prefix("[redacted]") else {
+        return false;
+    };
+    let mut rest = rest;
+    if let Some(quote) = quote {
+        if rest.as_bytes().first().copied() != Some(quote) {
+            return false;
+        }
+        rest = &rest[1..];
+    }
+    let rest = rest.trim_start();
+    rest.is_empty()
+        || rest
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| matches!(byte, b',' | b'}' | b']'))
 }
 
 fn lifecycle_operation_query(
@@ -945,17 +1432,16 @@ fn record_job_transition_in_transaction(
         return Err(StoreError::new(ExitClass::Unavailable, "store.job.missing")
             .with_remediation(format!("job {job_uid} is not recorded for this instance")));
     }
-    transaction.execute(
-        "INSERT INTO events (instance_slug, event_kind, subject, correlation_id, occurred_at, detail)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            instance_slug,
-            format!("job.transition.{}", transition.reason.as_str()),
-            job_uid,
-            transition.correlation_id.as_str(),
-            rfc3339(transition.transition_time),
-            transition.message,
-        ],
+    Store::append_event_in_transaction(
+        transaction,
+        &EventRow {
+            instance_slug: instance_slug.to_owned(),
+            event_kind: format!("job.transition.{}", transition.reason.as_str()),
+            subject: job_uid.to_owned(),
+            correlation_id: Some(transition.correlation_id.as_str().to_owned()),
+            occurred_at: transition.transition_time,
+            detail: transition.message.clone(),
+        },
     )?;
     Ok(true)
 }
@@ -1103,4 +1589,404 @@ fn summary_decode(field: &'static str) -> StoreError {
 #[cfg(test)]
 pub(crate) fn test_connection(store: &Store) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
     store.lock_conn().expect("store lock poisoned")
+}
+
+#[cfg(test)]
+mod event_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    struct TempDb {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "velnor-event-store-{}-{}",
+                std::process::id(),
+                Timestamp::now()
+                    .as_offset_datetime()
+                    .unix_timestamp_nanos()
+                    .unsigned_abs()
+            ));
+            std::fs::create_dir_all(&dir).expect("temp directory");
+            Self {
+                path: dir.join("state.db"),
+                dir,
+            }
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn event(instance: &str, subject: &str, kind: &str) -> EventRow {
+        EventRow {
+            instance_slug: instance.to_owned(),
+            event_kind: kind.to_owned(),
+            subject: subject.to_owned(),
+            correlation_id: None,
+            occurred_at: Timestamp::UNIX_EPOCH,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn normalized_events_are_bounded_and_instance_scoped() {
+        let temp = TempDb::new();
+        let store = Store::open(&temp.path).expect("open store");
+        let first = store
+            .append_event(&event("a", "job-a", "job.started"))
+            .expect("append a");
+        let second = store
+            .append_event(&event("b", "job-b", "job.started"))
+            .expect("append b");
+        store
+            .append_event(&event("a", "job-a", "job.completed"))
+            .expect("append a completion");
+
+        assert_eq!(
+            store.event_bounds("a").expect("bounds a"),
+            (Some(first), Some(second + 1))
+        );
+        assert_eq!(
+            store.event_bounds("b").expect("bounds b"),
+            (Some(second), Some(second))
+        );
+        let rows = store.events_after("a", first, 1).expect("read a");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, second + 1);
+        assert_eq!(rows[0].row.instance_slug, "a");
+    }
+
+    #[test]
+    fn filtered_event_windows_merge_indexed_kind_and_subject_matches() {
+        let temp = TempDb::new();
+        let store = Store::open(&temp.path).expect("open store");
+        store
+            .append_event(&event("a", "unrelated", "other"))
+            .expect("append unrelated");
+        let kind_match = store
+            .append_event(&event("a", "job-a", "Ready"))
+            .expect("append kind match");
+        let both_match = store
+            .append_event(&event("a", "ready", "READY"))
+            .expect("append dual match");
+        store
+            .append_event(&event("a", "job-b", "other"))
+            .expect("append second unrelated");
+        let fourth_match = store
+            .append_event(&event("a", "job-c", "ready"))
+            .expect("append fourth match");
+        store
+            .append_event(&event("b", "ready", "READY"))
+            .expect("append other instance");
+
+        let window = store
+            .event_window("a", 0, Some("ready"), 3)
+            .expect("read filtered events");
+        assert_eq!(
+            window
+                .events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![kind_match, both_match, fourth_match]
+        );
+        assert!(window
+            .events
+            .iter()
+            .all(|event| event.row.instance_slug == "a"));
+    }
+
+    #[test]
+    fn event_contract_rejects_secret_forms_and_controls() {
+        let valid = event("a", "job-a", "job.started");
+        assert!(validate_event_row(&valid).is_ok());
+
+        for detail in [
+            "token=[REDACTED]LEAK",
+            "{\"token\":\"[REDACTED]LEAK\"}",
+            "{\"\\u0074oken\":\"secret\"}",
+            r"tok\u0065n=REAL_SECRET",
+            r"tok\x65n=REAL_SECRET",
+            r"tok\U00000065n=REAL_SECRET",
+            "Authorization: Bearer abc",
+            "secret: value",
+            "safe\nlog",
+        ] {
+            let mut candidate = valid.clone();
+            candidate.detail = Some(detail.to_owned());
+            assert!(validate_event_row(&candidate).is_err(), "detail={detail:?}");
+        }
+
+        let mut redacted = valid;
+        redacted.detail = Some("{\"token\":\"[REDACTED]\"}".to_owned());
+        assert!(validate_event_row(&redacted).is_ok());
+
+        let mut escaped_redacted = event("a", "job-a", "job.started");
+        escaped_redacted.detail = Some(r"tok\u0065n=[REDACTED]".to_owned());
+        assert!(validate_event_row(&escaped_redacted).is_ok());
+    }
+
+    #[test]
+    fn event_contract_enforces_shared_limits_and_identity() {
+        let valid = event("a", "job-a", "job.started");
+
+        let mut too_long = valid.clone();
+        too_long.subject = "x".repeat(MAX_EVENT_TEXT_BYTES + 1);
+        assert!(validate_event_row(&too_long).is_err());
+
+        let mut too_long_detail = valid.clone();
+        too_long_detail.detail = Some("x".repeat(MAX_EVENT_DETAIL_BYTES + 1));
+        assert!(validate_event_row(&too_long_detail).is_err());
+
+        let mut invalid_identity = valid;
+        invalid_identity.subject = "job name".to_owned();
+        assert!(validate_event_row(&invalid_identity).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn durable_operation_quota_is_per_instance_and_replays_at_capacity() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-quota-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let path = directory.join("state.db");
+        let store = Store::open(&path).expect("open store");
+        let created_at = rfc3339(Timestamp::UNIX_EPOCH);
+        let mut connection = test_connection(&store);
+        let transaction = connection.transaction().expect("transaction");
+        for index in 0..MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE {
+            let phase = if index + 1 == MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE {
+                "pending"
+            } else {
+                "accepted"
+            };
+            transaction
+                .execute(
+                    "INSERT INTO lifecycle_operations
+                     (instance_slug, idempotency_key, operation_id, kind, target, reason,
+                      desired_state, desired_slots, resource_version, phase, created_at)
+                     VALUES (?1, ?2, ?3, 'cordon', ?1, 'test', 'cordoned', NULL, 1,
+                             ?4, ?5)",
+                    params![
+                        "primary",
+                        format!("key-{index}"),
+                        format!("op-{index}"),
+                        phase,
+                        created_at.as_str()
+                    ],
+                )
+                .expect("seed operation");
+        }
+        transaction.commit().expect("commit seed");
+        drop(connection);
+
+        let request = LifecycleOperationRequest {
+            instance_slug: "primary".to_owned(),
+            kind: "cordon".to_owned(),
+            target: "primary".to_owned(),
+            reason: "test".to_owned(),
+            idempotency_key: "key-0".to_owned(),
+            desired_state: "cordoned".to_owned(),
+            desired_slots: None,
+            expected_version: None,
+            operation_id: "new-op".to_owned(),
+            created_at: Timestamp::UNIX_EPOCH,
+        };
+        let (_, replayed) = store
+            .record_lifecycle_operation(&request)
+            .expect("replay at quota");
+        assert!(!replayed);
+
+        let mut fresh = request.clone();
+        fresh.idempotency_key = "new-primary".to_owned();
+        assert_eq!(
+            store
+                .record_lifecycle_operation(&fresh)
+                .expect_err("primary quota must reject fresh key")
+                .envelope
+                .reason,
+            "store.lifecycle.operation_quota"
+        );
+
+        let connection = test_connection(&store);
+        let retained_nonterminal: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM lifecycle_operations
+                 WHERE instance_slug = 'primary'
+                   AND phase IN ('accepted', 'pending')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count retained nonterminal operations");
+        assert_eq!(
+            retained_nonterminal,
+            MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE as i64
+        );
+        drop(connection);
+
+        fresh.instance_slug = "secondary".to_owned();
+        fresh.target = "secondary".to_owned();
+        fresh.idempotency_key = "new-secondary".to_owned();
+        assert!(
+            store
+                .record_lifecycle_operation(&fresh)
+                .expect("secondary has independent quota")
+                .1
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn old_request_timestamp_does_not_reclaim_fresh_operation() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-request-time-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let path = directory.join("state.db");
+        let store = Store::open(&path).expect("open store");
+        let created_at = rfc3339(Timestamp::now());
+        let mut connection = test_connection(&store);
+        let transaction = connection.transaction().expect("transaction");
+        for index in 0..(MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE - 1) {
+            transaction
+                .execute(
+                    "INSERT INTO lifecycle_operations
+                     (instance_slug, idempotency_key, operation_id, kind, target, reason,
+                      desired_state, desired_slots, resource_version, phase, created_at)
+                     VALUES ('primary', ?1, ?2, 'cordon', 'primary', 'test', 'cordoned', NULL, 1,
+                             'accepted', ?3)",
+                    params![
+                        format!("key-{index}"),
+                        format!("op-{index}"),
+                        created_at.as_str()
+                    ],
+                )
+                .expect("seed operation");
+        }
+        transaction.commit().expect("commit seed");
+        drop(connection);
+
+        let request = LifecycleOperationRequest {
+            instance_slug: "primary".to_owned(),
+            kind: "cordon".to_owned(),
+            target: "primary".to_owned(),
+            reason: "test".to_owned(),
+            idempotency_key: "fresh-key".to_owned(),
+            desired_state: "cordoned".to_owned(),
+            desired_slots: None,
+            expected_version: None,
+            operation_id: "fresh-op".to_owned(),
+            created_at: Timestamp::UNIX_EPOCH,
+        };
+        let (accepted, fresh) = store
+            .record_lifecycle_operation(&request)
+            .expect("fresh operation");
+        assert!(fresh);
+        assert_ne!(accepted.created_at, Timestamp::UNIX_EPOCH);
+
+        let mut retry = request;
+        retry.idempotency_key = "another-key".to_owned();
+        retry.operation_id = "another-op".to_owned();
+        assert_eq!(
+            store
+                .record_lifecycle_operation(&retry)
+                .expect_err("fresh accepted operation must remain quota-protected")
+                .envelope
+                .reason,
+            "store.lifecycle.operation_quota"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn stale_terminal_operations_reclaim_capacity() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-terminal-retention-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let path = directory.join("state.db");
+        let store = Store::open(&path).expect("open store");
+        let mut connection = test_connection(&store);
+        let transaction = connection.transaction().expect("transaction");
+        let terminal_phases = ["completed", "canceled", "cancelled", "rejected"];
+        for index in 0..MAX_LIFECYCLE_OPERATIONS_PER_INSTANCE {
+            transaction
+                .execute(
+                    "INSERT INTO lifecycle_operations
+                     (instance_slug, idempotency_key, operation_id, kind, target, reason,
+                      desired_state, desired_slots, resource_version, phase, created_at)
+                     VALUES ('primary', ?1, ?2, 'cordon', 'primary', 'test', 'cordoned',
+                             NULL, 1, ?3, ?4)",
+                    params![
+                        format!("terminal-key-{index}"),
+                        format!("terminal-op-{index}"),
+                        terminal_phases[index % terminal_phases.len()],
+                        rfc3339(Timestamp::UNIX_EPOCH),
+                    ],
+                )
+                .expect("seed terminal operation");
+        }
+        transaction.commit().expect("commit seed");
+        drop(connection);
+
+        let request = LifecycleOperationRequest {
+            instance_slug: "primary".to_owned(),
+            kind: "cordon".to_owned(),
+            target: "primary".to_owned(),
+            reason: "test".to_owned(),
+            idempotency_key: "fresh-key".to_owned(),
+            desired_state: "cordoned".to_owned(),
+            desired_slots: None,
+            expected_version: None,
+            operation_id: "fresh-op".to_owned(),
+            created_at: Timestamp::now(),
+        };
+        assert!(
+            store
+                .record_lifecycle_operation(&request)
+                .expect("terminal rows reclaim capacity")
+                .1
+        );
+
+        let connection = test_connection(&store);
+        let retained: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM lifecycle_operations WHERE instance_slug = 'primary'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count retained operations");
+        assert_eq!(retained, 1);
+        drop(connection);
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }

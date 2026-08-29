@@ -124,6 +124,7 @@ impl Store {
             let (more_events, deleted_jobs, deleted_transitions) =
                 Self::prune_terminal_jobs(&transaction, budget, now)?;
             let deleted_events = deleted_events.saturating_add(more_events);
+            refresh_event_stream_state(&transaction, now)?;
             if let Some(hook) = hook {
                 hook(PrunePhase::AfterJobPrune)?;
             }
@@ -396,6 +397,25 @@ impl Store {
         }
         Ok((deleted_events, deleted_jobs, deleted_transitions))
     }
+}
+
+/// Keep cursor validity independent from currently retained rows. A fully
+/// pruned stream still rejects cursors below its high-water mark.
+fn refresh_event_stream_state(conn: &rusqlite::Connection, now: Timestamp) -> StoreResult<()> {
+    conn.execute(
+        "UPDATE event_stream_state
+         SET first_retained_id = COALESCE(
+                 (SELECT MIN(id) FROM events WHERE events.instance_slug = event_stream_state.instance_slug),
+                 high_water_id + 1
+             ),
+             high_water_id = MAX(
+                 high_water_id,
+                 COALESCE((SELECT MAX(id) FROM events WHERE events.instance_slug = event_stream_state.instance_slug), 0)
+             ),
+             updated_at = ?1",
+        [rfc3339(now)],
+    )?;
+    Ok(())
 }
 
 /// Delete one job row plus its transitions and its own job events; returns

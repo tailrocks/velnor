@@ -17,6 +17,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use velnor_model::{ExitClass, MachineErrorEnvelope, SCHEMA_VERSION};
 
 use velnor_control::ports::{
@@ -27,6 +28,8 @@ use velnor_control::ports::{
 /// Shared application ports held by HTTP handlers.
 #[derive(Clone)]
 pub struct ApiState {
+    /// Exact daemon instance authorized by this API state.
+    instance: Arc<str>,
     /// Resource query implementation.
     pub query: Arc<dyn QueryPort>,
     /// Ordered event observation implementation.
@@ -35,22 +38,39 @@ pub struct ApiState {
     pub logs: Arc<dyn LogPort>,
     /// Lifecycle/reconciliation mutation implementation.
     pub mutation: Arc<dyn MutationPort>,
+    /// Shared admission bound for synchronous application-port work.
+    blocking: Arc<Semaphore>,
 }
 
+const APPLICATION_BLOCKING_CONCURRENCY: usize = 16;
+
 impl ApiState {
-    /// Build transport state from the one daemon-owned application bundle.
+    /// Build transport state bound to one daemon instance.
     ///
-    /// Callers must construct production services with
-    /// [`ApplicationServices::with_store`]; this constructor never creates a
-    /// second projection, log buffer, or lifecycle ledger.
+    /// The admin route compares its path instance with this identity before
+    /// invoking the mutation port. Callers must construct production services
+    /// with [`ApplicationServices::with_store`]; this constructor never creates
+    /// a second projection, log buffer, or lifecycle ledger.
     #[must_use]
-    pub fn from_services(services: &velnor_control::application::ApplicationServices) -> Self {
+    pub fn from_services_for_instance(
+        services: &velnor_control::application::ApplicationServices,
+        instance: impl Into<String>,
+    ) -> Self {
         Self {
+            instance: Arc::from(instance.into()),
             query: services.query(),
             watch: services.events(),
             logs: services.logs(),
             mutation: services.lifecycle(),
+            blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
         }
+    }
+
+    /// Build an in-memory state for unit tests using the default instance.
+    #[cfg(test)]
+    #[must_use]
+    pub fn from_services(services: &velnor_control::application::ApplicationServices) -> Self {
+        Self::from_services_for_instance(services, "default")
     }
 }
 
@@ -137,7 +157,6 @@ pub fn bind_unix(
     mode: u32,
     group_name: &str,
 ) -> Result<tokio::net::UnixListener, std::io::Error> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::os::unix::io::AsRawFd;
 
     let group = group_id(group_name).ok_or_else(|| {
@@ -154,32 +173,9 @@ pub fn bind_unix(
         )
     })?;
     inspect_directory_chain(parent)?;
-    if let Ok(existing) = std::fs::symlink_metadata(path) {
-        if !existing.file_type().is_socket() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "refusing to replace non-socket control path",
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let owner = unsafe { libc::geteuid() } as u32;
-            if existing.uid() != owner && owner != 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "refusing to replace a foreign-owned control socket",
-                ));
-            }
-        }
-        if existing.gid() != group {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "refusing to replace a socket with the wrong group owner",
-            ));
-        }
-        std::fs::remove_file(path)?;
-    }
+    // `bind` is the atomic ownership claim. Never unlink an existing path:
+    // check-then-remove would let a sibling replace the pathname between the
+    // metadata check and the unlink, and could destroy an unrelated endpoint.
     let listener = tokio::net::UnixListener::bind(path)?;
     let fd = listener.as_raw_fd();
     // SAFETY: `fd` is borrowed from the live listener and the sentinel uid
@@ -188,14 +184,12 @@ pub fn bind_unix(
     if chown_result != 0 {
         let error = std::io::Error::last_os_error();
         drop(listener);
-        let _ = std::fs::remove_file(path);
         return Err(error);
     }
     // SAFETY: `fd` is a live Unix listener descriptor.
     if unsafe { libc::fchmod(fd, mode as libc::mode_t) } != 0 {
         let error = std::io::Error::last_os_error();
         drop(listener);
-        let _ = std::fs::remove_file(path);
         return Err(error);
     }
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -203,14 +197,12 @@ pub fn bind_unix(
     if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
         let error = std::io::Error::last_os_error();
         drop(listener);
-        let _ = std::fs::remove_file(path);
         return Err(error);
     }
     // SAFETY: fstat initialized `stat` on success.
     let stat = unsafe { stat.assume_init() };
     if stat.st_gid != group || stat.st_mode as u32 & 0o777 != mode {
         drop(listener);
-        let _ = std::fs::remove_file(path);
         return Err(std::io::Error::other(
             "bound control socket ownership or mode was not enforced",
         ));
@@ -452,14 +444,18 @@ async fn query_resource(
     AxumPath(resource_kind): AxumPath<String>,
     Query(params): Query<QueryParams>,
 ) -> Result<Json<QueryPage>, ApiError> {
-    let page = state.query.query(QueryRequest {
-        resource_kind,
-        selector: params.selector,
-        field_selector: params.field_selector,
-        page_token: params.page_token,
-        limit: params.limit.unwrap_or(100),
-        since: params.since,
-    })?;
+    let query = Arc::clone(&state.query);
+    let page = run_application_call(state.blocking.clone(), move || {
+        query.query(QueryRequest {
+            resource_kind,
+            selector: params.selector,
+            field_selector: params.field_selector,
+            page_token: params.page_token,
+            limit: params.limit.unwrap_or(100),
+            since: params.since,
+        })
+    })
+    .await?;
     Ok(Json(page))
 }
 
@@ -484,23 +480,33 @@ async fn logs(
     AxumPath(subject): AxumPath<String>,
     Query(params): Query<LogParams>,
 ) -> Result<Json<Vec<velnor_control::ports::LogItem>>, ApiError> {
-    Ok(Json(state.logs.logs(LogRequest {
-        subject,
-        source: params.source,
-        cursor: params.cursor,
-        limit: params.limit.unwrap_or(100),
-    })?))
+    let logs = Arc::clone(&state.logs);
+    let records = run_application_call(state.blocking.clone(), move || {
+        logs.logs(LogRequest {
+            subject,
+            source: params.source,
+            cursor: params.cursor,
+            limit: params.limit.unwrap_or(100),
+        })
+    })
+    .await?;
+    Ok(Json(records))
 }
 
 async fn watch(
     State(state): State<ApiState>,
     Query(params): Query<WatchParams>,
 ) -> Result<Json<Vec<velnor_control::ports::WatchItem>>, ApiError> {
-    Ok(Json(state.watch.watch(WatchRequest {
-        resource_kind: params.resource_kind,
-        after_version: params.after_version,
-        limit: params.limit.unwrap_or(100),
-    })?))
+    let watch = Arc::clone(&state.watch);
+    let events = run_application_call(state.blocking.clone(), move || {
+        watch.watch(WatchRequest {
+            resource_kind: params.resource_kind,
+            after_version: params.after_version,
+            limit: params.limit.unwrap_or(100),
+        })
+    })
+    .await?;
+    Ok(Json(events))
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,6 +531,12 @@ async fn mutate_instance(
     AxumPath((instance, operation)): AxumPath<(String, String)>,
     Json(body): Json<MutationBody>,
 ) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
+    if instance != state.instance.as_ref() {
+        return Err(ApiError::bad_request(
+            "mutation.instance",
+            "path instance does not match daemon instance",
+        ));
+    }
     let kind = parse_mutation(&operation)?;
     if body.operation != operation {
         return Err(ApiError::bad_request(
@@ -532,14 +544,18 @@ async fn mutate_instance(
             "body operation does not match path",
         ));
     }
-    let result = state.mutation.mutate(MutationRequest {
-        kind,
-        target: instance,
-        reason: body.reason,
-        idempotency_key: body.idempotency_key,
-        expected_version: body.expected_version,
-        scale_to: body.slots,
-    })?;
+    let mutation = Arc::clone(&state.mutation);
+    let result = run_application_call(state.blocking.clone(), move || {
+        mutation.mutate(MutationRequest {
+            kind,
+            target: instance,
+            reason: body.reason,
+            idempotency_key: body.idempotency_key,
+            expected_version: body.expected_version,
+            scale_to: body.slots,
+        })
+    })
+    .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(MutationResponse {
@@ -547,6 +563,24 @@ async fn mutate_instance(
             phase: result.phase,
         }),
     ))
+}
+
+async fn run_application_call<T, F>(blocking: Arc<Semaphore>, call: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, velnor_control::ports::PortError> + Send + 'static,
+{
+    let permit = blocking
+        .acquire_owned()
+        .await
+        .map_err(|_| ApiError::operation_failed())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        call()
+    })
+    .await
+    .map_err(|_| ApiError::operation_failed())?
+    .map_err(ApiError::from)
 }
 
 fn parse_mutation(raw: &str) -> Result<MutationKind, ApiError> {
@@ -590,6 +624,12 @@ impl ApiError {
             )
             .with_remediation("connect through an authorized Velnor Unix socket"),
         }
+    }
+
+    fn operation_failed() -> Self {
+        Self::from(velnor_control::ports::PortError::Operation {
+            operation: "application call failed".to_owned(),
+        })
     }
 }
 
@@ -649,8 +689,27 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use velnor_control::ports::{MutationResult, PortError};
     use velnor_model::{AnyResource, Event, ResourceMeta, Source, Timestamp};
+
+    #[derive(Default)]
+    struct RecordingMutation {
+        calls: AtomicUsize,
+    }
+
+    impl MutationPort for RecordingMutation {
+        fn mutate(&self, _request: MutationRequest) -> Result<MutationResult, PortError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(MutationResult {
+                operation_id: "operation-1".to_owned(),
+                phase: "accepted".to_owned(),
+                resource: None,
+            })
+        }
+    }
 
     fn event(kind: &str) -> Event {
         Event {
@@ -730,6 +789,37 @@ mod tests {
             })
             .expect("mutate");
         assert_eq!(result.phase, "accepted");
+    }
+
+    #[tokio::test]
+    async fn admin_rejects_another_instance_before_mutation() {
+        let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
+        let mutation = Arc::new(RecordingMutation::default());
+        let state = ApiState {
+            instance: Arc::from("primary"),
+            query: services.query(),
+            watch: services.events(),
+            logs: services.logs(),
+            mutation: Arc::clone(&mutation) as Arc<dyn MutationPort>,
+            blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
+        };
+
+        let result = mutate_instance(
+            State(state),
+            AxumPath(("other".to_owned(), "cordon".to_owned())),
+            Json(MutationBody {
+                operation: "cordon".to_owned(),
+                reason: "maintenance".to_owned(),
+                idempotency_key: "request-1".to_owned(),
+                expected_version: None,
+                slots: None,
+            }),
+        )
+        .await;
+
+        let error = result.expect_err("foreign instance must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

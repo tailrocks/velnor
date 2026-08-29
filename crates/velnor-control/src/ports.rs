@@ -97,7 +97,7 @@ pub struct WatchRequest {
 }
 
 /// One watch item with a monotonic stream version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct WatchItem {
     /// Monotonic version used for reconnect and gap detection.
     pub version: u64,

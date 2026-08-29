@@ -1,13 +1,19 @@
 //! Bounded, cursor-based sanitized log service.
 
+use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 
 use crate::ports::{LogItem, LogPort, LogRequest, PortError};
+use aho_corasick::{AhoCorasickBuilder, MatchKind};
+use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 const MAX_BUFFER: usize = 16_384;
 const MAX_RECORD_BYTES: usize = 256 * 1024;
 const MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
-
+const MAX_SUBJECT_BYTES: usize = 512;
+const MAX_SECRET_COUNT: usize = 64;
+const MAX_SECRET_BYTES: usize = 16 * 1024;
 #[derive(Clone, Default)]
 struct LogState {
     generation: u64,
@@ -37,10 +43,12 @@ impl LogService {
         message: &str,
         secrets: &[&str],
     ) -> Result<String, PortError> {
-        if subject.trim().is_empty() || source.trim().is_empty() {
+        if !valid_identity(subject) || !valid_identity(source) {
             return Err(PortError::Invalid {
                 field: "subject/source".to_owned(),
-                message: "log subject and source are required".to_owned(),
+                message: format!(
+                    "subject and source are required, control-free, and at most {MAX_SUBJECT_BYTES} bytes"
+                ),
             });
         }
         let sanitized = redact_message(message, secrets)?;
@@ -52,11 +60,33 @@ impl LogService {
                 ),
             });
         }
+        if contains_unredacted_secret(subject, secrets)
+            || contains_unredacted_secret(source, secrets)
+        {
+            return Err(PortError::Invalid {
+                field: "subject/source".to_owned(),
+                message: "subject and source must not contain secrets".to_owned(),
+            });
+        }
         let mut state = self.state.write().map_err(|_| unavailable())?;
         let sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
-        let cursor = format!("v1:{}:{sequence}", state.generation);
-        let record_bytes = sanitized.len();
+        let cursor = format!(
+            "v2:{}:{sequence}:{}",
+            state.generation,
+            cursor_fingerprint(subject, source)
+        );
+        let record_size = subject
+            .len()
+            .saturating_add(source.len())
+            .saturating_add(cursor.len())
+            .saturating_add(sanitized.len());
+        if record_size > MAX_BUFFER_BYTES {
+            return Err(PortError::Invalid {
+                field: "message".to_owned(),
+                message: format!("log record must be at most {MAX_BUFFER_BYTES} bytes"),
+            });
+        }
         state.records.push_back(LogItem {
             subject: subject.to_owned(),
             cursor: cursor.clone(),
@@ -64,10 +94,10 @@ impl LogService {
             sequence,
             message: sanitized,
         });
-        state.bytes = state.bytes.saturating_add(record_bytes);
+        state.bytes = state.bytes.saturating_add(record_size);
         while state.records.len() > MAX_BUFFER || state.bytes > MAX_BUFFER_BYTES {
             if let Some(record) = state.records.pop_front() {
-                state.bytes = state.bytes.saturating_sub(record.message.len());
+                state.bytes = state.bytes.saturating_sub(record_bytes(&record));
             }
             state.generation = state.generation.saturating_add(1);
         }
@@ -77,18 +107,40 @@ impl LogService {
 
 impl LogPort for LogService {
     fn logs(&self, request: LogRequest) -> Result<Vec<LogItem>, PortError> {
-        if request.subject.trim().is_empty()
+        if !valid_identity(&request.subject)
+            || request
+                .source
+                .as_deref()
+                .is_some_and(|source| !valid_identity(source))
             || request.limit == 0
             || request.limit as usize > MAX_BUFFER
         {
             return Err(PortError::Invalid {
                 field: "subject/limit".to_owned(),
-                message: format!("subject is required and limit must be 1..{MAX_BUFFER}"),
+                message: format!(
+                    "subject/source must be nonempty, control-free, and at most {MAX_SUBJECT_BYTES} bytes; limit must be 1..{MAX_BUFFER}"
+                ),
             });
         }
         let state = self.state.read().map_err(|_| unavailable())?;
-        let after = request.cursor.as_deref().map(parse_cursor).transpose()?;
+        let after = request
+            .cursor
+            .as_deref()
+            .map(|cursor| {
+                parse_cursor(
+                    cursor,
+                    &request.subject,
+                    request.source.as_deref().unwrap_or_default(),
+                )
+            })
+            .transpose()?;
         if let Some((generation, sequence)) = after {
+            if sequence >= state.next_sequence {
+                return Err(PortError::Invalid {
+                    field: "cursor".to_owned(),
+                    message: "log cursor is ahead of the stream".to_owned(),
+                });
+            }
             if generation != state.generation
                 && state
                     .records
@@ -100,7 +152,9 @@ impl LogPort for LogService {
                 });
             }
         }
-        Ok(state
+        let mut result = Vec::new();
+        let mut response_bytes = 0_usize;
+        for record in state
             .records
             .iter()
             .filter(|record| {
@@ -111,10 +165,34 @@ impl LogPort for LogService {
                         .is_none_or(|source| source == record.source)
             })
             .filter(|record| after.is_none_or(|(_, sequence)| record.sequence > sequence))
-            .take(request.limit as usize)
-            .cloned()
-            .collect())
+        {
+            let bytes = record_bytes(record);
+            if !result.is_empty() && response_bytes.saturating_add(bytes) > MAX_BUFFER_BYTES {
+                break;
+            }
+            response_bytes = response_bytes.saturating_add(bytes);
+            result.push(record.clone());
+            if result.len() == request.limit as usize {
+                break;
+            }
+        }
+        Ok(result)
     }
+}
+
+fn record_bytes(record: &LogItem) -> usize {
+    record
+        .subject
+        .len()
+        .saturating_add(record.cursor.len())
+        .saturating_add(record.source.len())
+        .saturating_add(record.message.len())
+}
+
+fn valid_identity(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_SUBJECT_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 fn redact_message(message: &str, secrets: &[&str]) -> Result<String, PortError> {
@@ -124,52 +202,118 @@ fn redact_message(message: &str, secrets: &[&str]) -> Result<String, PortError> 
             message: format!("message must be at most {MAX_RECORD_BYTES} bytes"),
         });
     }
-    let replacement = "[REDACTED]";
-    let mut output = String::with_capacity(message.len());
-    let mut index = 0;
-    while index < message.len() {
-        let remaining = &message[index..];
-        let secret = secrets
-            .iter()
-            .copied()
-            .filter(|secret| !secret.is_empty() && remaining.starts_with(secret))
-            .max_by_key(|secret| secret.len());
-        if let Some(secret) = secret {
-            if output.len().saturating_add(replacement.len()) > MAX_RECORD_BYTES {
-                return Err(PortError::Invalid {
-                    field: "message".to_owned(),
-                    message: format!(
-                        "message must be at most {MAX_RECORD_BYTES} bytes after redaction"
-                    ),
-                });
-            }
-            output.push_str(replacement);
-            index += secret.len();
-        } else {
-            let character = remaining
-                .chars()
-                .next()
-                .ok_or_else(|| PortError::Operation {
-                    operation: "log redaction encountered invalid UTF-8 boundary".to_owned(),
-                })?;
-            output.push(character);
-            index += character.len_utf8();
-        }
+    let secret_bytes = secrets
+        .iter()
+        .fold(0_usize, |total, secret| total.saturating_add(secret.len()));
+    if secrets.len() > MAX_SECRET_COUNT || secret_bytes > MAX_SECRET_BYTES {
+        return Err(PortError::Invalid {
+            field: "secrets".to_owned(),
+            message: "secret registry exceeds bounded limits".to_owned(),
+        });
+    }
+    let output = replace_literal_secrets(message, secrets)?;
+    if contains_unredacted_secret(&output, secrets) {
+        return Err(PortError::Invalid {
+            field: "message".to_owned(),
+            message: "message contains an encoded secret and was rejected".to_owned(),
+        });
     }
     Ok(output)
 }
 
-fn parse_cursor(raw: &str) -> Result<(u64, u64), PortError> {
-    let Some(raw) = raw.strip_prefix("v1:") else {
+fn replace_literal_secrets(message: &str, secrets: &[&str]) -> Result<String, PortError> {
+    let patterns: Vec<&str> = secrets
+        .iter()
+        .copied()
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    if patterns.is_empty() {
+        return Ok(message.to_owned());
+    }
+    let matcher = AhoCorasickBuilder::new()
+        .match_kind(MatchKind::LeftmostLongest)
+        .build(&patterns)
+        .map_err(|_| PortError::Operation {
+            operation: "log secret matcher could not be built".to_owned(),
+        })?;
+    let mut output = String::with_capacity(message.len());
+    let mut cursor = 0;
+    for matched in matcher.find_iter(message) {
+        let start = matched.start();
+        let end = matched.end();
+        output.push_str(&message[cursor..start]);
+        output.push_str("[REDACTED]");
+        cursor = end;
+    }
+    output.push_str(&message[cursor..]);
+    if output.len() > MAX_RECORD_BYTES {
+        return Err(PortError::Invalid {
+            field: "message".to_owned(),
+            message: format!("message must be at most {MAX_RECORD_BYTES} bytes after redaction"),
+        });
+    }
+    Ok(output)
+}
+
+/// Detect a supplied secret in canonical Unicode form. Any escape/entity
+/// syntax is rejected whenever a mask registry is active: decoding every
+/// possible shell, URL, JSON, and Unicode dialect safely is not feasible, so
+/// this boundary fails closed instead of persisting an ambiguous payload.
+fn contains_unredacted_secret(message: &str, secrets: &[&str]) -> bool {
+    if secrets.iter().all(|secret| secret.is_empty()) {
+        return false;
+    }
+    let normalized_message: String = message.nfkc().collect();
+    if secrets
+        .iter()
+        .copied()
+        .filter(|secret| !secret.is_empty())
+        .any(|secret| {
+            let normalized_secret: String = secret.nfkc().collect();
+            normalized_message.contains(&normalized_secret)
+        })
+    {
+        return true;
+    }
+    !secrets.is_empty() && has_encoded_syntax(message)
+}
+
+fn has_encoded_syntax(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    bytes.contains(&b'%')
+        || bytes.contains(&b'\\')
+        || bytes.windows(2).any(|window| window == b"&#")
+        || bytes
+            .windows(2)
+            .any(|window| window[0] == b'&' && window[1].is_ascii_alphabetic())
+}
+
+fn parse_cursor(raw: &str, subject: &str, source: &str) -> Result<(u64, u64), PortError> {
+    let Some(raw) = raw.strip_prefix("v2:") else {
         return Err(PortError::Invalid {
             field: "cursor".to_owned(),
             message: "malformed log cursor".to_owned(),
         });
     };
-    let (generation, sequence) = raw.split_once(':').ok_or_else(|| PortError::Invalid {
+    let mut fields = raw.split(':');
+    let generation = fields.next().ok_or_else(|| PortError::Invalid {
         field: "cursor".to_owned(),
         message: "malformed log cursor".to_owned(),
     })?;
+    let sequence = fields.next().ok_or_else(|| PortError::Invalid {
+        field: "cursor".to_owned(),
+        message: "malformed log cursor".to_owned(),
+    })?;
+    let fingerprint = fields.next().ok_or_else(|| PortError::Invalid {
+        field: "cursor".to_owned(),
+        message: "malformed log cursor".to_owned(),
+    })?;
+    if fields.next().is_some() || fingerprint != cursor_fingerprint(subject, source) {
+        return Err(PortError::Invalid {
+            field: "cursor".to_owned(),
+            message: "log cursor does not belong to this stream".to_owned(),
+        });
+    }
     Ok((
         generation.parse().map_err(|_| PortError::Invalid {
             field: "cursor".to_owned(),
@@ -180,6 +324,19 @@ fn parse_cursor(raw: &str) -> Result<(u64, u64), PortError> {
             message: "malformed log cursor".to_owned(),
         })?,
     ))
+}
+
+fn cursor_fingerprint(subject: &str, source: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(subject.as_bytes());
+    hasher.update([0]);
+    hasher.update(source.as_bytes());
+    let digest = hasher.finalize();
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(fingerprint, "{byte:02x}");
+    }
+    fingerprint
 }
 
 fn unavailable() -> PortError {
@@ -207,6 +364,113 @@ mod tests {
             })
             .expect("read");
         assert!(!records[0].message.contains("secret"));
-        assert!(cursor.starts_with("v1:"));
+        assert!(cursor.starts_with("v2:"));
+    }
+
+    #[test]
+    fn encoded_secrets_fail_closed_before_storage() {
+        let service = LogService::new();
+        for message in [r"tok\u0065n=\u0073ecret", "token=%73%65%63%72%65%74"] {
+            assert!(service
+                .append("job-1", "active", message, &["secret"])
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn nested_backslash_encoded_secrets_fail_closed() {
+        let service = LogService::new();
+        assert!(service
+            .append("job-1", "active", r"token=\\u0073ecret", &["secret"])
+            .is_err());
+    }
+
+    #[test]
+    fn mixed_literal_and_encoded_secret_is_rejected() {
+        let service = LogService::new();
+        assert!(service
+            .append(
+                "job-1",
+                "active",
+                r"literal=secret encoded=\u0073ecret",
+                &["secret"],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn subject_and_source_are_bounded() {
+        let service = LogService::new();
+        assert!(service
+            .append(&"s".repeat(MAX_SUBJECT_BYTES + 1), "active", "ok", &[])
+            .is_err());
+        assert!(service
+            .append("job-1", &"s".repeat(MAX_SUBJECT_BYTES + 1), "ok", &[])
+            .is_err());
+    }
+
+    #[test]
+    fn secret_registry_is_bounded() {
+        let service = LogService::new();
+        let secrets = vec!["secret"; MAX_SECRET_COUNT + 1];
+        assert!(service.append("job-1", "active", "ok", &secrets).is_err());
+    }
+
+    #[test]
+    fn identity_fields_reject_literal_and_encoded_secrets() {
+        let service = LogService::new();
+        assert!(service
+            .append("secret", "active", "ok", &["secret"])
+            .is_err());
+        assert!(service
+            .append(r"job-\u0073ecret", "active", "ok", &["secret"])
+            .is_err());
+        assert!(service
+            .append("job-1", "secret", "ok", &["secret"])
+            .is_err());
+    }
+
+    #[test]
+    fn unicode_equivalent_and_unknown_escaped_secrets_fail_closed() {
+        let service = LogService::new();
+        assert!(service
+            .append("job-1", "active", "e\u{301}", &["é"])
+            .is_err());
+        assert!(service
+            .append("job-1", "active", r"token=\U00000073ecret", &["secret"])
+            .is_err());
+    }
+
+    #[test]
+    fn log_cursor_is_bound_to_stream_identity_and_position() {
+        let service = LogService::new();
+        let cursor = service
+            .append("job-1", "active", "ok", &[])
+            .expect("append");
+        assert!(service
+            .logs(LogRequest {
+                subject: "job-2".to_owned(),
+                source: Some("active".to_owned()),
+                cursor: Some(cursor.clone()),
+                limit: 1,
+            })
+            .is_err());
+        assert!(service
+            .logs(LogRequest {
+                subject: "job-1".to_owned(),
+                source: Some("other".to_owned()),
+                cursor: Some(cursor),
+                limit: 1,
+            })
+            .is_err());
+        let future = format!("v2:0:99:{}", cursor_fingerprint("job-1", "active"));
+        assert!(service
+            .logs(LogRequest {
+                subject: "job-1".to_owned(),
+                source: Some("active".to_owned()),
+                cursor: Some(future),
+                limit: 1,
+            })
+            .is_err());
     }
 }

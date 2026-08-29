@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 7;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -157,6 +157,29 @@ ALTER TABLE instances ADD COLUMN desired_slots INTEGER;
 ALTER TABLE lifecycle_operations ADD COLUMN desired_slots INTEGER;
 ";
 
+/// Indexes for the normalized event stream. API projections never get stored
+/// as opaque JSON blobs in the operational database.
+const SCHEMA_V8: &str = "
+CREATE INDEX IF NOT EXISTS idx_events_instance_id
+ON events (instance_slug, id);
+CREATE INDEX IF NOT EXISTS idx_events_instance_kind_id
+ON events (instance_slug, event_kind COLLATE NOCASE, id);
+CREATE INDEX IF NOT EXISTS idx_events_instance_subject_id
+ON events (instance_slug, subject COLLATE NOCASE, id);
+CREATE TABLE IF NOT EXISTS event_stream_state (
+    instance_slug TEXT PRIMARY KEY,
+    first_retained_id INTEGER NOT NULL CHECK (first_retained_id >= 1),
+    high_water_id INTEGER NOT NULL CHECK (high_water_id >= 0),
+    updated_at TEXT NOT NULL,
+    CHECK (first_retained_id <= high_water_id + 1)
+);
+INSERT OR IGNORE INTO event_stream_state
+    (instance_slug, first_retained_id, high_water_id, updated_at)
+SELECT instance_slug, MIN(id), MAX(id), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM events
+GROUP BY instance_slug;
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -222,6 +245,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 7,
         name: "durable-scale-intent",
         sql: SCHEMA_V7,
+    },
+    Migration {
+        version: 8,
+        name: "normalized-event-cursor-state",
+        sql: SCHEMA_V8,
     },
 ];
 
@@ -459,7 +487,41 @@ fn has_column(conn: &rusqlite::Transaction<'_>, table: &str, column: &str) -> St
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use rusqlite::Connection;
+    use velnor_model::Timestamp;
+
+    use crate::store::Store;
+
     use super::*;
+
+    struct TempDb {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new(label: &str) -> Self {
+            let nonce = Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs();
+            let dir = std::env::temp_dir().join(format!(
+                "velnor-migration-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("temporary directory");
+            let path = dir.join("state.db");
+            Self { dir, path }
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 
     #[test]
     fn far_future_heartbeat_is_not_live_forever() {
@@ -467,5 +529,88 @@ mod tests {
             &Some("future-owner".to_owned()),
             &Some("2099-01-01T00:00:00Z".to_owned())
         ));
+    }
+
+    #[test]
+    fn upgrades_v7_to_v8_backfilling_instance_event_watermarks() {
+        let temp = TempDb::new("v7-v8-events");
+        let mut conn = Connection::open(&temp.path).expect("open legacy database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+
+        for migration in MIGRATIONS.iter().take(7) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO events
+                 (instance_slug, event_kind, subject, correlation_id, occurred_at, detail)
+             VALUES
+                 ('instance-a', 'started', 'job-a', NULL, '1970-01-01T00:00:00Z', NULL),
+                 ('instance-b', 'started', 'job-b', NULL, '1970-01-01T00:00:00Z', NULL),
+                 ('instance-a', 'completed', 'job-a', NULL, '1970-01-01T00:00:00Z', NULL);",
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "v7-v8-test", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v7-v8-test", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v7-v8-test").unwrap();
+
+        let watermarks: Vec<(String, i64, i64)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT instance_slug, first_retained_id, high_water_id
+                     FROM event_stream_state ORDER BY instance_slug",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            watermarks,
+            vec![
+                ("instance-a".to_owned(), 1, 3),
+                ("instance-b".to_owned(), 2, 2),
+            ]
+        );
+        for index_name in [
+            "idx_events_instance_id",
+            "idx_events_instance_kind_id",
+            "idx_events_instance_subject_id",
+        ] {
+            let present: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+                     )",
+                    [index_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(present, "missing migration index {index_name}");
+        }
+        drop(conn);
+
+        let reopened = Store::open(&temp.path).expect("reopen migrated database");
+        assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let rows = reopened.events_after("instance-a", 0, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|event| event.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            reopened.event_bounds("instance-a").unwrap(),
+            (Some(1), Some(3))
+        );
     }
 }

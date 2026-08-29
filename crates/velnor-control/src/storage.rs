@@ -18,12 +18,18 @@ const MAX_PLAN_CANDIDATES: usize = 100_000;
 const MAX_RETAINED_PLANS: usize = 1_024;
 
 /// In-memory catalog backing the storage application ports and tests.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct StorageService {
     state: Arc<Mutex<StorageState>>,
 }
 
-#[derive(Default)]
+impl Default for StorageService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Default)]
 struct StorageState {
     version: u64,
     next_plan_id: u64,
@@ -35,7 +41,9 @@ impl StorageService {
     /// Create an empty catalog.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            state: Arc::new(Mutex::new(StorageState::default())),
+        }
     }
 
     /// Insert or refresh one catalog object.

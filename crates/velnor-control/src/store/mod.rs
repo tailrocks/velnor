@@ -24,8 +24,9 @@ pub mod retention;
 pub use error::{StoreError, StoreResult};
 pub use migrations::LATEST_SCHEMA_VERSION;
 pub use records::{
-    EventRow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow, LifecycleOperationRequest,
-    LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow, SlotRow, Transition,
+    EventRow, EventWindow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow,
+    LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
+    SlotRow, StoredEvent, Transition,
 };
 pub use retention::{PrunePhase, PruneReport, RetentionBudget, StoreAccounting};
 
@@ -34,7 +35,6 @@ pub use retention::{PrunePhase, PruneReport, RetentionBudget, StoreAccounting};
 pub const DEFAULT_STATE_DB_PATH: &str = "/var/lib/velnor/state.db";
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Cold-start contention windows are structurally retried, never ignored:
 /// several daemons opening one fresh database simultaneously race the WAL
 /// journal-mode switch and meta-table seed before any lock coordination
