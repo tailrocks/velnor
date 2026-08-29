@@ -284,18 +284,7 @@ impl Drop for OwnedUnixListener {
 }
 
 fn cleanup_socket(path: &Path, expected: SocketIdentity) {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-
-    if std::fs::symlink_metadata(path)
-        .ok()
-        .is_some_and(|metadata| {
-            metadata.file_type().is_socket()
-                && metadata.dev() == expected.device
-                && metadata.ino() == expected.inode
-        })
-    {
-        let _ = std::fs::remove_file(path);
-    }
+    let _ = crate::http::remove_socket_if_unchanged(path, expected.device, expected.inode);
 }
 
 impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {

@@ -293,7 +293,7 @@ pub fn remove_stale_socket(path: &FsPath) -> Result<(), std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
         Err(error) => return Err(error),
     }
-    remove_socket_if_unchanged(path, identity)
+    remove_socket_if_unchanged(path, identity.device, identity.inode)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,9 +312,10 @@ fn socket_identity(path: &FsPath) -> Option<SocketIdentity> {
     })
 }
 
-fn remove_socket_if_unchanged(
+pub(crate) fn remove_socket_if_unchanged(
     path: &FsPath,
-    expected: SocketIdentity,
+    expected_device: u64,
+    expected_inode: u64,
 ) -> Result<(), std::io::Error> {
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -342,7 +343,12 @@ fn remove_socket_if_unchanged(
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(parent)?;
-    if socket_identity_at(directory.as_raw_fd(), &name)? != Some(expected) {
+    if socket_identity_at(directory.as_raw_fd(), &name)?
+        != Some(SocketIdentity {
+            device: expected_device,
+            inode: expected_inode,
+        })
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "stale control socket changed before cleanup",
@@ -404,7 +410,7 @@ fn cleanup_failed_bind(
 ) {
     drop(listener);
 
-    let _ = remove_socket_if_unchanged(path, identity);
+    let _ = remove_socket_if_unchanged(path, identity.device, identity.inode);
 }
 
 fn inspect_directory_chain(path: &FsPath) -> Result<(), std::io::Error> {
