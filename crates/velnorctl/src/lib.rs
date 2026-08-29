@@ -685,14 +685,8 @@ async fn execute_describe(
             ))
         }
     };
-    let page = client_for(globals)?
-        .get_resources(plural, &Default::default())
-        .await?;
-    let matching = page
-        .resources
-        .into_iter()
-        .filter(|item| item.meta().name == name)
-        .collect::<Vec<_>>();
+    let client = client_for(globals)?;
+    let matching = named_resources(&client, plural, name).await?;
     match matching.as_slice() {
         [] => Err(CommandError::unavailable("resource was not found")),
         [_] => render_resources(globals, &matching),
@@ -702,6 +696,37 @@ async fn execute_describe(
             "resource name is ambiguous",
         )),
     }
+}
+
+fn named_resource_query(name: &str) -> velnor_client::ResourceQuery {
+    velnor_client::ResourceQuery {
+        field_selector: Some(format!("metadata.name={name}")),
+        limit: Some(2),
+        ..velnor_client::ResourceQuery::default()
+    }
+}
+
+async fn named_resources(
+    client: &velnor_client::UnixControlClient,
+    resource: &str,
+    name: &str,
+) -> Result<Vec<velnor_model::AnyResource>, CommandError> {
+    let page = client
+        .get_resources(resource, &named_resource_query(name))
+        .await?;
+    Ok(page
+        .resources
+        .into_iter()
+        .filter(|item| item.meta().name == name)
+        .collect())
+}
+
+fn condition_is_true(resources: &[velnor_model::AnyResource], condition: &str) -> bool {
+    resources.first().is_some_and(|resource| {
+        resource.meta().conditions.iter().any(|candidate| {
+            candidate.kind == condition && candidate.status == velnor_model::ConditionStatus::True
+        })
+    })
 }
 
 async fn execute_events(
@@ -736,27 +761,51 @@ async fn execute_wait(globals: &GlobalArgs, args: commands::WaitArgs) -> Result<
         )
     })?;
     let plural = format!("{resource}s");
-    let page = client_for(globals)?
-        .get_resources(&plural, &Default::default())
-        .await?;
-    let matching = page
-        .resources
-        .into_iter()
-        .filter(|item| item.meta().name == name)
-        .collect::<Vec<_>>();
-    let resource = matching
-        .first()
-        .ok_or_else(|| CommandError::unavailable("resource was not found"))?;
-    if resource.meta().conditions.iter().any(|condition| {
-        condition.kind == args.condition && condition.status == velnor_model::ConditionStatus::True
-    }) {
-        render_resources(globals, &matching)
-    } else {
-        Err(CommandError::new(
-            ExitClass::Timeout,
-            "condition.pending",
-            "condition is not yet true",
-        ))
+    let client = client_for(globals)?;
+    let mut matching = named_resources(&client, &plural, name).await?;
+    if condition_is_true(&matching, &args.condition) {
+        return render_resources(globals, &matching);
+    }
+
+    // Establish a versioned cursor after the current read, then read the
+    // resource again to close the query/watch race. The outer `--timeout`
+    // deadline owns the wait; this loop never converts a pending condition
+    // into an immediate timeout.
+    let mut cursor = client
+        .watch(None, None, Some(4_096))
+        .await?
+        .last()
+        .map(|item| item.version)
+        .unwrap_or(0);
+    matching = named_resources(&client, &plural, name).await?;
+    loop {
+        if condition_is_true(&matching, &args.condition) {
+            return render_resources(globals, &matching);
+        }
+
+        let items = match client.watch(None, Some(cursor), Some(256)).await {
+            Ok(items) => items,
+            Err(error) if error.exit_class() == ExitClass::Conflict => {
+                // The bounded stream can expire while a caller is paused.
+                // Rebootstrap from a fresh snapshot instead of using a stale
+                // cursor or silently missing a transition.
+                cursor = client
+                    .watch(None, None, Some(4_096))
+                    .await?
+                    .last()
+                    .map(|item| item.version)
+                    .unwrap_or(0);
+                matching = named_resources(&client, &plural, name).await?;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(last) = items.last() {
+            cursor = last.version;
+            matching = named_resources(&client, &plural, name).await?;
+        } else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 }
 

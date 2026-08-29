@@ -102,7 +102,14 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
     let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
     let admin_path = endpoint.socket_path(velnor_client::SocketKind::Admin);
+    crate::http::prepare_instance_dir(
+        control_path
+            .parent()
+            .expect("canonical control socket always has an instance directory"),
+    )?;
     let _instance_lock = InstanceLock::acquire(&control_path)?;
+    crate::http::remove_stale_socket(&control_path)?;
+    crate::http::remove_stale_socket(&admin_path)?;
     let state_path = args
         .state_db
         .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH));

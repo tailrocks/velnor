@@ -25,8 +25,8 @@ use tokio::sync::Semaphore;
 use velnor_model::{ExitClass, MachineErrorEnvelope, SCHEMA_VERSION};
 
 use velnor_control::ports::{
-    LogPort, LogRequest, MutationKind, MutationPort, MutationRequest, QueryPage, QueryPort,
-    QueryRequest, WatchPort, WatchRequest,
+    LogPort, LogRequest, MutationKind, MutationPort, QueryPage, QueryPort, QueryRequest, WatchPort,
+    WatchRequest,
 };
 
 /// Shared application ports held by HTTP handlers.
@@ -143,6 +143,34 @@ pub const CONTROL_GROUP: &str = "velnor";
 /// Unix group owning the mutation-only admin socket.
 pub const ADMIN_GROUP: &str = "velnor-admin";
 
+/// Create and validate one daemon instance directory before any lock or
+/// socket pathname is opened. The package owns `/run/velnor`; this helper
+/// creates only the validated child and refuses symlink or writable-path
+/// substitutions.
+pub fn prepare_instance_dir(path: &FsPath) -> Result<(), std::io::Error> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "instance directory must have a parent",
+        )
+    })?;
+    inspect_directory_chain(parent)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "instance directory is not a trusted directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path)?;
+        }
+        Err(error) => return Err(error),
+    }
+    inspect_directory_chain(path)
+}
+
 /// Verify that package-owned socket groups exist before daemon readiness.
 pub fn validate_socket_groups() -> Result<(), std::io::Error> {
     for name in [CONTROL_GROUP, ADMIN_GROUP] {
@@ -226,6 +254,43 @@ pub fn bind_unix(
         ));
     }
     Ok(listener)
+}
+
+/// Reclaim a socket pathname left by a crashed daemon after the instance lock
+/// has been acquired. A live endpoint or any non-socket filesystem object is
+/// never removed; only an unconnected socket with the same identity observed
+/// before unlink is eligible.
+pub fn remove_stale_socket(path: &FsPath) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::net::UnixStream;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "existing socket path is not a socket",
+        ));
+    }
+    let identity = socket_identity(path)
+        .ok_or_else(|| std::io::Error::other("existing socket identity could not be verified"))?;
+    match UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "daemon instance socket is still serving",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+        Err(error) => return Err(error),
+    }
+    if socket_identity(path) == Some(identity) {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,7 +569,7 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
-        mutations: true,
+        mutations: false,
     })
 }
 
@@ -607,55 +672,45 @@ struct MutationBody {
     slots: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MutationResponse {
-    operation_id: String,
-    phase: String,
-}
-
 async fn mutate_instance(
     State(state): State<ApiState>,
     AxumPath((instance, operation)): AxumPath<(String, String)>,
     body: Result<Json<MutationBody>, JsonRejection>,
-) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
+) -> Result<StatusCode, ApiError> {
     let Json(body) = body.map_err(|_| {
         ApiError::bad_request(
             "body",
             "request body must be valid JSON with the documented fields",
         )
     })?;
+    let MutationBody {
+        operation: body_operation,
+        reason,
+        idempotency_key,
+        expected_version,
+        slots,
+    } = body;
     if instance != state.instance.as_ref() {
         return Err(ApiError::bad_request(
             "mutation.instance",
             "path instance does not match daemon instance",
         ));
     }
-    let kind = parse_mutation(&operation)?;
-    if body.operation != operation {
+    let _kind = parse_mutation(&operation)?;
+    if body_operation != operation {
         return Err(ApiError::bad_request(
             "mutation.operation",
             "body operation does not match path",
         ));
     }
-    let mutation = Arc::clone(&state.mutation);
-    let result = run_application_call(state.blocking.clone(), move || {
-        mutation.mutate(MutationRequest {
-            kind,
-            target: instance,
-            reason: body.reason,
-            idempotency_key: body.idempotency_key,
-            expected_version: body.expected_version,
-            scale_to: body.slots,
-        })
-    })
-    .await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(MutationResponse {
-            operation_id: result.operation_id,
-            phase: result.phase,
-        }),
+    let _ = (reason, idempotency_key, expected_version, slots);
+    // The durable lifecycle ledger is not an actuator. Until the daemon
+    // reconciler consumes these intents, accepting them as HTTP 202 would
+    // claim an effect that the runtime cannot perform.
+    Err(ApiError::from(
+        velnor_control::ports::PortError::Unsupported {
+            operation: "lifecycle reconciler is not installed".to_owned(),
+        },
     ))
 }
 
@@ -802,7 +857,7 @@ mod tests {
 
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use velnor_control::ports::{MutationResult, PortError};
+    use velnor_control::ports::{MutationRequest, MutationResult, PortError};
     use velnor_model::{AnyResource, Event, ResourceMeta, Source, Timestamp};
 
     #[derive(Default)]
@@ -944,6 +999,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_instance_dir_creates_and_validates_the_child_directory() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let parent = std::env::current_dir()
+            .expect("current directory")
+            .join(format!(
+                ".velnorctl-instance-dir-{}-{suffix}",
+                std::process::id()
+            ));
+        std::fs::create_dir(&parent).expect("create test parent");
+        let instance = parent.join("primary");
+
+        prepare_instance_dir(&instance).expect("prepare instance directory");
+
+        assert!(instance.is_dir());
+        std::fs::remove_dir_all(parent).expect("remove test directory");
+    }
+
+    #[tokio::test]
     async fn failed_bind_cleanup_removes_only_the_bound_socket() {
         let path = test_socket_path("failed-bind-cleanup");
         let listener = tokio::net::UnixListener::bind(&path).expect("bind test socket");
@@ -963,6 +1039,17 @@ mod tests {
         assert!(path.exists());
         drop(replacement);
         std::fs::remove_file(path).expect("remove replacement socket");
+    }
+
+    #[tokio::test]
+    async fn stale_socket_recovery_removes_unconnected_socket_only() {
+        let path = test_socket_path("stale-recovery");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind stale socket");
+        drop(listener);
+
+        remove_stale_socket(&path).expect("remove stale socket");
+
+        assert!(!path.exists());
     }
 
     #[tokio::test]
@@ -995,7 +1082,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_admin_socket_routes_matching_mutation_and_safely_rejects_bad_json() {
+    async fn real_admin_socket_rejects_unimplemented_mutation_and_bad_json() {
         let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
         let mutation = Arc::new(RecordingMutation::default());
         let state = ApiState {
@@ -1020,8 +1107,8 @@ mod tests {
             br#"{"operation":"cordon","reason":"test","idempotencyKey":"test"}"#,
         )
         .await;
-        assert_eq!(response_status(&accepted), 202);
-        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(response_status(&accepted), 501);
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
 
         let rejected = socket_request(
             &path,
@@ -1034,7 +1121,7 @@ mod tests {
         let rejected_text = String::from_utf8_lossy(&rejected);
         assert!(rejected_text.contains("body"));
         assert!(!rejected_text.contains("unknown"));
-        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
 
         shutdown.send(true).expect("signal admin shutdown");
         server.await.expect("join admin server").expect("serve");

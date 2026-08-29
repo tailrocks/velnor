@@ -182,15 +182,44 @@ impl GitHubRetryHint {
 /// be sent in cleartext. Loopback HTTP remains available for local protocol
 /// tests and explicitly local development servers.
 pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
-    let url = Url::parse(raw).with_context(|| format!("parse authenticated URL '{raw}'"))?;
+    let safe = redacted_authenticated_url(raw);
+    let url = Url::parse(raw).with_context(|| format!("parse authenticated URL '{safe}'"))?;
     if !url.username().is_empty() || url.password().is_some() {
         bail!("authenticated URL must not contain userinfo");
     }
     match url.scheme() {
         "https" => Ok(url),
         "http" if url.host_str().is_some_and(is_loopback_host) => Ok(url),
-        _ => bail!("authenticated endpoint must use HTTPS: {raw}"),
+        _ => bail!("authenticated endpoint must use HTTPS: {safe}"),
     }
+}
+
+fn validate_known_service_url(raw: &str, field: &str, hosts: &[&str]) -> Result<Url> {
+    let url = validate_authenticated_url(raw)?;
+    let host = url.host_str().unwrap_or_default();
+    let allowed_host = is_loopback_host(host)
+        || hosts
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed));
+    let allowed_port = is_loopback_host(host) || url.port().is_none();
+    if !allowed_host || !allowed_port {
+        bail!(
+            "{field} endpoint host is not an approved GitHub Actions service: {}",
+            redacted_authenticated_url(raw)
+        );
+    }
+    Ok(url)
+}
+
+pub(crate) fn redacted_authenticated_url(raw: &str) -> String {
+    let Ok(mut url) = Url::parse(raw) else {
+        return "<invalid URL>".to_owned();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -778,6 +807,7 @@ fn oauth_registration_not_found(error: &str) -> bool {
 impl OAuthClient {
     pub fn new() -> Result<Self> {
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build OAuth HTTP client")?;
@@ -1023,21 +1053,33 @@ impl RegistrationClient {
             total_count: Option<u64>,
             runners: Vec<ListedRunner>,
         }
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: u32 = 100;
+        const MAX_ITEMS: usize = PAGE_SIZE * MAX_PAGES as usize;
         let base = scope.runners_url()?;
         let mut all = Vec::new();
         let mut page_number = 1u32;
         loop {
+            if page_number > MAX_PAGES || all.len() >= MAX_ITEMS {
+                bail!("runner listing exceeded bounded response limit ({MAX_ITEMS} runners)");
+            }
             let mut url = base.clone();
             url.query_pairs_mut()
-                .append_pair("per_page", "100")
+                .append_pair("per_page", &PAGE_SIZE.to_string())
                 .append_pair("page", &page_number.to_string());
             let page: Page = github_json_body(
                 "list runners response",
                 github_http_request("GET", url.as_str(), pat, None, 30).await?,
             )?;
             let fetched = page.runners.len();
+            if all.len().saturating_add(fetched) > MAX_ITEMS {
+                bail!("runner listing exceeded bounded response limit ({MAX_ITEMS} runners)");
+            }
             all.extend(page.runners);
             let total = page.total_count.unwrap_or(all.len() as u64);
+            if total > MAX_ITEMS as u64 {
+                bail!("runner listing exceeds bounded response limit ({MAX_ITEMS} runners)");
+            }
             if fetched < 100 || all.len() as u64 >= total {
                 return Ok(all);
             }
@@ -1076,6 +1118,12 @@ impl RegistrationClient {
                     group.name,
                     group.id,
                     requested_id
+                );
+            }
+            if group.id != requested_id {
+                bail!(
+                    "runner group response identity mismatch: requested id {requested_id}, returned {}",
+                    group.id
                 );
             }
             return Ok(group);
@@ -1274,7 +1322,10 @@ impl RegistrationClient {
         runner_id: i64,
     ) -> Result<Option<ListedRunner>> {
         let url = scope.runner_url(runner_id)?;
-        parse_runner_lookup_response(github_http_request("GET", url.as_str(), pat, None, 30).await?)
+        parse_runner_lookup_response(
+            github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            runner_id,
+        )
     }
 
     pub async fn delete_runner(
@@ -1352,6 +1403,7 @@ fn native_http_client() -> Result<Client> {
     static CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
     match CLIENT.get_or_init(|| {
         Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .use_native_tls()
             .tcp_keepalive(None)
@@ -1617,22 +1669,32 @@ pub fn parse_runner_lookup(status: u16, body: &str) -> Result<Option<ListedRunne
         .context("parse runner lookup response")
 }
 
-fn parse_runner_lookup_response(response: GithubHttpResponse) -> Result<Option<ListedRunner>> {
+fn parse_runner_lookup_response(
+    response: GithubHttpResponse,
+    expected_id: i64,
+) -> Result<Option<ListedRunner>> {
     if response.status == 404 {
         return Ok(None);
     }
     if !(200..300).contains(&response.status) {
         return Err(github_error_from_response("runner lookup", response));
     }
-    serde_json::from_str(response.body.trim())
-        .map(Some)
-        .context("parse runner lookup response")
+    let runner: ListedRunner =
+        serde_json::from_str(response.body.trim()).context("parse runner lookup response")?;
+    if runner.id != Some(expected_id) {
+        bail!(
+            "runner lookup identity mismatch: requested id {expected_id}, returned {:?}",
+            runner.id
+        );
+    }
+    Ok(Some(runner))
 }
 
 impl BrokerClient {
     pub fn new(server_url_v2: &str, bearer_token: impl Into<String>) -> Result<Self> {
         validate_authenticated_url(server_url_v2)?;
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build broker HTTP client")?;
@@ -1759,6 +1821,7 @@ pub(crate) fn is_transient_acquire_error(error: &anyhow::Error) -> bool {
 impl RunServiceClient {
     pub fn new(bearer_token: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build run-service HTTP client")?;
@@ -1973,8 +2036,13 @@ fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
 
 impl DistributedTaskClient {
     pub fn new(server_url: &str, bearer_token: impl Into<String>) -> Result<Self> {
-        validate_authenticated_url(server_url)?;
+        validate_known_service_url(
+            server_url,
+            "SystemVssConnection",
+            &["pipelines.actions.githubusercontent.com"],
+        )?;
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build distributed task HTTP client")?;
@@ -2409,19 +2477,34 @@ fn broker_acknowledge_url(base_url: &Url, session_id: &str, status: RunnerStatus
 }
 
 fn run_service_acquire_job_url(run_service_url: &str) -> Result<Url> {
-    slash_url(run_service_url)?
+    let validated = validate_known_service_url(
+        run_service_url,
+        "run-service",
+        &["run.actions.githubusercontent.com"],
+    )?;
+    slash_url(validated.as_str())?
         .join("acquirejob")
         .context("build run-service acquire job URL")
 }
 
 fn run_service_renew_job_url(run_service_url: &str) -> Result<Url> {
-    slash_url(run_service_url)?
+    let validated = validate_known_service_url(
+        run_service_url,
+        "run-service",
+        &["run.actions.githubusercontent.com"],
+    )?;
+    slash_url(validated.as_str())?
         .join("renewjob")
         .context("build run-service renew job URL")
 }
 
 fn run_service_complete_job_url(run_service_url: &str) -> Result<Url> {
-    slash_url(run_service_url)?
+    let validated = validate_known_service_url(
+        run_service_url,
+        "run-service",
+        &["run.actions.githubusercontent.com"],
+    )?;
+    slash_url(validated.as_str())?
         .join("completejob")
         .context("build run-service complete job URL")
 }
@@ -3432,6 +3515,15 @@ impl FeedStreamClient {
         if url.is_empty() || token.is_empty() {
             return None;
         }
+        validate_known_service_url(
+            &url,
+            "FeedStreamUrl",
+            &[
+                "pipelines.actions.githubusercontent.com",
+                "results-receiver.actions.githubusercontent.com",
+            ],
+        )
+        .ok()?;
         Some(Self::new(url, token))
     }
 
@@ -3444,6 +3536,14 @@ impl FeedStreamClient {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     > {
+        validate_known_service_url(
+            &self.url,
+            "FeedStreamUrl",
+            &[
+                "pipelines.actions.githubusercontent.com",
+                "results-receiver.actions.githubusercontent.com",
+            ],
+        )?;
         use tokio_tungstenite::connect_async;
         // Append plan_id and job_id as query parameters so the Results Service
         // can route the connection to the correct run's blob storage.
@@ -3593,10 +3693,20 @@ pub struct TwirpResultsClient {
 
 impl TwirpResultsClient {
     pub fn new(results_service_url: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        let results_service_url = results_service_url.into();
+        let results_service_url = validate_known_service_url(
+            &results_service_url,
+            "ResultsServiceUrl",
+            &["results-receiver.actions.githubusercontent.com"],
+        )?;
         Ok(Self {
-            results_service_url: results_service_url.into().trim_end_matches('/').to_string(),
+            results_service_url: results_service_url
+                .to_string()
+                .trim_end_matches('/')
+                .to_string(),
             token: token.into(),
             http: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .user_agent(RUNNER_USER_AGENT)
                 .build()
                 .context("build Twirp HTTP client")?,
@@ -4196,7 +4306,12 @@ pub fn upload_artifact_blocking(
     options: ArtifactUploadOptions,
 ) -> Result<String> {
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
-    let base = results_service_url.trim_end_matches('/');
+    let results_service_url = validate_known_service_url(
+        results_service_url,
+        "ResultsServiceUrl",
+        &["results-receiver.actions.githubusercontent.com"],
+    )?;
+    let base = results_service_url.as_str().trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
 
     // Write a mode-0600 file. Construct the guard before any fallible I/O so
@@ -4207,6 +4322,7 @@ pub fn upload_artifact_blocking(
     };
 
     let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
@@ -4243,6 +4359,7 @@ pub fn upload_artifact_blocking(
     let zip_path = write_temp_file("zip", &zip_bytes).context("write zip temp file")?;
     let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
     let put_response = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build artifact upload HTTP client")?
@@ -4434,7 +4551,12 @@ fn download_artifacts_blocking_in_temp_dir(
 ) -> Result<Vec<ResultsArtifactDownload>> {
     use std::io::Read;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
-    let base = results_service_url.trim_end_matches('/');
+    let results_service_url = validate_known_service_url(
+        results_service_url,
+        "ResultsServiceUrl",
+        &["results-receiver.actions.githubusercontent.com"],
+    )?;
+    let base = results_service_url.as_str().trim_end_matches('/');
 
     let matcher = if !name.is_empty() || pattern.is_empty() {
         None
@@ -4445,6 +4567,7 @@ fn download_artifacts_blocking_in_temp_dir(
     };
 
     let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
@@ -4521,6 +4644,7 @@ fn download_artifacts_blocking_in_temp_dir(
             uuid::Uuid::new_v4()
         ));
         let response = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build artifact download HTTP client")?

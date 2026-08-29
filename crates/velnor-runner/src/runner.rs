@@ -779,10 +779,16 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         ) {
             let cleanup = jit_client.delete_runner(&scope, pat, runner.id).await;
             return Err(match cleanup {
-                Ok(()) => error.context(format!(
-                    "persist JIT runner id {}; exact remote registration removed",
-                    runner.id
-                )),
+                Ok(()) => match clear_pending_jit_registration(&dir) {
+                    Ok(()) => error.context(format!(
+                        "persist JIT runner id {}; exact remote registration removed",
+                        runner.id
+                    )),
+                    Err(clear_error) => error.context(format!(
+                        "persist JIT runner id {}; exact cleanup succeeded but pending marker clear failed: {clear_error:#}",
+                        runner.id
+                    )),
+                },
                 Err(cleanup) => error.context(format!(
                     "persist JIT runner id {}; exact cleanup also failed: {cleanup:#}",
                     runner.id
@@ -974,8 +980,7 @@ async fn reap_pending_jit_registration(dir: &Path, scope: &GitHubScope, pat: &st
     }
 
     if let Some(runner_id) = pending.runner_id {
-        let committed_id = config::load(dir)
-            .ok()
+        let committed_id = load_config_if_present(dir)?
             .and_then(|stored| stored.settings.agent_id)
             .is_some_and(|agent_id| agent_id == runner_id);
         if committed_id {
@@ -990,9 +995,14 @@ async fn reap_pending_jit_registration(dir: &Path, scope: &GitHubScope, pat: &st
         return Ok(());
     }
 
-    bail!(
-        "pending JIT registration has no runner id; refusing name-based cleanup and preserving marker"
-    )
+    // The response may have been lost after GitHub accepted the request. No
+    // safe exact delete is possible without the returned ID, and name-based
+    // deletion is forbidden because names are not identities. Clear only the
+    // local transaction marker so a subsequent configure can retry instead of
+    // permanently bricking the slot; any remote orphan remains subject to the
+    // provider's JIT expiry and must never be guessed at locally.
+    clear_pending_jit_registration(dir)
+        .context("clear unreconciled ID-less JIT marker; exact remote cleanup unavailable")
 }
 
 async fn cleanup_failed_jit_registration(
@@ -1001,9 +1011,32 @@ async fn cleanup_failed_jit_registration(
     pat: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    if github_api_error_status(&error)
+        .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 409 | 429))
+    {
+        return match clear_pending_jit_registration(dir) {
+            Ok(()) => error,
+            Err(cleanup) => error.context(format!(
+                "definitive JIT rejection received but pending marker clear failed: {cleanup:#}"
+            )),
+        };
+    }
     match reap_pending_jit_registration(dir, scope, pat).await {
         Ok(()) => error,
         Err(cleanup) => error.context(format!("cleanup uncertain JIT registration: {cleanup:#}")),
+    }
+}
+
+fn load_config_if_present(dir: &Path) -> Result<Option<StoredRunnerConfig>> {
+    match config::load(dir) {
+        Ok(stored) => Ok(Some(stored)),
+        Err(load_error) => match fs::symlink_metadata(dir.join("runner.json")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Ok(_) => Err(load_error).context(
+                "load local runner config before remote identity cleanup; local identity preserved",
+            ),
+            Err(error) => Err(error).context("inspect local runner config before cleanup"),
+        },
     }
 }
 
@@ -1092,13 +1125,22 @@ fn validate_jit_endpoint(
     if scope.hosted {
         if hosted_host.is_some() {
             if !host_matches {
-                bail!("JIT {field} endpoint host is not an approved GitHub Actions service: {raw}");
+                bail!(
+                    "JIT {field} endpoint host is not an approved GitHub Actions service: {}",
+                    crate::protocol::redacted_authenticated_url(raw)
+                );
             }
         } else if !same_endpoint_origin(&endpoint, &scope_url) {
-            bail!("JIT {field} endpoint is outside the configured GitHub origin: {raw}");
+            bail!(
+                "JIT {field} endpoint is outside the configured GitHub origin: {}",
+                crate::protocol::redacted_authenticated_url(raw)
+            );
         }
     } else if !same_endpoint_origin(&endpoint, &scope_url) {
-        bail!("JIT {field} endpoint is outside the configured GitHub origin: {raw}");
+        bail!(
+            "JIT {field} endpoint is outside the configured GitHub origin: {}",
+            crate::protocol::redacted_authenticated_url(raw)
+        );
     }
     Ok(())
 }
@@ -3580,8 +3622,10 @@ async fn run_v2(
             match &action {
                 V2MessageAction::None => {}
                 V2MessageAction::BrokerMigration(migration_url) => {
-                    current_broker_url = migration_url.clone();
-                    broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+                    let trusted_url = validate_broker_migration_url(&stored, migration_url)?;
+                    let migrated = BrokerClient::new(&trusted_url, broker_token.clone())?;
+                    current_broker_url = trusted_url;
+                    broker = migrated;
                     println!("Broker migration applied: {current_broker_url}");
                     forensics.lifecycle(&format!("broker migration applied: {current_broker_url}"));
                 }
@@ -4119,8 +4163,12 @@ async fn handle_v2_message(
         .message_type
         .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
     {
-        let migration_url = broker_migration_url(&message)?;
-        println!("Received broker migration to {migration_url}.");
+        let migration_url =
+            validate_broker_migration_url(stored, &broker_migration_url(&message)?)?;
+        println!(
+            "Received broker migration to {}.",
+            crate::protocol::redacted_authenticated_url(&migration_url)
+        );
         return Ok(V2MessageAction::BrokerMigration(migration_url));
     }
     if message
@@ -5543,13 +5591,16 @@ fn start_broker_cancellation_poll(
             {
                 // Migrations can land while busy; following them keeps
                 // cancellation coverage for the rest of the job.
-                match broker_migration_url(&message) {
+                match broker_migration_url(&message)
+                    .and_then(|url| validate_broker_migration_url(&stored, &url))
+                {
                     Ok(migration_url) => match oauth_access_token(&stored).await {
                         Ok(token) => match BrokerClient::new(&migration_url, token.token) {
                             Ok(migrated) => {
                                 broker = migrated;
                                 println!(
-                                    "Cancellation poller applied broker migration: {migration_url}"
+                                    "Cancellation poller applied broker migration: {}",
+                                    crate::protocol::redacted_authenticated_url(&migration_url)
                                 );
                             }
                             Err(error) => eprintln!(
@@ -6092,6 +6143,18 @@ fn broker_migration_url(message: &crate::protocol::TaskAgentMessage) -> Result<S
         bail!("BrokerMigration message missing BrokerBaseUrl");
     }
     Ok(migration.broker_base_url)
+}
+
+fn validate_broker_migration_url(stored: &StoredRunnerConfig, raw: &str) -> Result<String> {
+    let scope = GitHubScope::parse(&stored.settings.github_url)
+        .context("parse configured GitHub scope for broker migration")?;
+    validate_jit_endpoint(
+        &scope,
+        "BrokerMigration",
+        raw,
+        Some("broker.actions.githubusercontent.com"),
+    )?;
+    Ok(raw.to_owned())
 }
 
 fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: &str) -> bool {
@@ -10019,7 +10082,7 @@ fn daemon_slot_config_dirs(config_base: &Path, slots: usize) -> Result<Vec<PathB
 }
 
 async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
-    let stored = config::load(dir).ok();
+    let stored = load_config_if_present(dir)?;
 
     if let Some(pat) = args.pat.as_ref().filter(|_| !args.local_only) {
         let stored = stored
