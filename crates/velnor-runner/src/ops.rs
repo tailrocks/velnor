@@ -230,14 +230,18 @@ impl<'a> RetentionLeaseGuard<'a> {
         let Some(lease) = self.lease.take() else {
             return Ok(false);
         };
-        self.store.release_retention_lease(&lease)
+        // The store finalizer treats false matches and SQLite errors as
+        // finalization failures and retries only bounded transient contention.
+        self.store
+            .release_retention_lease_final(&lease)
+            .map(|()| true)
     }
 }
 
 impl Drop for RetentionLeaseGuard<'_> {
     fn drop(&mut self) {
         if let Some(lease) = self.lease.take() {
-            if self.store.release_retention_lease(&lease).is_err() {
+            if self.store.release_retention_lease_final(&lease).is_err() {
                 if let Some(sink) = self.telemetry {
                     sink.report_lease_finalization_failure();
                 } else {
@@ -624,8 +628,9 @@ impl OpsSink {
                 self.clear_prune_retry();
             }
         }
-        if lease_guard.release().is_err() {
-            self.report_lease_finalization_failure();
+        match lease_guard.release() {
+            Ok(true) => {}
+            Ok(false) | Err(_) => self.report_lease_finalization_failure(),
         }
     }
 

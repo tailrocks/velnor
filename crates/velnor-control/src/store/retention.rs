@@ -638,7 +638,11 @@ impl Store {
             (Ok(report), Ok(())) => Ok(report),
             (Ok(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
             (Err(failure), Ok(())) => Err(failure),
-            (Err(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
+            // A pre-commit failure means the deletion transaction rolled back.
+            // Lease finalization failure cannot change that fact into a
+            // post-commit result; preserving the original phase keeps retry
+            // admission safe.
+            (Err(failure), Err(_release_error)) => Err(failure),
         }
     }
 
@@ -681,7 +685,10 @@ impl Store {
             (Ok(report), Ok(())) => Ok(report),
             (Ok(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
             (Err(failure), Ok(())) => Err(failure),
-            (Err(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
+            // The test-only direct seam has the same rollback invariant as
+            // the public path: failed/no-deletion is never post-commit merely
+            // because lease cleanup also failed.
+            (Err(failure), Err(_release_error)) => Err(failure),
         };
         result.map_err(PruneFailure::into_store_error)
     }
@@ -727,6 +734,56 @@ impl Store {
                 StoreError::new(ExitClass::Conflict, "store.retention.lease.lost")
                     .with_remediation(
                         "retention ownership expired or was fenced by a newer generation",
+                    ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Extend the exact capability inside the deletion transaction immediately
+    /// before commit. This is the commit fence: if a lease expired while the
+    /// transaction was doing work, this conditional update affects zero rows,
+    /// the caller returns without committing, and SQLite rolls back all
+    /// deletion work. A successful update moves expiry beyond the commit so a
+    /// wall-clock tick after this fence cannot invalidate the commit.
+    fn fence_retention_lease_for_commit(
+        transaction: &rusqlite::Transaction<'_>,
+        lease: &RetentionLease,
+    ) -> StoreResult<()> {
+        let now = Timestamp::now().as_offset_datetime().unix_timestamp();
+        let expires_at = now
+            .checked_add(
+                i64::try_from(MAX_RETENTION_LEASE_DURATION.as_secs()).map_err(|_| {
+                    retention_lease_error(
+                        "store.retention.lease.clock",
+                        "retention lease duration exceeds SQLite integer range",
+                    )
+                })?,
+            )
+            .ok_or_else(|| {
+                retention_lease_error(
+                    "store.retention.lease.clock",
+                    "retention lease expiry exceeds SQLite integer range",
+                )
+            })?;
+        let generation = i64::try_from(lease.generation).map_err(|_| {
+            retention_lease_error(
+                "store.retention.lease.generation",
+                "retention lease generation exceeds SQLite integer range",
+            )
+        })?;
+        let changed = transaction.execute(
+            "UPDATE retention_lease
+             SET expires_at = ?1
+             WHERE singleton = 0 AND owner = ?2 AND generation = ?3
+               AND expires_at > ?4",
+            params![expires_at, lease.owner, generation, now],
+        )?;
+        if changed != 1 {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.retention.lease.lost")
+                    .with_remediation(
+                        "retention lease expired or was fenced before the deletion commit",
                     ),
             );
         }
@@ -929,7 +986,7 @@ impl Store {
                 PruneFailure::PreCommit(error)
             }
         })?;
-        Self::require_retention_lease_connection(&transaction, lease).map_err(|error| {
+        Self::fence_retention_lease_for_commit(&transaction, lease).map_err(|error| {
             PruneFailure::LeaseLost {
                 committed: committed_before,
                 error,
@@ -1424,7 +1481,7 @@ impl Store {
     /// exact owner/generation predicate makes every retry idempotent. Any
     /// failure is surfaced as post-commit finalization failure so callers do
     /// not re-run logical deletion as if it had rolled back.
-    fn release_retention_lease_final(&self, lease: &RetentionLease) -> StoreResult<()> {
+    pub fn release_retention_lease_final(&self, lease: &RetentionLease) -> StoreResult<()> {
         let mut last_error = None;
         for attempt in 0..MAX_RELEASE_RETRY_ATTEMPTS {
             match self.release_retention_lease(lease) {
@@ -2072,6 +2129,56 @@ mod tests {
         assert!(error.is_lease_lost());
         assert!(!error.is_post_commit());
         assert!(second.release_retention_lease(&second_lease).unwrap());
+    }
+
+    #[test]
+    fn lease_expiry_before_commit_rolls_back_deletion() {
+        let (_dir, store) = temp_store("lease-commit-fence");
+        seed_expired_events(&store, 1);
+        let lease = store
+            .try_acquire_retention_lease("owner-a-1", 100, Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let result = store.execute_prune_batch(
+            &lease,
+            Timestamp::now(),
+            false,
+            &PruneCounts::default(),
+            |transaction| {
+                let counts = Store::prune_expired_event_batch(
+                    transaction,
+                    &budget,
+                    Timestamp::now(),
+                    &lease,
+                )?;
+                // Model a lease expiring after deletion work but before the
+                // commit fence. The transaction must roll back the delete.
+                transaction.execute(
+                    "UPDATE retention_lease SET expires_at = 0
+                     WHERE singleton = 0 AND owner = ?1 AND generation = ?2",
+                    params![lease.owner, i64::try_from(lease.generation).unwrap()],
+                )?;
+                Ok(counts)
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(PruneFailure::LeaseLost {
+                committed: false,
+                ..
+            })
+        ));
+        assert_eq!(store.accounting().unwrap().event_rows, 1);
     }
 
     #[test]

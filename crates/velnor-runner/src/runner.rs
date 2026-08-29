@@ -1181,7 +1181,6 @@ fn daemon_forensic_log(config_base: &Path, message: &str) {
 
 fn sanitize_forensic_log_message(raw: &str) -> String {
     const MAX_FORENSIC_LOG_BYTES: usize = 2048;
-    let lower = raw.to_ascii_lowercase();
     if [
         "authorization:",
         "bearer ",
@@ -1190,14 +1189,31 @@ fn sanitize_forensic_log_message(raw: &str) -> String {
         "token=",
         "token:",
         "fingerprint=",
+        "api-key",
+        "api_key",
+        "apikey",
+        "access-token",
+        "access_token",
+        "client-secret",
+        "client_secret",
+        "private-key",
+        "private_key",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "begin private key",
     ]
     .iter()
-    .any(|marker| lower.contains(marker))
+    .any(|marker| contains_ascii_case_insensitive(raw, marker))
     {
         return "redacted-sensitive-diagnostic".to_owned();
     }
     let mut output = String::with_capacity(raw.len().min(MAX_FORENSIC_LOG_BYTES));
     for character in raw.chars() {
+        if is_forbidden_log_character(character) {
+            continue;
+        }
         let character = if character.is_control() || character.is_whitespace() {
             ' '
         } else {
@@ -1213,6 +1229,68 @@ fn sanitize_forensic_log_message(raw: &str) -> String {
     } else {
         output
     }
+}
+
+fn contains_ascii_case_insensitive(value: &str, marker: &str) -> bool {
+    value.as_bytes().windows(marker.len()).any(|window| {
+        window
+            .iter()
+            .zip(marker.as_bytes())
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn is_forbidden_log_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
+struct BoundedErrorRenderer {
+    output: String,
+    truncated: bool,
+}
+
+impl BoundedErrorRenderer {
+    const LIMIT: usize = 2048;
+
+    fn new() -> Self {
+        Self {
+            output: String::with_capacity(Self::LIMIT),
+            truncated: false,
+        }
+    }
+}
+
+impl std::fmt::Write for BoundedErrorRenderer {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        for character in value.chars() {
+            if self.output.len() + character.len_utf8() > Self::LIMIT {
+                self.truncated = true;
+                return Err(std::fmt::Error);
+            }
+            self.output.push(character);
+        }
+        Ok(())
+    }
+}
+
+fn sanitized_retry_error(error: &anyhow::Error) -> String {
+    let mut renderer = BoundedErrorRenderer::new();
+    let formatted = std::fmt::write(&mut renderer, format_args!("{error:#}"));
+    if renderer.truncated || formatted.is_err() {
+        return "redacted-sensitive-diagnostic".to_owned();
+    }
+    sanitize_forensic_log_message(&renderer.output)
 }
 
 /// Set on SIGTERM/SIGINT: the daemon drains instead of dying. Idle slots exit
@@ -1395,17 +1473,18 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
             Err(error) => {
                 attempt += 1;
                 let delay = supervised_retry_delay(attempt);
+                let error_detail = sanitized_retry_error(&error);
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
                     .unwrap_or_default();
                 if let Ok(config_base) = daemon_config_dir(&args) {
                     daemon_forensic_log(
                         &config_base,
-                        &format!("daemon pass attempt {attempt} failed: {error:#}"),
+                        &format!("daemon pass attempt {attempt} failed: {error_detail}"),
                     );
                 }
                 eprintln!(
-                    "daemon attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s (the daemon never exits; fix the cause and it recovers).",
+                    "daemon attempt {attempt} failed: {error_detail}.{diagnosis} Retrying in {}s (the daemon never exits; fix the cause and it recovers).",
                     delay.as_secs()
                 );
                 crate::sd_notify::status(&format!(
@@ -1853,16 +1932,17 @@ pub(crate) async fn run_daemon_slot(
                 cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
                 return Err(error);
             }
+            let error_detail = sanitized_retry_error(&error);
             if registration_was_deleted(&error) {
                 local_failure_streak = 0;
                 cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
                 eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} registration disappeared; creating a fresh JIT config: {error:#}"
+                    "daemon slot-{slot_index} cycle {cycle} registration disappeared; creating a fresh JIT config: {error_detail}"
                 );
                 daemon_forensic_log(
                     &config_base,
                     &format!(
-                        "slot-{slot_index} cycle {cycle} registration disappeared; fresh JIT config: {error:#}"
+                        "slot-{slot_index} cycle {cycle} registration disappeared; fresh JIT config: {error_detail}"
                     ),
                 );
                 reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
@@ -1879,12 +1959,12 @@ pub(crate) async fn run_daemon_slot(
             {
                 local_failure_streak = 0;
                 eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error:#}"
+                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error_detail}"
                 );
                 daemon_forensic_log(
                     &config_base,
                     &format!(
-                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error:#}"
+                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error_detail}"
                     ),
                 );
                 reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
@@ -1899,13 +1979,13 @@ pub(crate) async fn run_daemon_slot(
                 local_failure_streak += 1;
                 let delay = slot_retry_delay(local_failure_streak, slot_index);
                 eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} local failure (registration kept, attempt {local_failure_streak}): {error:#}. Retrying in {}s.",
+                    "daemon slot-{slot_index} cycle {cycle} local failure (registration kept, attempt {local_failure_streak}): {error_detail}. Retrying in {}s.",
                     delay.as_secs()
                 );
                 daemon_forensic_log(
                     &config_base,
                     &format!(
-                        "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error:#}"
+                        "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error_detail}"
                     ),
                 );
                 if sleep_slot_retry_or_drain(delay).await {
@@ -1916,11 +1996,11 @@ pub(crate) async fn run_daemon_slot(
             local_failure_streak = 0;
             cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
             eprintln!(
-                "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error:#}"
+                "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error_detail}"
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error:#}"),
+                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
             );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
             cycle += 1;
@@ -1947,12 +2027,13 @@ pub(crate) async fn run_daemon_slot(
         );
         if let Err(error) = recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle).await
         {
+            let error_detail = sanitized_retry_error(&error);
             eprintln!(
-                "daemon slot-{slot_index} cycle {cycle} recycle failed: {error:#}; retrying JIT config until it succeeds"
+                "daemon slot-{slot_index} cycle {cycle} recycle failed: {error_detail}; retrying JIT config until it succeeds"
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} recycle failed: {error:#}"),
+                &format!("slot-{slot_index} cycle {cycle} recycle failed: {error_detail}"),
             );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
         }
@@ -1978,11 +2059,12 @@ async fn reconfigure_daemon_slot_forever(
             Ok(()) => return,
             Err(error) => {
                 let delay = slot_retry_delay_for_error(attempt, slot_index, &error);
+                let error_detail = sanitized_retry_error(&error);
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
                     .unwrap_or_default();
                 eprintln!(
-                    "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s.",
+                    "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error_detail}.{diagnosis} Retrying in {}s.",
                     delay.as_secs()
                 );
                 if sleep_slot_retry_or_drain(delay).await {
