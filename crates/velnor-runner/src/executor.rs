@@ -2428,9 +2428,23 @@ where
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let result = self.native_shell(container, state, &kache_setup_script(), timeout)?;
+        // Mirror the script's env in step state so later steps see the same
+        // values even where GITHUB_ENV is not threaded (mirrors script above).
+        let runner_temp = state
+            .env
+            .get("RUNNER_TEMP")
+            .map(String::as_str)
+            .unwrap_or("/__t");
         let mut command_state = StepCommandState::default();
         command_state.set_env("KACHE_CACHE_DIR".into(), "/var/cache/kache".into());
-        command_state.set_env("KACHE_MAX_SIZE".into(), "20GiB".into());
+        command_state.set_env(
+            "KACHE_MAX_SIZE".into(),
+            crate::compiler_cache::DEFAULT_COMPILER_CACHE_MAX_SIZE.into(),
+        );
+        command_state.set_env(
+            "KACHE_RUNTIME_DIR".into(),
+            format!("{runner_temp}/kache-runtime"),
+        );
         command_state.set_env("RUSTC_WRAPPER".into(), "kache".into());
         Ok(native_command_result(result, command_state))
     }
@@ -4157,21 +4171,33 @@ sccache --start-server 2>/dev/null || true
 }
 
 fn kache_setup_script() -> String {
-    r#"set -e
-command -v kache >/dev/null 2>&1 || { echo 'kache v0.10.0 must be preinstalled in the job image' >&2; exit 1; }
-kache --version | grep -F 'kache 0.10.0'
+    // Same shape as the sccache setup: the kache binary must come from the job
+    // image (never a download), pinned to the version the image ships. Runtime
+    // state (socket, locks, logs) lives per-job under RUNNER_TEMP so concurrent
+    // jobs never share a socket; cache data stays in the shared /var/cache/kache
+    // bind. KACHE_SERVICE is not part of kache's env contract and is never set.
+    format!(
+        r#"set -e
+command -v kache >/dev/null 2>&1 || {{ echo 'kache v{kache_version} must be preinstalled in the job image' >&2; exit 1; }}
+kache --version | grep -F 'kache {kache_version}'
 mkdir -p /var/cache/kache
+KACHE_RUNTIME_DIR="${{RUNNER_TEMP:-/__t}}/kache-runtime"
+mkdir -p "$KACHE_RUNTIME_DIR"
 export KACHE_CACHE_DIR=/var/cache/kache
-export KACHE_MAX_SIZE=20GiB
+export KACHE_MAX_SIZE={max_size}
+export KACHE_RUNTIME_DIR
 export RUSTC_WRAPPER=kache
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo 'KACHE_CACHE_DIR=/var/cache/kache' >> "$GITHUB_ENV"
-  echo 'KACHE_MAX_SIZE=20GiB' >> "$GITHUB_ENV"
+if [ -n "${{GITHUB_ENV:-}}" ]; then
+  echo "KACHE_CACHE_DIR=/var/cache/kache" >> "$GITHUB_ENV"
+  echo "KACHE_MAX_SIZE={max_size}" >> "$GITHUB_ENV"
+  echo "KACHE_RUNTIME_DIR=$KACHE_RUNTIME_DIR" >> "$GITHUB_ENV"
   echo 'RUSTC_WRAPPER=kache' >> "$GITHUB_ENV"
 fi
 kache stats >/dev/null
-"#
-    .to_string()
+"#,
+        kache_version = crate::compiler_cache::KACHE_BINARY_VERSION,
+        max_size = crate::compiler_cache::DEFAULT_COMPILER_CACHE_MAX_SIZE,
+    )
 }
 
 /// Inputs of `hadolint/hadolint-action`, defaults matching its action.yml.
@@ -10022,7 +10048,10 @@ mod tests {
             assert!(!script.contains("wget"));
         }
         assert!(sccache.contains("0.16.0"));
-        assert!(kache.contains("0.10.0"));
+        assert!(kache.contains("0.16.0"));
+        // Runtime state is per-job under RUNNER_TEMP; kache has no service env.
+        assert!(kache.contains("KACHE_RUNTIME_DIR=\"${RUNNER_TEMP:-/__t}/kache-runtime\""));
+        assert!(!kache.contains("KACHE_SERVICE"));
     }
 
     #[test]
@@ -14677,6 +14706,11 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results[0].state.env["RUSTC_WRAPPER"], "kache");
         assert_eq!(results[0].state.env["KACHE_CACHE_DIR"], "/var/cache/kache");
         assert_eq!(results[0].state.env["KACHE_MAX_SIZE"], "20GiB");
+        // Per-job runtime dir, never a shared socket across concurrent jobs.
+        assert_eq!(
+            results[0].state.env["KACHE_RUNTIME_DIR"],
+            "/__t/kache-runtime"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
