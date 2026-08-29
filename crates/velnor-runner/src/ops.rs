@@ -189,6 +189,8 @@ pub struct OpsSink {
     injected_write_failure: Mutex<Option<(ExitClass, &'static str)>>,
     #[cfg(test)]
     forensic_failures: Mutex<Vec<String>>,
+    #[cfg(test)]
+    injected_prune_failure: AtomicBool,
 }
 
 impl OpsSink {
@@ -212,6 +214,8 @@ impl OpsSink {
             injected_write_failure: Mutex::new(None),
             #[cfg(test)]
             forensic_failures: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            injected_prune_failure: AtomicBool::new(false),
         })
     }
 
@@ -371,30 +375,60 @@ impl OpsSink {
         {
             return;
         }
-        if let Err(error) = self.store.prune_history(&self.budget) {
-            self.absorb("store.prune", &error.to_string());
+        let report = match self.store.prune_history(&self.budget) {
+            Ok(report) => report,
+            Err(error) => {
+                self.restore_prune_marker(now_unix, last);
+                self.absorb("store.prune", &error.to_string());
+                return;
+            }
+        };
+        #[cfg(test)]
+        if self.injected_prune_failure.swap(false, Ordering::Relaxed) {
+            self.restore_prune_marker(now_unix, last);
+            self.absorb(
+                "store.accounting",
+                "test-injected post-commit accounting failure",
+            );
             return;
         }
-        // Publish post-prune accounting so retention stays observable from
-        // logs alone (Plan 066 step 5).
-        match self.accounting() {
-            Ok(accounting) => println!(
-                "forensics.ops event=retention jobs={} events={} transitions={} db_bytes={} wal_bytes={} last_prune_at={}",
-                accounting.job_rows,
-                accounting.event_rows,
-                accounting.transition_rows,
-                accounting.database_bytes,
-                accounting.wal_bytes,
-                accounting.last_prune_at.as_deref().unwrap_or("never"),
-            ),
-            Err(error) => self.absorb("store.accounting", &error.to_string()),
+        if report.maintenance_deferred {
+            println!(
+                "forensics.ops event=retention-maintenance-deferred reason={}",
+                report
+                    .maintenance_reason
+                    .as_deref()
+                    .unwrap_or("unspecified")
+            );
         }
+        // Publish the coherent post-prune report so retention stays
+        // observable from logs without a second full accounting scan.
+        println!(
+            "forensics.ops event=retention deleted_jobs={} deleted_events={} deleted_transitions={} db_bytes={} wal_bytes={} total_bytes={} oldest_retained_at={}",
+            report.deleted_jobs,
+            report.deleted_events,
+            report.deleted_transitions,
+            report.database_bytes,
+            report.wal_bytes,
+            report.total_bytes,
+            report.oldest_retained_at.as_deref().unwrap_or("none"),
+        );
+    }
+
+    fn restore_prune_marker(&self, claimed: u64, previous: u64) {
+        let _ = self.last_prune_unix.compare_exchange(
+            claimed,
+            previous,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
     }
 
     /// Read-only accounting snapshot for diagnostics.
     ///
     /// # Errors
     /// Propagates store read failures.
+    #[allow(dead_code)]
     pub fn accounting(
         &self,
     ) -> Result<velnor_control::store::StoreAccounting, velnor_control::store::StoreError> {
@@ -447,6 +481,11 @@ impl OpsSink {
             .lock()
             .unwrap()
             .replace((class, reason));
+    }
+
+    #[cfg(test)]
+    fn fail_next_prune_accounting(&self) {
+        self.injected_prune_failure.store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -880,6 +919,24 @@ mod tests {
         sink.prune_if_due();
         sink.prune_if_due();
         assert!(!sink.degraded());
+    }
+
+    #[test]
+    fn prune_if_due_restores_retry_marker_after_post_commit_failure() {
+        let (_dir, sink) = temp_sink("prune-retry");
+        sink.fail_next_prune_accounting();
+
+        sink.prune_if_due();
+
+        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), 0);
+        assert!(sink.degraded());
+        assert!(sink
+            .forensic_failures()
+            .iter()
+            .any(|entry| entry.contains("store.accounting")));
+
+        sink.prune_if_due();
+        assert!(sink.last_prune_unix.load(Ordering::Relaxed) > 0);
     }
 
     #[test]
