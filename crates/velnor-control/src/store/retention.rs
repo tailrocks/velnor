@@ -1704,49 +1704,28 @@ impl Store {
     }
 }
 
-/// Read and validate the reservation aggregate inside the caller's write
-/// transaction. Any missing, malformed, orphaned, or counter-mismatched row
-/// fails closed instead of silently weakening the physical admission gate.
+/// Read the maintained reservation aggregate inside the caller's write
+/// transaction. The count and fixed per-job size make this O(1); immutable
+/// rows and migration-verified triggers prevent callers from changing the
+/// aggregate without its counter update.
 pub(crate) fn storage_reservation_bytes_with_connection(
     connection: &rusqlite::Connection,
 ) -> StoreResult<u64> {
-    let stored_total: Option<i64> = connection
+    let (stored_total, stored_count): (i64, i64) = connection
         .query_row(
-            "SELECT reserved_bytes FROM storage_reservation_state WHERE singleton = 0",
+            "SELECT reserved_bytes, reservation_count
+             FROM storage_reservation_state WHERE singleton = 0",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?;
-    let Some(stored_total) = stored_total else {
-        return Err(storage_reservation_integrity_error(
-            "the reservation aggregate row is missing",
-        ));
-    };
-    let (row_count, row_total, invalid_rows, orphan_rows): (i64, i64, i64, i64) = connection
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(reserved_bytes), 0),
-                    COALESCE(SUM(CASE WHEN reserved_bytes != ?1 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN NOT EXISTS(
-                        SELECT 1 FROM jobs
-                        WHERE jobs.instance_slug = job_storage_reservations.instance_slug
-                          AND jobs.job_uid = job_storage_reservations.job_uid
-                    ) THEN 1 ELSE 0 END), 0)
-             FROM job_storage_reservations",
-            [i64::try_from(JOB_STORAGE_RESERVATION_BYTES).map_err(|_| {
-                storage_reservation_integrity_error("the fixed reservation exceeds SQLite range")
-            })?],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
+        .map_err(StoreError::from)?;
     if stored_total < 0
-        || row_total < 0
-        || invalid_rows != 0
-        || orphan_rows != 0
-        || i128::from(row_count) * i128::from(JOB_STORAGE_RESERVATION_BYTES)
-            != i128::from(row_total)
-        || stored_total != row_total
+        || stored_count < 0
+        || i128::from(stored_count) * i128::from(JOB_STORAGE_RESERVATION_BYTES)
+            != i128::from(stored_total)
     {
         return Err(storage_reservation_integrity_error(
-            "durable reservation rows and aggregate are inconsistent",
+            "durable reservation aggregate is inconsistent",
         ));
     }
     u64::try_from(stored_total).map_err(|_| {

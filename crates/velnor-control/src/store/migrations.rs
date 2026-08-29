@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 14;
+pub const LATEST_SCHEMA_VERSION: u32 = 15;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -398,6 +398,71 @@ FROM jobs
 WHERE phase NOT IN ('completed', 'canceled', 'rejected');
 ";
 
+/// Keep admission accounting constant-time and make claims immutable. The
+/// primary key supplies the identity lookup; the redundant v13 index is
+/// removed after existing databases have converged.
+const SCHEMA_V15: &str = "
+ALTER TABLE storage_reservation_state
+    ADD COLUMN reservation_count INTEGER NOT NULL DEFAULT 0;
+UPDATE storage_reservation_state
+SET reservation_count = (SELECT COUNT(*) FROM job_storage_reservations)
+WHERE singleton = 0;
+DROP TRIGGER IF EXISTS storage_reservations_insert;
+DROP TRIGGER IF EXISTS storage_reservations_delete;
+CREATE TRIGGER storage_reservations_insert
+AFTER INSERT ON job_storage_reservations
+BEGIN
+    UPDATE storage_reservation_state
+    SET reserved_bytes = reserved_bytes + NEW.reserved_bytes,
+        reservation_count = reservation_count + 1
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER storage_reservations_delete
+AFTER DELETE ON job_storage_reservations
+BEGIN
+    UPDATE storage_reservation_state
+    SET reserved_bytes = reserved_bytes - OLD.reserved_bytes,
+        reservation_count = reservation_count - 1
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS storage_reservations_immutable
+BEFORE UPDATE ON job_storage_reservations
+BEGIN
+    SELECT RAISE(ABORT, 'job storage reservations are immutable');
+END;
+DROP INDEX IF EXISTS idx_job_storage_reservations_job;
+";
+
+const SCHEMA_V15_REPLAY: &str = "
+UPDATE storage_reservation_state
+SET reservation_count = (SELECT COUNT(*) FROM job_storage_reservations)
+WHERE singleton = 0;
+DROP TRIGGER IF EXISTS storage_reservations_insert;
+DROP TRIGGER IF EXISTS storage_reservations_delete;
+CREATE TRIGGER storage_reservations_insert
+AFTER INSERT ON job_storage_reservations
+BEGIN
+    UPDATE storage_reservation_state
+    SET reserved_bytes = reserved_bytes + NEW.reserved_bytes,
+        reservation_count = reservation_count + 1
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER storage_reservations_delete
+AFTER DELETE ON job_storage_reservations
+BEGIN
+    UPDATE storage_reservation_state
+    SET reserved_bytes = reserved_bytes - OLD.reserved_bytes,
+        reservation_count = reservation_count - 1
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS storage_reservations_immutable
+BEFORE UPDATE ON job_storage_reservations
+BEGIN
+    SELECT RAISE(ABORT, 'job storage reservations are immutable');
+END;
+DROP INDEX IF EXISTS idx_job_storage_reservations_job;
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -499,6 +564,11 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "backfill-active-job-storage-reservations",
         sql: SCHEMA_V14,
     },
+    Migration {
+        version: 15,
+        name: "constant-time-storage-reservation-accounting",
+        sql: SCHEMA_V15,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -538,13 +608,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
         [],
         |row| row.get(0),
     )?;
-    if version >= LATEST_SCHEMA_VERSION && !v14_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v15_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 14 is recorded but its exact lifecycle-event identity or active-job storage-reservation schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 15 is recorded but its exact lifecycle-event identity or constant-time storage-reservation schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -693,6 +763,12 @@ pub(crate) fn apply_pending(
             migration.version == 12 && has_column(&transaction, "events", "transition_id")?;
         let event_reconciliation_column_exists =
             migration.version == 12 && has_column(&transaction, "events", "reconciliation_id")?;
+        let reservation_count_exists = migration.version == 15
+            && has_column(
+                &transaction,
+                "storage_reservation_state",
+                "reservation_count",
+            )?;
         if migration.version == 12
             && event_transition_column_exists != event_reconciliation_column_exists
         {
@@ -716,6 +792,8 @@ pub(crate) fn apply_pending(
                 SCHEMA_V9_REPLAY
             } else if event_transition_column_exists && event_reconciliation_column_exists {
                 SCHEMA_V12_REPLAY
+            } else if reservation_count_exists {
+                SCHEMA_V15_REPLAY
             } else {
                 migration.sql
             };
@@ -746,6 +824,15 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v14 active jobs did not converge to durable storage reservations; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 15 && !v15_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v15 constant-time storage-reservation accounting did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -954,12 +1041,7 @@ fn v13_schema_complete(conn: &Connection) -> StoreResult<bool> {
     {
         return Ok(false);
     }
-    has_index_columns(
-        conn,
-        "idx_job_storage_reservations_job",
-        "job_storage_reservations",
-        ["instance_slug", "job_uid"].as_slice(),
-    )
+    Ok(true)
 }
 
 fn v14_schema_complete(conn: &Connection) -> StoreResult<bool> {
@@ -979,6 +1061,34 @@ fn v14_schema_complete(conn: &Connection) -> StoreResult<bool> {
         [],
         |row| row.get::<_, bool>(0),
     )?)
+}
+
+fn v15_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v13_schema_complete(conn)?
+        || !has_column_connection(conn, "storage_reservation_state", "reservation_count")?
+    {
+        return Ok(false);
+    }
+    let state_valid: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM storage_reservation_state
+             WHERE singleton = 0 AND reserved_bytes >= 0 AND reservation_count >= 0
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(state_valid
+        && trigger_sql_contains(
+            conn,
+            "storage_reservations_insert",
+            "reservation_count = reservation_count + 1",
+        )?
+        && trigger_sql_contains(
+            conn,
+            "storage_reservations_delete",
+            "reservation_count = reservation_count - 1",
+        )?
+        && trigger_sql_contains(conn, "storage_reservations_immutable", "RAISE(ABORT")?)
 }
 
 fn table_sql_contains(conn: &Connection, table: &str, fragment: &str) -> StoreResult<bool> {
