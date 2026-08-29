@@ -5835,22 +5835,24 @@ fn native_upload_artifact(
     // access local artifacts.
     if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN") {
         if let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token) {
-            // Collect files from the local artifact store for the zip upload.
-            let mut zip_files: Vec<(String, Vec<u8>)> = Vec::new();
+            // Pass artifact-store paths directly. The Results Service upload
+            // streams each source file and never materializes the artifact in RAM.
+            let mut zip_files = Vec::new();
             if let Ok(entries) = fs::read_dir(&artifact_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_file() {
-                        if let (Ok(content), Some(file_name)) =
-                            (fs::read(&path), path.file_name().and_then(|n| n.to_str()))
-                        {
-                            zip_files.push((file_name.to_string(), content));
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            zip_files.push(crate::protocol::ArtifactUploadFile {
+                                archive_path: file_name.to_string(),
+                                source_path: path,
+                            });
                         }
                     }
                 }
             }
             if !zip_files.is_empty() {
-                match crate::protocol::upload_artifact_blocking(
+                match crate::protocol::upload_artifact_files_blocking(
                     &results_url,
                     runtime_token,
                     &plan_id,
@@ -5962,13 +5964,18 @@ fn native_download_artifact(
             } else {
                 destination.join(&artifact.name)
             };
-            for (relative, content) in &artifact.files {
-                let output = target.join(relative);
+            for file in &artifact.files {
+                let output = target.join(&file.relative_path);
                 if let Some(parent) = output.parent() {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("create artifact target {}", parent.display()))?;
                 }
-                fs::write(&output, content)
+                let mut input = fs::File::open(file.path()).with_context(|| {
+                    format!("open downloaded artifact {}", file.path().display())
+                })?;
+                let mut output_file = fs::File::create(&output)
+                    .with_context(|| format!("create artifact file {}", output.display()))?;
+                std::io::copy(&mut input, &mut output_file)
                     .with_context(|| format!("write artifact file {}", output.display()))?;
             }
         }
