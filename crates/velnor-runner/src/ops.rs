@@ -417,6 +417,14 @@ impl OpsSink {
         true
     }
 
+    /// Release a durable claim after stale in-flight recovery completed the
+    /// remote job. Cleanup remains allowed while admission is blocked.
+    pub(crate) fn release_storage_reservation(&self, job_uid: &str) -> Result<(), StoreError> {
+        self.store
+            .release_job_storage_reservation(&self.instance_slug, job_uid)
+            .map(|_| ())
+    }
+
     /// Best-effort normalized event; failures degrade, never propagate.
     pub fn emit(&self, reason: EventReason, subject: &str, detail: Option<String>) {
         let Some(masks) = self.event_masks() else {

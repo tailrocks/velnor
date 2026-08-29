@@ -534,6 +534,35 @@ impl Store {
         Ok(())
     }
 
+    /// Release one durable job claim after an abandoned in-flight job has
+    /// been completed remotely. The identity-qualified delete is idempotent
+    /// and deliberately bypasses the admission budget so cleanup can finish
+    /// under disk pressure.
+    pub fn release_job_storage_reservation(
+        &self,
+        instance_slug: &str,
+        job_uid: &str,
+    ) -> StoreResult<bool> {
+        Slug::validate("instance_slug", instance_slug).map_err(|_| {
+            StoreError::new(ExitClass::Conflict, "store.admission.reservation.identity")
+                .with_remediation("release requires the daemon instance and job identity")
+        })?;
+        Slug::validate("job_uid", job_uid).map_err(|_| {
+            StoreError::new(ExitClass::Conflict, "store.admission.reservation.identity")
+                .with_remediation("release requires the daemon instance and job identity")
+        })?;
+        let mut conn = self.lock_conn()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let deleted = transaction.execute(
+            "DELETE FROM job_storage_reservations
+             WHERE instance_slug = ?1 AND job_uid = ?2",
+            params![instance_slug, job_uid],
+        )?;
+        transaction.commit()?;
+        Ok(deleted == 1)
+    }
+
     /// Persist one sanitized [`ModelJobSummary`], upserting by its normalized
     /// `(instance_slug, job_uid)` identity.
     ///

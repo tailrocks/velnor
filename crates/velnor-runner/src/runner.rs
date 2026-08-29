@@ -404,7 +404,7 @@ async fn complete_recorded_in_flight_job(
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
-        job_id: record.job_id,
+        job_id: record.job_id.clone(),
     };
     complete_acquired_job_failure(
         &ctx,
@@ -414,6 +414,14 @@ async fn complete_recorded_in_flight_job(
         "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
     )
     .await?;
+    let sink = crate::ops::global().ok_or_else(|| {
+        anyhow::anyhow!(
+            "operational store sink unavailable while releasing stale reservation for job {}",
+            record.job_id
+        )
+    })?;
+    sink.release_storage_reservation(&record.job_id)
+        .context("release stale in-flight job storage reservation")?;
     clear_in_flight_job(slot_dir)?;
     Ok(true)
 }
