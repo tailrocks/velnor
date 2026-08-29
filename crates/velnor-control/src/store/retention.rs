@@ -2136,7 +2136,7 @@ mod tests {
         let (_dir, store) = temp_store("lease-commit-fence");
         seed_expired_events(&store, 1);
         let lease = store
-            .try_acquire_retention_lease("owner-a-1", 100, Duration::from_secs(30))
+            .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
             .unwrap()
             .unwrap();
         let budget = RetentionBudget {

@@ -741,17 +741,18 @@ fn has_index_columns(
     if actual_table.as_deref() != Some(table) {
         return Ok(false);
     }
-    let index_list: Option<(i64, String)> = conn
+    let index_list: Option<(i64, String, i64)> = conn
         .query_row(
-            "SELECT \"unique\", origin FROM pragma_index_list(?1) WHERE name = ?2",
+            "SELECT \"unique\", origin, partial
+             FROM pragma_index_list(?1) WHERE name = ?2",
             rusqlite::params![table, index],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((unique, origin)) = index_list else {
+    let Some((unique, origin, partial)) = index_list else {
         return Ok(false);
     };
-    if unique != 0 || origin != "c" {
+    if unique != 0 || origin != "c" || partial != 0 {
         return Ok(false);
     }
 
@@ -957,6 +958,28 @@ mod tests {
             .execute(
                 "CREATE UNIQUE INDEX idx_events_transition_id
                  ON events (transition_id COLLATE NOCASE, id DESC)",
+                [],
+            )
+            .unwrap();
+
+        let error = current_version(&connection).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+    }
+
+    #[test]
+    fn recorded_v12_with_partial_identity_index_fails_closed() {
+        let temp = TempDb::new("partial-v12-index-semantics");
+        let store = Store::open(&temp.path).expect("initial migration");
+        let connection = store.lock_conn().expect("store lock");
+
+        connection
+            .execute("DROP INDEX idx_events_transition_id", [])
+            .unwrap();
+        connection
+            .execute(
+                "CREATE INDEX idx_events_transition_id
+                 ON events (transition_id, id)
+                 WHERE transition_id IS NOT NULL",
                 [],
             )
             .unwrap();

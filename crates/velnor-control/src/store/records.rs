@@ -1275,7 +1275,7 @@ fn json_contains_secret(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
             let sensitive = EVENT_SECRET_KEYS
                 .iter()
-                .any(|candidate| key.eq_ignore_ascii_case(candidate));
+                .any(|candidate| secret_keys_match(key, candidate));
             (sensitive && !json_value_is_exact_redaction(value)) || json_contains_secret(value)
         }),
         serde_json::Value::Array(values) => values.iter().any(json_contains_secret),
@@ -1293,8 +1293,10 @@ fn json_value_is_exact_redaction(value: &serde_json::Value) -> bool {
 }
 
 fn secret_key_has_value(text: &str, key: &str) -> bool {
+    let text = normalize_secret_key_separators(text);
+    let key = normalize_secret_key_separators(key);
     let mut offset = 0;
-    while let Some(index) = text[offset..].find(key) {
+    while let Some(index) = text[offset..].find(key.as_str()) {
         let start = offset + index;
         let preceded_by_name_char = text[..start]
             .chars()
@@ -1318,6 +1320,26 @@ fn secret_key_has_value(text: &str, key: &str) -> bool {
         }
     }
     false
+}
+
+fn secret_keys_match(actual: &str, expected: &str) -> bool {
+    actual
+        .chars()
+        .filter(|character| !matches!(*character, '-' | '_'))
+        .map(|character| character.to_ascii_lowercase())
+        .eq(
+            expected
+                .chars()
+                .filter(|character| !matches!(*character, '-' | '_'))
+                .map(|character| character.to_ascii_lowercase()),
+        )
+}
+
+fn normalize_secret_key_separators(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !matches!(*character, '-' | '_'))
+        .collect()
 }
 
 fn is_exact_redaction(value: &str) -> bool {
@@ -1840,6 +1862,10 @@ mod event_tests {
         for detail in [
             "token=[REDACTED]LEAK",
             "{\"token\":\"[REDACTED]LEAK\"}",
+            "api-key=REAL_SECRET",
+            "access-token: REAL_SECRET",
+            "client-secret=REAL_SECRET",
+            "private-key: REAL_SECRET",
             "{\"\\u0074oken\":\"secret\"}",
             r"tok\u0065n=REAL_SECRET",
             r"tok\x65n=REAL_SECRET",
@@ -1856,6 +1882,17 @@ mod event_tests {
         let mut redacted = valid;
         redacted.detail = Some("{\"token\":\"[REDACTED]\"}".to_owned());
         assert!(validate_event_row(&redacted).is_ok());
+
+        for detail in [
+            r#"{"api-key":"secret"}"#,
+            r#"{"access-token":"secret"}"#,
+            r#"{"client-secret":"secret"}"#,
+            r#"{"private-key":"secret"}"#,
+        ] {
+            let mut candidate = event("a", "job-a", "job.started");
+            candidate.detail = Some(detail.to_owned());
+            assert!(validate_event_row(&candidate).is_err(), "detail={detail:?}");
+        }
 
         let mut escaped_redacted = event("a", "job-a", "job.started");
         escaped_redacted.detail = Some(r"tok\u0065n=[REDACTED]".to_owned());

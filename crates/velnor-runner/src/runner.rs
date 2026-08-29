@@ -1284,7 +1284,7 @@ impl std::fmt::Write for BoundedErrorRenderer {
     }
 }
 
-fn sanitized_retry_error(error: &anyhow::Error) -> String {
+fn sanitized_retry_error(error: &dyn std::fmt::Display) -> String {
     let mut renderer = BoundedErrorRenderer::new();
     let formatted = std::fmt::write(&mut renderer, format_args!("{error:#}"));
     if renderer.truncated || formatted.is_err() {
@@ -3376,9 +3376,10 @@ async fn run_v2(
             return Err(error).context("delete broker runner session");
         }
         Err(error) => {
-            eprintln!("Best-effort broker session delete failed: {error:#}");
+            let detail = sanitized_retry_error(&error);
+            eprintln!("Best-effort broker session delete failed: {detail}");
             forensics.lifecycle(&format!(
-                "best-effort broker session delete failed: {error:#}"
+                "best-effort broker session delete failed: {detail}"
             ));
         }
     }
@@ -3481,8 +3482,9 @@ async fn refresh_idle_credentials(
             forensics.lifecycle(&note);
         }
         Err(error) => {
+            let detail = sanitized_retry_error(&error);
             let note = format!(
-                "proactive credential refresh failed (token age {token_age_minutes}m): {error:#}"
+                "proactive credential refresh failed (token age {token_age_minutes}m): {detail}"
             );
             eprintln!("{note}");
             forensics.lifecycle(&note);
@@ -3524,14 +3526,20 @@ async fn check_runner_registry(
     let client = match RegistrationClient::new() {
         Ok(client) => client,
         Err(error) => {
-            forensics.registry(&format!("lookup skipped: client build failed: {error:#}"));
+            forensics.registry(&format!(
+                "lookup skipped: client build failed: {}",
+                sanitized_retry_error(&error)
+            ));
             return None;
         }
     };
     let lookup = match client.get_runner(scope, pat, agent_id).await {
         Ok(lookup) => lookup,
         Err(error) => {
-            forensics.registry(&format!("lookup error (not counted as strike): {error:#}"));
+            forensics.registry(&format!(
+                "lookup error (not counted as strike): {}",
+                sanitized_retry_error(&error)
+            ));
             return None;
         }
     };
@@ -3638,8 +3646,9 @@ async fn create_broker_session_with_retry(
             Err(error) if attempt < BROKER_SESSION_CREATE_MAX_ATTEMPTS => {
                 let delay = broker_session_create_retry_delay(attempt);
                 eprintln!(
-                    "Broker session create failed on attempt {attempt}/{}: {error:#}. Retrying in {}s.",
+                    "Broker session create failed on attempt {attempt}/{}: {}. Retrying in {}s.",
                     BROKER_SESSION_CREATE_MAX_ATTEMPTS,
+                    sanitized_retry_error(&error),
                     delay.as_secs()
                 );
                 attempt += 1;
@@ -3780,7 +3789,8 @@ async fn poll_broker_message(
             Err(error) => {
                 if draining() {
                     forensics.lifecycle(&format!(
-                        "idle slot exiting after broker poll error during daemon drain: {error:#}"
+                        "idle slot exiting after broker poll error during daemon drain: {}",
+                        sanitized_retry_error(&error)
                     ));
                     return Ok(None);
                 }
@@ -3803,19 +3813,22 @@ async fn poll_broker_message(
                         }
                         Err(refresh_error) => {
                             forensics.lifecycle(&format!(
-                                "broker poll credential refresh failed after auth error: {refresh_error:#}"
+                                "broker poll credential refresh failed after auth error: {}",
+                                sanitized_retry_error(&refresh_error)
                             ));
                         }
                     }
                 }
                 forensics.broker(&format!(
-                    "poll ERROR consecutive={}: {error:#}",
-                    poll_state.consecutive_errors + 1
+                    "poll ERROR consecutive={}: {}",
+                    poll_state.consecutive_errors + 1,
+                    sanitized_retry_error(&error)
                 ));
                 let delay = poll_state.received_error()?;
                 eprintln!(
-                    "Broker message poll failed ({} consecutive error(s)): {error:#}. Retrying in {}s.",
+                    "Broker message poll failed ({} consecutive error(s)): {}. Retrying in {}s.",
                     poll_state.consecutive_errors,
+                    sanitized_retry_error(&error),
                     delay.as_secs()
                 );
                 tokio::time::sleep(delay).await;
@@ -3917,8 +3930,9 @@ async fn handle_v2_message(
             .await
         {
             eprintln!(
-                "Best-effort broker acknowledge failed for request {}: {error:#}",
-                reference.runner_request_id
+                "Best-effort broker acknowledge failed for request {}: {}",
+                reference.runner_request_id,
+                sanitized_retry_error(&error)
             );
         }
     }
@@ -3950,8 +3964,9 @@ async fn handle_v2_message(
         Err(error) => {
             if !is_transient_acquire_error(&error) {
                 forensics.broker(&format!(
-                    "acquire ERROR request={} permanent; closing session: {error:#}",
-                    reference.runner_request_id
+                    "acquire ERROR request={} permanent; closing session: {}",
+                    reference.runner_request_id,
+                    sanitized_retry_error(&error)
                 ));
                 return Err(error).context("permanent run-service acquire failure");
             }
@@ -3961,12 +3976,14 @@ async fn handle_v2_message(
             // recycling the JIT identity here amplifies GitHub outages and
             // can strand the assigned job as runner-lost.
             forensics.broker(&format!(
-                "acquire ERROR request={} session retained: {error:#}",
-                reference.runner_request_id
+                "acquire ERROR request={} session retained: {}",
+                reference.runner_request_id,
+                sanitized_retry_error(&error)
             ));
             eprintln!(
-                "Run-service acquire failed for request {}; retaining broker session and runner registration: {error:#}",
-                reference.runner_request_id
+                "Run-service acquire failed for request {}; retaining broker session and runner registration: {}",
+                reference.runner_request_id,
+                sanitized_retry_error(&error)
             );
             return Ok(V2MessageAction::None);
         }
@@ -5066,7 +5083,10 @@ async fn start_run_service_lock_renewal(
             );
         }
         Err(error) => {
-            eprintln!("Initial run-service job lock renewal failed: {error:#}");
+            eprintln!(
+                "Initial run-service job lock renewal failed: {}",
+                sanitized_retry_error(&error)
+            );
             if lock_renewal_refresh_is_terminal(&error) {
                 registration_lost.store(true, Ordering::SeqCst);
             } else if is_credential_poll_error(&error) {
@@ -5077,7 +5097,8 @@ async fn start_run_service_lock_renewal(
                     }
                     Err(refresh_error) => {
                         eprintln!(
-                            "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                            "Run-service lock renewal credential refresh failed: {}",
+                            sanitized_retry_error(&refresh_error)
                         );
                         if lock_renewal_refresh_is_terminal(&refresh_error) {
                             registration_lost.store(true, Ordering::SeqCst);
@@ -5107,7 +5128,10 @@ async fn start_run_service_lock_renewal(
                     );
                 }
                 Err(error) => {
-                    eprintln!("Run-service job lock renewal failed: {error:#}");
+                    eprintln!(
+                        "Run-service job lock renewal failed: {}",
+                        sanitized_retry_error(&error)
+                    );
                     if lock_renewal_refresh_is_terminal(&error) {
                         registration_lost.store(true, Ordering::SeqCst);
                         break;
@@ -5120,7 +5144,8 @@ async fn start_run_service_lock_renewal(
                             }
                             Err(refresh_error) => {
                                 eprintln!(
-                                    "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                                    "Run-service lock renewal credential refresh failed: {}",
+                                    sanitized_retry_error(&refresh_error)
                                 );
                                 if lock_renewal_refresh_is_terminal(&refresh_error) {
                                     registration_lost.store(true, Ordering::SeqCst);
@@ -5202,12 +5227,14 @@ fn start_broker_cancellation_poll(
                     // Rate-cap the log line: first few, then once a minute.
                     if error_streak <= 3 || error_streak.is_multiple_of(30) {
                         eprintln!(
-                            "Broker cancellation poll failed ({error_streak} consecutive): {error:#}"
+                            "Broker cancellation poll failed ({error_streak} consecutive): {}",
+                            sanitized_retry_error(&error)
                         );
                     }
                     if active_job_broker_registration_is_gone(&error) {
                         eprintln!(
-                            "Active job runner registration disappeared; cancelling the job because broker control messages can no longer be received: {error:#}"
+                            "Active job runner registration disappeared; cancelling the job because broker control messages can no longer be received: {}",
+                            sanitized_retry_error(&error)
                         );
                         canceled.store(true, Ordering::SeqCst);
                         kill_job_container(&job_container_name);
@@ -5224,12 +5251,14 @@ fn start_broker_cancellation_poll(
                                     );
                                     }
                                     Err(error) => eprintln!(
-                                    "Cancellation poller failed to rebuild broker client: {error:#}"
-                                ),
+                                        "Cancellation poller failed to rebuild broker client: {}",
+                                        sanitized_retry_error(&error)
+                                    ),
                                 }
                             }
                             Err(error) => eprintln!(
-                                "Cancellation poller credential refresh failed: {error:#}"
+                                "Cancellation poller credential refresh failed: {}",
+                                sanitized_retry_error(&error)
                             ),
                         }
                     }
@@ -5257,15 +5286,20 @@ fn start_broker_cancellation_poll(
                                 );
                             }
                             Err(error) => eprintln!(
-                                "Cancellation poller failed to apply broker migration: {error:#}"
+                                "Cancellation poller failed to apply broker migration: {}",
+                                sanitized_retry_error(&error)
                             ),
                         },
                         Err(error) => eprintln!(
-                            "Cancellation poller migration credential refresh failed: {error:#}"
+                            "Cancellation poller migration credential refresh failed: {}",
+                            sanitized_retry_error(&error)
                         ),
                     },
                     Err(error) => {
-                        eprintln!("Cancellation poller received malformed migration: {error:#}")
+                        eprintln!(
+                            "Cancellation poller received malformed migration: {}",
+                            sanitized_retry_error(&error)
+                        )
                     }
                 }
                 continue;
@@ -5328,8 +5362,9 @@ fn start_step_timeline_publisher(
                     .await
                 {
                     eprintln!(
-                        "Best-effort Twirp step start failed for '{}': {e:#}",
-                        event.step_id
+                        "Best-effort Twirp step start failed for '{}': {}",
+                        event.step_id,
+                        sanitized_retry_error(&e)
                     );
                 }
                 change_order += 1;
@@ -5338,8 +5373,9 @@ fn start_step_timeline_publisher(
             // Also update the distributed task timeline (legacy path)
             if let Err(error) = publish_timeline_step_started(&job, &event).await {
                 eprintln!(
-                    "Best-effort timeline step start update failed for '{}': {error:#}",
-                    event.step_id
+                    "Best-effort timeline step start update failed for '{}': {}",
+                    event.step_id,
+                    sanitized_retry_error(&error)
                 );
             }
         }
@@ -5418,7 +5454,10 @@ fn start_step_log_publisher(
                     Some(ws)
                 }
                 Err(e) => {
-                    eprintln!("Best-effort WebSocket feed connect failed: {e:#}");
+                    eprintln!(
+                        "Best-effort WebSocket feed connect failed: {}",
+                        sanitized_retry_error(&e)
+                    );
                     None
                 }
             }
@@ -5442,7 +5481,8 @@ fn start_step_log_publisher(
                     if let Some(ws) = ws_conn.as_mut() {
                         if let Err(e) = crate::protocol::FeedStreamClient::send_ping(ws).await {
                             eprintln!(
-                                "[feed] keepalive ping failed: {e:#}; dropping to reconnect on next send"
+                                "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
+                                sanitized_retry_error(&e)
                             );
                             ws_conn = None;
                         }
@@ -5529,8 +5569,9 @@ fn start_step_log_publisher(
                         .await
                     {
                         eprintln!(
-                            "Best-effort Twirp step completion failed for '{}': {e:#}",
-                            log.step_id
+                            "Best-effort Twirp step completion failed for '{}': {}",
+                            log.step_id,
+                            sanitized_retry_error(&e)
                         );
                     }
                     change_order += 1;
@@ -5547,8 +5588,9 @@ fn start_step_log_publisher(
                             .await
                         {
                             eprintln!(
-                                "Best-effort Results Service log upload failed for '{}': {e:#}",
-                                log.step_id
+                                "Best-effort Results Service log upload failed for '{}': {}",
+                                log.step_id,
+                                sanitized_retry_error(&e)
                             );
                         }
                         // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
@@ -5558,8 +5600,9 @@ fn start_step_log_publisher(
                                 .await
                             {
                                 eprintln!(
-                                    "Best-effort step summary upload failed for '{}': {e:#}",
-                                    log.step_id
+                                    "Best-effort step summary upload failed for '{}': {}",
+                                    log.step_id,
+                                    sanitized_retry_error(&e)
                                 );
                             }
                         }
@@ -5568,8 +5611,9 @@ fn start_step_log_publisher(
 
                 if let Err(error) = publish_timeline_step_log(&job, &log).await {
                     eprintln!(
-                        "Best-effort timeline step log upload failed for '{}': {error:#}",
-                        log.step_id
+                        "Best-effort timeline step log upload failed for '{}': {}",
+                        log.step_id,
+                        sanitized_retry_error(&error)
                     );
                 }
             }
@@ -5797,8 +5841,9 @@ fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: 
         },
         Err(error) => {
             eprintln!(
-                "Treating malformed cancellation message {} as job cancellation: {error:#}",
-                message.message_id
+                "Treating malformed cancellation message {} as job cancellation: {}",
+                message.message_id,
+                sanitized_retry_error(&error)
             );
             true
         }
