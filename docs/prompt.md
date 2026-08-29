@@ -41,7 +41,11 @@ authorized safe integration checkpoint, then prove the merged SHA on `main`
 before release. Repeated per-task PRs or repeated PR merges are prohibited by
 the one-branch/one-PR topology.
 
-Normal releases use the signed `velnor-apt` workflow. If, and only if, a
+Normal releases use the signed `velnor-apt` workflow. For normal and emergency
+paths alike, before accepting publication or installing, verify the exact
+package/source/version/digest binding, trusted signing-key fingerprint, and all
+three APT metadata artifacts—`Release`, clearsigned `InRelease`, and detached
+`Release.gpg`—with matching metadata bytes and checksums. If, and only if, a
 failed Velnor lane must build Velnor itself and urgent Sentry validation is
 required before the sole PR can merge, an explicitly authorized chicken-egg
 bootstrap may build one Debian package from the exact pushed campaign SHA.
@@ -50,9 +54,9 @@ package SHA-256 before and after transfer; transfer only that `.deb` via
 noninteractive `ssh sentry`; and publish it into the signed `velnor-apt`
 repository through the authorized host/Sentry release path. Install the exact
 version through the configured HTTPS APT source using the current exclusive
-`flock` transaction lock, never `dpkg -i`. Verify the repository signature,
-package checksum, installed package/source identity, service health, signed
-rollback predecessor, and rollback ability; record all evidence. Cancel stale
+`flock` transaction lock, never `dpkg -i`. Verify the installed package/source
+identity, service health, signed rollback predecessor, and rollback ability;
+record all evidence. Cancel stale
 validation state as required, prove it is clear, then retry `velnor`,
 `github`, and `both`. This exception is not raw binary/source/checkout copy,
 local-path installation, an unpinned package, or silent GitHub fallback.
