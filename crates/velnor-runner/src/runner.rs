@@ -3,6 +3,8 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -218,6 +220,35 @@ impl JobClaim {
             Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
             Err(error) => Err(error).context("lock host job claim"),
         }
+    }
+}
+
+/// Serialize the complete configure transaction for one runner directory.
+///
+/// The pending JIT marker, remote registration, and stored identity are one
+/// transaction. A process-local mutex cannot protect daemon/CLI peers, so use
+/// a stable on-disk flock held across every await and file mutation.
+#[derive(Debug)]
+struct ConfigureLock {
+    _file: File,
+}
+
+impl ConfigureLock {
+    fn acquire(dir: &Path) -> Result<Self> {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("create runner config directory {}", dir.display()))?;
+        let path = dir.join(".configure.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("open configure lock {}", path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .with_context(|| format!("lock runner config directory {}", dir.display()))?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -680,6 +711,7 @@ fn assess_registry_lookup(lookup: Option<&ListedRunner>, strikes_before: u32) ->
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
+    let _configure_lock = ConfigureLock::acquire(&dir)?;
     let scope = GitHubScope::parse(&args.url)?;
     let scope_url = pending_scope_url(&scope)?;
     let organization_scope = matches!(scope.kind(), "organization" | "enterprise");
@@ -997,12 +1029,11 @@ async fn reap_pending_jit_registration(dir: &Path, scope: &GitHubScope, pat: &st
 
     // The response may have been lost after GitHub accepted the request. No
     // safe exact delete is possible without the returned ID, and name-based
-    // deletion is forbidden because names are not identities. Clear only the
-    // local transaction marker so a subsequent configure can retry instead of
-    // permanently bricking the slot; any remote orphan remains subject to the
-    // provider's JIT expiry and must never be guessed at locally.
-    clear_pending_jit_registration(dir)
-        .context("clear unreconciled ID-less JIT marker; exact remote cleanup unavailable")
+    // deletion is forbidden because names are not identities. Preserve the
+    // marker and stop: retrying could create a duplicate/orphan registration.
+    bail!(
+        "pending JIT registration has no runner id; exact remote cleanup is impossible; preserving marker for operator reconciliation"
+    )
 }
 
 async fn cleanup_failed_jit_registration(
@@ -1081,10 +1112,18 @@ fn validate_jit_runner_identity(
     if !runner.ephemeral || !decoded.settings.ephemeral {
         bail!("GitHub JIT identity is not ephemeral");
     }
-    for label in requested_labels {
-        if !runner.labels.iter().any(|returned| returned.name == *label) {
-            bail!("GitHub JIT response omitted requested label '{label}'");
-        }
+    let requested_labels: BTreeSet<&str> = requested_labels.iter().map(String::as_str).collect();
+    let returned_labels: BTreeSet<&str> = runner
+        .labels
+        .iter()
+        .map(|label| label.name.as_str())
+        .collect();
+    if requested_labels != returned_labels {
+        bail!(
+            "GitHub JIT response label set mismatch: requested {:?}, returned {:?}",
+            requested_labels,
+            returned_labels
+        );
     }
     Ok(())
 }
@@ -3626,8 +3665,10 @@ async fn run_v2(
                     let migrated = BrokerClient::new(&trusted_url, broker_token.clone())?;
                     current_broker_url = trusted_url;
                     broker = migrated;
-                    println!("Broker migration applied: {current_broker_url}");
-                    forensics.lifecycle(&format!("broker migration applied: {current_broker_url}"));
+                    let safe_broker_url =
+                        crate::protocol::redacted_authenticated_url(&current_broker_url);
+                    println!("Broker migration applied: {safe_broker_url}");
+                    forensics.lifecycle(&format!("broker migration applied: {safe_broker_url}"));
                 }
                 V2MessageAction::RefreshToken => {
                     let refreshed_token = oauth_access_token(&stored).await?;
@@ -10786,6 +10827,17 @@ mod tests {
     }
 
     #[test]
+    fn configure_lock_excludes_concurrent_transactions() {
+        let dir = unique_temp_dir("configure-lock");
+        let owner = ConfigureLock::acquire(&dir).unwrap();
+        let error = ConfigureLock::acquire(&dir).unwrap_err().to_string();
+        assert!(error.contains("lock runner config directory"), "{error}");
+        drop(owner);
+        ConfigureLock::acquire(&dir).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn jit_runner_group_validation_rejects_missing_or_mismatched_identity() {
         let runner = crate::protocol::GitHubJitRunner {
             id: 42,
@@ -10829,6 +10881,24 @@ mod tests {
             &decoded,
         )
         .is_ok());
+
+        let mut extra_label = runner.clone();
+        extra_label
+            .labels
+            .push(crate::protocol::GitHubJitRunnerLabel {
+                name: "unexpected".into(),
+                kind: Some("custom".into()),
+            });
+        let error = validate_jit_runner_identity(
+            "velnor-slot-1",
+            &["velnor".into()],
+            3,
+            &extra_label,
+            &decoded,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("label set mismatch"), "{error}");
 
         settings.pool_id = None;
         let decoded_without_pool = crate::protocol::DecodedJitConfig {
@@ -12201,6 +12271,33 @@ jobs:
         assert_eq!(stored.settings.agent_id, Some(2));
         assert!(!stored.settings.ephemeral);
 
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_pending_jit_registration_is_preserved_for_reconciliation() {
+        let dir = unique_temp_dir("pending-jit-unknown-id");
+        let scope = GitHubScope::parse("https://github.com/owner/repo").unwrap();
+        write_pending_jit_registration(
+            &dir,
+            &PendingJitRegistration {
+                version: PENDING_JIT_REGISTRATION_VERSION,
+                scope_url: pending_scope_url(&scope).unwrap(),
+                agent_name: "velnor-slot-1".into(),
+                runner_id: None,
+            },
+        )
+        .unwrap();
+
+        let error = reap_pending_jit_registration(&dir, &scope, "unused")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("exact remote cleanup is impossible"),
+            "{error}"
+        );
+        assert!(pending_jit_registration_exists(&dir));
         fs::remove_dir_all(dir).unwrap();
     }
 
