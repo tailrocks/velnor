@@ -98,8 +98,8 @@ pub fn control_router(state: ApiState) -> Router {
         .route("/v1/{resource_kind}", get(query_resource))
         .route("/v1/watch", get(watch))
         .route("/v1/logs/{subject}", get(logs))
-        .layer(Extension(PeerPolicy::for_group(CONTROL_GROUP)))
         .layer(middleware::from_fn(require_peer))
+        .layer(Extension(PeerPolicy::for_group(CONTROL_GROUP)))
         .with_state(state)
 }
 
@@ -111,8 +111,8 @@ pub fn admin_router(state: ApiState) -> Router {
             "/v1/instances/{instance}/{operation}",
             post(mutate_instance),
         )
-        .layer(Extension(PeerPolicy::for_group(ADMIN_GROUP)))
         .layer(middleware::from_fn(require_peer))
+        .layer(Extension(PeerPolicy::for_group(ADMIN_GROUP)))
         .layer(DefaultBodyLimit::max(MAX_MUTATION_BODY_BYTES))
         .with_state(state)
 }
@@ -391,7 +391,39 @@ fn peer_groups(stream: &tokio::net::UnixStream) -> (Box<[u32]>, bool) {
     (groups, complete)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn peer_credentials(stream: &tokio::net::UnixStream) -> PeerCredentials {
+    use std::os::fd::AsRawFd;
+
+    let mut uid = 0;
+    let mut gid = 0;
+    // SAFETY: both output pointers refer to live scalar storage and the
+    // descriptor is borrowed only for this libc call.
+    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if result == 0 {
+        PeerCredentials {
+            uid,
+            gid,
+            valid: true,
+            // macOS exposes the peer's effective uid/gid here, but not a
+            // complete supplementary-group vector through this API. The
+            // primary group remains enforceable; supplementary-only access
+            // fails closed in PeerPolicy::allows.
+            groups: Box::new([]),
+            groups_valid: false,
+        }
+    } else {
+        PeerCredentials {
+            uid: 0,
+            gid: 0,
+            valid: false,
+            groups: Box::new([]),
+            groups_valid: false,
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn peer_credentials(_stream: &tokio::net::UnixStream) -> PeerCredentials {
     PeerCredentials {
         uid: 0,
@@ -724,6 +756,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use velnor_control::ports::{MutationResult, PortError};
     use velnor_model::{AnyResource, Event, ResourceMeta, Source, Timestamp};
 
@@ -863,6 +896,131 @@ mod tests {
         let error = result.expect_err("a full application bound must shed work");
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.envelope.reason, "control.overloaded");
+    }
+
+    #[tokio::test]
+    async fn real_control_socket_exposes_reads_but_no_mutations() {
+        let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
+        let state = ApiState::from_services(&services);
+        let path = test_socket_path("control");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind control socket");
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_unix(listener, control_router(state), async move {
+            let _ = shutdown_rx.changed().await;
+        }));
+
+        let info = socket_request(&path, "GET", "/v1/info", b"").await;
+        assert_eq!(response_status(&info), 200);
+        assert!(String::from_utf8_lossy(&info).contains("\"mutations\":false"));
+
+        let mutation = socket_request(
+            &path,
+            "POST",
+            "/v1/instances/default/cordon",
+            br#"{"operation":"cordon","reason":"test","idempotencyKey":"test"}"#,
+        )
+        .await;
+        assert!(matches!(response_status(&mutation), 404 | 405));
+
+        shutdown.send(true).expect("signal control shutdown");
+        server.await.expect("join control server").expect("serve");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn real_admin_socket_routes_matching_mutation_and_safely_rejects_bad_json() {
+        let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
+        let mutation = Arc::new(RecordingMutation::default());
+        let state = ApiState {
+            instance: Arc::from("primary"),
+            query: services.query(),
+            watch: services.events(),
+            logs: services.logs(),
+            mutation: Arc::clone(&mutation) as Arc<dyn MutationPort>,
+            blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
+        };
+        let path = test_socket_path("admin");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind admin socket");
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_unix(listener, admin_router(state), async move {
+            let _ = shutdown_rx.changed().await;
+        }));
+
+        let accepted = socket_request(
+            &path,
+            "POST",
+            "/v1/instances/primary/cordon",
+            br#"{"operation":"cordon","reason":"test","idempotencyKey":"test"}"#,
+        )
+        .await;
+        assert_eq!(response_status(&accepted), 202);
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
+
+        let rejected = socket_request(
+            &path,
+            "POST",
+            "/v1/instances/primary/cordon",
+            br#"{"operation":"cordon","reason":"test","idempotencyKey":"test","unknown":true}"#,
+        )
+        .await;
+        assert_eq!(response_status(&rejected), 400);
+        let rejected_text = String::from_utf8_lossy(&rejected);
+        assert!(rejected_text.contains("body"));
+        assert!(!rejected_text.contains("unknown"));
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 1);
+
+        shutdown.send(true).expect("signal admin shutdown");
+        server.await.expect("join admin server").expect("serve");
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn test_socket_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "velnorctl-http-{label}-{}-{}.sock",
+            std::process::id(),
+            NEXT_TEST_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    static NEXT_TEST_SOCKET: AtomicUsize = AtomicUsize::new(1);
+
+    async fn socket_request(
+        path: &std::path::Path,
+        method: &str,
+        target: &str,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let mut stream = tokio::net::UnixStream::connect(path)
+            .await
+            .expect("connect test socket");
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write test request");
+        stream.write_all(body).await.expect("write test body");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read test response");
+        response
+    }
+
+    fn response_status(response: &[u8]) -> u16 {
+        assert!(
+            !response.is_empty(),
+            "test server returned no HTTP response: {response:?}"
+        );
+        String::from_utf8_lossy(response)
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse().ok())
+            .expect("HTTP status")
     }
 
     #[test]
