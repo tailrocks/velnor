@@ -4,3 +4,22 @@
 
 [execution]
 backend = "docker"
+
+# Acceleration policy. Defaults are maximum, so an absent section is the
+# maximum policy; every key is shown with its only accepted value(s).
+# The only runtime overrides are the emergency env vars
+# VELNOR_ACCELERATION_TARGET_PERSISTENCE (auto|on|off) and
+# VELNOR_ACCELERATION_COMPILER_CACHE (auto|kache|sccache|off); any override
+# that changes the policy is recorded as a degradation on the job.
+#
+# [acceleration]
+# mode = "maximum"
+# target_persistence = "auto"
+# compiler_cache = "auto"
+# typed_stores = true
+# singleflight = true
+# prefetch = true
+# cache_aware_scheduling = true
+# native_actions = "prefer"
+# buildkit_local = true
+# result_cache = "hermetic-only"
