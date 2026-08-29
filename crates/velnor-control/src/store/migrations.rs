@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 8;
+pub const LATEST_SCHEMA_VERSION: u32 = 9;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -180,6 +180,128 @@ FROM events
 GROUP BY instance_slug;
 ";
 
+/// Retention indexes, exact lifecycle ancestry lookup, and transactional row
+/// counters. The expression indexes normalize RFC3339 values to SQLite's
+/// Julian-day representation for indexed oldest-row lookup; Rust still
+/// returns the original timestamp text and rejects malformed values.
+const SCHEMA_V9: &str = "
+ALTER TABLE retention_state ADD COLUMN job_rows INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE retention_state ADD COLUMN event_rows INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE retention_state ADD COLUMN transition_rows INTEGER NOT NULL DEFAULT 0;
+UPDATE retention_state SET
+    job_rows = (SELECT COUNT(*) FROM jobs),
+    event_rows = (SELECT COUNT(*) FROM events),
+    transition_rows = (SELECT COUNT(*) FROM job_transitions)
+WHERE singleton = 0;
+CREATE INDEX IF NOT EXISTS idx_jobs_retention_phase_id
+ON jobs (phase, id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_events_retention_time_id
+ON events (julianday(occurred_at), id);
+CREATE INDEX IF NOT EXISTS idx_transitions_retention_time_id
+ON job_transitions (julianday(transition_time), id);
+CREATE INDEX IF NOT EXISTS idx_transitions_ancestry
+ON job_transitions (instance_slug, job_uid, correlation_id, reason);
+CREATE INDEX IF NOT EXISTS idx_events_ancestry
+ON events (instance_slug, subject, correlation_id, event_kind, id);
+CREATE INDEX IF NOT EXISTS idx_reconciliations_retention
+ON reconciliations (instance_slug, status, subject);
+CREATE TRIGGER IF NOT EXISTS retention_jobs_insert
+AFTER INSERT ON jobs
+BEGIN
+    UPDATE retention_state SET job_rows = job_rows + 1 WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_jobs_delete
+AFTER DELETE ON jobs
+BEGIN
+    UPDATE retention_state
+    SET job_rows = CASE WHEN job_rows > 0 THEN job_rows - 1 ELSE 0 END
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_events_insert
+AFTER INSERT ON events
+BEGIN
+    UPDATE retention_state SET event_rows = event_rows + 1 WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_events_delete
+AFTER DELETE ON events
+BEGIN
+    UPDATE retention_state
+    SET event_rows = CASE WHEN event_rows > 0 THEN event_rows - 1 ELSE 0 END
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_transitions_insert
+AFTER INSERT ON job_transitions
+BEGIN
+    UPDATE retention_state SET transition_rows = transition_rows + 1 WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_transitions_delete
+AFTER DELETE ON job_transitions
+BEGIN
+    UPDATE retention_state
+    SET transition_rows = CASE WHEN transition_rows > 0 THEN transition_rows - 1 ELSE 0 END
+    WHERE singleton = 0;
+END;
+";
+
+/// Replay form for tests and operators that deliberately re-run migration
+/// history. SQLite has no portable `ADD COLUMN IF NOT EXISTS`; the caller
+/// selects this form after detecting the v9 columns.
+const SCHEMA_V9_REPLAY: &str = "
+UPDATE retention_state SET
+    job_rows = (SELECT COUNT(*) FROM jobs),
+    event_rows = (SELECT COUNT(*) FROM events),
+    transition_rows = (SELECT COUNT(*) FROM job_transitions)
+WHERE singleton = 0;
+CREATE INDEX IF NOT EXISTS idx_jobs_retention_phase_id
+ON jobs (phase, id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_events_retention_time_id
+ON events (julianday(occurred_at), id);
+CREATE INDEX IF NOT EXISTS idx_transitions_retention_time_id
+ON job_transitions (julianday(transition_time), id);
+CREATE INDEX IF NOT EXISTS idx_transitions_ancestry
+ON job_transitions (instance_slug, job_uid, correlation_id, reason);
+CREATE INDEX IF NOT EXISTS idx_events_ancestry
+ON events (instance_slug, subject, correlation_id, event_kind, id);
+CREATE INDEX IF NOT EXISTS idx_reconciliations_retention
+ON reconciliations (instance_slug, status, subject);
+CREATE TRIGGER IF NOT EXISTS retention_jobs_insert
+AFTER INSERT ON jobs
+BEGIN
+    UPDATE retention_state SET job_rows = job_rows + 1 WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_jobs_delete
+AFTER DELETE ON jobs
+BEGIN
+    UPDATE retention_state
+    SET job_rows = CASE WHEN job_rows > 0 THEN job_rows - 1 ELSE 0 END
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_events_insert
+AFTER INSERT ON events
+BEGIN
+    UPDATE retention_state SET event_rows = event_rows + 1 WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_events_delete
+AFTER DELETE ON events
+BEGIN
+    UPDATE retention_state
+    SET event_rows = CASE WHEN event_rows > 0 THEN event_rows - 1 ELSE 0 END
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_transitions_insert
+AFTER INSERT ON job_transitions
+BEGIN
+    UPDATE retention_state SET transition_rows = transition_rows + 1 WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS retention_transitions_delete
+AFTER DELETE ON job_transitions
+BEGIN
+    UPDATE retention_state
+    SET transition_rows = CASE WHEN transition_rows > 0 THEN transition_rows - 1 ELSE 0 END
+    WHERE singleton = 0;
+END;
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -250,6 +372,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "normalized-event-cursor-state",
         sql: SCHEMA_V8,
+    },
+    Migration {
+        version: 9,
+        name: "bounded-retention-counters-and-indexes",
+        sql: SCHEMA_V9,
     },
 ];
 
@@ -428,6 +555,8 @@ pub(crate) fn apply_pending(
         let scale_columns_exist = migration.version == 7
             && has_column(&transaction, "instances", "desired_slots")?
             && has_column(&transaction, "lifecycle_operations", "desired_slots")?;
+        let retention_columns_exist =
+            migration.version == 9 && has_column(&transaction, "retention_state", "job_rows")?;
         if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
             && !slot_column_exists
         {
@@ -435,6 +564,8 @@ pub(crate) fn apply_pending(
                 SCHEMA_V6_REPLAY
             } else if scale_columns_exist {
                 ""
+            } else if retention_columns_exist {
+                SCHEMA_V9_REPLAY
             } else {
                 migration.sql
             };
@@ -587,6 +718,12 @@ mod tests {
             "idx_events_instance_id",
             "idx_events_instance_kind_id",
             "idx_events_instance_subject_id",
+            "idx_jobs_retention_phase_id",
+            "idx_events_retention_time_id",
+            "idx_transitions_retention_time_id",
+            "idx_transitions_ancestry",
+            "idx_events_ancestry",
+            "idx_reconciliations_retention",
         ] {
             let present: bool = conn
                 .query_row(
@@ -599,6 +736,15 @@ mod tests {
                 .unwrap();
             assert!(present, "missing migration index {index_name}");
         }
+        let counters: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT job_rows, event_rows, transition_rows
+                 FROM retention_state WHERE singleton = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counters, (0, 3, 0));
         drop(conn);
 
         let reopened = Store::open(&temp.path).expect("reopen migrated database");

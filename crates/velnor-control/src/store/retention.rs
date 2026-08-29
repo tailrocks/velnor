@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{params, params_from_iter};
+use rusqlite::{params, params_from_iter, OptionalExtension};
 use velnor_model::{ExitClass, Timestamp};
 
 use super::error::{StoreError, StoreResult};
@@ -57,27 +57,17 @@ impl Default for RetentionBudget {
 }
 
 const MIN_EFFECTIVE_BATCH_SIZE: u64 = 1;
-const MAX_EFFECTIVE_BATCH_SIZE: u64 = 512;
 /// Prune SQL never fetches more than this many rows per statement. Keeping
 /// this below the public accounting batch cap makes the write-lock ceiling
 /// independent of hostile `RetentionBudget::batch_size` values.
 const MAX_PRUNE_BATCH_SIZE: u64 = 64;
 const MIN_PRUNE_BATCHES: u64 = 8;
-const MAX_PRUNE_BATCHES: u64 = 64;
-/// A newest-N window larger than this is deliberately not materialized while
-/// holding the immediate transaction. Skipping that row-cap rule is safe
-/// (retention may be temporarily looser) and keeps work bounded.
-const MAX_RETENTION_WINDOW_ROWS: u64 = 4096;
-/// RFC 3339 timestamps cannot be ordered safely as text because fractions may
-/// have different widths. Accounting therefore parses an indexed id prefix,
-/// with an honest incomplete status when a table exceeds this hard cap.
-const MAX_OLDEST_SCAN_ROWS: u64 = 4096;
-
-fn effective_batch_size(budget: &RetentionBudget) -> u64 {
-    budget
-        .batch_size
-        .clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE)
-}
+const MAX_PRUNE_BATCHES: u64 = 8;
+/// Configured defaults are valid, but an unbounded newest-N query is not. A
+/// caller above this explicit supported ceiling gets a typed error instead of
+/// silently disabling row retention. The query returns one row and is backed
+/// by the migration's indexed ID ordering.
+const MAX_RETENTION_WINDOW_ROWS: u64 = 100_000;
 
 fn prune_batch_size(budget: &RetentionBudget) -> u64 {
     budget
@@ -85,13 +75,9 @@ fn prune_batch_size(budget: &RetentionBudget) -> u64 {
         .clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE)
 }
 
-fn prune_pass_batch_limit(budget: &RetentionBudget) -> u64 {
-    let batch_size = effective_batch_size(budget);
-    let retained_rows = budget
-        .max_event_rows
-        .saturating_add(budget.max_terminal_job_rows);
-    let configured_batches = retained_rows.div_ceil(batch_size).saturating_add(2);
-    configured_batches.clamp(MIN_PRUNE_BATCHES, MAX_PRUNE_BATCHES)
+fn prune_pass_batch_limit(_budget: &RetentionBudget) -> u64 {
+    // Keep write-lock work independent of user-configured row windows.
+    MAX_PRUNE_BATCHES.max(MIN_PRUNE_BATCHES)
 }
 
 /// What one completed prune pass did.
@@ -170,6 +156,28 @@ pub enum PrunePhase {
 /// Only these exact spellings are terminal for retention. Any other value,
 /// including a future or malformed phase, protects its event ancestry.
 const CANONICAL_TERMINAL_PHASES: &str = "('completed','canceled','rejected')";
+/// Reconciliation states outside this closed set are treated as active or
+/// unknown. Their instance's events stay protected until an explicit terminal
+/// state is recorded.
+const CLOSED_RECONCILIATION_STATUSES: &str = "('completed','canceled','failed','rejected')";
+
+fn retention_budget_error(detail: impl Into<String>) -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.retention.budget").with_remediation(detail)
+}
+
+fn validate_budget(budget: &RetentionBudget) -> StoreResult<()> {
+    for (field, value) in [
+        ("max_event_rows", budget.max_event_rows),
+        ("max_terminal_job_rows", budget.max_terminal_job_rows),
+    ] {
+        if value > MAX_RETENTION_WINDOW_ROWS {
+            return Err(retention_budget_error(format!(
+                "{field}={value} exceeds the supported retention window of {MAX_RETENTION_WINDOW_ROWS}; reduce the value or run more frequent bounded passes"
+            )));
+        }
+    }
+    Ok(())
+}
 
 impl Store {
     /// Run one bounded prune pass with the given budget.
@@ -193,6 +201,7 @@ impl Store {
         budget: &RetentionBudget,
         hook: Option<&dyn Fn(PrunePhase) -> StoreResult<()>>,
     ) -> StoreResult<PruneReport> {
+        validate_budget(budget)?;
         let now = Timestamp::now();
 
         let (deleted_events, deleted_jobs, deleted_transitions) = {
@@ -527,11 +536,15 @@ fn read_retention_snapshot(
     path: &Path,
 ) -> StoreResult<RetentionSnapshot> {
     let transaction = conn.transaction()?;
-    let job_rows: i64 = transaction.query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))?;
-    let event_rows: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
-    let transition_rows: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM job_transitions", [], |row| row.get(0))?;
+    // v9 triggers maintain these counters in the same transactions as the
+    // source rows. Accounting therefore remains O(1) in table size and does
+    // not pin a long read snapshot while a writer waits for a checkpoint.
+    let (job_rows, event_rows, transition_rows): (i64, i64, i64) = transaction.query_row(
+        "SELECT job_rows, event_rows, transition_rows
+         FROM retention_state WHERE singleton = 0",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
     let (database_bytes, wal_bytes) = Store::total_database_bytes(&transaction, path)?;
     let (last_prune_at, last_deleted_events, last_deleted_jobs): (Option<String>, i64, i64) =
         transaction.query_row(
@@ -562,44 +575,49 @@ fn read_retention_snapshot(
     })
 }
 
-/// Find the oldest retained event/transition from a bounded, id-indexed
-/// prefix. RFC 3339 fractions may have different widths, so SQL text MIN is
-/// not semantically safe; parsing the whole table would make accounting an
-/// unbounded Rust scan. A missing value with `complete == false` is deliberate
-/// and means the prefix was only a lower-bound observation.
+/// Find the oldest retained event/transition using v9's normalized expression
+/// indexes. RFC 3339 text is not ordered safely, so SQLite orders by Julian
+/// day and Rust returns the original timestamp. Malformed rows produce an
+/// explicit incomplete result; accounting never labels a partial result as
+/// complete and never turns post-commit reporting into a retry signal.
 fn oldest_retained_at(conn: &rusqlite::Connection) -> StoreResult<(Option<String>, bool)> {
-    let scan_limit = i64::try_from(MAX_OLDEST_SCAN_ROWS.saturating_add(1)).unwrap_or(i64::MAX);
+    let malformed: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM events WHERE julianday(occurred_at) IS NULL
+         ) OR EXISTS(
+             SELECT 1 FROM job_transitions WHERE julianday(transition_time) IS NULL
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if malformed {
+        return Ok((None, false));
+    }
     let mut oldest: Option<Timestamp> = None;
-    let mut complete = true;
     for (table, column) in [
         ("events", "occurred_at"),
         ("job_transitions", "transition_time"),
     ] {
-        let sql = format!("SELECT {column} FROM {table} ORDER BY id ASC LIMIT ?1");
-        let mut statement = conn.prepare_cached(&sql)?;
-        let mut rows = statement.query([scan_limit])?;
-        let mut fetched = 0_u64;
-        while let Some(row) = rows.next()? {
-            if fetched == MAX_OLDEST_SCAN_ROWS {
-                complete = false;
-                break;
-            }
-            let timestamp =
-                Timestamp::parse(&row.get::<_, String>(0)?).map_err(|_| stale_timestamp_error())?;
-            if oldest.is_none_or(|current| timestamp < current) {
-                oldest = Some(timestamp);
-            }
-            fetched = fetched.saturating_add(1);
-        }
-        if !complete {
-            break;
+        let sql = format!(
+            "SELECT {column} FROM {table}
+             WHERE julianday({column}) IS NOT NULL
+             ORDER BY julianday({column}) ASC, id ASC LIMIT 1"
+        );
+        let raw: Option<String> = conn.query_row(&sql, [], |row| row.get(0)).optional()?;
+        let Some(raw) = raw else { continue };
+        let Ok(timestamp) = Timestamp::parse(&raw) else {
+            return Ok((None, false));
+        };
+        if oldest.is_none_or(|current| timestamp < current) {
+            oldest = Some(timestamp);
         }
     }
-    Ok((oldest.map(rfc3339).filter(|_| complete), complete))
+    Ok((oldest.map(rfc3339), true))
 }
 
-/// Find the oldest ID inside a newest-N retention window without ever
-/// materializing or asking SQLite for more than one effective batch.
+/// Find the oldest ID inside a newest-N retention window without materializing
+/// the window in Rust. The explicit supported ceiling is validated before a
+/// prune starts; larger values fail closed instead of disabling row retention.
 fn newest_window_start(
     conn: &rusqlite::Connection,
     table: &str,
@@ -608,35 +626,24 @@ fn newest_window_start(
     batch_size: u64,
 ) -> StoreResult<Option<i64>> {
     if keep_rows > MAX_RETENTION_WINDOW_ROWS {
-        return Ok(None);
+        return Err(retention_budget_error(
+            "row window exceeds the supported retention ceiling",
+        ));
     }
-    let batch_size = batch_size.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
-    let mut remaining = keep_rows;
-    let mut cursor = i64::MAX;
-    loop {
-        let limit = remaining.min(batch_size);
-        let where_clause = predicate.map_or_else(String::new, |value| format!(" AND ({value})"));
-        let sql = format!(
-            "SELECT id FROM {table}
-             WHERE id < ?1{where_clause}
-             ORDER BY id DESC LIMIT ?2"
-        );
-        let mut statement = conn.prepare_cached(&sql)?;
-        let mut rows =
-            statement.query(params![cursor, i64::try_from(limit).unwrap_or(i64::MAX)])?;
-        let mut ids = Vec::new();
-        while let Some(row) = rows.next()? {
-            ids.push(row.get::<_, i64>(0)?);
-        }
-        let Some(oldest_in_batch) = ids.last().copied() else {
-            return Ok(None);
-        };
-        if (ids.len() as u64) >= remaining || (ids.len() as u64) < limit {
-            return Ok(Some(oldest_in_batch));
-        }
-        remaining = remaining.saturating_sub(ids.len() as u64);
-        cursor = oldest_in_batch;
-    }
+    // OFFSET is bounded by the validated ceiling and returns one ID. This
+    // avoids allocating the newest-N window or repeatedly reacquiring a
+    // statement for each page while the immediate transaction is held.
+    let _ = batch_size;
+    let offset = i64::try_from(keep_rows.saturating_sub(1)).unwrap_or(i64::MAX);
+    let where_clause = predicate.map_or_else(String::new, |value| format!(" AND ({value})"));
+    let sql = format!(
+        "SELECT id FROM {table}
+         WHERE 1 = 1{where_clause}
+         ORDER BY id DESC LIMIT 1 OFFSET ?1"
+    );
+    conn.query_row(&sql, [offset], |row| row.get(0))
+        .optional()
+        .map_err(StoreError::from)
 }
 
 /// Keep cursor validity independent from currently retained rows. A fully
@@ -686,31 +693,121 @@ fn delete_job_with_ancestry(
     let Some((instance_slug, job_uid)) = identity else {
         return Ok((0, 0, 0));
     };
+    let reconciliation_open: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM reconciliations
+                 WHERE instance_slug = ?1 AND status NOT IN {CLOSED_RECONCILIATION_STATUSES}
+             )"
+        ),
+        [&instance_slug],
+        |row| row.get(0),
+    )?;
+    if reconciliation_open {
+        // Reconciliation owns the instance's operational history until it
+        // explicitly reaches a closed state. This is conservative by design:
+        // no job or ancestry is deleted while ownership is ambiguous.
+        return Ok((0, 0, 0));
+    }
+
+    // Pull at most one bounded chunk of exact transition ancestry. The
+    // extra row detects fan-out without scanning or deleting an unbounded
+    // number of transitions in the write transaction.
+    let transition_limit = MAX_PRUNE_BATCH_SIZE.saturating_add(1);
+    let transition_ids = select_transition_ids(conn, &instance_slug, &job_uid, transition_limit)?;
+
     // The transition correlation is the exact lifecycle ancestry key. Do not
     // delete by subject/event-kind: generic operational events may reuse a job
     // UID or a lifecycle-looking kind and must survive job deletion.
-    let events = conn.execute(
-        "DELETE FROM events
-         WHERE EXISTS (
-             SELECT 1 FROM job_transitions t
-             WHERE t.instance_slug = ?1
-               AND t.job_uid = ?2
-               AND t.instance_slug = events.instance_slug
-               AND t.correlation_id = events.correlation_id
-               AND events.subject = t.job_uid
-               AND events.event_kind = 'job.transition.' || t.reason
-         )",
-        params![instance_slug, job_uid],
-    )? as u64;
-    if events > 0 {
-        refresh_event_stream_state_for_instance(conn, &instance_slug, now)?;
+    let event_ids = select_transition_event_ids(
+        conn,
+        &instance_slug,
+        &job_uid,
+        MAX_PRUNE_BATCH_SIZE.saturating_add(1),
+    )?;
+    let mut events = 0;
+    if !event_ids.is_empty() {
+        let bounded_ids = &event_ids[..event_ids.len().min(MAX_PRUNE_BATCH_SIZE as usize)];
+        events = delete_events_by_ids(conn, bounded_ids, now)?;
     }
-    let transitions = conn.execute(
-        "DELETE FROM job_transitions WHERE instance_slug = ?1 AND job_uid = ?2",
-        params![instance_slug, job_uid],
-    )? as u64;
+    if event_ids.len() > MAX_PRUNE_BATCH_SIZE as usize {
+        return Ok((0, 0, events));
+    }
+
+    if transition_ids.len() > MAX_PRUNE_BATCH_SIZE as usize {
+        let bounded_ids = &transition_ids[..MAX_PRUNE_BATCH_SIZE as usize];
+        let transitions = delete_transition_rows_by_ids(conn, bounded_ids)?;
+        return Ok((0, transitions, events));
+    }
+
+    let transitions = delete_transition_rows_by_ids(conn, &transition_ids)?;
     let jobs = conn.execute("DELETE FROM jobs WHERE id = ?1", [id])? as u64;
     Ok((jobs, transitions, events))
+}
+
+fn select_transition_ids(
+    conn: &rusqlite::Connection,
+    instance_slug: &str,
+    job_uid: &str,
+    limit: u64,
+) -> StoreResult<Vec<i64>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id FROM job_transitions
+         WHERE instance_slug = ?1 AND job_uid = ?2
+         ORDER BY id ASC LIMIT ?3",
+    )?;
+    let mut rows = statement.query(params![
+        instance_slug,
+        job_uid,
+        i64::try_from(limit).unwrap_or(i64::MAX)
+    ])?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next()? {
+        ids.push(row.get(0)?);
+    }
+    Ok(ids)
+}
+
+fn select_transition_event_ids(
+    conn: &rusqlite::Connection,
+    instance_slug: &str,
+    job_uid: &str,
+    limit: u64,
+) -> StoreResult<Vec<i64>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT e.id FROM events e
+         WHERE e.instance_slug = ?1
+           AND EXISTS (
+               SELECT 1 FROM job_transitions t
+               WHERE t.instance_slug = ?1
+                 AND t.job_uid = ?2
+                 AND t.correlation_id = e.correlation_id
+                 AND e.subject = t.job_uid
+                 AND e.event_kind = 'job.transition.' || t.reason
+           )
+         ORDER BY e.id ASC LIMIT ?3",
+    )?;
+    let mut rows = statement.query(params![
+        instance_slug,
+        job_uid,
+        i64::try_from(limit).unwrap_or(i64::MAX)
+    ])?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next()? {
+        ids.push(row.get(0)?);
+    }
+    Ok(ids)
+}
+
+fn delete_transition_rows_by_ids(conn: &rusqlite::Connection, ids: &[i64]) -> StoreResult<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    Ok(conn.execute(
+        &format!("DELETE FROM job_transitions WHERE id IN ({placeholders})"),
+        params_from_iter(ids.iter()),
+    )? as u64)
 }
 
 struct ExpiredBatch {
@@ -755,8 +852,8 @@ fn scan_expired_batch(
 
 /// Events version of [`scan_expired_batch`]: additionally skips (and scans
 /// past) events whose subject belongs to a nonterminal or unknown-phase job,
-/// so a long-running job's early events never unprotect later prunable rows
-/// nor get deleted themselves.
+/// or to an open/unknown reconciliation. A long-running job's early events
+/// never get deleted themselves.
 fn protected_expired_older_than(
     conn: &rusqlite::Connection,
     table: &str,
@@ -772,9 +869,14 @@ fn protected_expired_older_than(
              WHERE j.instance_slug = {table}.instance_slug
                AND j.job_uid = {table}.subject
                AND j.phase NOT IN {terminal}
+         ) AND NOT EXISTS (
+             SELECT 1 FROM reconciliations r
+             WHERE r.instance_slug = {table}.instance_slug
+               AND r.status NOT IN {reconciliation_terminal}
          ) AND {table}.id > ?2
          ORDER BY id ASC LIMIT ?1",
         terminal = CANONICAL_TERMINAL_PHASES,
+        reconciliation_terminal = CLOSED_RECONCILIATION_STATUSES,
     );
     scan_expired_batch(conn, &sql, batch, cutoff, cursor)
 }
@@ -791,8 +893,8 @@ fn unprotected_expired_batch(
     scan_expired_batch(conn, sql, batch, cutoff, cursor)
 }
 
-/// IDs strictly below `keep_from_id`, excluding rows whose `(instance_slug,
-/// subject)` pair belongs to a nonterminal or unknown-phase job. Only
+/// IDs strictly below `keep_from_id`, excluding rows protected by a
+/// nonterminal/unknown job or reconciliation in the same instance. Only
 /// meaningful for the events table.
 fn protected_ids_below(
     conn: &rusqlite::Connection,
@@ -809,9 +911,14 @@ fn protected_ids_below(
                WHERE j.instance_slug = {table}.instance_slug
                  AND j.job_uid = {table}.subject
                  AND j.phase NOT IN {terminal}
+           ) AND NOT EXISTS (
+               SELECT 1 FROM reconciliations r
+               WHERE r.instance_slug = {table}.instance_slug
+                 AND r.status NOT IN {reconciliation_terminal}
            )
          ORDER BY id ASC LIMIT ?2",
         terminal = CANONICAL_TERMINAL_PHASES,
+        reconciliation_terminal = CLOSED_RECONCILIATION_STATUSES,
     );
     let mut statement = conn.prepare_cached(&sql)?;
     let mut rows = statement.query(params![
@@ -900,7 +1007,7 @@ mod tests {
             batch_size: 500,
             ..RetentionBudget::default()
         };
-        assert_eq!(prune_pass_batch_limit(&budget), 26);
+        assert_eq!(prune_pass_batch_limit(&budget), MAX_PRUNE_BATCHES);
 
         let tiny_budget = RetentionBudget {
             max_event_rows: 0,
@@ -909,7 +1016,6 @@ mod tests {
             ..RetentionBudget::default()
         };
         assert_eq!(prune_pass_batch_limit(&tiny_budget), MIN_PRUNE_BATCHES);
-        assert_eq!(effective_batch_size(&tiny_budget), MIN_EFFECTIVE_BATCH_SIZE);
 
         let huge_budget = RetentionBudget {
             max_event_rows: u64::MAX,
@@ -918,19 +1024,38 @@ mod tests {
             ..RetentionBudget::default()
         };
         assert_eq!(prune_pass_batch_limit(&huge_budget), MAX_PRUNE_BATCHES);
-        assert_eq!(effective_batch_size(&huge_budget), MAX_EFFECTIVE_BATCH_SIZE);
         assert_eq!(prune_batch_size(&huge_budget), MAX_PRUNE_BATCH_SIZE);
     }
 
     #[test]
-    fn newest_window_skips_unbounded_retention_counts() {
+    fn newest_window_rejects_unsupported_retention_counts() {
         let (_dir, store) = temp_store("window-bound");
         let connection = test_connection(&store);
 
-        assert_eq!(
-            newest_window_start(&connection, "events", None, u64::MAX, 1).unwrap(),
-            None
-        );
+        let error = newest_window_start(&connection, "events", None, u64::MAX, 1)
+            .expect_err("oversized windows must fail closed");
+        assert_eq!(error.envelope.reason, "store.retention.budget");
+    }
+
+    #[test]
+    fn oversized_budget_is_rejected_without_mutation() {
+        let (_dir, store) = temp_store("budget-rejection");
+        seed_expired_events(&store, 2);
+        let budget = RetentionBudget {
+            max_event_rows: MAX_RETENTION_WINDOW_ROWS + 1,
+            max_event_age: Some(Duration::from_secs(1)),
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let error = store
+            .prune_history(&budget)
+            .expect_err("unsupported row windows must be explicit");
+
+        assert_eq!(error.envelope.reason, "store.retention.budget");
+        assert_eq!(store.accounting().unwrap().event_rows, 2);
     }
 
     #[test]
@@ -1050,26 +1175,53 @@ mod tests {
     }
 
     #[test]
-    fn accounting_reports_when_oldest_timestamp_is_bounded() {
+    fn accounting_reports_malformed_timestamp_as_incomplete() {
         let (_dir, store) = temp_store("oldest-bound");
         let connection = test_connection(&store);
-        for _ in 0..=MAX_OLDEST_SCAN_ROWS {
-            connection
-                .execute(
-                    "INSERT INTO events
-                     (instance_slug, event_kind, subject, occurred_at)
-                     VALUES ('bounded', 'capacity.pressure', 'host',
-                             '2024-01-01T00:00:00Z')",
-                    [],
-                )
-                .unwrap();
-        }
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at)
+                 VALUES ('bounded', 'capacity.pressure', 'host', 'not-a-timestamp')",
+                [],
+            )
+            .unwrap();
         drop(connection);
 
         let accounting = store.accounting().unwrap();
 
         assert!(!accounting.oldest_retained_at_complete);
         assert!(accounting.oldest_retained_at.is_none());
+    }
+
+    #[test]
+    fn malformed_candidate_rolls_back_before_commit() {
+        let (_dir, store) = temp_store("malformed-candidate");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at)
+                 VALUES ('malformed', 'gc.completed', 'host', 'not-a-timestamp')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+        let error = store
+            .prune_history(&budget)
+            .expect_err("malformed deletion candidates fail before commit");
+
+        assert_eq!(error.envelope.reason, "store.retention.timestamp");
+        assert_eq!(store.accounting().unwrap().event_rows, 1);
     }
 
     #[test]
@@ -1136,6 +1288,68 @@ mod tests {
             store.accounting().unwrap().oldest_retained_at.as_deref(),
             Some("2000-01-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn large_terminal_ancestry_converges_in_bounded_exact_chunks() {
+        let (_dir, store) = temp_store("large-ancestry");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO jobs
+                 (instance_slug, job_uid, repository, workflow, job_name, phase, updated_at)
+                 VALUES ('fanout', 'job-1', 'repo', 'workflow', 'job', 'completed',
+                         '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        for index in 0..(MAX_PRUNE_BATCH_SIZE + 6) {
+            let correlation = format!("corr-{index}");
+            connection
+                .execute(
+                    "INSERT INTO job_transitions
+                     (instance_slug, job_uid, transition_token, correlation_id, reason,
+                      transition_time)
+                     VALUES ('fanout', 'job-1', ?1, ?2, 'job.completed',
+                             '2000-01-01T00:00:00Z')",
+                    params![format!("token-{index}"), correlation],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO events
+                     (instance_slug, event_kind, subject, correlation_id, occurred_at)
+                     VALUES ('fanout', 'job.transition.job.completed', 'job-1', ?1,
+                             '2000-01-01T00:00:00Z')",
+                    [correlation],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: None,
+            max_event_rows: 0,
+            max_terminal_job_age: Some(Duration::from_secs(1)),
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let first = store.prune_history(&budget).unwrap();
+        assert_eq!(first.deleted_jobs, 0);
+        assert_eq!(first.deleted_events, MAX_PRUNE_BATCH_SIZE);
+        assert!(store.accounting().unwrap().job_rows == 1);
+
+        let second = store.prune_history(&budget).unwrap();
+        assert_eq!(second.deleted_jobs, 0);
+        assert!(second.deleted_transitions <= MAX_PRUNE_BATCH_SIZE);
+
+        let third = store.prune_history(&budget).unwrap();
+        assert_eq!(third.deleted_jobs, 1);
+        assert_eq!(store.accounting().unwrap().job_rows, 0);
+        assert_eq!(store.accounting().unwrap().transition_rows, 0);
+        assert_eq!(store.accounting().unwrap().event_rows, 0);
     }
 
     #[test]
