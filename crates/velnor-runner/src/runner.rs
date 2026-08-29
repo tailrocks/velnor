@@ -80,9 +80,12 @@ const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
 const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_JIT_REGISTRATION_FILE: &str = ".jit-registration-pending.json";
+const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct PendingJitRegistration {
+    version: u8,
+    scope_url: String,
     agent_name: String,
     runner_id: Option<i64>,
 }
@@ -678,6 +681,7 @@ fn assess_registry_lookup(lookup: Option<&ListedRunner>, strikes_before: u32) ->
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
     let scope = GitHubScope::parse(&args.url)?;
+    let scope_url = pending_scope_url(&scope)?;
     let organization_scope = matches!(scope.kind(), "organization" | "enterprise");
     if organization_scope && args.pool_name.as_deref().is_none_or(str::is_empty) {
         bail!(
@@ -722,10 +726,10 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
                     "--pool-name requires live GitHub lookup; for --dry-run also pass --pool-id"
                 )
             })?;
-            let groups = RegistrationClient::new()?
-                .list_runner_groups(&scope, pat)
-                .await?;
-            resolve_runner_group_id(&groups, pool_name, args.pool_id)?
+            RegistrationClient::new()?
+                .find_runner_group(&scope, pat, pool_name, args.pool_id)
+                .await?
+                .id
         }
         None => args.pool_id.unwrap_or(1),
     };
@@ -747,6 +751,8 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         write_pending_jit_registration(
             &dir,
             &PendingJitRegistration {
+                version: PENDING_JIT_REGISTRATION_VERSION,
+                scope_url: scope_url.clone(),
                 agent_name: agent_name.clone(),
                 runner_id: None,
             },
@@ -757,27 +763,6 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
             .await
         {
             Ok(r) => r,
-            Err(e) if github_api_error_status(&e) == Some(409) => {
-                // Orphaned runner from a previous failed run — delete by name and retry once.
-                eprintln!(
-                    "JIT 409: deleting orphaned runner '{}' and retrying",
-                    agent_name
-                );
-                if let Err(error) =
-                    delete_orphaned_jit_runner_by_name(&scope, pat, &agent_name).await
-                {
-                    return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
-                }
-                match jit_client
-                    .generate_jit_config(&scope, pat, &jit_request)
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(error) => {
-                        return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
-                    }
-                }
-            }
             Err(error) => {
                 return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
             }
@@ -786,14 +771,23 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         if let Err(error) = write_pending_jit_registration(
             &dir,
             &PendingJitRegistration {
+                version: PENDING_JIT_REGISTRATION_VERSION,
+                scope_url: scope_url.clone(),
                 agent_name: agent_name.clone(),
                 runner_id: Some(runner.id),
             },
         ) {
-            eprintln!(
-                "warning: could not persist JIT runner id {}; name-only recovery marker remains: {error:#}",
-                runner.id
-            );
+            let cleanup = jit_client.delete_runner(&scope, pat, runner.id).await;
+            return Err(match cleanup {
+                Ok(()) => error.context(format!(
+                    "persist JIT runner id {}; exact remote registration removed",
+                    runner.id
+                )),
+                Err(cleanup) => error.context(format!(
+                    "persist JIT runner id {}; exact cleanup also failed: {cleanup:#}",
+                    runner.id
+                )),
+            });
         }
         let decoded = match decode_jit_config(&response.encoded_jit_config) {
             Ok(decoded) => decoded,
@@ -804,6 +798,9 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         if let Err(error) =
             validate_jit_runner_identity(&agent_name, &labels, runner_group_id, &runner, &decoded)
         {
+            return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+        }
+        if let Err(error) = validate_jit_config_endpoints(&scope, &decoded) {
             return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
         }
         Some((runner, decoded))
@@ -875,9 +872,9 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         }
         return Err(error);
     }
-    if let Err(error) = clear_pending_jit_registration(&dir) {
-        eprintln!("warning: saved runner config but could not clear pending JIT marker: {error:#}");
-    }
+    clear_pending_jit_registration(&dir).context(
+        "saved runner config but could not clear pending JIT marker; recovery marker preserved",
+    )?;
     println!("Wrote local runner config to {}", dir.display());
     println!("GitHub scope API: {}", scope.api_base_url);
     println!("JIT config endpoint: {}", scope.jit_config_url);
@@ -904,6 +901,15 @@ fn pending_jit_registration_path(dir: &Path) -> PathBuf {
     dir.join(PENDING_JIT_REGISTRATION_FILE)
 }
 
+fn pending_scope_url(scope: &GitHubScope) -> Result<String> {
+    let mut url = url::Url::parse(&scope.original_url)?;
+    url.set_query(None);
+    url.set_fragment(None);
+    let path = url.path().trim_end_matches('/').to_owned();
+    url.set_path(&path);
+    Ok(url.to_string())
+}
+
 fn pending_jit_registration_exists(dir: &Path) -> bool {
     pending_jit_registration_path(dir).is_file()
 }
@@ -912,7 +918,10 @@ fn write_pending_jit_registration(dir: &Path, pending: &PendingJitRegistration) 
     fs::create_dir_all(dir)?;
     let path = pending_jit_registration_path(dir);
     let tmp = dir.join(format!("{PENDING_JIT_REGISTRATION_FILE}.tmp"));
-    fs::write(&tmp, serde_json::to_vec(pending)?)?;
+    let bytes = serde_json::to_vec(pending)?;
+    let mut file = File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = fs::metadata(&tmp)?.permissions();
@@ -920,6 +929,7 @@ fn write_pending_jit_registration(dir: &Path, pending: &PendingJitRegistration) 
         fs::set_permissions(&tmp, permissions)?;
     }
     fs::rename(tmp, path)?;
+    File::open(dir)?.sync_all()?;
     Ok(())
 }
 
@@ -937,7 +947,10 @@ fn read_pending_jit_registration(dir: &Path) -> Result<Option<PendingJitRegistra
 
 fn clear_pending_jit_registration(dir: &Path) -> Result<()> {
     match fs::remove_file(pending_jit_registration_path(dir)) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            File::open(dir)?.sync_all()?;
+            Ok(())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
@@ -947,6 +960,15 @@ async fn reap_pending_jit_registration(dir: &Path, scope: &GitHubScope, pat: &st
     let Some(pending) = read_pending_jit_registration(dir)? else {
         return Ok(());
     };
+    if pending.version != PENDING_JIT_REGISTRATION_VERSION {
+        bail!(
+            "pending JIT marker has unsupported version {}; refusing cleanup",
+            pending.version
+        );
+    }
+    if pending.scope_url != pending_scope_url(scope)? {
+        bail!("pending JIT marker scope does not match configured GitHub scope");
+    }
     if pending.agent_name.is_empty() {
         bail!("pending JIT marker has an empty runner name");
     }
@@ -964,11 +986,13 @@ async fn reap_pending_jit_registration(dir: &Path, scope: &GitHubScope, pat: &st
             .delete_runner(scope, pat, runner_id)
             .await
             .with_context(|| format!("reap pending JIT runner id {runner_id}"))?;
+        clear_pending_jit_registration(dir)?;
+        return Ok(());
     }
 
-    delete_orphaned_jit_runner_by_name(scope, pat, &pending.agent_name).await?;
-    clear_pending_jit_registration(dir)?;
-    Ok(())
+    bail!(
+        "pending JIT registration has no runner id; refusing name-based cleanup and preserving marker"
+    )
 }
 
 async fn cleanup_failed_jit_registration(
@@ -981,37 +1005,6 @@ async fn cleanup_failed_jit_registration(
         Ok(()) => error,
         Err(cleanup) => error.context(format!("cleanup uncertain JIT registration: {cleanup:#}")),
     }
-}
-
-fn resolve_runner_group_id(
-    groups: &[crate::protocol::RunnerGroup],
-    requested_name: &str,
-    requested_id: Option<i64>,
-) -> Result<i64> {
-    let group = groups
-        .iter()
-        .find(|group| group.name.eq_ignore_ascii_case(requested_name))
-        .ok_or_else(|| {
-            let accepted = groups
-                .iter()
-                .map(|group| group.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::anyhow!(
-                "runner group '{requested_name}' not found; accepted groups: {accepted}"
-            )
-        })?;
-    if let Some(requested_id) = requested_id {
-        if requested_id != group.id {
-            bail!(
-                "runner group '{}' resolves to id {}, not supplied --pool-id {}",
-                group.name,
-                group.id,
-                requested_id
-            );
-        }
-    }
-    Ok(group.id)
 }
 
 fn validate_jit_runner_identity(
@@ -1063,6 +1056,93 @@ fn validate_jit_runner_identity(
     Ok(())
 }
 
+fn endpoint_port(url: &url::Url) -> Option<u16> {
+    url.port().or_else(|| match url.scheme() {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    })
+}
+
+fn same_endpoint_origin(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left
+            .host_str()
+            .zip(right.host_str())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && endpoint_port(left) == endpoint_port(right)
+}
+
+fn validate_jit_endpoint(
+    scope: &GitHubScope,
+    field: &str,
+    raw: &str,
+    hosted_host: Option<&str>,
+) -> Result<()> {
+    let endpoint = crate::protocol::validate_authenticated_url(raw)
+        .with_context(|| format!("validate JIT {field} endpoint"))?;
+    let scope_url = crate::protocol::validate_authenticated_url(&scope.original_url)
+        .context("validate configured GitHub scope endpoint")?;
+    let host_matches = hosted_host.is_some_and(|host| {
+        endpoint
+            .host_str()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(host))
+            && endpoint.port().is_none()
+    });
+    if scope.hosted {
+        if hosted_host.is_some() {
+            if !host_matches {
+                bail!("JIT {field} endpoint host is not an approved GitHub Actions service: {raw}");
+            }
+        } else if !same_endpoint_origin(&endpoint, &scope_url) {
+            bail!("JIT {field} endpoint is outside the configured GitHub origin: {raw}");
+        }
+    } else if !same_endpoint_origin(&endpoint, &scope_url) {
+        bail!("JIT {field} endpoint is outside the configured GitHub origin: {raw}");
+    }
+    Ok(())
+}
+
+fn validate_jit_config_endpoints(
+    scope: &GitHubScope,
+    decoded: &crate::protocol::DecodedJitConfig,
+) -> Result<()> {
+    if let Some(github_url) = decoded.settings.github_url.as_deref() {
+        validate_jit_endpoint(scope, "GitHubUrl", github_url, None)?;
+    }
+    if let Some(server_url) = decoded.settings.server_url.as_deref() {
+        validate_jit_endpoint(
+            scope,
+            "ServerUrl",
+            server_url,
+            Some("pipelines.actions.githubusercontent.com"),
+        )?;
+    }
+    if let Some(server_url_v2) = decoded.settings.server_url_v2.as_deref() {
+        validate_jit_endpoint(
+            scope,
+            "ServerUrlV2",
+            server_url_v2,
+            Some("broker.actions.githubusercontent.com"),
+        )?;
+    }
+    if let Some(authorization_url) = decoded
+        .credentials
+        .data
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("authorizationUrl"))
+        .map(|(_, value)| value.as_str())
+    {
+        validate_jit_endpoint(
+            scope,
+            "authorizationUrl",
+            authorization_url,
+            Some("vstoken.actions.githubusercontent.com"),
+        )?;
+    }
+    Ok(())
+}
+
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
     let stored = match config::load(dir) {
         Ok(stored) => Some(stored),
@@ -1108,40 +1188,6 @@ async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -
         }
     }
     Ok(())
-}
-
-/// After a 409 Conflict on JIT creation, find and delete any orphaned runner
-/// with the given name on GitHub, then allow the caller to retry.
-pub async fn delete_orphaned_jit_runner_by_name(
-    scope: &GitHubScope,
-    pat: &str,
-    agent_name: &str,
-) -> Result<()> {
-    let client = RegistrationClient::new()?;
-    for attempt in 0..3 {
-        let agents = client.list_runners(scope, pat).await?;
-        let matches = agents
-            .iter()
-            .filter(|agent| agent.name.as_deref() == Some(agent_name))
-            .collect::<Vec<_>>();
-        if matches.is_empty() {
-            return Ok(());
-        }
-        for orphan in matches {
-            let id = orphan
-                .id
-                .ok_or_else(|| anyhow::anyhow!("orphaned runner has no id"))?;
-            client
-                .delete_runner(scope, pat, id)
-                .await
-                .with_context(|| format!("delete orphaned JIT runner '{agent_name}' id {id}"))?;
-            println!("Deleted orphaned JIT runner '{agent_name}' id {id} before retry.");
-        }
-        if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-    bail!("orphaned JIT runner '{agent_name}' remains after bounded cleanup")
 }
 
 fn stored_jit_credentials(config: &crate::protocol::DecodedJitConfig) -> Result<StoredCredentials> {
@@ -2310,6 +2356,12 @@ async fn recycle_daemon_slot(
     // path so they do not linger until GitHub's expiry window.
     remove_completed_daemon_slot_jit_config(&slot_dir)
         .with_context(|| format!("discard consumed daemon slot-{slot_index} JIT identity"))?;
+    let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
+    if pending_jit_registration_exists(&slot_dir) || pending_jit_registration_exists(&next_dir) {
+        bail!(
+            "cannot promote daemon slot-{slot_index} while a pending JIT registration marker exists"
+        );
+    }
     if config::promote_prepared(&slot_dir)
         .with_context(|| format!("promote successor JIT config for daemon slot-{slot_index}"))?
     {
@@ -2349,6 +2401,11 @@ async fn recycle_daemon_slot(
 }
 
 fn remove_completed_daemon_slot_jit_config(slot_dir: &Path) -> Result<()> {
+    if pending_jit_registration_exists(slot_dir) {
+        bail!(
+            "cannot discard daemon slot config while pending JIT registration recovery is unresolved"
+        );
+    }
     if config::remove(slot_dir)? {
         println!(
             "Removed consumed local daemon JIT runner config from {}",
@@ -2516,10 +2573,10 @@ async fn resolve_daemon_runner_group_once(args: &DaemonArgs) -> Result<DaemonArg
         .pat
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("runner group resolution requires a GitHub PAT"))?;
-    let groups = RegistrationClient::new()?
-        .list_runner_groups(&scope, pat)
-        .await?;
-    let pool_id = resolve_runner_group_id(&groups, pool_name, args.pool_id)?;
+    let pool_id = RegistrationClient::new()?
+        .find_runner_group(&scope, pat, pool_name, args.pool_id)
+        .await?
+        .id;
 
     let mut resolved = args.clone();
     resolved.pool_id = Some(pool_id);
@@ -2586,11 +2643,9 @@ async fn configure_daemon_slots(
     outcomes.sort_by_key(|(slot_index, _)| *slot_index);
 
     for (slot_index, result) in outcomes {
-        // Per-slot best-effort: a slot whose previous runner is still registered
-        // and busy (stale from a prior crash) can't reclaim its name yet and will
-        // fail here (409 → orphan delete → 422). That must NOT take down the whole
-        // daemon — skip this slot and run on the rest; it recovers on a later
-        // restart once the stale runner ages out.
+        // Per-slot best-effort: an unresolved registration identity cannot be
+        // reclaimed by name. It must remain visible for exact operator
+        // resolution and must not take down healthy sibling slots.
         if let Err(error) = result {
             eprintln!(
                 "Warning: could not configure daemon slot-{slot_index} (skipping; running on the remaining slots): {}",
@@ -2666,8 +2721,8 @@ pub(crate) async fn jit_configure_one_slot(
 }
 
 /// Remove a JIT runner whose POST may have succeeded after its caller timed
-/// out before receiving or persisting the response. The name is deterministic
-/// per daemon slot, so cleanup cannot target another slot's registration.
+/// out before receiving or persisting the response. Cleanup is authorized only
+/// by the slot's exact pending runner ID.
 pub(crate) async fn cleanup_orphaned_jit_one_slot(
     args: &DaemonArgs,
     config_base: &Path,
@@ -2678,15 +2733,17 @@ pub(crate) async fn cleanup_orphaned_jit_one_slot(
     let Some(url) = args.url.as_deref() else {
         return Ok(());
     };
-    let Some(pat) = args.pat.as_deref() else {
+    let slot_dir = daemon_slot_config_dir(config_base, slot_index, slot_count);
+    if !pending_jit_registration_exists(&slot_dir) {
         return Ok(());
-    };
-    let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slot_count)?;
-    let Some(agent_name) = configure_args.name.as_deref() else {
-        return Ok(());
-    };
+    }
+    let pat = args.pat.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "pending JIT registration for daemon slot-{slot_index} requires a GitHub PAT; local recovery preserved"
+        )
+    })?;
     let scope = GitHubScope::parse(url)?;
-    delete_orphaned_jit_runner_by_name(&scope, pat, agent_name).await
+    reap_pending_jit_registration(&slot_dir, &scope, pat).await
 }
 
 async fn cleanup_configured_daemon_slots(
@@ -2780,14 +2837,14 @@ async fn delete_and_remove_daemon_slot_jit_config(
     slot_dir: &Path,
 ) -> Result<()> {
     let stored = match config::load(slot_dir) {
-        Ok(stored) => stored,
+        Ok(stored) => Some(stored),
         Err(load_error) => match fs::symlink_metadata(slot_dir.join("runner.json")) {
             Ok(_) => {
                 return Err(load_error).context(
                     "load existing daemon slot runner config before cleanup; local identity preserved",
                 );
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(error).context(
                     "inspect existing daemon slot runner config before cleanup; local identity preserved",
@@ -2796,19 +2853,40 @@ async fn delete_and_remove_daemon_slot_jit_config(
         },
     };
 
-    if let Some(agent_id) = stored.settings.agent_id {
-        let pat = args.pat.as_ref().ok_or_else(|| {
+    if pending_jit_registration_exists(slot_dir) {
+        let scope_url = stored
+            .as_ref()
+            .map(|stored| stored.settings.github_url.as_str())
+            .or(args.url.as_deref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "pending JIT registration has no GitHub scope; local recovery preserved"
+                )
+            })?;
+        let pat = args.pat.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
-                "cannot delete daemon JIT runner id {agent_id} without a GitHub PAT; local identity preserved"
+                "pending JIT registration requires a GitHub PAT; local recovery preserved"
             )
         })?;
-        let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(slot_dir))
-            .await
-            .with_context(|| {
-                format!("delete daemon JIT runner id {agent_id}; local identity preserved")
+        let scope = GitHubScope::parse(scope_url)?;
+        reap_pending_jit_registration(slot_dir, &scope, pat).await?;
+    }
+
+    if let Some(stored) = stored {
+        if let Some(agent_id) = stored.settings.agent_id {
+            let pat = args.pat.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot delete daemon JIT runner id {agent_id} without a GitHub PAT; local identity preserved"
+                )
             })?;
-        println!("Deleted or confirmed absent daemon JIT runner id {agent_id}.");
+            let scope = GitHubScope::parse(&stored.settings.github_url)?;
+            delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(slot_dir))
+                .await
+                .with_context(|| {
+                    format!("delete daemon JIT runner id {agent_id}; local identity preserved")
+                })?;
+            println!("Deleted or confirmed absent daemon JIT runner id {agent_id}.");
+        }
     }
 
     if config::remove(slot_dir)? {
@@ -2827,7 +2905,9 @@ fn daemon_slot_should_configure_jit(
 ) -> bool {
     // A valid local identity is authoritative across daemon/package restarts.
     // Replacing it before a successor exists creates configless dead slots.
-    dry_run_registration || config::load(slot_config_dir).is_err()
+    dry_run_registration
+        || pending_jit_registration_exists(slot_config_dir)
+        || config::load(slot_config_dir).is_err()
 }
 
 fn daemon_should_poll_after_jit_config(args: &DaemonArgs) -> bool {
@@ -3311,6 +3391,13 @@ async fn run_v2(
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
+    let scope = GitHubScope::parse(&stored.settings.github_url)?;
+    validate_jit_endpoint(
+        &scope,
+        "ServerUrlV2",
+        server_url_v2,
+        Some("broker.actions.githubusercontent.com"),
+    )?;
     let mut broker_token = token.token.clone();
     let mut current_broker_url = server_url_v2.to_string();
     let mut broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
@@ -9874,9 +9961,17 @@ async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<OAuthAccessTo
             })
             .ok_or_else(|| anyhow::anyhow!("OAuthAccessToken credentials missing token")),
         CredentialScheme::OAuth => {
+            let scope = GitHubScope::parse(&stored.settings.github_url)?;
+            let authorization_url = credential_str(credentials, "authorizationUrl")?;
+            validate_jit_endpoint(
+                &scope,
+                "authorizationUrl",
+                &authorization_url,
+                Some("vstoken.actions.githubusercontent.com"),
+            )?;
             let oauth = OAuthJwtCredentials {
                 client_id: credential_str(credentials, "clientId")?,
-                authorization_url: credential_str(credentials, "authorizationUrl")?,
+                authorization_url,
                 private_key_pem: credential_str(credentials, "privateKeyPem")?,
             };
             OAuthClient::new()?
@@ -10625,24 +10720,6 @@ mod tests {
             .unwrap()
             .is_some());
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn runner_group_name_resolves_case_insensitively() {
-        let groups = vec![crate::protocol::RunnerGroup {
-            id: 42,
-            name: "Velnor Trusted".into(),
-            default: false,
-        }];
-        assert_eq!(
-            resolve_runner_group_id(&groups, "velnor trusted", None).unwrap(),
-            42
-        );
-        assert!(resolve_runner_group_id(&groups, "missing", None)
-            .unwrap_err()
-            .to_string()
-            .contains("accepted groups: Velnor Trusted"));
-        assert!(resolve_runner_group_id(&groups, "Velnor Trusted", Some(7)).is_err());
     }
 
     #[test]

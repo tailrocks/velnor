@@ -37,7 +37,6 @@ pub fn velnor_runner_display() -> String {
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_MAX_TIME_SECS: u64 = 5;
-const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
@@ -176,6 +175,31 @@ impl GitHubRetryHint {
     }
 }
 
+/// Validate an endpoint before sending an authenticated request.
+///
+/// GitHub response data and job messages can supply URLs. HTTPS is mandatory
+/// for remote endpoints so bearer tokens, PATs, and OAuth assertions cannot
+/// be sent in cleartext. Loopback HTTP remains available for local protocol
+/// tests and explicitly local development servers.
+pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
+    let url = Url::parse(raw).with_context(|| format!("parse authenticated URL '{raw}'"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("authenticated URL must not contain userinfo");
+    }
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" if url.host_str().is_some_and(is_loopback_host) => Ok(url),
+        _ => bail!("authenticated endpoint must use HTTPS: {raw}"),
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host == "::1"
+}
+
 fn unix_epoch_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -263,12 +287,24 @@ fn github_api_retry_delay_at(error: &anyhow::Error, now_epoch: u64) -> Option<st
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
         .and_then(|error| {
-            GitHubRetryHint {
-                retry_after_seconds: error.retry_after_seconds,
-                rate_limit_reset_epoch: error.rate_limit_reset_epoch,
-                remaining: error.remaining,
+            let status = error.rate_limit_status();
+            let retry_after = status
+                .retry_after_seconds
+                .map(std::time::Duration::from_secs);
+            let quota_reset = status
+                .is_limited(error.status)
+                .then(|| {
+                    status.reset_epoch_or_retry_after(now_epoch).map(|reset| {
+                        std::time::Duration::from_secs(reset.saturating_sub(now_epoch))
+                    })
+                })
+                .flatten();
+            match (retry_after, quota_reset) {
+                (Some(retry_after), Some(quota_reset)) => Some(retry_after.max(quota_reset)),
+                (Some(retry_after), None) => Some(retry_after),
+                (None, Some(quota_reset)) => Some(quota_reset),
+                (None, None) => None,
             }
-            .delay(now_epoch)
         })
 }
 
@@ -753,6 +789,7 @@ impl OAuthClient {
         credentials: &OAuthJwtCredentials,
     ) -> Result<OAuthAccessToken> {
         github_http_transport()?;
+        validate_authenticated_url(&credentials.authorization_url)?;
         let assertion = build_client_assertion(credentials)?;
         // Build the URL-encoded OAuth form body.
         let body: String = url::form_urlencoded::Serializer::new(String::new())
@@ -909,6 +946,7 @@ async fn github_http_request(
     max_time_secs: u64,
 ) -> Result<GithubHttpResponse> {
     github_http_transport()?;
+    validate_authenticated_url(url)?;
     let method_name = method.to_owned();
     let method = Method::from_bytes(method.as_bytes()).map_err(|error| {
         github_transport_error(&format!("parse GitHub HTTP method '{method}'"), error)
@@ -920,7 +958,7 @@ async fn github_http_request(
         .bearer_auth(bearer_token)
         .header(USER_AGENT, RUNNER_USER_AGENT)
         .header(ACCEPT, "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", "2026-03-10")
         .timeout(Duration::from_secs(max_time_secs));
     if let Some(body) = json_body {
         request = request
@@ -961,55 +999,19 @@ impl RegistrationClient {
     ) -> Result<GitHubJitConfigResponse> {
         let url = scope.jit_config_url.to_string();
         let body = serde_json::to_string(request).context("serialize JIT config request")?;
-        let pat = pat.to_string();
-        let mut last_err = anyhow::anyhow!("no attempts made");
-        let mut retry_delay = None;
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                let backoff = retry_delay
-                    .take()
-                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5))
-                    .min(GITHUB_RETRY_SLEEP_MAX);
-                eprintln!(
-                    "JIT config error (attempt {}/3), retrying in {}s",
-                    attempt,
-                    backoff.as_secs()
-                );
-                tokio::time::sleep(backoff).await;
-            }
-            let result =
-                github_http_request("POST", &url, &pat, Some(body.clone()), GITHUB_MAX_TIME_SECS)
-                    .await;
-
-            match result {
-                Err(e) => {
-                    last_err = e.context("send JIT runner config request");
-                }
-                Ok(response) => {
-                    let status = response.status;
-                    if status == 201 {
-                        return github_json_body("parse JIT runner config response", response);
-                    }
-                    let hint =
-                        github_retry_hint_from_header_map(&response.headers, unix_epoch_now());
-                    last_err = github_error_from_response("JIT runner config request", response);
-                    // Permission and quota failures cannot recover during
-                    // this attempt. Return immediately so controller pacing
-                    // owns the retry schedule; never sleep for an hour on a
-                    // GitHub reset header.
-                    if matches!(status, 403 | 429) || status == 409 {
-                        return Err(last_err);
-                    }
-                    retry_delay = hint.delay(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    );
-                }
-            }
+        let response = github_http_request("POST", &url, pat, Some(body), GITHUB_MAX_TIME_SECS)
+            .await
+            .context("send JIT runner config request")?;
+        if response.status == 201 {
+            return github_json_body("parse JIT runner config response", response);
         }
-        Err(last_err)
+        // A JIT POST can succeed remotely even when its response is lost or
+        // arrives as 5xx. Never issue an automatic second POST: the pending
+        // marker and outer supervisor retain ownership of recovery.
+        Err(github_error_from_response(
+            "JIT runner config request",
+            response,
+        ))
     }
 
     /// List every runner registration in scope. Paginated (100/page): the
@@ -1043,20 +1045,47 @@ impl RegistrationClient {
         }
     }
 
-    pub async fn list_runner_groups(
+    pub async fn find_runner_group(
         &self,
         scope: &GitHubScope,
         pat: &str,
-    ) -> Result<Vec<RunnerGroup>> {
+        requested_name: &str,
+        requested_id: Option<i64>,
+    ) -> Result<RunnerGroup> {
         #[derive(Deserialize)]
         struct Page {
-            total_count: Option<u64>,
+            total_count: u64,
             runner_groups: Vec<RunnerGroup>,
         }
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: u32 = 100;
+        const MAX_ITEMS: usize = PAGE_SIZE * MAX_PAGES as usize;
         let base = scope.runner_groups_url()?;
-        let mut all = Vec::new();
+        if requested_name.is_empty() && requested_id.is_none() {
+            bail!("runner group lookup requires a name or numeric id");
+        }
+        if let Some(requested_id) = requested_id {
+            let url = scope.runner_group_url(requested_id)?;
+            let group: RunnerGroup = github_json_body(
+                "get runner group response",
+                github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            )?;
+            if !requested_name.is_empty() && !group.name.eq_ignore_ascii_case(requested_name) {
+                bail!(
+                    "runner group '{}' resolves to id {}, not supplied --pool-id {}",
+                    group.name,
+                    group.id,
+                    requested_id
+                );
+            }
+            return Ok(group);
+        }
         let mut page_number = 1u32;
+        let mut items_seen = 0usize;
         loop {
+            if page_number > MAX_PAGES || items_seen >= MAX_ITEMS {
+                bail!("runner group lookup exceeded bounded response limit ({MAX_ITEMS} groups)");
+            }
             let mut url = base.clone();
             url.query_pairs_mut()
                 .append_pair("per_page", "100")
@@ -1066,10 +1095,40 @@ impl RegistrationClient {
                 github_http_request("GET", url.as_str(), pat, None, 30).await?,
             )?;
             let fetched = page.runner_groups.len();
-            all.extend(page.runner_groups);
-            let total = page.total_count.unwrap_or(all.len() as u64);
-            if fetched < 100 || all.len() as u64 >= total {
-                return Ok(all);
+            items_seen = items_seen.saturating_add(fetched);
+            if page.total_count > MAX_ITEMS as u64 || items_seen as u64 > page.total_count {
+                bail!(
+                    "runner group response has inconsistent total_count {} after {} items",
+                    page.total_count,
+                    items_seen
+                );
+            }
+            if let Some(group) = page.runner_groups.into_iter().find(|group| {
+                group.name.eq_ignore_ascii_case(requested_name)
+                    || requested_id.is_some_and(|id| group.id == id)
+            }) {
+                if !requested_name.is_empty() && !group.name.eq_ignore_ascii_case(requested_name) {
+                    bail!(
+                        "runner group '{}' resolves to id {}, not supplied --pool-id {}",
+                        requested_name,
+                        group.id,
+                        requested_id.unwrap_or_default()
+                    );
+                }
+                return Ok(group);
+            }
+            if fetched < PAGE_SIZE || items_seen as u64 >= page.total_count {
+                if items_seen as u64 != page.total_count {
+                    bail!(
+                        "runner group pagination ended at {} of {} items",
+                        items_seen,
+                        page.total_count
+                    );
+                }
+                let identity = requested_id
+                    .map(|id| format!("id {id}"))
+                    .unwrap_or_else(|| format!("name '{requested_name}'"));
+                bail!("runner group {identity} not found")
             }
             page_number += 1;
         }
@@ -1312,6 +1371,7 @@ async fn native_json_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String)> {
+    validate_authenticated_url(url)?;
     let method_name = method.to_string();
     let method = Method::from_bytes(method.as_bytes())
         .with_context(|| format!("parse GitHub HTTP method '{method}'"))?;
@@ -1347,6 +1407,7 @@ async fn native_json_request_with_rate_limit(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String, GitHubRateLimitStatus)> {
+    validate_authenticated_url(url)?;
     let method_name = method.to_string();
     let method = Method::from_bytes(method.as_bytes())
         .with_context(|| format!("parse GitHub HTTP method '{method}'"))?;
@@ -1570,6 +1631,7 @@ fn parse_runner_lookup_response(response: GithubHttpResponse) -> Result<Option<L
 
 impl BrokerClient {
     pub fn new(server_url_v2: &str, bearer_token: impl Into<String>) -> Result<Self> {
+        validate_authenticated_url(server_url_v2)?;
         let http = Client::builder()
             .user_agent(RUNNER_USER_AGENT)
             .build()
@@ -1911,6 +1973,7 @@ fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
 
 impl DistributedTaskClient {
     pub fn new(server_url: &str, bearer_token: impl Into<String>) -> Result<Self> {
+        validate_authenticated_url(server_url)?;
         let http = Client::builder()
             .user_agent(RUNNER_USER_AGENT)
             .build()
@@ -4607,7 +4670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_runner_groups_fetches_all_pages() {
+    async fn find_runner_group_stops_when_target_is_found() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4639,14 +4702,14 @@ mod tests {
             .await;
 
         let scope = GitHubScope::parse(&format!("{}/tailrocks", server.uri())).unwrap();
-        let groups = RegistrationClient::new()
+        let group = RegistrationClient::new()
             .unwrap()
-            .list_runner_groups(&scope, "test-token")
+            .find_runner_group(&scope, "test-token", "velnor-trusted", None)
             .await
             .unwrap();
 
-        assert_eq!(groups.len(), 101);
-        assert_eq!(groups.last().unwrap().name, "velnor-trusted");
+        assert_eq!(group.id, 101);
+        assert_eq!(group.name, "velnor-trusted");
     }
 
     #[tokio::test]
@@ -6460,9 +6523,10 @@ mod tests {
             github_api_quota_status(&permission).is_none(),
             "permission 403 with remaining>0 must not fleet-hold"
         );
-        assert!(
-            github_api_retry_delay_at(&permission, 1_700_000_000).is_some(),
-            "reset headers may still delay the failing slot"
+        assert_eq!(
+            github_api_retry_delay_at(&permission, 1_700_000_000),
+            None,
+            "permission 403 reset headers must not delay the slot"
         );
 
         let exhausted = github_api_error_with_retry(
@@ -6548,5 +6612,36 @@ mod tests {
         );
         assert_eq!(hint, GitHubRetryHint::default());
         assert_eq!(hint.delay(1000), None);
+    }
+
+    #[test]
+    fn retry_after_is_honored_for_transient_server_errors_without_using_reset() {
+        let error = github_api_error_with_retry(
+            "transient",
+            503,
+            "unavailable",
+            GitHubRetryHint {
+                retry_after_seconds: Some(17),
+                rate_limit_reset_epoch: Some(1_800_000_000),
+                remaining: Some(4999),
+            },
+        );
+        assert_eq!(
+            github_api_retry_delay_at(&error, 1_700_000_000),
+            Some(Duration::from_secs(17))
+        );
+    }
+
+    #[test]
+    fn authenticated_endpoint_validation_rejects_cleartext_remote_urls() {
+        assert!(validate_authenticated_url("http://github.example.com/api")
+            .unwrap_err()
+            .to_string()
+            .contains("HTTPS"));
+        assert!(validate_authenticated_url("https://user:pass@example.com")
+            .unwrap_err()
+            .to_string()
+            .contains("userinfo"));
+        assert!(validate_authenticated_url("http://127.0.0.1:8080/api").is_ok());
     }
 }

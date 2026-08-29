@@ -186,7 +186,10 @@ pub fn bind_unix(
     let bound_socket = match socket_identity(path) {
         Some(identity) => identity,
         None => {
-            cleanup_unverified_bind(path, listener);
+            // The pathname identity could not be proven. Dropping the live
+            // listener is safe; unlinking by type would reintroduce a
+            // pathname TOCTOU race and could remove a replacement endpoint.
+            drop(listener);
             return Err(std::io::Error::other(
                 "bound control socket identity could not be verified",
             ));
@@ -254,21 +257,6 @@ fn cleanup_failed_bind(
     drop(listener);
 
     if socket_identity(path) == Some(identity) {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
-/// Best-effort cleanup when pathname identity could not be captured. The
-/// parent chain was already proven non-writable to untrusted peers, so after
-/// dropping the listener only a socket at the exact path is eligible for
-/// removal; non-socket replacements are never touched.
-fn cleanup_unverified_bind(path: &FsPath, listener: tokio::net::UnixListener) {
-    drop(listener);
-    use std::os::unix::fs::FileTypeExt;
-    if std::fs::symlink_metadata(path)
-        .ok()
-        .is_some_and(|metadata| metadata.file_type().is_socket())
-    {
         let _ = std::fs::remove_file(path);
     }
 }

@@ -786,7 +786,7 @@ fn github_headers(user_agent: &'static str) -> Result<HeaderMap> {
     headers.insert(USER_AGENT, HeaderValue::from_static(user_agent));
     headers.insert(
         "X-GitHub-Api-Version",
-        HeaderValue::from_static("2022-11-28"),
+        HeaderValue::from_static("2026-03-10"),
     );
     if let Ok(token) = env::var("GITHUB_TOKEN") {
         if !token.trim().is_empty() {

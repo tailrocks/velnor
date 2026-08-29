@@ -35,8 +35,9 @@ durability/job isolation tradeoff is allowed.
 Earlier sibling-worktree and branch ownership notes are historical evidence
 only. They are superseded by the active single-campaign directive: all
 remaining issue-408 work, fixture tooling, fixture dispatch, APT, and Sentry
-evidence is implemented and audited on this campaign branch and its sole PR.
-No sibling branch or additional PR is executable.
+evidence must be implemented and audited on this campaign branch and its sole
+PR. External evidence remains open until recorded below. No sibling branch or
+additional PR is executable.
 
 ## Phase 0 — attribution and budgets
 
@@ -141,20 +142,18 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 
 ## Phase 7 — canary and release
 
-- [x] Candidate is built and published through signed Debian APT.
-- [x] One isolated Sentry scope is drained and upgraded.
-- [x] Unrelated scopes remain on the previous version during canary.
-- [x] Sentry v0.1.240 idle soak passes 30/30 samples over 15 minutes with
+- [ ] Candidate is built and published through signed Debian APT.
+- [ ] One isolated Sentry scope is drained and upgraded.
+- [ ] Unrelated scopes remain on the previous version during canary.
+- [ ] Sentry idle soak passes 30/30 samples over 15 minutes with
   zero jobs, zero scoped containers, zero idle workers, zero overlap, ready
   health, and no JIT churn. Fixture job and live forced-fault proof remain
   open behind the unchanged fixture audit blocker.
 - [ ] Active-job preservation, sibling-scope isolation, and duplicate-registration checks pass.
 - [ ] Promotion occurs only after every gate passes.
 - [x] Exact forward candidate version and scoped drain procedure are documented.
-- [x] Rollback is not an acceptance requirement for this issue; operator decision
-  is forward-only progression with no return to the previous implementation.
-- [x] Post-forward idle soak and fixture proof are the required validation path;
-  rollback validation is intentionally removed by the operator decision.
+- [ ] Rollback to the previous signed APT version and forward recovery are
+  proven without losing active jobs, caches, leases, logs, or evidence.
 
 ## Ready definition
 
@@ -168,14 +167,13 @@ no-op events 0; idle job workers 0; bounded retry; active-job p95 regression
 - [x] Process-isolation guarantees remain intact or have stronger proof.
 - [x] Zero-job idle budgets pass for 15+ minutes.
 - [x] Broker/JIT fault tests pass without retry storms.
-- [x] Fixture parity and smoke pass without fixture changes (run
+- [ ] Fixture parity and smoke pass without fixture changes (run
   `33083180030`; both lanes passed and normalized result artifacts matched;
   the fixture comparator's case-sensitive path lookup skipped its own
   comparison and remains an external fixture defect).
 - [ ] Sentry canary and full-fleet soak pass (Sentry canary idle soak passes;
   full-fleet soak remains open).
-- [x] Forward-only signed-APT rollout is proven; rollback is explicitly outside
-  this issue’s acceptance scope by operator decision.
+- [ ] Signed-APT rollout and rollback/forward-recovery proof are complete.
 
 ## Evidence log
 

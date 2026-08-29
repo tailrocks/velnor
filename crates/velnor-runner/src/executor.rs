@@ -6276,7 +6276,7 @@ fn native_configure_pages(
         .get(&endpoint)
         .bearer_auth(&token)
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", "2026-03-10")
         .header("User-Agent", "velnor-runner")
         .send()
         .with_context(|| format!("get Pages site for {repository}"))?;
@@ -6384,7 +6384,7 @@ fn native_create_github_app_token(
             .get(&installation_endpoint)
             .bearer_auth(&jwt)
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", "2026-03-10")
             .header("User-Agent", "velnor-runner")
             .send(),
         "resolve GitHub App installation",
@@ -6404,7 +6404,7 @@ fn native_create_github_app_token(
             .post(&token_endpoint)
             .bearer_auth(&jwt)
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", "2026-03-10")
             .header("User-Agent", "velnor-runner")
             .json(&serde_json::json!({"repositories": [repository_name]}))
             .send(),
@@ -6472,7 +6472,7 @@ fn native_revoke_github_app_token(state: &JobExecutionState) -> Result<StepExecu
         .delete("https://api.github.com/installation/token")
         .bearer_auth(&token)
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", "2026-03-10")
         .header("User-Agent", "velnor-runner")
         .send();
     let stderr = match response {
@@ -6643,7 +6643,7 @@ fn native_deploy_pages(
             .post(format!("{api_url}/repos/{repository}/pages/deployments"))
             .bearer_auth(&github_token)
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", "2026-03-10")
             .json(&payload)
             .send()
             .context("create Pages deployment")?,
@@ -6684,7 +6684,7 @@ fn native_deploy_pages(
             .get(&status_url)
             .bearer_auth(&github_token)
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", "2026-03-10")
             .send();
         match response {
             Ok(response) if response.status().is_success() => {
@@ -6800,7 +6800,7 @@ fn cancel_pages_deployment(
         ))
         .bearer_auth(token)
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", "2026-03-10")
         .send();
 }
 
@@ -7097,7 +7097,7 @@ fn restore_repository_artifact(
                 client
                     .get(&list_url)
                     .bearer_auth(token)
-                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .header("X-GitHub-Api-Version", "2026-03-10")
             },
             "list repository artifacts",
         )?)?;
@@ -7112,7 +7112,7 @@ fn restore_repository_artifact(
                     client
                         .get(&archive_url)
                         .bearer_auth(token)
-                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .header("X-GitHub-Api-Version", "2026-03-10")
                 },
                 "download repository artifact",
             )?;
