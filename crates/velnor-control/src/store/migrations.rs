@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 13;
+pub const LATEST_SCHEMA_VERSION: u32 = 14;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -388,6 +388,16 @@ BEGIN
 END;
 ";
 
+/// Backfill claims for active jobs created before durable reservations. The
+/// insert is idempotent and runs after v13's triggers exist.
+const SCHEMA_V14: &str = "
+INSERT OR IGNORE INTO job_storage_reservations
+    (instance_slug, job_uid, reserved_bytes, reserved_at)
+SELECT instance_slug, job_uid, 262144, updated_at
+FROM jobs
+WHERE phase NOT IN ('completed', 'canceled', 'rejected');
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -484,6 +494,11 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "durable-job-storage-reservations",
         sql: SCHEMA_V13,
     },
+    Migration {
+        version: 14,
+        name: "backfill-active-job-storage-reservations",
+        sql: SCHEMA_V14,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -523,13 +538,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
         [],
         |row| row.get(0),
     )?;
-    if version >= LATEST_SCHEMA_VERSION && !v13_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v14_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 13 is recorded but its exact lifecycle-event identity or storage-reservation schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 14 is recorded but its exact lifecycle-event identity or active-job storage-reservation schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -724,6 +739,15 @@ pub(crate) fn apply_pending(
                 "v13 durable storage-reservation tables, counter, index, and triggers did not converge transactionally; the schema version remains unchanged",
             ));
         }
+        if migration.version == 14 && !v14_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v14 active jobs did not converge to durable storage reservations; the schema version remains unchanged",
+            ));
+        }
         if let Some(hook) = hook {
             hook(migration.version)?;
         }
@@ -888,12 +912,93 @@ fn v13_schema_complete(conn: &Connection) -> StoreResult<bool> {
     {
         return Ok(false);
     }
+    let reservation_pk = conn
+        .prepare(
+            "SELECT pk, name FROM pragma_table_info('job_storage_reservations')
+             WHERE pk > 0 ORDER BY pk",
+        )?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if reservation_pk != [(1, "instance_slug".to_owned()), (2, "job_uid".to_owned())] {
+        return Ok(false);
+    }
+    let state_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM storage_reservation_state
+             WHERE singleton = 0 AND reserved_bytes >= 0
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !state_exists
+        || !table_sql_contains(
+            conn,
+            "job_storage_reservations",
+            "CHECK (reserved_bytes = 262144)",
+        )?
+        || !table_sql_contains(conn, "storage_reservation_state", "CHECK (singleton = 0)")?
+        || !trigger_sql_contains(
+            conn,
+            "storage_reservations_insert",
+            "AFTER INSERT ON job_storage_reservations",
+        )?
+        || !trigger_sql_contains(conn, "storage_reservations_insert", "NEW.reserved_bytes")?
+        || !trigger_sql_contains(
+            conn,
+            "storage_reservations_delete",
+            "AFTER DELETE ON job_storage_reservations",
+        )?
+        || !trigger_sql_contains(conn, "storage_reservations_delete", "OLD.reserved_bytes")?
+    {
+        return Ok(false);
+    }
     has_index_columns(
         conn,
         "idx_job_storage_reservations_job",
         "job_storage_reservations",
         ["instance_slug", "job_uid"].as_slice(),
     )
+}
+
+fn v14_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v13_schema_complete(conn)? {
+        return Ok(false);
+    }
+    Ok(!conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM jobs
+             WHERE phase NOT IN ('completed', 'canceled', 'rejected')
+               AND NOT EXISTS(
+                   SELECT 1 FROM job_storage_reservations
+                   WHERE instance_slug = jobs.instance_slug
+                     AND job_uid = jobs.job_uid
+               )
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
+fn table_sql_contains(conn: &Connection, table: &str, fragment: &str) -> StoreResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, String>(0),
+        )?
+        .contains(fragment))
+}
+
+fn trigger_sql_contains(conn: &Connection, trigger: &str, fragment: &str) -> StoreResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            [trigger],
+            |row| row.get::<_, String>(0),
+        )?
+        .contains(fragment))
 }
 
 #[cfg(test)]

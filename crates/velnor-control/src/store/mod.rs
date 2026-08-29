@@ -1302,22 +1302,6 @@ mod tests {
         store
             .record_job(&job("reserve", "j", "org/reserve"))
             .unwrap();
-        {
-            let mut connection = test_connection(&store);
-            let transaction = connection.transaction().unwrap();
-            transaction
-                .execute(
-                    "INSERT INTO job_storage_reservations
-                     (instance_slug, job_uid, reserved_bytes, reserved_at)
-                     VALUES ('reserve', 'j', ?1, ?2)",
-                    params![
-                        crate::store::retention::JOB_STORAGE_RESERVATION_BYTES as i64,
-                        rfc3339(Timestamp::now()),
-                    ],
-                )
-                .unwrap();
-            transaction.commit().unwrap();
-        }
         let reserved: i64 = test_connection(&store)
             .query_row(
                 "SELECT reserved_bytes FROM storage_reservation_state WHERE singleton = 0",

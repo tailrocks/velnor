@@ -477,8 +477,10 @@ impl Store {
     /// Envelope-classified persistence failures.
     pub fn record_job(&self, row: &JobRow) -> StoreResult<()> {
         validate_job_row(row)?;
-        let conn = self.lock_conn()?;
-        conn.execute(
+        let mut conn = self.lock_conn()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute(
             "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
                                head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
                                trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
@@ -525,6 +527,10 @@ impl Store {
                 rfc3339(row.updated_at),
             ],
         )?;
+        if !matches!(row.phase.as_str(), "completed" | "canceled" | "rejected") {
+            ensure_job_storage_reservation(&transaction, &row.instance_slug, &row.job_uid)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -576,6 +582,10 @@ impl Store {
         let mut conn = self.lock_conn()?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if transition_token_exists(&transaction, instance_slug, job_uid, &transition.token)? {
+            transaction.commit()?;
+            return Ok(());
+        }
         insert_summary(&transaction, summary)?;
         ensure_job_storage_reservation(&transaction, instance_slug, job_uid)?;
         record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
@@ -607,8 +617,13 @@ impl Store {
         let mut conn = self.lock_conn()?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let additional_reservation_bytes =
-            admission_reservation_bytes(&transaction, instance_slug, job_uid)?;
+        let replay =
+            transition_token_exists(&transaction, instance_slug, job_uid, &transition.token)?;
+        let additional_reservation_bytes = if replay {
+            0
+        } else {
+            admission_reservation_bytes(&transaction, instance_slug, job_uid)?
+        };
         let status = self.physical_budget_status_with_connection_and_reservation(
             &transaction,
             budget,
@@ -617,7 +632,9 @@ impl Store {
         if !status.admits_job() {
             return Ok(status);
         }
-        insert_summary(&transaction, summary)?;
+        if !replay {
+            insert_summary(&transaction, summary)?;
+        }
         if additional_reservation_bytes != 0 {
             insert_job_storage_reservation(&transaction, instance_slug, job_uid)?;
         }
@@ -1646,6 +1663,22 @@ fn record_job_transition_in_transaction(
         )?;
     }
     Ok(true)
+}
+
+fn transition_token_exists(
+    transaction: &Transaction<'_>,
+    instance_slug: &str,
+    job_uid: &str,
+    token: &str,
+) -> StoreResult<bool> {
+    Ok(transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM job_transitions
+             WHERE instance_slug = ?1 AND job_uid = ?2 AND transition_token = ?3
+         )",
+        params![instance_slug, job_uid, token],
+        |row| row.get(0),
+    )?)
 }
 
 fn admission_reservation_bytes(

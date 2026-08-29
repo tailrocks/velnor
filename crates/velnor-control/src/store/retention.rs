@@ -800,10 +800,23 @@ impl Store {
     ) -> StoreResult<PhysicalBudgetStatus> {
         let (database_bytes, wal_bytes) = Self::total_database_bytes(connection, &self.path)?;
         let reserved_bytes = storage_reservation_bytes_with_connection(connection)?;
+        let claimed_bytes = reserved_bytes
+            .checked_add(additional_reservation_bytes)
+            .ok_or_else(|| {
+                StoreError::new(ExitClass::Operation, "store.admission.reservation.overflow")
+                    .with_remediation("release stale job reservations before admitting more work")
+            })?;
         let projected_bytes = database_bytes
             .checked_add(wal_bytes)
-            .and_then(|bytes| bytes.checked_add(reserved_bytes))
-            .and_then(|bytes| bytes.checked_add(additional_reservation_bytes))
+            .and_then(|bytes| bytes.checked_add(claimed_bytes))
+            .ok_or_else(|| {
+                StoreError::new(ExitClass::Operation, "store.admission.reservation.overflow")
+                    .with_remediation("release stale job reservations before admitting more work")
+            })?;
+        let mut admission_budget = budget.clone();
+        admission_budget.min_free_bytes = budget
+            .min_free_bytes
+            .checked_add(claimed_bytes)
             .ok_or_else(|| {
                 StoreError::new(ExitClass::Operation, "store.admission.reservation.overflow")
                     .with_remediation("release stale job reservations before admitting more work")
@@ -811,7 +824,7 @@ impl Store {
         Ok(evaluate_admission_physical_budget(
             projected_bytes,
             filesystem_free_bytes(&self.path),
-            budget,
+            &admission_budget,
         ))
     }
 
