@@ -7,8 +7,8 @@ name: Release
 # guard) are folded in below. One tagged commit produces one coherent, acyclic
 # release record binding: source SHA -> crate version -> per-arch binary/deb
 # Velnor remains the release default. During a fully drained recovery window,
-# `VELNOR_AUTOMATIC_LANES=github` moves the single release writer to GitHub;
-# removing the variable restores Velnor without changing workflow code.
+# `VELNOR_AUTOMATIC_LANES=github` selects GitHub for automatic tag releases;
+# `velnor` and `both` remain explicit, validated values.
 # digests -> OCI image digest -> compiled-manifest hash -> APT coordinate.
 #
 # This workflow holds NO APT credential and performs NO consumer write/dispatch
@@ -43,11 +43,46 @@ env:
   SOURCE_URL: https://github.com/tailrocks/velnor
 
 jobs:
+  lane-admission:
+    name: Resolve release lanes
+    timeout-minutes: 5
+    runs-on: ${{ 'ubuntu-26.04' }}
+    permissions:
+      contents: read
+    env:
+      VELNOR_IMPLEMENTATION_REQUIREMENT: "guest-image-build.user-namespace"
+      VELNOR_MISSING_CAPABILITY: "unprivileged user namespaces or CAP_SYS_ADMIN"
+    outputs:
+      lanes: ${{ steps.route.outputs.lanes }}
+    steps:
+      - name: Validate requested lanes and required capabilities
+        id: route
+        env:
+          REQUESTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || 'velnor' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_LANES" in
+            github)
+              echo "lanes=github" >> "$GITHUB_OUTPUT"
+              ;;
+            velnor|both)
+              echo "::error::release lanes '$REQUESTED_LANES' fail capability check '$VELNOR_MISSING_CAPABILITY'; Velnor implementation requirement '$VELNOR_IMPLEMENTATION_REQUIREMENT' remains open; refusing GitHub substitution" >&2
+              exit 1
+              ;;
+            *)
+              echo "::error::invalid release lanes '$REQUESTED_LANES'; expected velnor, github, or both" >&2
+              exit 1
+              ;;
+          esac
+
   identity:
+    needs: lane-admission
     name: Resolve + gate release identity
     timeout-minutes: 20
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ needs.lane-admission.outputs.lanes == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
+      lane: ${{ needs.lane-admission.outputs.lanes }}
       version: ${{ steps.gate.outputs.version }}
       commit: ${{ steps.gate.outputs.commit }}
     steps:
@@ -107,11 +142,11 @@ jobs:
     needs: identity
     name: Compile release metadata once
     timeout-minutes: 30
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
-      CACHE_LANE: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'GitHub' || 'Velnor' }}
+      CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -192,7 +227,7 @@ jobs:
     needs: [identity, metadata]
     name: Build + push one multi-platform GHCR image
     timeout-minutes: 60
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: read
       packages: write
@@ -200,7 +235,7 @@ jobs:
       index_digest: ${{ steps.push.outputs.digest }}
       manifest_sha256: ${{ needs.metadata.outputs.manifest_sha256 }}
     env:
-      CACHE_LANE: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'GitHub' || 'Velnor' }}
+      CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       VERSION: ${{ needs.identity.outputs.version }}
       COMMIT: ${{ needs.identity.outputs.commit }}
     steps:
@@ -298,11 +333,15 @@ jobs:
             deb: amd64
           - arch: aarch64
             deb: arm64
-    # Always GitHub-hosted: mmdebstrap needs unprivileged user namespaces
-    # (or CAP_SYS_ADMIN), which the Velnor job sandbox drops. Building the
-    # signed guest kernel/rootfs release artifacts is a trusted operation on
-    # the documented trust route anyway.
+    # lane-admission permits this GitHub-hosted implementation only for the
+    # explicit github lane. Velnor/both fail before release side effects until
+    # Velnor provides the required isolated user-namespace capability.
     runs-on: ${{ matrix.deb == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    env:
+      CACHE_LANE: GitHub
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -325,10 +364,23 @@ jobs:
           install_args: "rust"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
+
       - name: Install kernel and rootfs build packages
         run: |
           set -euo pipefail
+          # velnor-sudo-exception: GitHub-hosted release build installs required OS packages.
           sudo apt-get update
+          # velnor-sudo-exception: GitHub-hosted release build installs required OS packages.
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
             mmdebstrap debootstrap qemu-user-binfmt binfmt-support \
@@ -376,7 +428,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - arch: arm64
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     env:
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
@@ -594,7 +646,7 @@ jobs:
     needs: [identity, metadata, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: write
     env:
@@ -852,51 +904,6 @@ jobs:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
       source-ref: refs/tags/v${{ needs.identity.outputs.version }}
-
-  parity-github:
-    # `both` on a single-writer pipeline: the lane-selected jobs above remain the
-    # sole writer (Velnor by default). This GitHub-hosted leg independently
-    # verifies the published release record against the release assets — both
-    # fleets execute from this same workflow definition, writes happen once.
-    needs: [identity, release]
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes == 'both' }}
-    name: Verify published release (GitHub lane)
-    timeout-minutes: 15
-    runs-on: ${{ 'ubuntu-26.04' }}
-    permissions:
-      contents: read
-    env:
-      VERSION: ${{ needs.identity.outputs.version }}
-      COMMIT: ${{ needs.identity.outputs.commit }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Download published release and verify digests against the record
-        run: |
-          set -euo pipefail
-          tag="v${VERSION}"
-          mkdir verify
-          cd verify
-          gh release download "$tag" \
-            --pattern 'SHA256SUMS' \
-            --pattern 'release-record.json' \
-            --pattern 'velnor-runner-*.tar.gz' \
-            --pattern 'velnor-runner-*.deb'
-          # SHA256SUMS binds the four package subjects.
-          sha256sum --check --strict SHA256SUMS
-          # Cross-check the release record against the downloaded bytes.
-          for arch in amd64 arm64; do
-            deb="velnor-runner-${VERSION}-${arch}.deb"
-            tarball="velnor-runner-${VERSION}-${arch}.tar.gz"
-            record_deb="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .deb_sha256' release-record.json)"
-            record_bin="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .binary_sha256' release-record.json)"
-            [ "$(sha256sum "$deb" | awk '{print $1}')" = "$record_deb" ] || { echo "::error::record deb digest mismatch ($arch)" >&2; exit 1; }
-            mkdir -p "extract-$arch"
-            tar -xzf "$tarball" -C "extract-$arch"
-            [ "$(sha256sum "extract-$arch/velnor-runner" | awk '{print $1}')" = "$record_bin" ] || { echo "::error::record binary digest mismatch ($arch)" >&2; exit 1; }
-          done
-          # The record must name this exact source commit.
-          [ "$(jq -r '.build.commit' release-record.json)" = "$COMMIT" ] || { echo "::error::record commit mismatch" >&2; exit 1; }
-          echo "parity-github: published release $tag verified on the GitHub lane"
 
   # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
   # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).
