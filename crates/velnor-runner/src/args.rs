@@ -175,6 +175,9 @@ pub struct ConfigureArgs {
     pub replace: bool,
     pub pool_id: Option<i64>,
     pub pool_name: Option<String>,
+    /// Internal daemon marker: the name/id pair was resolved and validated
+    /// once before configuring all slots.
+    pub pool_id_pre_resolved: bool,
     pub dry_run: bool,
     pub config_dir: Option<PathBuf>,
 }
@@ -216,6 +219,9 @@ pub struct DaemonArgs {
     pub replace: bool,
     pub pool_id: Option<i64>,
     pub pool_name: Option<String>,
+    /// Internal daemon marker for a validated name/id pair.
+    #[serde(default)]
+    pub pool_id_pre_resolved: bool,
     #[serde(default)]
     pub routing_policy_file: Option<PathBuf>,
     pub dry_run_registration: bool,

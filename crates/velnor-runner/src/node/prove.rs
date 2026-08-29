@@ -6,8 +6,11 @@
 //! field is invalid (August 24 class: registration without repo access).
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use velnor_model::{ExecutionBackendKind, Generation, SlotId};
@@ -249,6 +252,9 @@ pub fn routing_drift(policy: &RoutingFields, evidence: &RoutingFields) -> Routin
 }
 
 const GITHUB_PROBE_TIMEOUT_SECS: u64 = 10;
+const GITHUB_PAGE_SIZE: usize = 100;
+const GITHUB_MAX_PAGES: u32 = 100;
+const GITHUB_MAX_ITEMS: usize = GITHUB_PAGE_SIZE * GITHUB_MAX_PAGES as usize;
 
 /// Preserve the most restrictive rate-limit telemetry across all requests in
 /// one probe. The controller paces on the lowest remaining budget and latest
@@ -625,38 +631,148 @@ async fn live_group_and_repos(
     want_group: &str,
     pool_id: Option<i64>,
 ) -> Result<(String, Vec<String>, GitHubRateLimitStatus), LiveLookupError> {
-    let url = scope
-        .runner_groups_url()
-        .map_err(|error| LiveLookupError::message(format!("build runner-groups URL: {error}")))?;
-    let (status, body, rate_limit) = github_json_request_with_rate_limit(
-        "GET",
-        url.as_str(),
-        token,
-        None,
-        GITHUB_PROBE_TIMEOUT_SECS,
-    )
-    .await
-    .map_err(|error| LiveLookupError::message(format!("request runner groups: {error}")))?;
-    if !(200..300).contains(&status) {
-        return Err(LiveLookupError::response(
-            "runner-groups",
-            status,
-            body,
-            rate_limit,
+    if want_group.is_empty() && pool_id.is_none() {
+        return Err(LiveLookupError::message(
+            "configured runner group identity is missing",
         ));
     }
+    let base_url = scope
+        .runner_groups_url()
+        .map_err(|error| LiveLookupError::message(format!("build runner-groups URL: {error}")))?;
     #[derive(Deserialize)]
     struct Groups {
+        total_count: u64,
         runner_groups: Vec<RunnerGroup>,
     }
-    let groups: Groups = serde_json::from_str(&body).map_err(|error| {
-        LiveLookupError::with_rate_limit(
-            format!("parse runner-groups response: {error}"),
-            rate_limit,
+    let (group, rate_limit) = if let Some(pool_id) = pool_id {
+        let url = scope.runner_group_url(pool_id).map_err(|error| {
+            LiveLookupError::message(format!("build runner-group URL: {error}"))
+        })?;
+        let (status, body, rate_limit) = github_json_request_with_rate_limit(
+            "GET",
+            url.as_str(),
+            token,
+            None,
+            GITHUB_PROBE_TIMEOUT_SECS,
         )
-    })?;
-    let group = resolve_live_group(&groups.runner_groups, want_group, pool_id)
-        .map_err(|error| LiveLookupError::with_rate_limit(error, rate_limit))?;
+        .await
+        .map_err(|error| LiveLookupError::message(format!("request runner group: {error}")))?;
+        if !(200..300).contains(&status) {
+            return Err(LiveLookupError::response(
+                "runner-group",
+                status,
+                body,
+                rate_limit,
+            ));
+        }
+        let group: RunnerGroup = serde_json::from_str(&body).map_err(|error| {
+            LiveLookupError::with_rate_limit(
+                format!("parse runner-group response: {error}"),
+                rate_limit,
+            )
+        })?;
+        let group = resolve_live_group(std::slice::from_ref(&group), want_group, Some(pool_id))
+            .map_err(|error| LiveLookupError::with_rate_limit(error, rate_limit))?;
+        (group, rate_limit)
+    } else {
+        let mut page_number = 1u32;
+        let mut items_seen = 0usize;
+        let mut rate_limit = GitHubRateLimitStatus::default();
+        let mut expected_total = None;
+        let mut group_ids = BTreeSet::new();
+        let mut group_names = BTreeSet::new();
+        let group = loop {
+            if page_number > GITHUB_MAX_PAGES || items_seen >= GITHUB_MAX_ITEMS {
+                return Err(LiveLookupError::with_rate_limit(
+                format!(
+                    "runner-group lookup exceeded bounded response limit ({GITHUB_MAX_ITEMS} groups)"
+                ),
+                rate_limit,
+            ));
+            }
+            let mut url = base_url.clone();
+            url.query_pairs_mut()
+                .append_pair("per_page", &GITHUB_PAGE_SIZE.to_string())
+                .append_pair("page", &page_number.to_string());
+            let (status, body, page_rate_limit) = github_json_request_with_rate_limit(
+                "GET",
+                url.as_str(),
+                token,
+                None,
+                GITHUB_PROBE_TIMEOUT_SECS,
+            )
+            .await
+            .map_err(|error| LiveLookupError::message(format!("request runner groups: {error}")))?;
+            rate_limit = aggregate_rate_limit_status(rate_limit, page_rate_limit);
+            if !(200..300).contains(&status) {
+                return Err(LiveLookupError::response(
+                    "runner-groups",
+                    status,
+                    body,
+                    rate_limit,
+                ));
+            }
+            let page: Groups = serde_json::from_str(&body).map_err(|error| {
+                LiveLookupError::with_rate_limit(
+                    format!("parse runner-groups response: {error}"),
+                    rate_limit,
+                )
+            })?;
+            let fetched = page.runner_groups.len();
+            items_seen = items_seen.saturating_add(fetched);
+            if page.total_count > GITHUB_MAX_ITEMS as u64 || items_seen as u64 > page.total_count {
+                return Err(LiveLookupError::with_rate_limit(
+                    format!(
+                        "runner-group response has inconsistent total_count {} after {} items",
+                        page.total_count, items_seen
+                    ),
+                    rate_limit,
+                ));
+            }
+            if expected_total.is_some_and(|total| total != page.total_count) {
+                return Err(LiveLookupError::with_rate_limit(
+                    "runner-group total_count changed during pagination",
+                    rate_limit,
+                ));
+            }
+            expected_total = Some(page.total_count);
+            for group in &page.runner_groups {
+                if !group_ids.insert(group.id) || !group_names.insert(group.name.clone()) {
+                    return Err(LiveLookupError::with_rate_limit(
+                        "runner-group pagination returned duplicate identities",
+                        rate_limit,
+                    ));
+                }
+            }
+            if let Some(group) = page.runner_groups.iter().find(|group| {
+                pool_id.is_some_and(|id| group.id == id)
+                    || (!want_group.is_empty() && group.name == want_group)
+            }) {
+                break resolve_live_group(std::slice::from_ref(group), want_group, pool_id)
+                    .map_err(|error| LiveLookupError::with_rate_limit(error, rate_limit))?;
+            }
+            if fetched < GITHUB_PAGE_SIZE || items_seen as u64 >= page.total_count {
+                if items_seen as u64 != page.total_count {
+                    return Err(LiveLookupError::with_rate_limit(
+                        format!(
+                            "runner-group pagination ended at {} of {} items",
+                            items_seen, page.total_count
+                        ),
+                        rate_limit,
+                    ));
+                }
+                let identity = pool_id
+                    .map(|id| format!("id {id}"))
+                    .unwrap_or_else(|| format!("name '{want_group}'"));
+                return Err(LiveLookupError::with_rate_limit(
+                    format!("configured runner group {identity} was not found"),
+                    rate_limit,
+                ));
+            }
+            page_number += 1;
+        };
+        (group, rate_limit)
+    };
     let (repos, repos_rate_limit) = match live_group_repos(scope, token, group.id).await {
         Ok(result) => result,
         Err(mut error) => {
@@ -748,51 +864,113 @@ async fn live_group_repos(
     token: &str,
     group_id: i64,
 ) -> Result<(Vec<String>, GitHubRateLimitStatus), LiveLookupError> {
-    let url = scope
+    let base_url = scope
         .runner_group_repositories_url(group_id)
         .map_err(|error| {
             LiveLookupError::message(format!("build runner-group repositories URL: {error}"))
         })?;
-    let (status, body, rate_limit) = github_json_request_with_rate_limit(
-        "GET",
-        url.as_str(),
-        token,
-        None,
-        GITHUB_PROBE_TIMEOUT_SECS,
-    )
-    .await
-    .map_err(|error| {
-        LiveLookupError::message(format!("request runner-group repositories: {error}"))
-    })?;
-    if !(200..300).contains(&status) {
-        return Err(LiveLookupError::response(
-            "runner-group repositories",
-            status,
-            body,
-            rate_limit,
-        ));
-    }
     #[derive(Deserialize)]
     struct Page {
+        total_count: u64,
         repositories: Vec<Repo>,
     }
     #[derive(Deserialize)]
     struct Repo {
         full_name: String,
     }
-    let page: Page = serde_json::from_str(&body).map_err(|error| {
-        LiveLookupError::with_rate_limit(
-            format!("parse runner-group repositories response: {error}"),
-            rate_limit,
+    let mut repositories = Vec::new();
+    let mut page_number = 1u32;
+    let mut items_seen = 0usize;
+    let mut rate_limit = GitHubRateLimitStatus::default();
+    let mut expected_total = None;
+    let mut repository_names = BTreeSet::new();
+    loop {
+        if page_number > GITHUB_MAX_PAGES || items_seen >= GITHUB_MAX_ITEMS {
+            return Err(LiveLookupError::with_rate_limit(
+                format!(
+                    "runner-group repository lookup exceeded bounded response limit ({GITHUB_MAX_ITEMS} repositories)"
+                ),
+                rate_limit,
+            ));
+        }
+        let mut url = base_url.clone();
+        url.query_pairs_mut()
+            .append_pair("per_page", &GITHUB_PAGE_SIZE.to_string())
+            .append_pair("page", &page_number.to_string());
+        let (status, body, page_rate_limit) = github_json_request_with_rate_limit(
+            "GET",
+            url.as_str(),
+            token,
+            None,
+            GITHUB_PROBE_TIMEOUT_SECS,
         )
-    })?;
-    Ok((
-        page.repositories
-            .into_iter()
-            .map(|repo| repo.full_name)
-            .collect(),
-        rate_limit,
-    ))
+        .await
+        .map_err(|error| {
+            LiveLookupError::message(format!("request runner-group repositories: {error}"))
+        })?;
+        rate_limit = aggregate_rate_limit_status(rate_limit, page_rate_limit);
+        if !(200..300).contains(&status) {
+            return Err(LiveLookupError::response(
+                "runner-group repositories",
+                status,
+                body,
+                rate_limit,
+            ));
+        }
+        let page: Page = serde_json::from_str(&body).map_err(|error| {
+            LiveLookupError::with_rate_limit(
+                format!("parse runner-group repositories response: {error}"),
+                rate_limit,
+            )
+        })?;
+        if page.total_count > GITHUB_MAX_ITEMS as u64 {
+            return Err(LiveLookupError::with_rate_limit(
+                format!(
+                    "runner-group repository response exceeds bounded response limit ({})",
+                    GITHUB_MAX_ITEMS
+                ),
+                rate_limit,
+            ));
+        }
+        if expected_total.is_some_and(|total| total != page.total_count) {
+            return Err(LiveLookupError::with_rate_limit(
+                "runner-group repository total_count changed during pagination",
+                rate_limit,
+            ));
+        }
+        expected_total = Some(page.total_count);
+        let fetched = page.repositories.len();
+        items_seen = items_seen.saturating_add(fetched);
+        if items_seen as u64 > page.total_count {
+            return Err(LiveLookupError::with_rate_limit(
+                "runner-group repository pagination returned more items than total_count",
+                rate_limit,
+            ));
+        }
+        for repo in page.repositories {
+            if !repository_names.insert(repo.full_name.clone()) {
+                return Err(LiveLookupError::with_rate_limit(
+                    "runner-group repository pagination returned duplicate identities",
+                    rate_limit,
+                ));
+            }
+            repositories.push(repo.full_name);
+        }
+        if fetched < GITHUB_PAGE_SIZE || items_seen as u64 >= page.total_count {
+            if items_seen as u64 != page.total_count {
+                return Err(LiveLookupError::with_rate_limit(
+                    format!(
+                        "runner-group repository pagination ended at {} of {} items",
+                        items_seen, page.total_count
+                    ),
+                    rate_limit,
+                ));
+            }
+            repositories.sort_unstable();
+            return Ok((repositories, rate_limit));
+        }
+        page_number += 1;
+    }
 }
 
 async fn queued_job_ids_for_repo(
@@ -1279,11 +1457,21 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
                 "runner_groups": [{
                     "id": 7,
                     "name": "velnor",
                     "default": false
                 }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 7,
+                "name": "velnor",
+                "default": false
             })))
             .mount(&server)
             .await;
@@ -1504,7 +1692,17 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
                 "runner_groups": [{"id": 7, "name": "velnor", "default": false}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 7,
+                "name": "velnor",
+                "default": false
             })))
             .mount(&server)
             .await;
@@ -1552,7 +1750,17 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
                 "runner_groups": [{"id": 7, "name": "velnor", "default": false}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 7,
+                "name": "velnor",
+                "default": false
             })))
             .mount(&server)
             .await;

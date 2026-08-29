@@ -26,8 +26,8 @@ use url::Url;
 use uuid::Uuid;
 
 /// GitHub Actions runner protocol version Velnor implements.
-pub const RUNNER_VERSION: &str = "2.335.1";
-pub const RUNNER_USER_AGENT: &str = "actions-runner/2.335.1 (velnor)";
+pub const RUNNER_VERSION: &str = "2.337.0";
+pub const RUNNER_USER_AGENT: &str = "actions-runner/2.337.0 (velnor)";
 /// Velnor's own version, sourced from Cargo.toml.
 pub const VELNOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Display name shown in "Set up job" log: "Velnor Runner/<version> (protocol: <runner_version>)"
@@ -37,16 +37,26 @@ pub fn velnor_runner_display() -> String {
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_MAX_TIME_SECS: u64 = 5;
-const GITHUB_RETRY_SLEEP_MAX: Duration = Duration::from_secs(2);
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
+const RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_ZIP_MEMBERS: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_ZIP_CENTRAL_DIRECTORY_BYTES: u64 = 64 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_RAW_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_UPLOAD_ZIP_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
     pub status: u16,
     pub action: String,
-    pub body: String,
+    pub(crate) body: String,
     pub retry_after_seconds: Option<u64>,
     pub rate_limit_reset_epoch: Option<u64>,
     /// `x-ratelimit-remaining`. Required to tell quota 403 (remaining=0)
@@ -94,6 +104,58 @@ pub(crate) fn classify_runner_delete(status: u16, body: &str) -> Option<RunnerDe
     }
 }
 
+/// Keep provider-controlled response text useful without allowing credentials
+/// or unbounded payloads into errors, forensic logs, or controller output.
+fn sanitize_response_body(raw: &str) -> String {
+    const MAX_RESPONSE_BODY_BYTES: usize = 4096;
+    const SENSITIVE_MARKERS: &[&str] = &[
+        "authorization:",
+        "bearer ",
+        "access_token",
+        "access-token",
+        "client_secret",
+        "client-secret",
+        "password",
+        "private_key",
+        "private-key",
+        "secret",
+        "signature=",
+        "sig=",
+        "token",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "begin private key",
+    ];
+    let lower = raw.to_ascii_lowercase();
+    if SENSITIVE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return "<redacted response body>".to_owned();
+    }
+
+    let mut output = String::with_capacity(raw.len().min(MAX_RESPONSE_BODY_BYTES));
+    let mut truncated = false;
+    for character in raw.chars() {
+        let character = if character.is_control() || character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_RESPONSE_BODY_BYTES {
+            truncated = true;
+            break;
+        }
+        output.push(character);
+    }
+    if truncated {
+        output.push('…');
+    }
+    output
+}
+
 fn github_api_error(
     action: impl Into<String>,
     status: u16,
@@ -102,7 +164,7 @@ fn github_api_error(
     GitHubApiError {
         status,
         action: action.into(),
-        body: body.into(),
+        body: sanitize_response_body(&body.into()),
         retry_after_seconds: None,
         rate_limit_reset_epoch: None,
         remaining: None,
@@ -176,6 +238,70 @@ impl GitHubRetryHint {
     }
 }
 
+/// Validate an endpoint before sending an authenticated request.
+///
+/// GitHub response data and job messages can supply URLs. HTTPS is mandatory
+/// for remote endpoints so bearer tokens, PATs, and OAuth assertions cannot
+/// be sent in cleartext. Loopback HTTP is available only to unit tests and the
+/// explicit non-default integration-test feature; release daemons never send
+/// credentials over cleartext HTTP.
+pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
+    let safe = redacted_authenticated_url(raw);
+    let url = Url::parse(raw).with_context(|| format!("parse authenticated URL '{safe}'"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("authenticated URL must not contain userinfo");
+    }
+    match url.scheme() {
+        "https" => Ok(url),
+        "http"
+            if (cfg!(test) || cfg!(feature = "test-support"))
+                && url.host_str().is_some_and(is_loopback_host) =>
+        {
+            Ok(url)
+        }
+        _ => bail!("authenticated endpoint must use HTTPS: {safe}"),
+    }
+}
+
+fn validate_known_service_url(raw: &str, field: &str, hosts: &[&str]) -> Result<Url> {
+    let url = validate_authenticated_url(raw)?;
+    let host = url.host_str().unwrap_or_default();
+    let allowed_host = is_loopback_host(host)
+        || hosts
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed));
+    let allowed_port = is_loopback_host(host) || url.port().is_none();
+    if !allowed_host || !allowed_port {
+        bail!(
+            "{field} endpoint host is not an approved GitHub Actions service: {}",
+            redacted_authenticated_url(raw)
+        );
+    }
+    Ok(url)
+}
+
+fn validate_signed_blob_url(raw: &str, field: &str) -> Result<Url> {
+    validate_authenticated_url(raw).with_context(|| format!("validate {field} signed blob URL"))
+}
+
+pub(crate) fn redacted_authenticated_url(raw: &str) -> String {
+    let Ok(mut url) = Url::parse(raw) else {
+        return "<invalid URL>".to_owned();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host == "::1"
+}
+
 fn unix_epoch_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -235,7 +361,7 @@ fn github_api_error_with_retry(
     GitHubApiError {
         status,
         action: action.into(),
-        body: body.into(),
+        body: sanitize_response_body(&body.into()),
         retry_after_seconds: hint.retry_after_seconds,
         rate_limit_reset_epoch: hint.rate_limit_reset_epoch,
         remaining: hint.remaining,
@@ -263,12 +389,24 @@ fn github_api_retry_delay_at(error: &anyhow::Error, now_epoch: u64) -> Option<st
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
         .and_then(|error| {
-            GitHubRetryHint {
-                retry_after_seconds: error.retry_after_seconds,
-                rate_limit_reset_epoch: error.rate_limit_reset_epoch,
-                remaining: error.remaining,
+            let status = error.rate_limit_status();
+            let retry_after = status
+                .retry_after_seconds
+                .map(std::time::Duration::from_secs);
+            let quota_reset = status
+                .is_limited(error.status)
+                .then(|| {
+                    status.reset_epoch_or_retry_after(now_epoch).map(|reset| {
+                        std::time::Duration::from_secs(reset.saturating_sub(now_epoch))
+                    })
+                })
+                .flatten();
+            match (retry_after, quota_reset) {
+                (Some(retry_after), Some(quota_reset)) => Some(retry_after.max(quota_reset)),
+                (Some(retry_after), None) => Some(retry_after),
+                (None, Some(quota_reset)) => Some(quota_reset),
+                (None, None) => None,
             }
-            .delay(now_epoch)
         })
 }
 
@@ -742,6 +880,7 @@ fn oauth_registration_not_found(error: &str) -> bool {
 impl OAuthClient {
     pub fn new() -> Result<Self> {
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build OAuth HTTP client")?;
@@ -753,6 +892,7 @@ impl OAuthClient {
         credentials: &OAuthJwtCredentials,
     ) -> Result<OAuthAccessToken> {
         github_http_transport()?;
+        validate_authenticated_url(&credentials.authorization_url)?;
         let assertion = build_client_assertion(credentials)?;
         // Build the URL-encoded OAuth form body.
         let body: String = url::form_urlencoded::Serializer::new(String::new())
@@ -909,6 +1049,7 @@ async fn github_http_request(
     max_time_secs: u64,
 ) -> Result<GithubHttpResponse> {
     github_http_transport()?;
+    validate_authenticated_url(url)?;
     let method_name = method.to_owned();
     let method = Method::from_bytes(method.as_bytes()).map_err(|error| {
         github_transport_error(&format!("parse GitHub HTTP method '{method}'"), error)
@@ -920,7 +1061,7 @@ async fn github_http_request(
         .bearer_auth(bearer_token)
         .header(USER_AGENT, RUNNER_USER_AGENT)
         .header(ACCEPT, "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", "2026-03-10")
         .timeout(Duration::from_secs(max_time_secs));
     if let Some(body) = json_body {
         request = request
@@ -929,7 +1070,10 @@ async fn github_http_request(
     }
     let response = request.send().await.map_err(|error| {
         github_transport_error(
-            &format!("send native GitHub request {method_name} {url}"),
+            &format!(
+                "send native GitHub request {method_name} {}",
+                redacted_authenticated_url(url)
+            ),
             error,
         )
     })?;
@@ -937,7 +1081,10 @@ async fn github_http_request(
     let headers = response.headers().clone();
     let body = response.text().await.map_err(|error| {
         github_transport_error(
-            &format!("read native GitHub response body {method_name} {url}"),
+            &format!(
+                "read native GitHub response body {method_name} {}",
+                redacted_authenticated_url(url)
+            ),
             error,
         )
     })?;
@@ -961,59 +1108,19 @@ impl RegistrationClient {
     ) -> Result<GitHubJitConfigResponse> {
         let url = scope.jit_config_url.to_string();
         let body = serde_json::to_string(request).context("serialize JIT config request")?;
-        let pat = pat.to_string();
-        let mut last_err = anyhow::anyhow!("no attempts made");
-        let mut retry_delay = None;
-        for attempt in 0..3u32 {
-            if attempt > 0 {
-                let backoff = retry_delay
-                    .take()
-                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5))
-                    .min(GITHUB_RETRY_SLEEP_MAX);
-                eprintln!(
-                    "JIT config error (attempt {}/3), retrying in {}s",
-                    attempt,
-                    backoff.as_secs()
-                );
-                tokio::time::sleep(backoff).await;
-            }
-            let result =
-                github_http_request("POST", &url, &pat, Some(body.clone()), GITHUB_MAX_TIME_SECS)
-                    .await;
-
-            match result {
-                Err(e) => {
-                    last_err = e.context("send JIT runner config request");
-                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
-                        .await;
-                }
-                Ok(response) => {
-                    let status = response.status;
-                    if status == 201 {
-                        return github_json_body("parse JIT runner config response", response);
-                    }
-                    let hint =
-                        github_retry_hint_from_header_map(&response.headers, unix_epoch_now());
-                    last_err = github_error_from_response("JIT runner config request", response);
-                    // Permission and quota failures cannot recover during
-                    // this attempt. Return immediately so controller pacing
-                    // owns the retry schedule; never sleep for an hour on a
-                    // GitHub reset header.
-                    if matches!(status, 403 | 429) || status == 409 {
-                        return Err(last_err);
-                    }
-                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
-                        .await;
-                    retry_delay = hint.delay(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    );
-                }
-            }
+        let response = github_http_request("POST", &url, pat, Some(body), GITHUB_MAX_TIME_SECS)
+            .await
+            .context("send JIT runner config request")?;
+        if response.status == 201 {
+            return github_json_body("parse JIT runner config response", response);
         }
-        Err(last_err)
+        // A JIT POST can succeed remotely even when its response is lost or
+        // arrives as 5xx. Never issue an automatic second POST: the pending
+        // marker and outer supervisor retain ownership of recovery.
+        Err(github_error_from_response(
+            "JIT runner config request",
+            response,
+        ))
     }
 
     /// List every runner registration in scope. Paginated (100/page): the
@@ -1025,21 +1132,33 @@ impl RegistrationClient {
             total_count: Option<u64>,
             runners: Vec<ListedRunner>,
         }
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: u32 = 100;
+        const MAX_ITEMS: usize = PAGE_SIZE * MAX_PAGES as usize;
         let base = scope.runners_url()?;
         let mut all = Vec::new();
         let mut page_number = 1u32;
         loop {
+            if page_number > MAX_PAGES || all.len() >= MAX_ITEMS {
+                bail!("runner listing exceeded bounded response limit ({MAX_ITEMS} runners)");
+            }
             let mut url = base.clone();
             url.query_pairs_mut()
-                .append_pair("per_page", "100")
+                .append_pair("per_page", &PAGE_SIZE.to_string())
                 .append_pair("page", &page_number.to_string());
             let page: Page = github_json_body(
                 "list runners response",
                 github_http_request("GET", url.as_str(), pat, None, 30).await?,
             )?;
             let fetched = page.runners.len();
+            if all.len().saturating_add(fetched) > MAX_ITEMS {
+                bail!("runner listing exceeded bounded response limit ({MAX_ITEMS} runners)");
+            }
             all.extend(page.runners);
             let total = page.total_count.unwrap_or(all.len() as u64);
+            if total > MAX_ITEMS as u64 {
+                bail!("runner listing exceeds bounded response limit ({MAX_ITEMS} runners)");
+            }
             if fetched < 100 || all.len() as u64 >= total {
                 return Ok(all);
             }
@@ -1047,55 +1166,99 @@ impl RegistrationClient {
         }
     }
 
-    async fn cleanup_named_jit_orphans(&self, scope: &GitHubScope, pat: &str, agent_name: &str) {
-        let cleanup = async {
-            let runners = self.list_runners(scope, pat).await?;
-            for runner in runners
-                .iter()
-                .filter(|runner| runner.name.as_deref() == Some(agent_name))
-            {
-                let Some(id) = runner.id else {
-                    continue;
-                };
-                match self.delete_runner(scope, pat, id).await {
-                    Ok(()) => eprintln!(
-                        "deleted uncertain JIT runner '{agent_name}' id {id} before retry"
-                    ),
-                    Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
-                        eprintln!(
-                            "kept busy JIT runner '{agent_name}' id {id} during retry cleanup"
-                        );
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-        match tokio::time::timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS), cleanup).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                eprintln!("JIT retry orphan cleanup failed for '{agent_name}': {error:#}");
-            }
-            Err(_) => {
-                eprintln!("JIT retry orphan cleanup timed out for '{agent_name}'");
-            }
-        }
-    }
-
-    pub async fn list_runner_groups(
+    pub async fn find_runner_group(
         &self,
         scope: &GitHubScope,
         pat: &str,
-    ) -> Result<Vec<RunnerGroup>> {
+        requested_name: &str,
+        requested_id: Option<i64>,
+    ) -> Result<RunnerGroup> {
         #[derive(Deserialize)]
-        struct Response {
+        struct Page {
+            total_count: u64,
             runner_groups: Vec<RunnerGroup>,
         }
-        let response: Response = github_json_body(
-            "list runner groups response",
-            github_http_request("GET", scope.runner_groups_url()?.as_str(), pat, None, 30).await?,
-        )?;
-        Ok(response.runner_groups)
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: u32 = 100;
+        const MAX_ITEMS: usize = PAGE_SIZE * MAX_PAGES as usize;
+        let base = scope.runner_groups_url()?;
+        if requested_name.is_empty() && requested_id.is_none() {
+            bail!("runner group lookup requires a name or numeric id");
+        }
+        if let Some(requested_id) = requested_id {
+            let url = scope.runner_group_url(requested_id)?;
+            let group: RunnerGroup = github_json_body(
+                "get runner group response",
+                github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            )?;
+            if !requested_name.is_empty() && !group.name.eq_ignore_ascii_case(requested_name) {
+                bail!(
+                    "runner group '{}' resolves to id {}, not supplied --pool-id {}",
+                    group.name,
+                    group.id,
+                    requested_id
+                );
+            }
+            if group.id != requested_id {
+                bail!(
+                    "runner group response identity mismatch: requested id {requested_id}, returned {}",
+                    group.id
+                );
+            }
+            return Ok(group);
+        }
+        let mut page_number = 1u32;
+        let mut items_seen = 0usize;
+        loop {
+            if page_number > MAX_PAGES || items_seen >= MAX_ITEMS {
+                bail!("runner group lookup exceeded bounded response limit ({MAX_ITEMS} groups)");
+            }
+            let mut url = base.clone();
+            url.query_pairs_mut()
+                .append_pair("per_page", "100")
+                .append_pair("page", &page_number.to_string());
+            let page: Page = github_json_body(
+                "list runner groups response",
+                github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            )?;
+            let fetched = page.runner_groups.len();
+            items_seen = items_seen.saturating_add(fetched);
+            if page.total_count > MAX_ITEMS as u64 || items_seen as u64 > page.total_count {
+                bail!(
+                    "runner group response has inconsistent total_count {} after {} items",
+                    page.total_count,
+                    items_seen
+                );
+            }
+            if let Some(group) = page.runner_groups.into_iter().find(|group| {
+                group.name.eq_ignore_ascii_case(requested_name)
+                    || requested_id.is_some_and(|id| group.id == id)
+            }) {
+                if !requested_name.is_empty() && !group.name.eq_ignore_ascii_case(requested_name) {
+                    bail!(
+                        "runner group '{}' resolves to id {}, not supplied --pool-id {}",
+                        requested_name,
+                        group.id,
+                        requested_id.unwrap_or_default()
+                    );
+                }
+                return Ok(group);
+            }
+            if fetched < PAGE_SIZE || items_seen as u64 >= page.total_count {
+                if items_seen as u64 != page.total_count {
+                    bail!(
+                        "runner group pagination ended at {} of {} items",
+                        items_seen,
+                        page.total_count
+                    );
+                }
+                let identity = requested_id
+                    .map(|id| format!("id {id}"))
+                    .unwrap_or_else(|| format!("name '{requested_name}'"));
+                bail!("runner group {identity} not found")
+            }
+            page_number += 1;
+        }
     }
 
     /// Queued (unassigned) jobs in this org/repo whose labels wait on Velnor.
@@ -1238,7 +1401,10 @@ impl RegistrationClient {
         runner_id: i64,
     ) -> Result<Option<ListedRunner>> {
         let url = scope.runner_url(runner_id)?;
-        parse_runner_lookup_response(github_http_request("GET", url.as_str(), pat, None, 30).await?)
+        parse_runner_lookup_response(
+            github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            runner_id,
+        )
     }
 
     pub async fn delete_runner(
@@ -1252,7 +1418,7 @@ impl RegistrationClient {
         match classify_runner_delete(response.status, &response.body) {
             Some(RunnerDeleteOutcome::Gone) => Ok(()),
             Some(RunnerDeleteOutcome::BusyConflict) => {
-                Err(RunnerBusyConflict(response.body.trim().to_string()).into())
+                Err(RunnerBusyConflict("GitHub reported the runner is busy".into()).into())
             }
             None => Err(github_error_from_response(
                 "delete runner request",
@@ -1316,6 +1482,7 @@ fn native_http_client() -> Result<Client> {
     static CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
     match CLIENT.get_or_init(|| {
         Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .use_native_tls()
             .tcp_keepalive(None)
@@ -1335,6 +1502,7 @@ async fn native_json_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String)> {
+    validate_authenticated_url(url)?;
     let method_name = method.to_string();
     let method = Method::from_bytes(method.as_bytes())
         .with_context(|| format!("parse GitHub HTTP method '{method}'"))?;
@@ -1350,10 +1518,12 @@ async fn native_json_request(
             .header("Content-Type", "application/json")
             .body(body);
     }
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
+    let response = request.send().await.with_context(|| {
+        format!(
+            "send native GitHub request {method_name} {}",
+            redacted_authenticated_url(url)
+        )
+    })?;
     let status = response.status().as_u16();
     let body = response
         .text()
@@ -1370,6 +1540,7 @@ async fn native_json_request_with_rate_limit(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String, GitHubRateLimitStatus)> {
+    validate_authenticated_url(url)?;
     let method_name = method.to_string();
     let method = Method::from_bytes(method.as_bytes())
         .with_context(|| format!("parse GitHub HTTP method '{method}'"))?;
@@ -1385,10 +1556,12 @@ async fn native_json_request_with_rate_limit(
             .header("Content-Type", "application/json")
             .body(body);
     }
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
+    let response = request.send().await.with_context(|| {
+        format!(
+            "send native GitHub request {method_name} {}",
+            redacted_authenticated_url(url)
+        )
+    })?;
     let status = response.status().as_u16();
     let rate_limit = github_retry_hint_from_header_map(response.headers(), unix_epoch_now()).into();
     let body = response
@@ -1579,21 +1752,32 @@ pub fn parse_runner_lookup(status: u16, body: &str) -> Result<Option<ListedRunne
         .context("parse runner lookup response")
 }
 
-fn parse_runner_lookup_response(response: GithubHttpResponse) -> Result<Option<ListedRunner>> {
+fn parse_runner_lookup_response(
+    response: GithubHttpResponse,
+    expected_id: i64,
+) -> Result<Option<ListedRunner>> {
     if response.status == 404 {
         return Ok(None);
     }
     if !(200..300).contains(&response.status) {
         return Err(github_error_from_response("runner lookup", response));
     }
-    serde_json::from_str(response.body.trim())
-        .map(Some)
-        .context("parse runner lookup response")
+    let runner: ListedRunner =
+        serde_json::from_str(response.body.trim()).context("parse runner lookup response")?;
+    if runner.id != Some(expected_id) {
+        bail!(
+            "runner lookup identity mismatch: requested id {expected_id}, returned {:?}",
+            runner.id
+        );
+    }
+    Ok(Some(runner))
 }
 
 impl BrokerClient {
     pub fn new(server_url_v2: &str, bearer_token: impl Into<String>) -> Result<Self> {
+        validate_authenticated_url(server_url_v2)?;
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build broker HTTP client")?;
@@ -1720,6 +1904,7 @@ pub(crate) fn is_transient_acquire_error(error: &anyhow::Error) -> bool {
 impl RunServiceClient {
     pub fn new(bearer_token: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build run-service HTTP client")?;
@@ -1934,7 +2119,13 @@ fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
 
 impl DistributedTaskClient {
     pub fn new(server_url: &str, bearer_token: impl Into<String>) -> Result<Self> {
+        validate_known_service_url(
+            server_url,
+            "SystemVssConnection",
+            &["pipelines.actions.githubusercontent.com"],
+        )?;
         let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build distributed task HTTP client")?;
@@ -2369,19 +2560,34 @@ fn broker_acknowledge_url(base_url: &Url, session_id: &str, status: RunnerStatus
 }
 
 fn run_service_acquire_job_url(run_service_url: &str) -> Result<Url> {
-    slash_url(run_service_url)?
+    let validated = validate_known_service_url(
+        run_service_url,
+        "run-service",
+        &["run.actions.githubusercontent.com"],
+    )?;
+    slash_url(validated.as_str())?
         .join("acquirejob")
         .context("build run-service acquire job URL")
 }
 
 fn run_service_renew_job_url(run_service_url: &str) -> Result<Url> {
-    slash_url(run_service_url)?
+    let validated = validate_known_service_url(
+        run_service_url,
+        "run-service",
+        &["run.actions.githubusercontent.com"],
+    )?;
+    slash_url(validated.as_str())?
         .join("renewjob")
         .context("build run-service renew job URL")
 }
 
 fn run_service_complete_job_url(run_service_url: &str) -> Result<Url> {
-    slash_url(run_service_url)?
+    let validated = validate_known_service_url(
+        run_service_url,
+        "run-service",
+        &["run.actions.githubusercontent.com"],
+    )?;
+    slash_url(validated.as_str())?
         .join("completejob")
         .context("build run-service complete job URL")
 }
@@ -3392,6 +3598,15 @@ impl FeedStreamClient {
         if url.is_empty() || token.is_empty() {
             return None;
         }
+        validate_known_service_url(
+            &url,
+            "FeedStreamUrl",
+            &[
+                "pipelines.actions.githubusercontent.com",
+                "results-receiver.actions.githubusercontent.com",
+            ],
+        )
+        .ok()?;
         Some(Self::new(url, token))
     }
 
@@ -3404,6 +3619,14 @@ impl FeedStreamClient {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     > {
+        validate_known_service_url(
+            &self.url,
+            "FeedStreamUrl",
+            &[
+                "pipelines.actions.githubusercontent.com",
+                "results-receiver.actions.githubusercontent.com",
+            ],
+        )?;
         use tokio_tungstenite::connect_async;
         // Append plan_id and job_id as query parameters so the Results Service
         // can route the connection to the correct run's blob storage.
@@ -3553,10 +3776,20 @@ pub struct TwirpResultsClient {
 
 impl TwirpResultsClient {
     pub fn new(results_service_url: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        let results_service_url = results_service_url.into();
+        let results_service_url = validate_known_service_url(
+            &results_service_url,
+            "ResultsServiceUrl",
+            &["results-receiver.actions.githubusercontent.com"],
+        )?;
         Ok(Self {
-            results_service_url: results_service_url.into().trim_end_matches('/').to_string(),
+            results_service_url: results_service_url
+                .to_string()
+                .trim_end_matches('/')
+                .to_string(),
             token: token.into(),
             http: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .user_agent(RUNNER_USER_AGENT)
                 .build()
                 .context("build Twirp HTTP client")?,
@@ -3604,7 +3837,9 @@ impl TwirpResultsClient {
             match github_json_request("POST", &url, &self.token, Some(body_json.clone()), 30).await
             {
                 Ok((status, _)) if (200..300).contains(&status) => return Ok(()),
-                Ok((status, resp)) => last_err = format!("status={status}, body={resp}"),
+                Ok((status, resp)) => {
+                    last_err = format!("status={status}, body={}", sanitize_response_body(&resp))
+                }
                 Err(e) => last_err = e.to_string(),
             }
             if attempt < 2 {
@@ -3776,18 +4011,22 @@ impl TwirpResultsClient {
                 .await
                 .context("GetJobLogsSignedBlobURL request")?;
         if !(200..300).contains(&status) {
-            bail!("GetJobLogsSignedBlobURL failed: status={status}, body={body}");
+            bail!(
+                "GetJobLogsSignedBlobURL failed: status={status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
         let resp: GetUrlResp =
             serde_json::from_str(&body).context("GetJobLogsSignedBlobURL parse")?;
         let logs_url = resp
             .logs_url
             .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GetJobLogsSignedBlobURL returned empty URL"))?;
+            .ok_or_else(|| anyhow::anyhow!("GetJobLogsSignedBlobURL returned empty URL"))
+            .and_then(|url| validate_signed_blob_url(&url, "job log"))?;
 
         let put_resp = self
             .http
-            .put(&logs_url)
+            .put(logs_url)
             .header("Content-Type", "text/plain")
             .header("Content-Length", content.len().to_string())
             .header("x-ms-blob-type", "BlockBlob")
@@ -3798,7 +4037,10 @@ impl TwirpResultsClient {
         let put_status = put_resp.status();
         if !put_status.is_success() {
             let body = put_resp.text().await.unwrap_or_default();
-            bail!("job log PUT failed: status={put_status}, body={body}");
+            bail!(
+                "job log PUT failed: status={put_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
 
         let ts = {
@@ -3819,12 +4061,18 @@ impl TwirpResultsClient {
                 .await
                 .context("CreateJobLogsMetadata request")?;
         if !(200..300).contains(&meta_status) {
-            bail!("CreateJobLogsMetadata failed: status={meta_status}, body={meta_body_resp}");
+            bail!(
+                "CreateJobLogsMetadata failed: status={meta_status}, body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         let meta_resp: MetaResp =
             serde_json::from_str(&meta_body_resp).context("CreateJobLogsMetadata parse")?;
         if !meta_resp.ok {
-            bail!("CreateJobLogsMetadata returned ok=false: body={meta_body_resp}");
+            bail!(
+                "CreateJobLogsMetadata returned ok=false: body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         Ok(())
     }
@@ -3864,19 +4112,23 @@ impl TwirpResultsClient {
                 .await
                 .context("GetStepLogsSignedBlobURL request")?;
         if !(200..300).contains(&status) {
-            bail!("GetStepLogsSignedBlobURL failed: status={status}, body={body}");
+            bail!(
+                "GetStepLogsSignedBlobURL failed: status={status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
         let resp: GetUrlResp =
             serde_json::from_str(&body).context("GetStepLogsSignedBlobURL parse")?;
         let logs_url = resp
             .logs_url
             .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))?;
+            .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))
+            .and_then(|url| validate_signed_blob_url(&url, "step log"))?;
 
         // 2. PUT log content to Azure blob (single block; reqwest — not GitHub infra).
         let put_resp = self
             .http
-            .put(&logs_url)
+            .put(logs_url)
             .header("Content-Type", "text/plain")
             .header("Content-Length", content.len().to_string())
             .header("x-ms-blob-type", "BlockBlob")
@@ -3887,7 +4139,10 @@ impl TwirpResultsClient {
         let put_status = put_resp.status();
         if !put_status.is_success() {
             let body = put_resp.text().await.unwrap_or_default();
-            bail!("step log PUT failed: status={put_status}, body={body}");
+            bail!(
+                "step log PUT failed: status={put_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
 
         // 3. Finalize with metadata through the selected GitHub transport.
@@ -3910,12 +4165,18 @@ impl TwirpResultsClient {
                 .await
                 .context("CreateStepLogsMetadata request")?;
         if !(200..300).contains(&meta_status) {
-            bail!("CreateStepLogsMetadata failed: status={meta_status}, body={meta_body_resp}");
+            bail!(
+                "CreateStepLogsMetadata failed: status={meta_status}, body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         let meta_resp: MetaResp =
             serde_json::from_str(&meta_body_resp).context("CreateStepLogsMetadata parse")?;
         if !meta_resp.ok {
-            bail!("CreateStepLogsMetadata returned ok=false: body={meta_body_resp}");
+            bail!(
+                "CreateStepLogsMetadata returned ok=false: body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         Ok(())
     }
@@ -3966,14 +4227,15 @@ impl TwirpResultsClient {
         let blob_url = resp
             .blob_url
             .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GetStepSummarySignedBlobURL returned empty URL"))?;
+            .ok_or_else(|| anyhow::anyhow!("GetStepSummarySignedBlobURL returned empty URL"))
+            .and_then(|url| validate_signed_blob_url(&url, "step summary"))?;
 
         // 2. Upload summary content.
         let content_bytes = content.as_bytes().to_vec();
         let content_len = content_bytes.len();
         let put_resp = self
             .http
-            .put(&blob_url)
+            .put(blob_url)
             .header("Content-Type", "text/plain")
             .header("Content-Length", content_len.to_string())
             .header("x-ms-blob-type", "BlockBlob")
@@ -3984,7 +4246,10 @@ impl TwirpResultsClient {
         let put_status = put_resp.status();
         if !put_status.is_success() {
             let body = put_resp.text().await.unwrap_or_default();
-            bail!("step summary PUT failed: status={put_status}, body={body}");
+            bail!(
+                "step summary PUT failed: status={put_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
 
         // 3. Finalize with metadata.
@@ -4019,17 +4284,30 @@ impl TwirpResultsClient {
         let meta_status = meta_resp.status();
         if !meta_status.is_success() {
             let body = meta_resp.text().await.unwrap_or_default();
-            bail!("CreateStepSummaryMetadata failed: status={meta_status}, body={body}");
+            bail!(
+                "CreateStepSummaryMetadata failed: status={meta_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
         Ok(())
     }
 }
 
-fn artifact_zip_bytes(files: &[(String, Vec<u8>)], store_uncompressed: bool) -> Result<Vec<u8>> {
+fn write_artifact_zip_temp_file(
+    path: std::path::PathBuf,
+    files: &[(String, Vec<u8>)],
+    store_uncompressed: bool,
+) -> Result<(ArtifactTempFile, u64, String)> {
     use std::io::Write;
 
-    let buf = std::io::Cursor::new(Vec::new());
-    let mut zip = zip::ZipWriter::new(buf);
+    ensure_upload_file_count(files.len())?;
+    let mut source_total = 0_u64;
+    for (_, content) in files {
+        source_total = checked_upload_source_add(source_total, content.len() as u64)?;
+    }
+
+    let (temp, file) = open_artifact_temp_file(path).context("create artifact zip temp file")?;
+    let mut zip = zip::ZipWriter::new(file);
     let method = if store_uncompressed {
         zip::CompressionMethod::Stored
     } else {
@@ -4041,7 +4319,121 @@ fn artifact_zip_bytes(files: &[(String, Vec<u8>)], store_uncompressed: bool) -> 
             .context("zip start_file")?;
         zip.write_all(content).context("zip write")?;
     }
-    Ok(zip.finish().context("zip finish")?.into_inner())
+    finish_artifact_zip(zip, temp)
+}
+
+fn write_artifact_zip_from_paths_temp_file(
+    path: std::path::PathBuf,
+    files: &[ArtifactUploadFile],
+    store_uncompressed: bool,
+) -> Result<(ArtifactTempFile, u64, String)> {
+    use std::io::Read;
+
+    ensure_upload_file_count(files.len())?;
+    let (temp, file) = open_artifact_temp_file(path).context("create artifact zip temp file")?;
+    let mut zip = zip::ZipWriter::new(file);
+    let method = if store_uncompressed {
+        zip::CompressionMethod::Stored
+    } else {
+        zip::CompressionMethod::Deflated
+    };
+    let options = zip::write::FileOptions::<()>::default().compression_method(method);
+    let mut source_total = 0_u64;
+    for source in files {
+        let metadata = std::fs::metadata(&source.source_path)
+            .with_context(|| format!("stat artifact source {}", source.source_path.display()))?;
+        if !metadata.is_file() {
+            bail!(
+                "artifact source {} is not a regular file",
+                source.source_path.display()
+            );
+        }
+        checked_upload_source_add(source_total, metadata.len())?;
+        zip.start_file(&source.archive_path, options)
+            .context("zip start_file")?;
+        let mut input = std::fs::File::open(&source.source_path)
+            .with_context(|| format!("open artifact source {}", source.source_path.display()))?;
+        let remaining = RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES - source_total;
+        let mut limited = (&mut input).take(remaining.saturating_add(1));
+        let copied = std::io::copy(&mut limited, &mut zip)
+            .with_context(|| format!("read artifact source {}", source.source_path.display()))?;
+        if copied > remaining {
+            bail!(
+                "artifact upload source bytes exceed the {}-byte limit; split the artifact into smaller uploads",
+                RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES
+            );
+        }
+        source_total += copied;
+    }
+    finish_artifact_zip(zip, temp)
+}
+
+fn finish_artifact_zip(
+    zip: zip::ZipWriter<std::fs::File>,
+    temp: ArtifactTempFile,
+) -> Result<(ArtifactTempFile, u64, String)> {
+    let file = zip.finish().context("zip finish")?;
+    file.sync_all().context("sync artifact zip temp file")?;
+    let zip_size = file
+        .metadata()
+        .context("stat artifact zip temp file")?
+        .len();
+    ensure_artifact_size_limit(
+        "upload",
+        "ZIP payload",
+        zip_size,
+        RESULTS_ARTIFACT_MAX_UPLOAD_ZIP_BYTES,
+        "split the artifact into smaller uploads",
+    )?;
+    drop(file);
+
+    let zip_hash = hash_artifact_file(temp.path())?;
+    Ok((temp, zip_size, zip_hash))
+}
+
+fn ensure_upload_file_count(count: usize) -> Result<()> {
+    if count > RESULTS_ARTIFACT_MAX_UPLOAD_FILES {
+        bail!(
+            "artifact contains {count} files, exceeding the {}-file upload limit; split it into artifacts",
+            RESULTS_ARTIFACT_MAX_UPLOAD_FILES
+        );
+    }
+    Ok(())
+}
+
+fn checked_upload_source_add(current: u64, additional: u64) -> Result<u64> {
+    let total = current
+        .checked_add(additional)
+        .context("artifact upload source byte count overflowed")?;
+    if total > RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES {
+        bail!(
+            "artifact upload source bytes exceed the {}-byte limit; split the artifact into smaller uploads",
+            RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES
+        );
+    }
+    Ok(total)
+}
+
+fn hash_artifact_file(path: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).context("open artifact zip for hashing")?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .context("read artifact zip for hashing")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn artifact_create_request(
@@ -4067,6 +4459,7 @@ fn artifact_create_request(
     Ok(request)
 }
 
+#[derive(Debug)]
 struct ArtifactTempFile(std::path::PathBuf);
 
 impl ArtifactTempFile {
@@ -4125,13 +4518,50 @@ fn results_service_post(
         .send()
         .with_context(|| format!("send Results Service {operation}"))?;
     let status = response.status();
-    let response_body = response
-        .text()
-        .with_context(|| format!("read Results Service {operation} response"))?;
     if !status.is_success() {
-        bail!("Results Service {operation}: status={status}, body={response_body}");
+        let mut response = response;
+        let response_body = read_bounded_response_preview(&mut response);
+        bail!(
+            "Results Service {operation}: status={status}, body={}",
+            response_body
+        );
     }
-    Ok(response_body)
+    if let Some(content_length) = response.content_length() {
+        ensure_artifact_size_limit(
+            "Results Service",
+            "control response",
+            content_length,
+            RESULTS_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES,
+            "reduce the response size",
+        )?;
+    }
+    let mut response = response;
+    read_bounded_response_body(
+        &mut response,
+        operation,
+        RESULTS_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES,
+    )
+}
+
+fn read_bounded_response_body(
+    reader: &mut impl std::io::Read,
+    operation: &str,
+    limit: u64,
+) -> Result<String> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    let mut limited = reader.take(limit.saturating_add(1));
+    limited
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read Results Service {operation} response"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        bail!(
+            "Results Service {operation} response exceeds the {limit}-byte limit; reduce the response size"
+        );
+    }
+    String::from_utf8(bytes)
+        .with_context(|| format!("Results Service {operation} response was not UTF-8"))
 }
 
 /// Upload artifact files to GitHub's Results Service (artifact v4 format).
@@ -4146,6 +4576,14 @@ pub struct ArtifactUploadOptions {
     pub retention_days: Option<u8>,
 }
 
+/// A file-backed artifact input. The upload path reads each source in bounded
+/// chunks, so artifact contents do not need to be materialized in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactUploadFile {
+    pub archive_path: String,
+    pub source_path: std::path::PathBuf,
+}
+
 pub fn upload_artifact_blocking(
     results_service_url: &str,
     token: &str,
@@ -4155,18 +4593,59 @@ pub fn upload_artifact_blocking(
     files: &[(String, Vec<u8>)], // (archive path, content)
     options: ArtifactUploadOptions,
 ) -> Result<String> {
+    upload_artifact_with_zip_builder(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        options,
+        |zip_path| write_artifact_zip_temp_file(zip_path, files, options.store_uncompressed),
+    )
+}
+
+pub fn upload_artifact_files_blocking(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    files: &[ArtifactUploadFile],
+    options: ArtifactUploadOptions,
+) -> Result<String> {
+    upload_artifact_with_zip_builder(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        options,
+        |zip_path| {
+            write_artifact_zip_from_paths_temp_file(zip_path, files, options.store_uncompressed)
+        },
+    )
+}
+
+fn upload_artifact_with_zip_builder(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    options: ArtifactUploadOptions,
+    build_zip: impl FnOnce(std::path::PathBuf) -> Result<(ArtifactTempFile, u64, String)>,
+) -> Result<String> {
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
-    let base = results_service_url.trim_end_matches('/');
+    let results_service_url = validate_known_service_url(
+        results_service_url,
+        "ResultsServiceUrl",
+        &["results-receiver.actions.githubusercontent.com"],
+    )?;
+    let base = results_service_url.as_str().trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
 
-    // Write a mode-0600 file. Construct the guard before any fallible I/O so
-    // failed open/write operations cannot leave secret artifact bytes behind.
-    let write_temp_file = |suffix: &str, content: &[u8]| -> std::io::Result<ArtifactTempFile> {
-        let p = tmp_dir.join(format!("velnor-artifact-{}.{suffix}", uuid::Uuid::new_v4()));
-        write_artifact_temp_file(p, content)
-    };
-
     let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
@@ -4195,18 +4674,15 @@ pub fn upload_artifact_blocking(
         .filter(|u| !u.is_empty())
         .context("CreateArtifact: empty signed_upload_url")?
         .to_string();
+    let upload_url = validate_signed_blob_url(&upload_url, "artifact upload")?;
 
-    // 2. Create zip archive and PUT to signed URL.
-    let zip_bytes = artifact_zip_bytes(files, options.store_uncompressed)?;
-    let zip_size = zip_bytes.len() as u64;
-
-    let zip_path = write_temp_file("zip", &zip_bytes).context("write zip temp file")?;
+    // 2. Stream the zip archive into its mode-0600 temp file, hash that file,
+    // and PUT the same bytes without retaining a second full archive in RAM.
+    let zip_path = tmp_dir.join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
+    let (zip_path, zip_size, zip_hash) = build_zip(zip_path)?;
     let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
-    let put_response = reqwest::blocking::Client::builder()
-        .user_agent(RUNNER_USER_AGENT)
-        .build()
-        .context("build artifact upload HTTP client")?
-        .put(&upload_url)
+    let put_response = client
+        .put(upload_url)
         .header("Content-Type", "application/zip")
         .header("Content-Length", zip_size)
         .header("x-ms-blob-type", "BlockBlob")
@@ -4221,10 +4697,6 @@ pub fn upload_artifact_blocking(
 
     // 3. FinalizeArtifact.
     let finalize_url = format!("{base}/{SERVICE}/FinalizeArtifact");
-    let zip_hash = sha2::Sha256::digest(&zip_bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
     let finalize_body = serde_json::to_string(&serde_json::json!({
         "workflow_run_backend_id": plan_id,
         "workflow_job_run_backend_id": job_id,
@@ -4259,10 +4731,22 @@ pub fn upload_artifact_blocking(
     Ok(artifact_id)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
+pub struct ResultsArtifactFile {
+    pub relative_path: std::path::PathBuf,
+    temp: ArtifactTempFile,
+}
+
+impl ResultsArtifactFile {
+    pub fn path(&self) -> &std::path::Path {
+        self.temp.path()
+    }
+}
+
+#[derive(Debug)]
 pub struct ResultsArtifactDownload {
     pub name: String,
-    pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
+    pub files: Vec<ResultsArtifactFile>,
 }
 
 fn safe_raw_artifact_path(name: &str) -> Result<std::path::PathBuf> {
@@ -4355,6 +4839,276 @@ fn artifact_download_status_is_ok(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::OK
 }
 
+fn ensure_artifact_size_limit(
+    artifact_name: &str,
+    resource: &str,
+    actual: u64,
+    limit: u64,
+    action: &str,
+) -> Result<()> {
+    if actual > limit {
+        bail!(
+            "artifact '{artifact_name}' {resource} is {actual} bytes, exceeding the {limit}-byte limit; {action}"
+        );
+    }
+    Ok(())
+}
+
+fn checked_artifact_size_add(
+    artifact_name: &str,
+    resource: &str,
+    current: u64,
+    additional: u64,
+    limit: u64,
+    action: &str,
+) -> Result<u64> {
+    let total = current
+        .checked_add(additional)
+        .with_context(|| format!("artifact '{artifact_name}' {resource} byte count overflowed"))?;
+    ensure_artifact_size_limit(artifact_name, resource, total, limit, action)?;
+    Ok(total)
+}
+
+fn ensure_artifact_zip_member_limit(
+    artifact_name: &str,
+    members: usize,
+    limit: usize,
+) -> Result<()> {
+    if members > limit {
+        bail!(
+            "artifact '{artifact_name}' contains {members} ZIP members, exceeding the {limit}-member limit; split it into artifacts with fewer files"
+        );
+    }
+    Ok(())
+}
+
+fn copy_artifact_response_bounded(
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    artifact_name: &str,
+    limit: u64,
+) -> Result<u64> {
+    const BUFFER_BYTES: usize = 64 * 1024;
+
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; BUFFER_BYTES];
+    loop {
+        let remaining = limit - copied;
+        let read_capacity = usize::try_from(
+            remaining
+                .saturating_add(1)
+                .min(u64::try_from(buffer.len()).unwrap_or(u64::MAX)),
+        )
+        .unwrap_or(buffer.len());
+        let read = reader
+            .read(&mut buffer[..read_capacity])
+            .with_context(|| format!("read artifact '{artifact_name}' download response"))?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        let read = u64::try_from(read).context("artifact response read size overflowed")?;
+        if read > remaining {
+            bail!(
+                "artifact '{artifact_name}' download response exceeds the {limit}-byte limit; split the artifact into smaller uploads"
+            );
+        }
+        writer
+            .write_all(&buffer[..usize::try_from(read).unwrap_or(buffer.len())])
+            .with_context(|| format!("write artifact '{artifact_name}' download temp file"))?;
+        copied += read;
+    }
+}
+
+fn read_bounded_response_preview(response: &mut impl std::io::Read) -> String {
+    use std::io::Read;
+
+    const PREVIEW_BYTES: u64 = 4096;
+
+    let mut bytes = Vec::with_capacity(PREVIEW_BYTES as usize);
+    let mut limited = response.take(PREVIEW_BYTES + 1);
+    if limited.read_to_end(&mut bytes).is_err() {
+        return "<response body unreadable>".to_string();
+    }
+    let truncated = bytes.len() > PREVIEW_BYTES as usize;
+    bytes.truncate(PREVIEW_BYTES as usize);
+    let mut preview = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        preview.push_str(" [truncated]");
+    }
+    sanitize_response_body(&preview)
+}
+
+fn copy_zip_entry_bounded(
+    entry: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    artifact_name: &str,
+    path: &std::path::Path,
+    limit: u64,
+) -> Result<u64> {
+    const BUFFER_BYTES: usize = 64 * 1024;
+
+    let mut read_total = 0_u64;
+    let mut buffer = [0_u8; BUFFER_BYTES];
+    loop {
+        let remaining = limit - read_total;
+        let read_capacity = usize::try_from(
+            remaining
+                .saturating_add(1)
+                .min(u64::try_from(buffer.len()).unwrap_or(u64::MAX)),
+        )
+        .unwrap_or(buffer.len());
+        let read = entry.read(&mut buffer[..read_capacity]).with_context(|| {
+            format!(
+                "read ZIP member '{}' from artifact '{artifact_name}'",
+                path.display()
+            )
+        })?;
+        if read == 0 {
+            return Ok(read_total);
+        }
+        let read = u64::try_from(read).context("ZIP member read size overflowed")?;
+        if read > remaining {
+            bail!(
+                "artifact '{artifact_name}' ZIP member '{}' exceeds the remaining {limit}-byte extraction allowance; split the artifact or reduce extracted content",
+                path.display()
+            );
+        }
+        writer
+            .write_all(&buffer[..usize::try_from(read).unwrap_or(buffer.len())])
+            .with_context(|| {
+                format!(
+                    "write ZIP member '{}' from artifact '{artifact_name}'",
+                    path.display()
+                )
+            })?;
+        read_total += read;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZipCentralDirectoryMetadata {
+    entries: u64,
+    size: u64,
+    offset: u64,
+}
+
+fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    bytes
+        .get(offset..offset.checked_add(2)?)
+        .map(|value| u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset.checked_add(4)?)
+        .map(|value| u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    bytes.get(offset..offset.checked_add(8)?).map(|value| {
+        u64::from_le_bytes([
+            value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+        ])
+    })
+}
+
+fn validate_zip_central_directory(
+    path: &std::path::Path,
+    artifact_name: &str,
+) -> Result<Option<ZipCentralDirectoryMetadata>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
+    const ZIP64_LOCATOR_SIGNATURE: &[u8; 4] = b"PK\x06\x07";
+    const ZIP64_EOCD_SIGNATURE: &[u8; 4] = b"PK\x06\x06";
+    const EOCD_BYTES: u64 = 22;
+    const MAX_ZIP_COMMENT_BYTES: u64 = u16::MAX as u64;
+    const ZIP64_LOCATOR_BYTES: u64 = 20;
+
+    let mut file = std::fs::File::open(path).context("open ZIP for metadata preflight")?;
+    let file_len = file
+        .metadata()
+        .context("stat ZIP for metadata preflight")?
+        .len();
+    if file_len < EOCD_BYTES {
+        return Ok(None);
+    }
+    let tail_len = file_len.min(EOCD_BYTES + MAX_ZIP_COMMENT_BYTES);
+    file.seek(SeekFrom::Start(file_len - tail_len))?;
+    let mut tail = vec![0_u8; usize::try_from(tail_len).context("ZIP tail length overflowed")?];
+    file.read_exact(&mut tail)?;
+    let eocd_offset = tail
+        .windows(EOCD_SIGNATURE.len())
+        .rposition(|window| window == EOCD_SIGNATURE)
+        .map(|offset| file_len - tail_len + u64::try_from(offset).unwrap_or(u64::MAX));
+    let Some(eocd_offset) = eocd_offset else {
+        return Ok(None);
+    };
+    let eocd_index = usize::try_from(eocd_offset - (file_len - tail_len))
+        .context("ZIP EOCD offset overflowed")?;
+    let eocd = tail
+        .get(eocd_index..eocd_index + usize::try_from(EOCD_BYTES).unwrap())
+        .context("truncated ZIP end record")?;
+    let entries16 = le_u16(eocd, 10).context("malformed ZIP entry count")?;
+    let size32 = le_u32(eocd, 12).context("malformed ZIP central-directory size")?;
+    let offset32 = le_u32(eocd, 16).context("malformed ZIP central-directory offset")?;
+
+    let metadata = if entries16 != u16::MAX && size32 != u32::MAX && offset32 != u32::MAX {
+        ZipCentralDirectoryMetadata {
+            entries: u64::from(entries16),
+            size: u64::from(size32),
+            offset: u64::from(offset32),
+        }
+    } else {
+        let locator_offset = eocd_offset
+            .checked_sub(ZIP64_LOCATOR_BYTES)
+            .context("ZIP64 locator offset underflowed")?;
+        file.seek(SeekFrom::Start(locator_offset))?;
+        let mut locator = [0_u8; 20];
+        file.read_exact(&mut locator)?;
+        if &locator[..4] != ZIP64_LOCATOR_SIGNATURE {
+            bail!("artifact '{artifact_name}' has ZIP64 markers but no ZIP64 locator");
+        }
+        let record_offset = le_u64(&locator, 8).context("malformed ZIP64 record offset")?;
+        file.seek(SeekFrom::Start(record_offset))?;
+        let mut record = [0_u8; 56];
+        file.read_exact(&mut record)?;
+        if &record[..4] != ZIP64_EOCD_SIGNATURE {
+            bail!("artifact '{artifact_name}' has an invalid ZIP64 end record");
+        }
+        let record_size = le_u64(&record, 4).context("malformed ZIP64 record size")?;
+        if record_size < 44 {
+            bail!("artifact '{artifact_name}' has a truncated ZIP64 end record");
+        }
+        ZipCentralDirectoryMetadata {
+            entries: le_u64(&record, 32).context("malformed ZIP64 entry count")?,
+            size: le_u64(&record, 40).context("malformed ZIP64 central-directory size")?,
+            offset: le_u64(&record, 48).context("malformed ZIP64 central-directory offset")?,
+        }
+    };
+
+    ensure_artifact_zip_member_limit(
+        artifact_name,
+        usize::try_from(metadata.entries).unwrap_or(usize::MAX),
+        RESULTS_ARTIFACT_MAX_ZIP_MEMBERS,
+    )?;
+    ensure_artifact_size_limit(
+        artifact_name,
+        "ZIP central directory",
+        metadata.size,
+        RESULTS_ARTIFACT_MAX_ZIP_CENTRAL_DIRECTORY_BYTES,
+        "split the artifact into smaller uploads",
+    )?;
+    let directory_end = metadata
+        .offset
+        .checked_add(metadata.size)
+        .context("ZIP central-directory range overflowed")?;
+    if directory_end > file_len || metadata.offset > file_len {
+        bail!("artifact '{artifact_name}' has a central directory outside the ZIP");
+    }
+    Ok(Some(metadata))
+}
+
 /// Download artifacts visible to this workflow run through the Results
 /// Service v4 protocol used by `actions/download-artifact`.
 ///
@@ -4392,9 +5146,13 @@ fn download_artifacts_blocking_in_temp_dir(
     pattern: &str,
     tmp_dir: &std::path::Path,
 ) -> Result<Vec<ResultsArtifactDownload>> {
-    use std::io::Read;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
-    let base = results_service_url.trim_end_matches('/');
+    let results_service_url = validate_known_service_url(
+        results_service_url,
+        "ResultsServiceUrl",
+        &["results-receiver.actions.githubusercontent.com"],
+    )?;
+    let base = results_service_url.as_str().trim_end_matches('/');
 
     let matcher = if !name.is_empty() || pattern.is_empty() {
         None
@@ -4405,6 +5163,7 @@ fn download_artifacts_blocking_in_temp_dir(
     };
 
     let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
@@ -4421,9 +5180,17 @@ fn download_artifacts_blocking_in_temp_dir(
     let artifacts = listed
         .get("artifacts")
         .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if artifacts.len() > RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS {
+        bail!(
+            "Results Service listed {} artifacts, exceeding the {}-artifact limit; narrow the workflow scope",
+            artifacts.len(),
+            RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS
+        );
+    }
     let mut downloads = Vec::new();
+    let mut total_returned_bytes = 0_u64;
     for artifact in artifacts {
         let Some(artifact_name) = artifact
             .get("name")
@@ -4476,32 +5243,47 @@ fn download_artifacts_blocking_in_temp_dir(
             .and_then(serde_json::Value::as_str)
             .filter(|url| !url.is_empty())
             .context("GetSignedArtifactURL returned no signed URL")?;
+        let signed_url = validate_signed_blob_url(signed_url, "artifact download")?;
         let artifact_path = tmp_dir.join(format!(
             "velnor-artifact-download-{}.zip",
             uuid::Uuid::new_v4()
         ));
-        let response = reqwest::blocking::Client::builder()
-            .user_agent(RUNNER_USER_AGENT)
-            .build()
-            .context("build artifact download HTTP client")?
-            .get(signed_url)
+        let mut response = client
+            .get(signed_url.as_str())
             .timeout(Duration::from_secs(120))
             .send()
             .context("download Results Service artifact zip")?;
         let status = response.status();
         if status != reqwest::StatusCode::OK {
-            let body = response.text().unwrap_or_default();
-            bail!("artifact zip download failed: status={status}, body={body}");
+            let body = read_bounded_response_preview(&mut response);
+            bail!("artifact '{artifact_name}' download failed: status={status}, body={body}");
         }
-        let content_type = response
-            .headers()
+        if let Some(content_length) = response.content_length() {
+            ensure_artifact_size_limit(
+                artifact_name,
+                "download response Content-Length",
+                content_length,
+                RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES,
+                "split the artifact into smaller uploads",
+            )?;
+        }
+        let response_headers = response.headers().clone();
+        let content_type = response_headers
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let mut response = response;
         let (artifact_path, mut output_file) =
             open_artifact_temp_file(artifact_path).context("create artifact zip temp file")?;
-        std::io::copy(&mut response, &mut output_file).context("write downloaded artifact zip")?;
+        copy_artifact_response_bounded(
+            &mut response,
+            &mut output_file,
+            artifact_name,
+            RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES,
+        )
+        .context("write downloaded artifact zip")?;
+        drop(output_file);
+        let is_zip = artifact_response_is_zip(content_type.as_deref(), signed_url.as_str());
+        validate_zip_central_directory(artifact_path.path(), artifact_name)?;
         let archive_file = std::fs::File::open(artifact_path.path())?;
         let mut archive = match zip::ZipArchive::new(archive_file) {
             Ok(archive) => archive,
@@ -4511,21 +5293,44 @@ fn download_artifacts_blocking_in_temp_dir(
                 // their bytes under the artifact name; never silently drop a
                 // selected artifact. A ZIP content type with invalid bytes is
                 // still a protocol failure.
-                if artifact_response_is_zip(content_type.as_deref(), signed_url) {
+                if is_zip {
                     bail!("artifact '{artifact_name}' is not a valid ZIP archive: {err}");
                 }
-                let raw = std::fs::read(artifact_path.path()).context("read raw artifact")?;
+                let raw_size = std::fs::metadata(artifact_path.path())
+                    .context("stat raw artifact")?
+                    .len();
+                ensure_artifact_size_limit(
+                    artifact_name,
+                    "raw payload",
+                    raw_size,
+                    RESULTS_ARTIFACT_MAX_RAW_BYTES,
+                    "split the raw artifact into smaller uploads",
+                )?;
+                total_returned_bytes = checked_artifact_size_add(
+                    artifact_name,
+                    "total selected download payload",
+                    total_returned_bytes,
+                    raw_size,
+                    RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
+                    "narrow the artifact name or pattern selection",
+                )?;
                 downloads.push(ResultsArtifactDownload {
                     name: artifact_name.to_string(),
-                    files: vec![(
-                        raw_artifact_filename(response.headers(), artifact_name)?,
-                        raw,
-                    )],
+                    files: vec![ResultsArtifactFile {
+                        relative_path: raw_artifact_filename(&response_headers, artifact_name)?,
+                        temp: artifact_path,
+                    }],
                 });
                 continue;
             }
         };
+        ensure_artifact_zip_member_limit(
+            artifact_name,
+            archive.len(),
+            RESULTS_ARTIFACT_MAX_ZIP_MEMBERS,
+        )?;
         let mut files = Vec::new();
+        let mut zip_uncompressed_bytes = 0_u64;
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
             if entry.is_dir() {
@@ -4534,9 +5339,62 @@ fn download_artifacts_blocking_in_temp_dir(
             let Some(path) = entry.enclosed_name() else {
                 bail!("artifact '{artifact_name}' contains an unsafe archive path");
             };
-            let mut content = Vec::new();
-            entry.read_to_end(&mut content)?;
-            files.push((path, content));
+            let declared_size = entry.size();
+            checked_artifact_size_add(
+                artifact_name,
+                "ZIP uncompressed payload",
+                zip_uncompressed_bytes,
+                declared_size,
+                RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES,
+                "split the artifact or reduce its uncompressed contents",
+            )?;
+            checked_artifact_size_add(
+                artifact_name,
+                "total selected download payload",
+                total_returned_bytes,
+                declared_size,
+                RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
+                "narrow the artifact name or pattern selection",
+            )?;
+            let extraction_allowance = (RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES
+                - zip_uncompressed_bytes)
+                .min(RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES - total_returned_bytes);
+            let member_path = tmp_dir.join(format!(
+                "velnor-artifact-member-{}.tmp",
+                uuid::Uuid::new_v4()
+            ));
+            let (member_temp, mut member_file) =
+                open_artifact_temp_file(member_path).context("create extracted artifact file")?;
+            let content_size = copy_zip_entry_bounded(
+                &mut entry,
+                &mut member_file,
+                artifact_name,
+                &path,
+                extraction_allowance,
+            )?;
+            member_file
+                .sync_all()
+                .context("sync extracted artifact file")?;
+            zip_uncompressed_bytes = checked_artifact_size_add(
+                artifact_name,
+                "ZIP uncompressed payload",
+                zip_uncompressed_bytes,
+                content_size,
+                RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES,
+                "split the artifact or reduce its uncompressed contents",
+            )?;
+            total_returned_bytes = checked_artifact_size_add(
+                artifact_name,
+                "total selected download payload",
+                total_returned_bytes,
+                content_size,
+                RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
+                "narrow the artifact name or pattern selection",
+            )?;
+            files.push(ResultsArtifactFile {
+                relative_path: path,
+                temp: member_temp,
+            });
         }
         downloads.push(ResultsArtifactDownload {
             name: artifact_name.to_string(),
@@ -4627,6 +5485,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
+    }
+
+    #[tokio::test]
+    async fn find_runner_group_stops_when_target_is_found() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let first_page: Vec<_> = (1..=100)
+            .map(|id| serde_json::json!({ "id": id, "name": format!("group-{id}") }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 101,
+                "runner_groups": first_page,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 101,
+                "runner_groups": [{ "id": 101, "name": "velnor-trusted" }],
+            })))
+            .mount(&server)
+            .await;
+
+        let scope = GitHubScope::parse(&format!("{}/tailrocks", server.uri())).unwrap();
+        let group = RegistrationClient::new()
+            .unwrap()
+            .find_runner_group(&scope, "test-token", "velnor-trusted", None)
+            .await
+            .unwrap();
+
+        assert_eq!(group.id, 101);
+        assert_eq!(group.name, "velnor-trusted");
     }
 
     #[tokio::test]
@@ -4739,10 +5640,153 @@ mod tests {
 
     #[test]
     fn artifact_compression_level_zero_uses_zip_stored() {
-        let bytes = artifact_zip_bytes(&[("seed.tar.zst".into(), vec![42; 64])], true).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-zip-test-{}.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let (temp, size, hash) =
+            write_artifact_zip_temp_file(path, &[("seed.tar.zst".into(), vec![42; 64])], true)
+                .unwrap();
+        let bytes = std::fs::read(temp.path()).unwrap();
+        let expected_hash = sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(size, bytes.len() as u64);
+        assert_eq!(hash, expected_hash);
+        assert_eq!(
+            std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let file = archive.by_index(0).unwrap();
         assert_eq!(file.compression(), zip::CompressionMethod::Stored);
+    }
+
+    #[test]
+    fn artifact_path_writer_streams_source_into_zip() {
+        let source_path = std::env::temp_dir().join(format!(
+            "velnor-artifact-source-{}.bin",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&source_path, b"streamed artifact\n").unwrap();
+        let zip_path = std::env::temp_dir().join(format!(
+            "velnor-artifact-path-writer-{}.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let source = ArtifactUploadFile {
+            archive_path: "dist/output.txt".to_string(),
+            source_path: source_path.clone(),
+        };
+        let (zip_temp, _, _) =
+            write_artifact_zip_from_paths_temp_file(zip_path, &[source], false).unwrap();
+        let bytes = std::fs::read(zip_temp.path()).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut entry = archive.by_name("dist/output.txt").unwrap();
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut content).unwrap();
+        assert_eq!(content, "streamed artifact\n");
+        drop(zip_temp);
+        std::fs::remove_file(source_path).unwrap();
+    }
+
+    #[test]
+    fn artifact_download_response_bound_stops_before_writing_excess_bytes() {
+        let mut response = std::io::Cursor::new(b"12345".to_vec());
+        let mut output = Vec::new();
+
+        let error =
+            copy_artifact_response_bounded(&mut response, &mut output, "release", 4).unwrap_err();
+
+        assert!(error.to_string().contains("4-byte limit"), "{error:#}");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn results_service_control_response_bound_rejects_chunked_excess() {
+        let mut response = std::io::Cursor::new(b"12345".to_vec());
+        let error = read_bounded_response_body(&mut response, "ListArtifacts", 4).unwrap_err();
+
+        assert!(error.to_string().contains("ListArtifacts"), "{error:#}");
+        assert!(error.to_string().contains("4-byte limit"), "{error:#}");
+    }
+
+    #[test]
+    fn zip_metadata_preflight_rejects_excess_zip64_members_before_parser() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-zip64-preflight-{}.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let mut zip64_end = [0_u8; 56];
+        zip64_end[..4].copy_from_slice(b"PK\x06\x06");
+        zip64_end[4..12].copy_from_slice(&44_u64.to_le_bytes());
+        zip64_end[32..40].copy_from_slice(&100_001_u64.to_le_bytes());
+        let mut locator = [0_u8; 20];
+        locator[..4].copy_from_slice(b"PK\x06\x07");
+        locator[8..16].copy_from_slice(&0_u64.to_le_bytes());
+        locator[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        let mut eocd = [0_u8; 22];
+        eocd[..4].copy_from_slice(b"PK\x05\x06");
+        eocd[10..12].copy_from_slice(&u16::MAX.to_le_bytes());
+        eocd[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        eocd[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&zip64_end);
+        bytes.extend_from_slice(&locator);
+        bytes.extend_from_slice(&eocd);
+        let temp = write_artifact_temp_file(path, &bytes).unwrap();
+
+        let error = validate_zip_central_directory(temp.path(), "release").unwrap_err();
+        assert!(error.to_string().contains("100001"), "{error:#}");
+    }
+
+    #[test]
+    fn artifact_zip_entry_bound_rejects_excess_uncompressed_bytes() {
+        let mut entry = std::io::Cursor::new(b"12345".to_vec());
+        let mut output = Vec::new();
+
+        let error = copy_zip_entry_bounded(
+            &mut entry,
+            &mut output,
+            "release",
+            std::path::Path::new("dist/output.bin"),
+            4,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("remaining 4-byte extraction allowance"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn artifact_member_and_returned_byte_bounds_are_actionable() {
+        let member_error = ensure_artifact_zip_member_limit("release", 3, 2).unwrap_err();
+        assert!(
+            member_error.to_string().contains("split it into artifacts"),
+            "{member_error:#}"
+        );
+
+        let size_error = checked_artifact_size_add(
+            "release",
+            "total selected download payload",
+            3,
+            2,
+            4,
+            "narrow the artifact name or pattern selection",
+        )
+        .unwrap_err();
+        assert!(
+            size_error
+                .to_string()
+                .contains("narrow the artifact name or pattern selection"),
+            "{size_error:#}"
+        );
     }
 
     #[test]
@@ -5202,12 +6246,14 @@ mod tests {
         .unwrap();
         assert_eq!(downloads.len(), 1);
         assert_eq!(downloads[0].name, "release-linux");
+        assert_eq!(downloads[0].files.len(), 1);
         assert_eq!(
-            downloads[0].files,
-            vec![(
-                std::path::PathBuf::from("dist/output.txt"),
-                b"artifact-v4\n".to_vec()
-            )]
+            downloads[0].files[0].relative_path,
+            std::path::PathBuf::from("dist/output.txt")
+        );
+        assert_eq!(
+            std::fs::read(downloads[0].files[0].path()).unwrap(),
+            b"artifact-v4\n"
         );
         let requests = server.join().unwrap();
         assert!(requests[0].contains("ArtifactService/ListArtifacts"));
@@ -5381,20 +6427,24 @@ mod tests {
         server.join().unwrap();
         assert_eq!(downloads.len(), 2);
         assert_eq!(downloads[0].name, "release-linux");
+        assert_eq!(downloads[0].files.len(), 1);
         assert_eq!(
-            downloads[0].files,
-            vec![(
-                std::path::PathBuf::from("dist/output.txt"),
-                b"artifact-v4\n".to_vec()
-            )]
+            downloads[0].files[0].relative_path,
+            std::path::PathBuf::from("dist/output.txt")
+        );
+        assert_eq!(
+            std::fs::read(downloads[0].files[0].path()).unwrap(),
+            b"artifact-v4\n"
         );
         assert_eq!(downloads[1].name, ".dockerbuild");
+        assert_eq!(downloads[1].files.len(), 1);
         assert_eq!(
-            downloads[1].files,
-            vec![(
-                std::path::PathBuf::from(".dockerbuild"),
-                expected_gzip_bytes
-            )]
+            downloads[1].files[0].relative_path,
+            std::path::PathBuf::from(".dockerbuild")
+        );
+        assert_eq!(
+            std::fs::read(downloads[1].files[0].path()).unwrap(),
+            expected_gzip_bytes
         );
     }
 
@@ -6440,9 +7490,10 @@ mod tests {
             github_api_quota_status(&permission).is_none(),
             "permission 403 with remaining>0 must not fleet-hold"
         );
-        assert!(
-            github_api_retry_delay_at(&permission, 1_700_000_000).is_some(),
-            "reset headers may still delay the failing slot"
+        assert_eq!(
+            github_api_retry_delay_at(&permission, 1_700_000_000),
+            None,
+            "permission 403 reset headers must not delay the slot"
         );
 
         let exhausted = github_api_error_with_retry(
@@ -6528,5 +7579,69 @@ mod tests {
         );
         assert_eq!(hint, GitHubRetryHint::default());
         assert_eq!(hint.delay(1000), None);
+    }
+
+    #[test]
+    fn retry_after_is_honored_for_transient_server_errors_without_using_reset() {
+        let error = github_api_error_with_retry(
+            "transient",
+            503,
+            "unavailable",
+            GitHubRetryHint {
+                retry_after_seconds: Some(17),
+                rate_limit_reset_epoch: Some(1_800_000_000),
+                remaining: Some(4999),
+            },
+        );
+        assert_eq!(
+            github_api_retry_delay_at(&error, 1_700_000_000),
+            Some(Duration::from_secs(17))
+        );
+    }
+
+    #[test]
+    fn authenticated_endpoint_validation_rejects_cleartext_remote_urls() {
+        assert!(validate_authenticated_url("http://github.example.com/api")
+            .unwrap_err()
+            .to_string()
+            .contains("HTTPS"));
+        assert!(validate_authenticated_url("https://user:pass@example.com")
+            .unwrap_err()
+            .to_string()
+            .contains("userinfo"));
+        assert!(validate_authenticated_url("http://127.0.0.1:8080/api").is_ok());
+    }
+
+    #[test]
+    fn signed_blob_validation_requires_secure_url_and_redacts_credentials() {
+        assert!(validate_signed_blob_url("http://127.0.0.1:8080/blob", "artifact").is_ok());
+        assert!(validate_signed_blob_url("http://blob.example.com/blob", "artifact").is_err());
+        assert!(
+            validate_signed_blob_url("https://user:pass@blob.example.com/blob", "artifact")
+                .is_err()
+        );
+
+        let safe = redacted_authenticated_url(
+            "https://user:pass@blob.example.com/blob?sig=secret&token=secret#fragment",
+        );
+        assert_eq!(safe, "https://blob.example.com/blob");
+        assert!(!safe.contains("secret"));
+    }
+
+    #[test]
+    fn provider_error_bodies_are_bounded_and_secret_safe() {
+        let error = github_api_error(
+            "test request",
+            500,
+            "authorization: Bearer reflected-secret",
+        );
+        let error = error.downcast_ref::<GitHubApiError>().unwrap();
+        assert_eq!(error.body, "<redacted response body>");
+
+        let long = "x".repeat(5000);
+        let error = github_api_error("test request", 500, long);
+        let error = error.downcast_ref::<GitHubApiError>().unwrap();
+        assert!(error.body.len() <= 4099);
+        assert!(error.body.ends_with('…'));
     }
 }

@@ -8,6 +8,11 @@
 //! interim [`scaffold`] facade exposes bootstrap and dispatch helpers until
 //! Plan 079 deletes the crate after its runtime modules move.
 
+#[cfg(all(not(debug_assertions), feature = "test-support"))]
+compile_error!("test-support is forbidden in release-profile builds");
+#[cfg(all(feature = "release-build", feature = "test-support"))]
+compile_error!("test-support must never be combined with release-build");
+
 mod action;
 mod admission;
 pub mod args;

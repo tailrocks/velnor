@@ -17,7 +17,7 @@ use velnor_control::journal::{Event, Journal, SideEffect, SlotRecord};
 use velnor_model::{ActorPhase, FleetHealthState, Generation, JobId, SlotId};
 
 use crate::config;
-use crate::protocol::{GitHubScope, ListedRunner, RegistrationClient};
+use crate::protocol::{GitHubScope, RegistrationClient};
 
 use super::cleanup;
 use super::exec::load_exec_config;
@@ -862,19 +862,7 @@ async fn reconcile_remote_registrations(
         return Ok(());
     };
     let scope = GitHubScope::parse(url)?;
-    let remote = match RegistrationClient::new()?.list_runners(&scope, pat).await {
-        Ok(remote) => remote,
-        Err(error) => {
-            if let Some(quota) = crate::protocol::github_api_quota_status(&error) {
-                pacing.hold_rest_until(
-                    tokio::time::Instant::now(),
-                    quota.reset_epoch_or_retry_after(epoch_now()),
-                );
-            }
-            eprintln!("registration reconciliation lookup failed: {error:#}");
-            return Ok(());
-        }
-    };
+    let client = RegistrationClient::new()?;
     let state = journal.materialized_state()?;
     let config_base = exec
         .config_dir
@@ -898,11 +886,29 @@ async fn reconcile_remote_registrations(
             }
         };
         let local_id = local.as_ref().and_then(|stored| stored.settings.agent_id);
-        let local_name = local
-            .as_ref()
-            .map(|stored| stored.settings.agent_name.as_str())
-            .unwrap_or_default();
-        if !remote_registration_present(local_id, local_name, &remote) {
+        let Some(local_id) = local_id else {
+            // A registered slot without its durable numeric identity cannot
+            // be reconciled safely. Name matching can select another live
+            // runner, so release the stale local claim and let JIT rebuild it.
+            lost.push((slot.slot_id.clone(), slot.generation));
+            continue;
+        };
+        let remote = match client.get_runner(&scope, pat, local_id).await {
+            Ok(remote) => remote,
+            Err(error) => {
+                if let Some(quota) = crate::protocol::github_api_quota_status(&error) {
+                    pacing.hold_rest_until(
+                        tokio::time::Instant::now(),
+                        quota.reset_epoch_or_retry_after(epoch_now()),
+                    );
+                }
+                eprintln!(
+                    "registration reconciliation lookup failed for runner id {local_id}: {error:#}"
+                );
+                continue;
+            }
+        };
+        if remote.is_none() {
             // Registration loss invalidates the broker worker even while it
             // owns a job. The durable event releases admission first; the
             // worker remains journal-owned until normal teardown reconciles it.
@@ -965,17 +971,6 @@ fn has_dangling_symlink_component(path: &Path) -> anyhow::Result<bool> {
         }
     }
     Ok(false)
-}
-
-fn remote_registration_present(
-    local_id: Option<i64>,
-    local_name: &str,
-    remote: &[ListedRunner],
-) -> bool {
-    remote.iter().any(|runner| {
-        local_id.is_some_and(|id| runner.id == Some(id))
-            || (local_id.is_none() && runner.name.as_deref() == Some(local_name))
-    })
 }
 
 fn job_child_keys_for_slot(
@@ -1661,21 +1656,6 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn remote_registration_matches_durable_id_before_name() {
-        let remote = vec![ListedRunner {
-            id: Some(7),
-            name: Some("slot-1".to_owned()),
-            status: Some("offline".to_owned()),
-            busy: Some(false),
-            labels: Vec::new(),
-        }];
-        assert!(remote_registration_present(Some(7), "other-name", &remote));
-        assert!(!remote_registration_present(Some(8), "slot-1", &remote));
-        assert!(remote_registration_present(None, "slot-1", &remote));
-        assert!(!remote_registration_present(None, "slot-2", &remote));
-    }
-
     fn reserved_slot() -> SlotRecord {
         SlotRecord {
             slot_id: SlotId("velnor-1".to_owned()),
@@ -1887,11 +1867,8 @@ mod tests {
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "total_count": 0,
-                "runners": []
-            })))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners/7"))
+            .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
 
@@ -1907,7 +1884,7 @@ mod tests {
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
         config::save(
-            &dir,
+            &crate::runner::daemon_slot_config_dir(&dir, 1, 1),
             &config::StoredRunnerConfig {
                 settings: config::RunnerSettings {
                     github_url: url.clone(),
@@ -2209,7 +2186,7 @@ mod tests {
                 response.insert_header(*name, value.clone())
             });
         Mock::given(method("GET"))
-            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners/7"))
             .respond_with(response)
             .mount(&server)
             .await;
@@ -2225,8 +2202,51 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
+        let slot_dir = crate::runner::daemon_slot_config_dir(&dir, 1, 1);
+        crate::config::save(
+            &slot_dir,
+            &crate::config::StoredRunnerConfig {
+                settings: crate::config::RunnerSettings {
+                    github_url: url.clone(),
+                    server_url: None,
+                    server_url_v2: None,
+                    pool_id: Some(7),
+                    pool_name: Some("velnor".to_owned()),
+                    agent_id: Some(7),
+                    agent_name: "velnor-1".to_owned(),
+                    labels: vec!["velnor".to_owned()],
+                    use_v2_flow: false,
+                    ephemeral: true,
+                    disable_update: true,
+                },
+                credentials: None,
+            },
+        )
+        .unwrap();
         std::env::set_var("GITHUB_TOKEN", "ghs_test");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
         let args = ControllerArgs {
             state_dir: dir.clone(),
             scope: "velnor".into(),
@@ -2297,6 +2317,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
                 "runner_groups": [{"id": 7, "name": "velnor", "default": false}]
             })))
             .mount(&server)
@@ -2306,6 +2327,7 @@ mod tests {
                 "/api/v3/orgs/tailrocks/actions/runner-groups/7/repositories",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
                 "repositories": [{"full_name": "tailrocks/velnor"}]
             })))
             .mount(&server)

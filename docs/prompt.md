@@ -30,6 +30,34 @@ open per-plan, per-task, or per-item branches or pull requests. Historical
 coordination text that prescribes branch-per-leaf delivery is superseded by
 this operator directive.
 
+## Velnor blocker integration loop
+
+A failed Velnor execution is a Velnor defect until evidence proves an external
+failure. Fix the enabling Velnor architecture on this campaign branch; never
+hide the defect in a repository workflow or in `velnor-actions-fixture`.
+Commit and push every finished iteration with the required signed-off commit
+trailers. The sole campaign PR is the only path into `main`: merge it at the
+authorized safe integration checkpoint, then prove the merged SHA on `main`
+before release. Repeated per-task PRs or repeated PR merges are prohibited by
+the one-branch/one-PR topology.
+
+If urgent Sentry validation is required before that sole PR can merge, an
+explicitly authorized exception may release the exact pushed branch SHA only
+through the signed `velnor-apt` workflow and install it over `ssh sentry`.
+The branch SHA must be bound to the immutable signed release record and exact
+package version. Never copy a checkout or binary, install a local `.deb`, use
+direct `dpkg -i`, or bypass signed APT. Record the exception and merge the
+same campaign branch when the PR becomes mergeable.
+
+Every Velnor blocker iteration must verify the deployed source/package
+identity, service health, rollback predecessor, and all three lane modes:
+`velnor`, `github`, and `both`. Before any retry, cancel older pending or
+running validation runs, remove only validation-owned stale registrations,
+prove both are clear, and monitor only the new run ID. After each push,
+fresh security, performance, goal/acceptance, verifier, and reviewer
+subagents audit the exact pushed diff; a failed audit keeps the iteration
+open.
+
 No earlier prompt or plan is active.
 
 Direction sources (`docs/mission.md`, `docs/vision.md`, `docs/roadmap.md`)

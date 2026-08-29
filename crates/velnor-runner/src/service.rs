@@ -123,7 +123,8 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub replace: bool,
 
-    /// Runner group id for JIT configuration. Defaults to GitHub's default group id 1.
+    /// Optional runner group id. Organization/enterprise scopes require
+    /// `--pool-name`/`VELNOR_POOL_NAME`; no scope may silently use group 1.
     #[arg(long, env = "VELNOR_POOL_ID")]
     pub pool_id: Option<i64>,
 
@@ -404,6 +405,7 @@ impl From<DaemonArgs> for crate::args::DaemonArgs {
             replace: a.replace,
             pool_id: a.pool_id,
             pool_name: a.pool_name,
+            pool_id_pre_resolved: false,
             routing_policy_file: a.routing_policy_file,
             dry_run_registration: a.dry_run_registration,
             slots: a.slots,

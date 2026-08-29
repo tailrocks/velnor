@@ -285,7 +285,7 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 ))
                 .bearer_auth(&self.token)
                 .header("Accept", "application/vnd.github.raw+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header("X-GitHub-Api-Version", "2026-03-10")
                 .send()?;
             last_status = Some(response.status());
             if response.status().is_success() {

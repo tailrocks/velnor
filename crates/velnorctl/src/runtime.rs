@@ -40,7 +40,7 @@ pub struct DaemonArgs {
     pub replace: bool,
     #[arg(long)]
     pub pool_id: Option<i64>,
-    #[arg(long)]
+    #[arg(long, env = "VELNOR_POOL_NAME")]
     pub pool_name: Option<String>,
     #[arg(long)]
     pub routing_policy_file: Option<PathBuf>,
@@ -102,7 +102,14 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
     let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
     let admin_path = endpoint.socket_path(velnor_client::SocketKind::Admin);
+    crate::http::prepare_instance_dir(
+        control_path
+            .parent()
+            .expect("canonical control socket always has an instance directory"),
+    )?;
     let _instance_lock = InstanceLock::acquire(&control_path)?;
+    crate::http::remove_stale_socket(&control_path)?;
+    crate::http::remove_stale_socket(&admin_path)?;
     let state_path = args
         .state_db
         .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH));
@@ -177,7 +184,7 @@ struct InstanceLock {
 impl InstanceLock {
     fn acquire(socket_path: &Path) -> std::io::Result<Self> {
         use std::os::fd::AsRawFd;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         let parent = socket_path.parent().ok_or_else(|| {
             std::io::Error::new(
@@ -185,6 +192,7 @@ impl InstanceLock {
                 "socket must have a parent for the instance lock",
             )
         })?;
+        crate::http::prepare_instance_dir(parent)?;
         let lock_path = parent.join(".daemon.lock");
         let file = OpenOptions::new()
             .create(true)
@@ -192,7 +200,20 @@ impl InstanceLock {
             .read(true)
             .write(true)
             .mode(0o660)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(lock_path)?;
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let owner = unsafe { libc::geteuid() } as u32;
+        if !metadata.is_file()
+            || (metadata.uid() != 0 && metadata.uid() != owner)
+            || metadata.mode() & 0o002 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "instance lock is not a trusted regular file",
+            ));
+        }
         // SAFETY: the descriptor remains open in `InstanceLock` for the
         // entire daemon lifetime; libc only reads the descriptor and flags.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -263,18 +284,7 @@ impl Drop for OwnedUnixListener {
 }
 
 fn cleanup_socket(path: &Path, expected: SocketIdentity) {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-
-    if std::fs::symlink_metadata(path)
-        .ok()
-        .is_some_and(|metadata| {
-            metadata.file_type().is_socket()
-                && metadata.dev() == expected.device
-                && metadata.ino() == expected.inode
-        })
-    {
-        let _ = std::fs::remove_file(path);
-    }
+    let _ = crate::http::remove_socket_if_unchanged(path, expected.device, expected.inode);
 }
 
 impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
@@ -290,6 +300,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             replace: args.replace,
             pool_id: args.pool_id,
             pool_name: args.pool_name,
+            pool_id_pre_resolved: false,
             routing_policy_file: args.routing_policy_file,
             dry_run_registration: args.dry_run_registration,
             slots: args.slots,
@@ -481,7 +492,8 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub replace: bool,
 
-    /// Runner group id for JIT configuration. Defaults to GitHub's default group id 1.
+    /// Optional runner group id. Organization/enterprise scopes require
+    /// `--pool-name`/`VELNOR_POOL_NAME`; no scope may silently use group 1.
     #[arg(long)]
     pub pool_id: Option<i64>,
 
@@ -510,6 +522,7 @@ impl From<ConfigureArgs> for rt::ConfigureArgs {
             replace: args.replace,
             pool_id: args.pool_id,
             pool_name: args.pool_name,
+            pool_id_pre_resolved: false,
             dry_run: args.dry_run,
             config_dir: args.config_dir,
         }

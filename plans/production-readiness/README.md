@@ -17,7 +17,11 @@ green local test, a shared commit, or partial workflow success.
 2. Capture baseline evidence. Cancel or delete only explicitly authorized,
    owned, inactive validation resources; unresolved ownership is `BLOCKED`.
 3. Resolve lifecycle and correctness blockers in Velnor. Do not work around
-   Velnor gaps in repositories or in `velnor-actions-fixture`.
+   Velnor gaps in repositories or in `velnor-actions-fixture`. Commit and push
+   each fix on the single campaign branch, audit it with fresh security,
+   performance, goal/acceptance, verifier, and reviewer subagents, and keep
+   retrying until the Velnor defect is fixed or a proven external blocker is
+   recorded.
 4. Execute Track A read-only fleet reconciliation and Track B migration in
    dependency order. Execute each C leaf only after its named dependencies are
    `DONE`; never batch-complete siblings.
@@ -26,8 +30,12 @@ green local test, a shared commit, or partial workflow success.
 6. Run defined cold/warm/rerun performance campaigns, fault injection, and
    multi-repository soak. Missing telemetry fails the gate.
 7. Finish Plan 079 and remove the legacy `velnor-runner` product surface.
-8. Integrate unique branch behavior, then merge to `main` and prove green
-   `main` before any release.
+8. Integrate unique branch behavior through the sole campaign PR, merge it to
+   `main` at the authorized safe integration checkpoint, and prove the merged
+   SHA green before any release. If urgent pre-merge Sentry validation is
+   explicitly authorized, use only an immutable signed-APT release bound to
+   the exact pushed branch SHA over `ssh sentry`; never copy binaries or
+   install local packages.
 9. Publish, install, verify, roll back, and forward-recover only through the
    signed APT path. Release and deployment are terminal gates.
 10. Run the independent final audit and generate the evidence index. Only then
@@ -45,6 +53,11 @@ green local test, a shared commit, or partial workflow success.
 - Every mutation requires a pre-state and post-state snapshot. Explicit
   authorization is required for cancellation, runner deletion, drain, restart,
   merge, tag, publish, install, rollback, policy changes, and re-admission.
+- Before every validation retry, cancel older pending/in-progress runs, delete
+  only validation-owned stale registrations, prove both are clear, and monitor
+  only the new run ID. Every Sentry validation records exact source/package
+  identity, host/user, health, rollback predecessor, and `velnor`, `github`,
+  and `both` lane results.
 - Evidence must be sanitized. Never commit secrets, credentials, unsanitized
   logs, or rendered GitHub HTML.
 - Run a final machine check: every row is `DONE`, every dependency is `DONE`,

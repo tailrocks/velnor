@@ -22,6 +22,15 @@ Velnor unified CI contract (2026-08-09):
 - **actions/runner is protocol source of truth** (https://github.com/actions/runner): before writing runner protocol code (job messages, broker, expressions, credentials, run-service, timeline), find and match its equivalent logic exactly; never guess.
 - **velnor-actions-fixture is ground truth**: never modify it to work around Velnor gaps; implement the missing feature in Velnor; strengthen coverage, never weaken.
 - **Strict capabilities**: support only what the Rust capability manifest and [docs/strict-capability-contract.md](docs/strict-capability-contract.md) declare; validate the whole job before side effects; fail unsupported config immediately with exact field/value and manifest version; no silent fallbacks — every approved `uses:` has a pinned native Rust adapter; new capabilities need explicit operator approval.
+- **Velnor blocker loop**: fix failed Velnor execution in Velnor on the single campaign branch, commit and push every iteration, and merge the sole campaign PR to `main` at the authorized safe integration checkpoint. If urgent Sentry validation is authorized before merge, use only an immutable signed-APT release bound to the exact branch SHA over `ssh sentry`; never copy binaries, install local packages, or use direct `dpkg -i`. Verify exact identity, health, rollback, and `velnor`, `github`, and `both` lanes; fresh security, performance, goal, verifier, and reviewer subagents audit each pushed iteration.
+- **Branch freshness and merge closure**: before each new fix/change, fetch `origin/main`; for a new campaign, fast-forward clean local `main` with `git pull --ff-only origin main`, verify SHA equality, and branch from it; for the active campaign, retain its sole branch/PR and integrate latest `origin/main`. Before merging any PR, inspect all conversation/comments, reviews, inline threads, and checks; classify each item, answer/fix or mark obsolete with a reason, re-check the final exact head SHA, and merge only with no unanswered questions, unresolved requests, or failing required checks.
+
+## Decision and bug-fix discipline
+
+- Judge work by correctness, consistency, and project-goal fit. Never defer a known-wrong state because of ROI, cost, effort, or a claim that it is “low-value,” “marginal,” or an “edge case.”
+- Stop only when the required change is proven impossible with the available tools or model. When uncertain, inspect, test, and measure before deciding; present only real correctness or capability tradeoffs.
+- Before fixing a bug, identify why the architecture permitted it and whether the same structure permits a class of related bugs.
+- Prefer structural root-cause fixes that remove the enabling condition. Use a symptom-layer patch only when the root fix is proven infeasible or belongs in a separate change, and name the deferred root cause.
 
 ## Operations
 
@@ -32,11 +41,18 @@ Velnor unified CI contract (2026-08-09):
 - Unprivileged by default: no `sudo`; mise user-space; OS-package privilege only via documented mise bootstrap, enforced by `audit-ci`.
 - Rust-first scripting; Python/shell only when Rust cannot reasonably do the task.
 - Lane changes pass `velnor`, `github`, and `both`.
+- Before retrying validation, cancel older pending/in-progress runs and remove only validation-owned stale registrations; prove both are clear first.
 
 ## Direction & decisions
 
 Normative direction: [docs/mission.md](docs/mission.md), docs/vision.md, docs/roadmap.md; docs/prompt.md is the sole active execution prompt; docs/comparison.md is timestamped non-normative evidence. On conflict docs/ wins — fix the prompt. Change procedure: update docs/ first → record one dated decision line here → reconcile plans/README.md and docs/prompt.md.
 
 Active decisions: two explicit backends `[execution] backend = "docker" | "microvm"` per daemon/pool, no fallback; Firecracker production microVM; Node Architecture v2 supervised processes; Build L3 final isolation target · velnorctl is the final CLI/package after Plan 079, zero aliases, Sentry apt-only from signed `velnor-apt` · sequential runs fully warm; persistent cargo targets job-local materializations; artifact fan-in Results Service authoritative · trust scopes runtime-enforced; warm-runner jobs get daemon resource caps · local-only compiler caches (sccache v0.16.0 / Kache v0.10.0, mutually exclusive, 20 GiB); storage budgets + disk-pressure controller P0 · log format contract is law ([docs/log-format-contract.md](docs/log-format-contract.md)); stability-first standing rules (dual health signals, forensic logs, tracing spans) · Parallax native Apple packaging is the sole measured macOS exception · correctness over ROI; root-cause fixes over symptom patches (docs/mission.md).
+
+2026-08-29 decision: the one campaign branch/one PR topology remains; Velnor
+blockers are fixed and pushed there, the sole PR merges to `main` at its safe
+authorized integration point, and urgent pre-merge Sentry validation is
+signed-APT-only from the exact branch SHA over `ssh sentry` with dual-lane
+evidence and rollback proof.
 
 Full history: `git log -p -- AGENTS.md`; entries predating the marked contract that conflict with it are historical and non-executable.

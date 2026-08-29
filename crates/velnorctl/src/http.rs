@@ -9,7 +9,11 @@ use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::{
-    extract::{connect_info::ConnectInfo, Extension, Path as AxumPath, Query, Request, State},
+    extract::{
+        connect_info::ConnectInfo,
+        rejection::{JsonRejection, QueryRejection},
+        DefaultBodyLimit, Extension, Path as AxumPath, Query, Request, State,
+    },
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -21,8 +25,8 @@ use tokio::sync::Semaphore;
 use velnor_model::{ExitClass, MachineErrorEnvelope, SCHEMA_VERSION};
 
 use velnor_control::ports::{
-    LogPort, LogRequest, MutationKind, MutationPort, MutationRequest, QueryPage, QueryPort,
-    QueryRequest, WatchPort, WatchRequest,
+    LogPort, LogRequest, MutationKind, MutationPort, QueryPage, QueryPort, QueryRequest, WatchPort,
+    WatchRequest,
 };
 
 /// Shared application ports held by HTTP handlers.
@@ -43,6 +47,7 @@ pub struct ApiState {
 }
 
 const APPLICATION_BLOCKING_CONCURRENCY: usize = 16;
+const MAX_MUTATION_BODY_BYTES: usize = 64 * 1024;
 
 impl ApiState {
     /// Build transport state bound to one daemon instance.
@@ -93,8 +98,8 @@ pub fn control_router(state: ApiState) -> Router {
         .route("/v1/{resource_kind}", get(query_resource))
         .route("/v1/watch", get(watch))
         .route("/v1/logs/{subject}", get(logs))
-        .layer(Extension(PeerPolicy::for_group(CONTROL_GROUP)))
         .layer(middleware::from_fn(require_peer))
+        .layer(Extension(PeerPolicy::for_group(CONTROL_GROUP)))
         .with_state(state)
 }
 
@@ -106,8 +111,9 @@ pub fn admin_router(state: ApiState) -> Router {
             "/v1/instances/{instance}/{operation}",
             post(mutate_instance),
         )
-        .layer(Extension(PeerPolicy::for_group(ADMIN_GROUP)))
         .layer(middleware::from_fn(require_peer))
+        .layer(Extension(PeerPolicy::for_group(ADMIN_GROUP)))
+        .layer(DefaultBodyLimit::max(MAX_MUTATION_BODY_BYTES))
         .with_state(state)
 }
 
@@ -136,6 +142,34 @@ pub const ADMIN_SOCKET_MODE: u32 = 0o660;
 pub const CONTROL_GROUP: &str = "velnor";
 /// Unix group owning the mutation-only admin socket.
 pub const ADMIN_GROUP: &str = "velnor-admin";
+
+/// Create and validate one daemon instance directory before any lock or
+/// socket pathname is opened. The package owns `/run/velnor`; this helper
+/// creates only the validated child and refuses symlink or writable-path
+/// substitutions.
+pub fn prepare_instance_dir(path: &FsPath) -> Result<(), std::io::Error> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "instance directory must have a parent",
+        )
+    })?;
+    inspect_directory_chain(parent)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "instance directory is not a trusted directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path)?;
+        }
+        Err(error) => return Err(error),
+    }
+    inspect_directory_chain(path)
+}
 
 /// Verify that package-owned socket groups exist before daemon readiness.
 pub fn validate_socket_groups() -> Result<(), std::io::Error> {
@@ -177,37 +211,213 @@ pub fn bind_unix(
     // check-then-remove would let a sibling replace the pathname between the
     // metadata check and the unlink, and could destroy an unrelated endpoint.
     let listener = tokio::net::UnixListener::bind(path)?;
+    let bound_socket = match socket_identity(path) {
+        Some(identity) => identity,
+        None => {
+            // The pathname identity could not be proven. Dropping the live
+            // listener is safe; unlinking by type would reintroduce a
+            // pathname TOCTOU race and could remove a replacement endpoint.
+            drop(listener);
+            return Err(std::io::Error::other(
+                "bound control socket identity could not be verified",
+            ));
+        }
+    };
     let fd = listener.as_raw_fd();
     // SAFETY: `fd` is borrowed from the live listener and the sentinel uid
     // preserves the kernel-assigned owner.
     let chown_result = unsafe { libc::fchown(fd, u32::MAX, group) };
     if chown_result != 0 {
         let error = std::io::Error::last_os_error();
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(error);
     }
     // SAFETY: `fd` is a live Unix listener descriptor.
     if unsafe { libc::fchmod(fd, mode as libc::mode_t) } != 0 {
         let error = std::io::Error::last_os_error();
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(error);
     }
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `stat` points to writable storage of the required size.
     if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
         let error = std::io::Error::last_os_error();
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(error);
     }
     // SAFETY: fstat initialized `stat` on success.
     let stat = unsafe { stat.assume_init() };
     if stat.st_gid != group || u64::from(stat.st_mode) & 0o777 != u64::from(mode) {
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(std::io::Error::other(
             "bound control socket ownership or mode was not enforced",
         ));
     }
     Ok(listener)
+}
+
+/// Reclaim a socket pathname left by a crashed daemon after the instance lock
+/// has been acquired. A live endpoint or any non-socket filesystem object is
+/// never removed; only an unconnected socket with the same identity observed
+/// before unlink is eligible.
+pub fn remove_stale_socket(path: &FsPath) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::os::unix::net::UnixStream;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "existing socket path is not a socket",
+        ));
+    }
+    if metadata.uid() != current_uid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to replace a foreign-owned control socket",
+        ));
+    }
+    let identity = socket_identity(path)
+        .ok_or_else(|| std::io::Error::other("existing socket identity could not be verified"))?;
+    match UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "daemon instance socket is still serving",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+        Err(error) => return Err(error),
+    }
+    remove_socket_if_unchanged(path, identity.device, identity.inode)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn socket_identity(path: &FsPath) -> Option<SocketIdentity> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    metadata.file_type().is_socket().then(|| SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+pub(crate) fn remove_socket_if_unchanged(
+    path: &FsPath,
+    expected_device: u64,
+    expected_inode: u64,
+) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket must have a parent",
+        )
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket must have a filename",
+        )
+    })?;
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket filename contains NUL",
+        )
+    })?;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
+    if socket_identity_at(directory.as_raw_fd(), &name)?
+        != Some(SocketIdentity {
+            device: expected_device,
+            inode: expected_inode,
+        })
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "stale control socket changed before cleanup",
+        ));
+    }
+    // A stable directory descriptor prevents parent-path replacement or
+    // symlink traversal between the identity check and unlink.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn socket_identity_at(
+    directory_fd: std::os::fd::RawFd,
+    name: &std::ffi::CStr,
+) -> Result<Option<SocketIdentity>, std::io::Error> {
+    use std::mem::MaybeUninit;
+
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `directory_fd` is an open directory descriptor and `name` is a
+    // valid NUL-terminated relative pathname. `stat` is initialized on zero.
+    let result = unsafe {
+        libc::fstatat(
+            directory_fd,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    // SAFETY: fstatat initialized `stat` on success.
+    let stat = unsafe { stat.assume_init() };
+    // libc exposes these stat fields with platform-specific integer widths.
+    // Keep the normalized comparison explicit; Linux clippy sees some casts
+    // as same-type while macOS requires them.
+    #[allow(clippy::unnecessary_cast)]
+    let file_type = (stat.st_mode as u32) & (libc::S_IFMT as u32);
+    #[allow(clippy::unnecessary_cast)]
+    if file_type != libc::S_IFSOCK as u32 {
+        return Ok(None);
+    }
+    #[allow(clippy::unnecessary_cast)]
+    let device = stat.st_dev as u64;
+    Ok(Some(SocketIdentity {
+        device,
+        inode: stat.st_ino,
+    }))
+}
+
+/// Remove only the exact socket pathname captured just after bind when
+/// post-bind setup fails. Dropping a Unix listener does not remove its
+/// pathname, so leaving this cleanup to the next daemon start would create a
+/// stale control endpoint. The metadata comparison prevents removing a
+/// replacement socket if the pathname changed after bind.
+fn cleanup_failed_bind(
+    path: &FsPath,
+    listener: tokio::net::UnixListener,
+    identity: SocketIdentity,
+) {
+    drop(listener);
+
+    let _ = remove_socket_if_unchanged(path, identity.device, identity.inode);
 }
 
 fn inspect_directory_chain(path: &FsPath) -> Result<(), std::io::Error> {
@@ -385,7 +595,39 @@ fn peer_groups(stream: &tokio::net::UnixStream) -> (Box<[u32]>, bool) {
     (groups, complete)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn peer_credentials(stream: &tokio::net::UnixStream) -> PeerCredentials {
+    use std::os::fd::AsRawFd;
+
+    let mut uid = 0;
+    let mut gid = 0;
+    // SAFETY: both output pointers refer to live scalar storage and the
+    // descriptor is borrowed only for this libc call.
+    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if result == 0 {
+        PeerCredentials {
+            uid,
+            gid,
+            valid: true,
+            // macOS exposes the peer's effective uid/gid here, but not a
+            // complete supplementary-group vector through this API. The
+            // primary group remains enforceable; supplementary-only access
+            // fails closed in PeerPolicy::allows.
+            groups: Box::new([]),
+            groups_valid: false,
+        }
+    } else {
+        PeerCredentials {
+            uid: 0,
+            gid: 0,
+            valid: false,
+            groups: Box::new([]),
+            groups_valid: false,
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn peer_credentials(_stream: &tokio::net::UnixStream) -> PeerCredentials {
     PeerCredentials {
         uid: 0,
@@ -421,7 +663,7 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
-        mutations: true,
+        mutations: false,
     })
 }
 
@@ -438,8 +680,11 @@ struct QueryParams {
 async fn query_resource(
     State(state): State<ApiState>,
     AxumPath(resource_kind): AxumPath<String>,
-    Query(params): Query<QueryParams>,
+    query: Result<Query<QueryParams>, QueryRejection>,
 ) -> Result<Json<QueryPage>, ApiError> {
+    let Query(params) = query.map_err(|_| {
+        ApiError::bad_request("query", "query parameters are malformed or unsupported")
+    })?;
     let query = Arc::clone(&state.query);
     let page = run_application_call(state.blocking.clone(), move || {
         query.query(QueryRequest {
@@ -474,8 +719,11 @@ struct LogParams {
 async fn logs(
     State(state): State<ApiState>,
     AxumPath(subject): AxumPath<String>,
-    Query(params): Query<LogParams>,
+    query: Result<Query<LogParams>, QueryRejection>,
 ) -> Result<Json<Vec<velnor_control::ports::LogItem>>, ApiError> {
+    let Query(params) = query.map_err(|_| {
+        ApiError::bad_request("query", "query parameters are malformed or unsupported")
+    })?;
     let logs = Arc::clone(&state.logs);
     let records = run_application_call(state.blocking.clone(), move || {
         logs.logs(LogRequest {
@@ -491,8 +739,11 @@ async fn logs(
 
 async fn watch(
     State(state): State<ApiState>,
-    Query(params): Query<WatchParams>,
+    query: Result<Query<WatchParams>, QueryRejection>,
 ) -> Result<Json<Vec<velnor_control::ports::WatchItem>>, ApiError> {
+    let Query(params) = query.map_err(|_| {
+        ApiError::bad_request("query", "query parameters are malformed or unsupported")
+    })?;
     let watch = Arc::clone(&state.watch);
     let events = run_application_call(state.blocking.clone(), move || {
         watch.watch(WatchRequest {
@@ -515,49 +766,45 @@ struct MutationBody {
     slots: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MutationResponse {
-    operation_id: String,
-    phase: String,
-}
-
 async fn mutate_instance(
     State(state): State<ApiState>,
     AxumPath((instance, operation)): AxumPath<(String, String)>,
-    Json(body): Json<MutationBody>,
-) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
+    body: Result<Json<MutationBody>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Json(body) = body.map_err(|_| {
+        ApiError::bad_request(
+            "body",
+            "request body must be valid JSON with the documented fields",
+        )
+    })?;
+    let MutationBody {
+        operation: body_operation,
+        reason,
+        idempotency_key,
+        expected_version,
+        slots,
+    } = body;
     if instance != state.instance.as_ref() {
         return Err(ApiError::bad_request(
             "mutation.instance",
             "path instance does not match daemon instance",
         ));
     }
-    let kind = parse_mutation(&operation)?;
-    if body.operation != operation {
+    let _kind = parse_mutation(&operation)?;
+    if body_operation != operation {
         return Err(ApiError::bad_request(
             "mutation.operation",
             "body operation does not match path",
         ));
     }
-    let mutation = Arc::clone(&state.mutation);
-    let result = run_application_call(state.blocking.clone(), move || {
-        mutation.mutate(MutationRequest {
-            kind,
-            target: instance,
-            reason: body.reason,
-            idempotency_key: body.idempotency_key,
-            expected_version: body.expected_version,
-            scale_to: body.slots,
-        })
-    })
-    .await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(MutationResponse {
-            operation_id: result.operation_id,
-            phase: result.phase,
-        }),
+    let _ = (reason, idempotency_key, expected_version, slots);
+    // The durable lifecycle ledger is not an actuator. Until the daemon
+    // reconciler consumes these intents, accepting them as HTTP 202 would
+    // claim an effect that the runtime cannot perform.
+    Err(ApiError::from(
+        velnor_control::ports::PortError::Unsupported {
+            operation: "lifecycle reconciler is not installed".to_owned(),
+        },
     ))
 }
 
@@ -566,10 +813,13 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, velnor_control::ports::PortError> + Send + 'static,
 {
+    // Queueing unbounded application work lets a burst of local callers hold
+    // open connections indefinitely and can starve shutdown. Shed excess
+    // work at the transport boundary; the caller can retry with its own
+    // deadline after the current bounded set drains.
     let permit = blocking
-        .acquire_owned()
-        .await
-        .map_err(|_| ApiError::operation_failed())?;
+        .try_acquire_owned()
+        .map_err(|_| ApiError::overloaded())?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         call()
@@ -626,6 +876,18 @@ impl ApiError {
         Self::from(velnor_control::ports::PortError::Operation {
             operation: "application call failed".to_owned(),
         })
+    }
+
+    fn overloaded() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            envelope: MachineErrorEnvelope::new(
+                ExitClass::Transport.as_str(),
+                ExitClass::Transport.code(),
+                "control.overloaded",
+            )
+            .with_remediation("retry after the current control requests drain"),
+        }
     }
 }
 
@@ -688,7 +950,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use velnor_control::ports::{MutationResult, PortError};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use velnor_control::ports::{MutationRequest, MutationResult, PortError};
     use velnor_model::{AnyResource, Event, ResourceMeta, Source, Timestamp};
 
     #[derive(Default)]
@@ -803,19 +1066,210 @@ mod tests {
         let result = mutate_instance(
             State(state),
             AxumPath(("other".to_owned(), "cordon".to_owned())),
-            Json(MutationBody {
+            Ok(Json(MutationBody {
                 operation: "cordon".to_owned(),
                 reason: "maintenance".to_owned(),
                 idempotency_key: "request-1".to_owned(),
                 expected_version: None,
                 slots: None,
-            }),
+            })),
         )
         .await;
 
         let error = result.expect_err("foreign instance must be rejected");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn application_admission_sheds_when_the_bound_is_full() {
+        let blocking = Arc::new(Semaphore::new(0));
+        let result: Result<(), ApiError> =
+            run_application_call(blocking, || Ok::<(), PortError>(())).await;
+
+        let error = result.expect_err("a full application bound must shed work");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.envelope.reason, "control.overloaded");
+    }
+
+    #[tokio::test]
+    async fn prepare_instance_dir_creates_and_validates_the_child_directory() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let parent = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .expect("HOME is set for tests")
+            .join(format!(
+                ".velnorctl-instance-dir-{}-{suffix}",
+                std::process::id()
+            ));
+        std::fs::create_dir(&parent).expect("create test parent");
+        let instance = parent.join("primary");
+
+        prepare_instance_dir(&instance).expect("prepare instance directory");
+
+        assert!(instance.is_dir());
+        std::fs::remove_dir_all(parent).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn failed_bind_cleanup_removes_only_the_bound_socket() {
+        let path = test_socket_path("failed-bind-cleanup");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind test socket");
+        let identity = socket_identity(&path).expect("socket identity");
+
+        cleanup_failed_bind(&path, listener, identity);
+
+        assert!(!path.exists());
+
+        let listener = tokio::net::UnixListener::bind(&path).expect("rebind test socket");
+        let identity = socket_identity(&path).expect("replacement identity");
+        std::fs::remove_file(&path).expect("unlink original path");
+        let replacement = tokio::net::UnixListener::bind(&path).expect("bind replacement socket");
+
+        cleanup_failed_bind(&path, listener, identity);
+
+        assert!(path.exists());
+        drop(replacement);
+        std::fs::remove_file(path).expect("remove replacement socket");
+    }
+
+    #[tokio::test]
+    async fn stale_socket_recovery_removes_unconnected_socket_only() {
+        let path = test_socket_path("stale-recovery");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind stale socket");
+        drop(listener);
+
+        remove_stale_socket(&path).expect("remove stale socket");
+
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn real_control_socket_exposes_reads_but_no_mutations() {
+        let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
+        let state = ApiState::from_services(&services);
+        let path = test_socket_path("control");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind control socket");
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_unix(listener, control_router(state), async move {
+            let _ = shutdown_rx.changed().await;
+        }));
+
+        let info = socket_request(&path, "GET", "/v1/info", b"").await;
+        assert_eq!(response_status(&info), 200);
+        assert!(String::from_utf8_lossy(&info).contains("\"mutations\":false"));
+
+        let mutation = socket_request(
+            &path,
+            "POST",
+            "/v1/instances/default/cordon",
+            br#"{"operation":"cordon","reason":"test","idempotencyKey":"test"}"#,
+        )
+        .await;
+        assert!(matches!(response_status(&mutation), 404 | 405));
+
+        shutdown.send(true).expect("signal control shutdown");
+        server.await.expect("join control server").expect("serve");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn real_admin_socket_rejects_unimplemented_mutation_and_bad_json() {
+        let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
+        let mutation = Arc::new(RecordingMutation::default());
+        let state = ApiState {
+            instance: Arc::from("primary"),
+            query: services.query(),
+            watch: services.events(),
+            logs: services.logs(),
+            mutation: Arc::clone(&mutation) as Arc<dyn MutationPort>,
+            blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
+        };
+        let path = test_socket_path("admin");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind admin socket");
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_unix(listener, admin_router(state), async move {
+            let _ = shutdown_rx.changed().await;
+        }));
+
+        let accepted = socket_request(
+            &path,
+            "POST",
+            "/v1/instances/primary/cordon",
+            br#"{"operation":"cordon","reason":"test","idempotencyKey":"test"}"#,
+        )
+        .await;
+        assert_eq!(response_status(&accepted), 501);
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+
+        let rejected = socket_request(
+            &path,
+            "POST",
+            "/v1/instances/primary/cordon",
+            br#"{"operation":"cordon","reason":"test","idempotencyKey":"test","unknown":true}"#,
+        )
+        .await;
+        assert_eq!(response_status(&rejected), 400);
+        let rejected_text = String::from_utf8_lossy(&rejected);
+        assert!(rejected_text.contains("body"));
+        assert!(!rejected_text.contains("unknown"));
+        assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+
+        shutdown.send(true).expect("signal admin shutdown");
+        server.await.expect("join admin server").expect("serve");
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn test_socket_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "velnorctl-http-{label}-{}-{}.sock",
+            std::process::id(),
+            NEXT_TEST_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    static NEXT_TEST_SOCKET: AtomicUsize = AtomicUsize::new(1);
+
+    async fn socket_request(
+        path: &std::path::Path,
+        method: &str,
+        target: &str,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let mut stream = tokio::net::UnixStream::connect(path)
+            .await
+            .expect("connect test socket");
+        let request = format!(
+            "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write test request");
+        stream.write_all(body).await.expect("write test body");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read test response");
+        response
+    }
+
+    fn response_status(response: &[u8]) -> u16 {
+        assert!(
+            !response.is_empty(),
+            "test server returned no HTTP response: {response:?}"
+        );
+        String::from_utf8_lossy(response)
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse().ok())
+            .expect("HTTP status")
     }
 
     #[test]

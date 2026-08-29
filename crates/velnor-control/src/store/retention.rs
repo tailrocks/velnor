@@ -51,6 +51,12 @@ pub struct RetentionBudget {
 /// both small and large filesystems.
 pub const DEFAULT_RETENTION_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// Bounded durable claim for one admitted job's future lifecycle writes.
+///
+/// This is deliberately fixed: admission cannot be made safe by trusting a
+/// caller-provided estimate, and the aggregate remains cheap to validate.
+pub const JOB_STORAGE_RESERVATION_BYTES: u64 = 256 * 1024;
+
 /// Bounds for the explicit post-prune maintenance operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionMaintenanceBudget {
@@ -780,6 +786,45 @@ impl Store {
             database_bytes.saturating_add(wal_bytes),
             filesystem_free_bytes(&self.path),
             budget,
+        ))
+    }
+
+    /// Evaluate admission against the current physical store plus durable
+    /// claims. The caller must hold the same immediate transaction for both
+    /// this measurement and the claim insert.
+    pub(crate) fn physical_budget_status_with_connection_and_reservation(
+        &self,
+        connection: &rusqlite::Connection,
+        budget: &RetentionMaintenanceBudget,
+        additional_reservation_bytes: u64,
+    ) -> StoreResult<PhysicalBudgetStatus> {
+        let (database_bytes, wal_bytes) = Self::total_database_bytes(connection, &self.path)?;
+        let reserved_bytes = storage_reservation_bytes_with_connection(connection)?;
+        let claimed_bytes = reserved_bytes
+            .checked_add(additional_reservation_bytes)
+            .ok_or_else(|| {
+                StoreError::new(ExitClass::Operation, "store.admission.reservation.overflow")
+                    .with_remediation("release stale job reservations before admitting more work")
+            })?;
+        let projected_bytes = database_bytes
+            .checked_add(wal_bytes)
+            .and_then(|bytes| bytes.checked_add(claimed_bytes))
+            .ok_or_else(|| {
+                StoreError::new(ExitClass::Operation, "store.admission.reservation.overflow")
+                    .with_remediation("release stale job reservations before admitting more work")
+            })?;
+        let mut admission_budget = budget.clone();
+        admission_budget.min_free_bytes = budget
+            .min_free_bytes
+            .checked_add(claimed_bytes)
+            .ok_or_else(|| {
+                StoreError::new(ExitClass::Operation, "store.admission.reservation.overflow")
+                    .with_remediation("release stale job reservations before admitting more work")
+            })?;
+        Ok(evaluate_admission_physical_budget(
+            projected_bytes,
+            filesystem_free_bytes(&self.path),
+            &admission_budget,
         ))
     }
 
@@ -1657,6 +1702,40 @@ impl Store {
             ..PruneCounts::default()
         })
     }
+}
+
+/// Read the maintained reservation aggregate inside the caller's write
+/// transaction. The count and fixed per-job size make this O(1); immutable
+/// rows and migration-verified triggers prevent callers from changing the
+/// aggregate without its counter update.
+pub(crate) fn storage_reservation_bytes_with_connection(
+    connection: &rusqlite::Connection,
+) -> StoreResult<u64> {
+    let (stored_total, stored_count): (i64, i64) = connection
+        .query_row(
+            "SELECT reserved_bytes, reservation_count
+             FROM storage_reservation_state WHERE singleton = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(StoreError::from)?;
+    if stored_total < 0
+        || stored_count < 0
+        || i128::from(stored_count) * i128::from(JOB_STORAGE_RESERVATION_BYTES)
+            != i128::from(stored_total)
+    {
+        return Err(storage_reservation_integrity_error(
+            "durable reservation aggregate is inconsistent",
+        ));
+    }
+    u64::try_from(stored_total).map_err(|_| {
+        storage_reservation_integrity_error("the reservation aggregate exceeds supported range")
+    })
+}
+
+fn storage_reservation_integrity_error(detail: &str) -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.admission.reservation.corrupt")
+        .with_remediation(detail)
 }
 
 fn passive_checkpoint(conn: &rusqlite::Connection) -> StoreResult<WalCheckpointStatus> {

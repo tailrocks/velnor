@@ -58,7 +58,8 @@ fn spawn_controller(state_dir: &Path, slots: u32) -> Child {
 }
 
 fn wait_for_metrics(path: &Path) -> Value {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(value) = serde_json::from_slice(&bytes) {
                 return value;
