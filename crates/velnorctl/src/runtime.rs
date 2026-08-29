@@ -290,6 +290,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             replace: args.replace,
             pool_id: args.pool_id,
             pool_name: args.pool_name,
+            pool_id_pre_resolved: false,
             routing_policy_file: args.routing_policy_file,
             dry_run_registration: args.dry_run_registration,
             slots: args.slots,
@@ -481,7 +482,8 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub replace: bool,
 
-    /// Runner group id for JIT configuration. Defaults to GitHub's default group id 1.
+    /// Optional runner group id. Organization/enterprise scopes require
+    /// `--pool-name`/`VELNOR_POOL_NAME`; no scope may silently use group 1.
     #[arg(long)]
     pub pool_id: Option<i64>,
 
@@ -510,6 +512,7 @@ impl From<ConfigureArgs> for rt::ConfigureArgs {
             replace: args.replace,
             pool_id: args.pool_id,
             pool_name: args.pool_name,
+            pool_id_pre_resolved: false,
             dry_run: args.dry_run,
             config_dir: args.config_dir,
         }

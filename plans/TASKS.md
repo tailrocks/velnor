@@ -16,7 +16,13 @@ Rules for every agent working this list:
    `rtk mise run check`, integration/fixture proof, safety scan, independent
    review, index agreement, commit trailers (`git commit -s`,
    `Co-authored-by: Codex <codex@openai.com>`).
-4. `BLOCKED` requires exact evidence and the named external decision. Never
+4. Every finished iteration is committed and pushed on the single campaign
+   branch. A Velnor blocker is fixed in Velnor, then audited by fresh security,
+   performance, goal/acceptance, verifier, and reviewer subagents. The sole
+   campaign PR merges to `main` at the authorized safe integration checkpoint;
+   an urgent pre-merge Sentry exception is signed-APT-only and bound to the
+   exact branch SHA over `ssh sentry`.
+5. `BLOCKED` requires exact evidence and the named external decision. Never
    batch-complete siblings; shared code does not transfer proof.
 
 Status legend: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[-]` BLOCKED(reason)
@@ -153,10 +159,12 @@ Immediate next actions, in order (update this section as work lands):
 3. Run **039** in parallel via its own subagent lane; live apply waits for
    reviewed digest + explicit operator authorization.
 4. After 063: dispatch 064, then follow the Track B order above.
-5. Keep `main` merged into the campaign branch before every leaf start;
-   re-run `rtk cargo nextest run --workspace` after every merge.
+5. Keep the campaign branch synchronized and push every iteration. Merge the
+   sole campaign PR to `main` only at the authorized safe integration point;
+   then rerun the complete required gates against the merged SHA. Before any
+   retry, clear older validation runs and validation-owned stale registrations.
 6. When 079 completes: verify no `velnor-runner` product surface remains; only
-   then open the campaign completion PR.
+   then use the sole campaign PR for the completion gate.
 
 ## Done definition (campaign-wide)
 

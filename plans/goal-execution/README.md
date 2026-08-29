@@ -90,13 +90,13 @@ Three OpenCode sessions run this goal together as peers. Binding channel: plans/
 
 Each session's primary agent orchestrates only: dependencies, dispatch, conflict prevention, operator-approval boundaries, evidence reconciliation, ledger consistency, verdict. Never implement, edit, test, or review a leaf directly. Per leaf dispatch fresh subagents for investigation (drift and dependency validation), implementation (owned file scope), verification (commands, fixture runs, artifacts, done criteria), independent diff review, plus specialists for security, protocol, packaging, fleet, storage, migration, or documentation surfaces. Subagents get the full leaf file, this contract, dependency evidence, applicable AGENTS.md, exact scope, STOP conditions, and return schema. Subagents are mandatory for every plan item; if no slot is free use bounded wait and retry cycles while checking state, never pulling a leaf into primary context. A separate verifier confirms claims against repository state; self-asserted success never counts; an implementer never provides the only review or verdict.
 
-One campaign branch carries every leaf commit sequentially; never create or switch branches; no separate implementation worktree. Prove HEAD and branch match the campaign ledger at every handoff; repair mismatch by returning to the recorded branch without discarding work.
+One campaign branch carries every leaf commit sequentially; never create or switch branches; no separate implementation worktree. Prove HEAD and branch match the campaign ledger at every handoff; repair mismatch by returning to the recorded branch without discarding work. Commit and push every finished iteration. Velnor execution failures are fixed in Velnor on this branch. The sole campaign PR merges to `main` at the authorized safe integration checkpoint; repeated per-task PRs or repeated PR merges are forbidden. An urgent pre-merge Sentry validation may use the exact pushed branch SHA only through an explicitly authorized, immutable signed-APT release over `ssh sentry`, with no checkout/binary copy/local package/direct `dpkg -i`.
 
 All gates run through mise tasks invoked via rtk (rtk mise run <task>): fmt, lint, test (nextest), actionlint, deny, composite check, ci. Never call cargo, clippy, nextest, actionlint, or cargo-deny directly where a task wraps them. Filters ride after the task name; focused scopes the task, never bypasses it. Missing capability means a mise.lock-pinned mise.toml task, never ad-hoc commands. Configure mise before gates.
 
 Per leaf: verify rtk and mise; prove dependencies DONE; drift-check against HEAD; inspect cited symbols; record baseline commit, worktree state, fixture commit, manifest version, baseline scoped tests; reconcile plan versus reality through subagents before implementing; never silently adapt or skip. Execute one step at a time verified through its mise task; retain shortest decisive evidence; use Rust and repository patterns; consult current official docs where required; GitHub runner protocol reads actions/runner first; no strict-capability expansion without operator approval; never weaken the fixture or fake missing Velnor behavior locally.
 
-Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration and fixture gates, whitespace check, scope audit, secret scan, independent diff review; affected gates rerun after fixes; every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push, PR, merge, publish, deploy, or destructive live work only when item and operator authorization demand. Dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
+Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration and fixture gates, whitespace check, scope audit, secret scan, independent diff review; affected gates rerun after fixes; every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push every iteration. After each push, fresh security, performance, goal/acceptance, verifier, and reviewer subagents audit the exact pushed diff. Merge the sole campaign PR to `main` only at the authorized safe integration checkpoint; if an urgent pre-merge Sentry validation is authorized, require exact branch-SHA-to-signed-APT binding, SSH host/user confirmation, exact installed version, health, rollback, and all three lanes (`velnor`, `github`, `both`). Before every retry cancel older pending/in-progress runs and delete only validation-owned stale registrations, prove both clear, then monitor only the new run. Dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
 ```
 
 Repository status and evidence, not chat memory, carry progress across
@@ -146,6 +146,22 @@ Run this loop for every leaf:
 No batch may mark sibling items done. Shared code may unblock siblings, but each
 command task still needs its own focused tests, fixture proof, review, and status
 transition.
+
+## Velnor blocker fast path
+
+When a Velnor execution blocks a plan item, keep the item open and fix the root
+cause in Velnor on the campaign branch. Commit and push the fix, run the fresh
+security/performance/goal/verifier/reviewer audits, and run the focused,
+repository, fixture, and lane gates. A mergeable campaign PR is merged to
+`main` at the one authorized integration point, and the merged SHA is the
+release source. If the PR is temporarily unmergeable but urgent Sentry proof
+is explicitly authorized, publish an immutable signed-APT candidate whose
+source record names the exact branch SHA, install the exact version via
+`ssh sentry`, and capture pre/post state, health, rollback, and lane evidence.
+This exception never permits a checkout, binary, local `.deb`, direct
+`dpkg -i`, or silent branch deployment; the campaign branch must still merge
+later. Internal Velnor failures are fix-and-retry, not `BLOCKED`; use
+`BLOCKED` only for a proven external limit or named approval decision.
 
 ## Execution graph
 

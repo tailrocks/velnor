@@ -183,37 +183,73 @@ pub fn bind_unix(
     // check-then-remove would let a sibling replace the pathname between the
     // metadata check and the unlink, and could destroy an unrelated endpoint.
     let listener = tokio::net::UnixListener::bind(path)?;
+    let bound_socket = socket_identity(path).ok_or_else(|| {
+        std::io::Error::other("bound control socket identity could not be verified")
+    })?;
     let fd = listener.as_raw_fd();
     // SAFETY: `fd` is borrowed from the live listener and the sentinel uid
     // preserves the kernel-assigned owner.
     let chown_result = unsafe { libc::fchown(fd, u32::MAX, group) };
     if chown_result != 0 {
         let error = std::io::Error::last_os_error();
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(error);
     }
     // SAFETY: `fd` is a live Unix listener descriptor.
     if unsafe { libc::fchmod(fd, mode as libc::mode_t) } != 0 {
         let error = std::io::Error::last_os_error();
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(error);
     }
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `stat` points to writable storage of the required size.
     if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
         let error = std::io::Error::last_os_error();
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(error);
     }
     // SAFETY: fstat initialized `stat` on success.
     let stat = unsafe { stat.assume_init() };
     if stat.st_gid != group || u64::from(stat.st_mode) & 0o777 != u64::from(mode) {
-        drop(listener);
+        cleanup_failed_bind(path, listener, bound_socket);
         return Err(std::io::Error::other(
             "bound control socket ownership or mode was not enforced",
         ));
     }
     Ok(listener)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn socket_identity(path: &FsPath) -> Option<SocketIdentity> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    metadata.file_type().is_socket().then(|| SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+/// Remove only the exact socket pathname captured just after bind when
+/// post-bind setup fails. Dropping a Unix listener does not remove its
+/// pathname, so leaving this cleanup to the next daemon start would create a
+/// stale control endpoint. The metadata comparison prevents removing a
+/// replacement socket if the pathname changed after bind.
+fn cleanup_failed_bind(
+    path: &FsPath,
+    listener: tokio::net::UnixListener,
+    identity: SocketIdentity,
+) {
+    drop(listener);
+
+    if socket_identity(path) == Some(identity) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn inspect_directory_chain(path: &FsPath) -> Result<(), std::io::Error> {
@@ -896,6 +932,28 @@ mod tests {
         let error = result.expect_err("a full application bound must shed work");
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.envelope.reason, "control.overloaded");
+    }
+
+    #[tokio::test]
+    async fn failed_bind_cleanup_removes_only_the_bound_socket() {
+        let path = test_socket_path("failed-bind-cleanup");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind test socket");
+        let identity = socket_identity(&path).expect("socket identity");
+
+        cleanup_failed_bind(&path, listener, identity);
+
+        assert!(!path.exists());
+
+        let listener = tokio::net::UnixListener::bind(&path).expect("rebind test socket");
+        let identity = socket_identity(&path).expect("replacement identity");
+        std::fs::remove_file(&path).expect("unlink original path");
+        let replacement = tokio::net::UnixListener::bind(&path).expect("bind replacement socket");
+
+        cleanup_failed_bind(&path, listener, identity);
+
+        assert!(path.exists());
+        drop(replacement);
+        std::fs::remove_file(path).expect("remove replacement socket");
     }
 
     #[tokio::test]

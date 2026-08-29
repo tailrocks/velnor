@@ -678,6 +678,13 @@ fn assess_registry_lookup(lookup: Option<&ListedRunner>, strikes_before: u32) ->
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
     let scope = GitHubScope::parse(&args.url)?;
+    let organization_scope = matches!(scope.kind(), "organization" | "enterprise");
+    if organization_scope && args.pool_name.as_deref().is_none_or(str::is_empty) {
+        bail!(
+            "organization/enterprise JIT registration requires --pool-name or VELNOR_POOL_NAME; refusing implicit Default runner group"
+        );
+    }
+    let configured_pool_name = args.pool_name.clone();
     let agent_name = args.name.unwrap_or_else(default_agent_name);
     let labels = normalize_labels(
         args.labels,
@@ -705,6 +712,9 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         );
     }
     let runner_group_id = match args.pool_name.as_deref() {
+        Some(_) if args.pool_id_pre_resolved => args.pool_id.ok_or_else(|| {
+            anyhow::anyhow!("pre-resolved runner group identity is missing its numeric id")
+        })?,
         Some(_) if args.dry_run && args.pool_id.is_some() => args.pool_id.expect("checked above"),
         Some(pool_name) => {
             let pat = pat.ok_or_else(|| {
@@ -791,6 +801,11 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
                 return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
             }
         };
+        if let Err(error) =
+            validate_jit_runner_identity(&agent_name, &labels, runner_group_id, &runner, &decoded)
+        {
+            return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
+        }
         Some((runner, decoded))
     };
 
@@ -826,7 +841,8 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
             }),
             pool_name: jit_config
                 .as_ref()
-                .and_then(|(_, config)| config.settings.pool_name.clone()),
+                .and_then(|(_, config)| config.settings.pool_name.clone())
+                .or(configured_pool_name),
             agent_id: jit_config
                 .as_ref()
                 .and_then(|(runner, config)| config.settings.agent_id.or(Some(runner.id))),
@@ -996,6 +1012,55 @@ fn resolve_runner_group_id(
         }
     }
     Ok(group.id)
+}
+
+fn validate_jit_runner_identity(
+    requested_name: &str,
+    requested_labels: &[String],
+    requested_id: i64,
+    runner: &crate::protocol::GitHubJitRunner,
+    decoded: &crate::protocol::DecodedJitConfig,
+) -> Result<()> {
+    if runner.runner_group_id.is_some_and(|id| id != requested_id) {
+        bail!(
+            "GitHub JIT response runner group mismatch: requested {requested_id}, returned {:?}",
+            runner.runner_group_id
+        );
+    }
+    if decoded.settings.pool_id != Some(requested_id) {
+        bail!(
+            "GitHub JIT config runner group mismatch: requested {requested_id}, decoded {:?}",
+            decoded.settings.pool_id
+        );
+    }
+    if runner.name != requested_name {
+        bail!(
+            "GitHub JIT response runner name mismatch: requested '{requested_name}', returned '{}'",
+            runner.name
+        );
+    }
+    if decoded.settings.agent_id != Some(runner.id) {
+        bail!(
+            "GitHub JIT config agent id mismatch: response {}, decoded {:?}",
+            runner.id,
+            decoded.settings.agent_id
+        );
+    }
+    if decoded.settings.agent_name.as_deref() != Some(requested_name) {
+        bail!(
+            "GitHub JIT config agent name mismatch: requested '{requested_name}', decoded {:?}",
+            decoded.settings.agent_name
+        );
+    }
+    if !runner.ephemeral || !decoded.settings.ephemeral {
+        bail!("GitHub JIT identity is not ephemeral");
+    }
+    for label in requested_labels {
+        if !runner.labels.iter().any(|returned| returned.name == *label) {
+            bail!("GitHub JIT response omitted requested label '{label}'");
+        }
+    }
+    Ok(())
 }
 
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
@@ -1543,7 +1608,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
             }
             Err(error) => {
                 attempt += 1;
-                let delay = supervised_retry_delay(attempt);
+                let delay = supervised_retry_delay_for_error(attempt, &error);
                 let error_detail = sanitized_retry_error(&error);
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
@@ -1786,6 +1851,13 @@ fn supervised_retry_delay(attempt: u32) -> Duration {
     // Cheap deterministic jitter (no RNG dependency): spread by PID.
     let jitter = (std::process::id() as u64 % 7) * (attempt as u64 % 3);
     Duration::from_secs(capped + jitter)
+}
+
+fn supervised_retry_delay_for_error(attempt: u32, error: &anyhow::Error) -> Duration {
+    let backoff = supervised_retry_delay(attempt);
+    github_api_retry_delay(error)
+        .map(|hint| hint.max(backoff))
+        .unwrap_or(backoff)
 }
 
 /// Per-slot retry backoff: 5s doubling to 10 minutes, with slot-index salt so
@@ -2417,27 +2489,32 @@ async fn resolve_daemon_runner_group_once(args: &DaemonArgs) -> Result<DaemonArg
     if args.url.is_none() {
         return Ok(args.clone());
     }
-    let Some(pool_name) = args.pool_name.as_deref() else {
+    let url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("runner group resolution requires --url"))?;
+    let scope = GitHubScope::parse(url)?;
+    if matches!(scope.kind(), "repository") {
         return Ok(args.clone());
+    };
+    let Some(pool_name) = args.pool_name.as_deref().filter(|name| !name.is_empty()) else {
+        bail!(
+            "organization/enterprise daemon JIT registration requires --pool-name or VELNOR_POOL_NAME; refusing implicit Default runner group"
+        );
     };
     if args.dry_run_registration {
         if args.pool_id.is_none() {
             bail!("--pool-name requires --pool-id with --dry-run-jit-config");
         }
         let mut resolved = args.clone();
-        resolved.pool_name = None;
+        resolved.pool_id_pre_resolved = true;
         return Ok(resolved);
     }
 
-    let url = args
-        .url
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("runner group resolution requires --url"))?;
     let pat = args
         .pat
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("runner group resolution requires a GitHub PAT"))?;
-    let scope = GitHubScope::parse(url)?;
     let groups = RegistrationClient::new()?
         .list_runner_groups(&scope, pat)
         .await?;
@@ -2445,7 +2522,7 @@ async fn resolve_daemon_runner_group_once(args: &DaemonArgs) -> Result<DaemonArg
 
     let mut resolved = args.clone();
     resolved.pool_id = Some(pool_id);
-    resolved.pool_name = None;
+    resolved.pool_id_pre_resolved = true;
     println!(
         "Resolved runner group '{pool_name}' to id {pool_id}; all daemon slots reuse this id."
     );
@@ -3043,6 +3120,7 @@ fn daemon_slot_configure_args(
         replace: false,
         pool_id: args.pool_id,
         pool_name: args.pool_name.clone(),
+        pool_id_pre_resolved: args.pool_id_pre_resolved,
         dry_run: args.dry_run_registration,
         config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
     })
@@ -10565,6 +10643,81 @@ mod tests {
             .contains("accepted groups: Velnor Trusted"));
         assert!(resolve_runner_group_id(&groups, "Velnor Trusted", Some(7)).is_err());
     }
+
+    #[test]
+    fn jit_runner_group_validation_rejects_missing_or_mismatched_identity() {
+        let runner = crate::protocol::GitHubJitRunner {
+            id: 42,
+            name: "velnor-slot-1".into(),
+            os: "linux".into(),
+            status: "offline".into(),
+            busy: false,
+            labels: vec![crate::protocol::GitHubJitRunnerLabel {
+                name: "velnor".into(),
+                kind: Some("custom".into()),
+            }],
+            runner_group_id: None,
+            ephemeral: true,
+        };
+        let mut settings = crate::protocol::DecodedJitRunnerSettings {
+            agent_id: Some(42),
+            agent_name: Some("velnor-slot-1".into()),
+            pool_id: Some(3),
+            pool_name: Some("velnor-trusted".into()),
+            server_url: None,
+            server_url_v2: None,
+            github_url: None,
+            work_folder: None,
+            use_v2_flow: true,
+            ephemeral: true,
+            disable_update: true,
+        };
+        let decoded = crate::protocol::DecodedJitConfig {
+            settings: settings.clone(),
+            credentials: crate::protocol::DecodedJitCredentials {
+                scheme: "OAuth".into(),
+                data: std::collections::BTreeMap::new(),
+            },
+            private_key_pem: String::new(),
+        };
+        assert!(validate_jit_runner_identity(
+            "velnor-slot-1",
+            &["velnor".into()],
+            3,
+            &runner,
+            &decoded,
+        )
+        .is_ok());
+
+        settings.pool_id = None;
+        let decoded_without_pool = crate::protocol::DecodedJitConfig {
+            settings,
+            ..decoded.clone()
+        };
+        let error = validate_jit_runner_identity(
+            "velnor-slot-1",
+            &["velnor".into()],
+            3,
+            &runner,
+            &decoded_without_pool,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("config runner group mismatch"), "{error}");
+
+        let mut wrong_name = runner.clone();
+        wrong_name.name = "other-runner".into();
+        let error = validate_jit_runner_identity(
+            "velnor-slot-1",
+            &["velnor".into()],
+            3,
+            &wrong_name,
+            &decoded,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("runner name mismatch"), "{error}");
+    }
     use crate::action::{
         parse_action_metadata, resolve_action, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };
@@ -10620,6 +10773,20 @@ mod tests {
             "delay grows: {first} -> {second}"
         );
         assert!(huge <= 600 + 14, "cap plus bounded jitter: {huge}");
+    }
+
+    #[test]
+    fn supervised_retry_delay_honors_github_retry_after() {
+        let error = anyhow::Error::from(GitHubApiError {
+            status: 429,
+            action: "list runner groups".into(),
+            body: "rate limited".into(),
+            retry_after_seconds: Some(120),
+            rate_limit_reset_epoch: None,
+            remaining: Some(0),
+        });
+
+        assert!(supervised_retry_delay_for_error(1, &error) >= Duration::from_secs(120));
     }
 
     #[test]
@@ -11597,6 +11764,7 @@ jobs:
             replace: false,
             pool_id: None,
             pool_name: None,
+            pool_id_pre_resolved: false,
             routing_policy_file: None,
             dry_run_registration: false,
             slots,
@@ -11774,13 +11942,30 @@ jobs:
         let resolved = resolve_daemon_runner_group_once(&args).await.unwrap();
 
         assert_eq!(resolved.pool_id, Some(3));
-        assert_eq!(resolved.pool_name, None);
+        assert_eq!(resolved.pool_name.as_deref(), Some("Velnor"));
+        assert!(resolved.pool_id_pre_resolved);
         for slot in 1..=8 {
             let configured =
                 daemon_slot_configure_args(&resolved, Path::new("/config"), slot, 8).unwrap();
             assert_eq!(configured.pool_id, Some(3));
-            assert_eq!(configured.pool_name, None);
+            assert_eq!(configured.pool_name.as_deref(), Some("Velnor"));
+            assert!(configured.pool_id_pre_resolved);
         }
+    }
+
+    #[tokio::test]
+    async fn organization_daemon_requires_named_runner_group() {
+        let mut args = daemon_args(2);
+        args.url = Some("https://github.com/tailrocks".into());
+        args.pool_id = Some(3);
+
+        let error = resolve_daemon_runner_group_once(&args)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("requires --pool-name or VELNOR_POOL_NAME"));
+        assert!(error.contains("refusing implicit Default runner group"));
     }
 
     #[tokio::test]
@@ -11837,6 +12022,7 @@ jobs:
             replace: true,
             pool_id: None,
             pool_name: None,
+            pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
         })
@@ -11852,6 +12038,32 @@ jobs:
         assert!(!stored.settings.ephemeral);
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn configure_organization_refuses_implicit_default_group() {
+        let dir = unique_temp_dir("configure-org-requires-pool-name");
+        let error = configure(ConfigureArgs {
+            url: "https://github.com/tailrocks".into(),
+            pat: None,
+            name: Some("velnor-org".into()),
+            labels: vec!["velnor".into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: false,
+            pool_id: Some(3),
+            pool_name: None,
+            pool_id_pre_resolved: false,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("requires --pool-name or VELNOR_POOL_NAME"));
+        assert!(error.contains("refusing implicit Default runner group"));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]
@@ -11872,6 +12084,7 @@ jobs:
             replace: true,
             pool_id: None,
             pool_name: None,
+            pool_id_pre_resolved: false,
             dry_run: true,
             config_dir: Some(dir.clone()),
         })
