@@ -1369,7 +1369,10 @@ fn start_drain_listener(config_base: PathBuf) {
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(signal) => signal,
                 Err(error) => {
-                    eprintln!("cannot install SIGTERM drain handler: {error:#}");
+                    eprintln!(
+                        "cannot install SIGTERM drain handler: {}",
+                        sanitized_retry_error(&error)
+                    );
                     return;
                 }
             };
@@ -1772,7 +1775,10 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
             if let Err(error) =
                 crate::leftover_disk::reclaim_production_if_hard_pressure_for(backend, percent)
             {
-                eprintln!("leftover-after-Velnor reclaim failed: {error:#}");
+                eprintln!(
+                    "leftover-after-Velnor reclaim failed: {}",
+                    sanitized_retry_error(&error)
+                );
             }
         }
     }
@@ -1923,7 +1929,8 @@ pub(crate) async fn run_daemon_slot(
         if let Some(prewarm_waiter) = prewarm_waiter {
             if let Err(join_error) = prewarm_waiter.await {
                 eprintln!(
-                    "daemon slot-{slot_index} successor JIT prewarm task failed: {join_error:#}"
+                    "daemon slot-{slot_index} successor JIT prewarm task failed: {}",
+                    sanitized_retry_error(&join_error)
                 );
             }
         }
@@ -2240,14 +2247,18 @@ async fn cleanup_failed_daemon_slot(
     let slot_cleanup = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await;
     if let Err(error) = &slot_cleanup {
         eprintln!(
-            "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {error:#}",
-            slot_dir.display()
+            "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {}",
+            slot_dir.display(),
+            sanitized_retry_error(error)
         );
     }
     let successor_cleanup =
         cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await;
     if let Err(error) = &successor_cleanup {
-        eprintln!("daemon slot-{slot_index} cycle {cycle} successor cleanup failed: {error:#}");
+        eprintln!(
+            "daemon slot-{slot_index} cycle {cycle} successor cleanup failed: {}",
+            sanitized_retry_error(error)
+        );
     }
     if let Some(sink) = crate::ops::global() {
         let (reason, detail) = daemon_slot_cleanup_event(
@@ -2541,14 +2552,18 @@ async fn cleanup_configured_daemon_slots(
         let slot_dir = daemon_slot_config_dir(config_base, *slot_index, slots);
         if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
             eprintln!(
-                "cleanup failed for configured daemon slot-{slot_index} at {}: {error:#}",
-                slot_dir.display()
+                "cleanup failed for configured daemon slot-{slot_index} at {}: {}",
+                slot_dir.display(),
+                sanitized_retry_error(&error)
             );
         }
         if let Err(error) =
             cleanup_daemon_slot_successor_jit_config(args, config_base, *slot_index, slots).await
         {
-            eprintln!("cleanup failed for successor daemon slot-{slot_index}: {error:#}");
+            eprintln!(
+                "cleanup failed for successor daemon slot-{slot_index}: {}",
+                sanitized_retry_error(&error)
+            );
         }
     }
 }
@@ -2840,7 +2855,10 @@ fn maybe_startup_host_docker_reclaim_with(
     // matched; scoped to THIS daemon id so co-located daemons are
     // untouched. Best-effort — never blocks startup (velnor#311).
     if let Err(error) = reclaim(daemon_id) {
-        eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
+        eprintln!(
+            "Warning: startup orphan job-environment reclaim failed: {}",
+            sanitized_retry_error(&error)
+        );
     }
 }
 
@@ -3363,7 +3381,10 @@ async fn run_v2(
     .await;
 
     if let Err(error) = &run_result {
-        forensics.lifecycle(&format!("run loop ended with error: {error:#}"));
+        forensics.lifecycle(&format!(
+            "run loop ended with error: {}",
+            sanitized_retry_error(error)
+        ));
     }
 
     match broker.delete_session().await {
@@ -3372,7 +3393,10 @@ async fn run_v2(
             forensics.lifecycle("broker session deleted");
         }
         Err(error) if run_result.is_ok() => {
-            forensics.lifecycle(&format!("broker session delete failed: {error:#}"));
+            forensics.lifecycle(&format!(
+                "broker session delete failed: {}",
+                sanitized_retry_error(&error)
+            ));
             return Err(error).context("delete broker runner session");
         }
         Err(error) => {
