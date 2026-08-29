@@ -984,8 +984,6 @@ impl RegistrationClient {
             match result {
                 Err(e) => {
                     last_err = e.context("send JIT runner config request");
-                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
-                        .await;
                 }
                 Ok(response) => {
                     let status = response.status;
@@ -1002,8 +1000,6 @@ impl RegistrationClient {
                     if matches!(status, 403 | 429) || status == 409 {
                         return Err(last_err);
                     }
-                    self.cleanup_named_jit_orphans(scope, &pat, &request.name)
-                        .await;
                     retry_delay = hint.delay(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -1047,55 +1043,36 @@ impl RegistrationClient {
         }
     }
 
-    async fn cleanup_named_jit_orphans(&self, scope: &GitHubScope, pat: &str, agent_name: &str) {
-        let cleanup = async {
-            let runners = self.list_runners(scope, pat).await?;
-            for runner in runners
-                .iter()
-                .filter(|runner| runner.name.as_deref() == Some(agent_name))
-            {
-                let Some(id) = runner.id else {
-                    continue;
-                };
-                match self.delete_runner(scope, pat, id).await {
-                    Ok(()) => eprintln!(
-                        "deleted uncertain JIT runner '{agent_name}' id {id} before retry"
-                    ),
-                    Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
-                        eprintln!(
-                            "kept busy JIT runner '{agent_name}' id {id} during retry cleanup"
-                        );
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-        match tokio::time::timeout(Duration::from_secs(GITHUB_MAX_TIME_SECS), cleanup).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                eprintln!("JIT retry orphan cleanup failed for '{agent_name}': {error:#}");
-            }
-            Err(_) => {
-                eprintln!("JIT retry orphan cleanup timed out for '{agent_name}'");
-            }
-        }
-    }
-
     pub async fn list_runner_groups(
         &self,
         scope: &GitHubScope,
         pat: &str,
     ) -> Result<Vec<RunnerGroup>> {
         #[derive(Deserialize)]
-        struct Response {
+        struct Page {
+            total_count: Option<u64>,
             runner_groups: Vec<RunnerGroup>,
         }
-        let response: Response = github_json_body(
-            "list runner groups response",
-            github_http_request("GET", scope.runner_groups_url()?.as_str(), pat, None, 30).await?,
-        )?;
-        Ok(response.runner_groups)
+        let base = scope.runner_groups_url()?;
+        let mut all = Vec::new();
+        let mut page_number = 1u32;
+        loop {
+            let mut url = base.clone();
+            url.query_pairs_mut()
+                .append_pair("per_page", "100")
+                .append_pair("page", &page_number.to_string());
+            let page: Page = github_json_body(
+                "list runner groups response",
+                github_http_request("GET", url.as_str(), pat, None, 30).await?,
+            )?;
+            let fetched = page.runner_groups.len();
+            all.extend(page.runner_groups);
+            let total = page.total_count.unwrap_or(all.len() as u64);
+            if fetched < 100 || all.len() as u64 >= total {
+                return Ok(all);
+            }
+            page_number += 1;
+        }
     }
 
     /// Queued (unassigned) jobs in this org/repo whose labels wait on Velnor.
@@ -4627,6 +4604,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_runner_groups_fetches_all_pages() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let first_page: Vec<_> = (1..=100)
+            .map(|id| serde_json::json!({ "id": id, "name": format!("group-{id}") }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 101,
+                "runner_groups": first_page,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total_count": 101,
+                "runner_groups": [{ "id": 101, "name": "velnor-trusted" }],
+            })))
+            .mount(&server)
+            .await;
+
+        let scope = GitHubScope::parse(&format!("{}/tailrocks", server.uri())).unwrap();
+        let groups = RegistrationClient::new()
+            .unwrap()
+            .list_runner_groups(&scope, "test-token")
+            .await
+            .unwrap();
+
+        assert_eq!(groups.len(), 101);
+        assert_eq!(groups.last().unwrap().name, "velnor-trusted");
     }
 
     #[tokio::test]

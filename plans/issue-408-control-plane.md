@@ -1,7 +1,7 @@
 # Issue 408 — Control-plane idle CPU and reconciliation churn
 
 Issue: https://github.com/tailrocks/velnor/issues/408  
-Working branch: `fix/408-control-plane-idle-churn`
+Working branch: `codex/plan-066-operational-history`
 
 This is the execution ledger for the issue. A checkbox is marked `[x]` only
 when current code and a matching test or external artifact prove it. External
@@ -30,16 +30,13 @@ an assigned job. Fixture strengthening/correctness edits are now operator-
 authorized; weakening remains forbidden. No broad Docker prune or
 durability/job isolation tradeoff is allowed.
 
-## Coordination lease — sibling watchdog branch
+## Coordination lease — historical entries
 
-The sibling worktree `velnor-performance`, branch
-`fix/watchdog-registration-deadline`, contains an isolated active-job recovery
-fix at `node/controller.rs` (stale job PID markers must not mask live waiter
-markers). That work owns its controller/test files only. This branch owns
-fixture tooling, fixture dispatch, APT, and Sentry rollout. Do not dispatch the
-fixture, mutate APT, or mutate Sentry from the sibling branch. After the sibling
-commit is pushed, integrate only that focused commit before the active-job gate;
-do not merge its 232-commit branch wholesale.
+Earlier sibling-worktree and branch ownership notes are historical evidence
+only. They are superseded by the active single-campaign directive: all
+remaining issue-408 work, fixture tooling, fixture dispatch, APT, and Sentry
+evidence is implemented and audited on this campaign branch and its sole PR.
+No sibling branch or additional PR is executable.
 
 ## Phase 0 — attribution and budgets
 

@@ -40,7 +40,7 @@ pub struct DaemonArgs {
     pub replace: bool,
     #[arg(long)]
     pub pool_id: Option<i64>,
-    #[arg(long)]
+    #[arg(long, env = "VELNOR_POOL_NAME")]
     pub pool_name: Option<String>,
     #[arg(long)]
     pub routing_policy_file: Option<PathBuf>,

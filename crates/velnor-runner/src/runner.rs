@@ -1855,7 +1855,8 @@ fn supervised_retry_delay(attempt: u32) -> Duration {
 
 fn supervised_retry_delay_for_error(attempt: u32, error: &anyhow::Error) -> Duration {
     let backoff = supervised_retry_delay(attempt);
-    github_api_retry_delay(error)
+    crate::protocol::github_api_quota_status(error)
+        .and_then(|_| github_api_retry_delay(error))
         .map(|hint| hint.max(backoff))
         .unwrap_or(backoff)
 }
@@ -10787,6 +10788,29 @@ mod tests {
         });
 
         assert!(supervised_retry_delay_for_error(1, &error) >= Duration::from_secs(120));
+    }
+
+    #[test]
+    fn supervised_retry_delay_does_not_treat_permission_reset_as_quota_hold() {
+        let error = anyhow::Error::from(GitHubApiError {
+            status: 403,
+            action: "list runner groups".into(),
+            body: "forbidden".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 3600,
+            ),
+            remaining: Some(4999),
+        });
+
+        assert_eq!(
+            supervised_retry_delay_for_error(1, &error),
+            supervised_retry_delay(1)
+        );
     }
 
     #[test]

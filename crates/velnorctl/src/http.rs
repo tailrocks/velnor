@@ -183,9 +183,15 @@ pub fn bind_unix(
     // check-then-remove would let a sibling replace the pathname between the
     // metadata check and the unlink, and could destroy an unrelated endpoint.
     let listener = tokio::net::UnixListener::bind(path)?;
-    let bound_socket = socket_identity(path).ok_or_else(|| {
-        std::io::Error::other("bound control socket identity could not be verified")
-    })?;
+    let bound_socket = match socket_identity(path) {
+        Some(identity) => identity,
+        None => {
+            cleanup_unverified_bind(path, listener);
+            return Err(std::io::Error::other(
+                "bound control socket identity could not be verified",
+            ));
+        }
+    };
     let fd = listener.as_raw_fd();
     // SAFETY: `fd` is borrowed from the live listener and the sentinel uid
     // preserves the kernel-assigned owner.
@@ -248,6 +254,21 @@ fn cleanup_failed_bind(
     drop(listener);
 
     if socket_identity(path) == Some(identity) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Best-effort cleanup when pathname identity could not be captured. The
+/// parent chain was already proven non-writable to untrusted peers, so after
+/// dropping the listener only a socket at the exact path is eligible for
+/// removal; non-socket replacements are never touched.
+fn cleanup_unverified_bind(path: &FsPath, listener: tokio::net::UnixListener) {
+    drop(listener);
+    use std::os::unix::fs::FileTypeExt;
+    if std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_socket())
+    {
         let _ = std::fs::remove_file(path);
     }
 }
