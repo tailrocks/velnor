@@ -40,12 +40,17 @@ const GITHUB_MAX_TIME_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
-const MAX_RESULTS_SERVICE_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_ZIP_MEMBERS: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_ZIP_CENTRAL_DIRECTORY_BYTES: u64 = 64 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_RAW_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
+const RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const RESULTS_ARTIFACT_MAX_UPLOAD_ZIP_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
@@ -4295,6 +4300,12 @@ fn write_artifact_zip_temp_file(
 ) -> Result<(ArtifactTempFile, u64, String)> {
     use std::io::Write;
 
+    ensure_upload_file_count(files.len())?;
+    let mut source_total = 0_u64;
+    for (_, content) in files {
+        source_total = checked_upload_source_add(source_total, content.len() as u64)?;
+    }
+
     let (temp, file) = open_artifact_temp_file(path).context("create artifact zip temp file")?;
     let mut zip = zip::ZipWriter::new(file);
     let method = if store_uncompressed {
@@ -4308,16 +4319,99 @@ fn write_artifact_zip_temp_file(
             .context("zip start_file")?;
         zip.write_all(content).context("zip write")?;
     }
+    finish_artifact_zip(zip, temp)
+}
+
+fn write_artifact_zip_from_paths_temp_file(
+    path: std::path::PathBuf,
+    files: &[ArtifactUploadFile],
+    store_uncompressed: bool,
+) -> Result<(ArtifactTempFile, u64, String)> {
+    use std::io::Read;
+
+    ensure_upload_file_count(files.len())?;
+    let (temp, file) = open_artifact_temp_file(path).context("create artifact zip temp file")?;
+    let mut zip = zip::ZipWriter::new(file);
+    let method = if store_uncompressed {
+        zip::CompressionMethod::Stored
+    } else {
+        zip::CompressionMethod::Deflated
+    };
+    let options = zip::write::FileOptions::<()>::default().compression_method(method);
+    let mut source_total = 0_u64;
+    for source in files {
+        let metadata = std::fs::metadata(&source.source_path)
+            .with_context(|| format!("stat artifact source {}", source.source_path.display()))?;
+        if !metadata.is_file() {
+            bail!(
+                "artifact source {} is not a regular file",
+                source.source_path.display()
+            );
+        }
+        checked_upload_source_add(source_total, metadata.len())?;
+        zip.start_file(&source.archive_path, options)
+            .context("zip start_file")?;
+        let mut input = std::fs::File::open(&source.source_path)
+            .with_context(|| format!("open artifact source {}", source.source_path.display()))?;
+        let remaining = RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES - source_total;
+        let mut limited = (&mut input).take(remaining.saturating_add(1));
+        let copied = std::io::copy(&mut limited, &mut zip)
+            .with_context(|| format!("read artifact source {}", source.source_path.display()))?;
+        if copied > remaining {
+            bail!(
+                "artifact upload source bytes exceed the {}-byte limit; split the artifact into smaller uploads",
+                RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES
+            );
+        }
+        source_total += copied;
+    }
+    finish_artifact_zip(zip, temp)
+}
+
+fn finish_artifact_zip(
+    zip: zip::ZipWriter<std::fs::File>,
+    temp: ArtifactTempFile,
+) -> Result<(ArtifactTempFile, u64, String)> {
     let file = zip.finish().context("zip finish")?;
     file.sync_all().context("sync artifact zip temp file")?;
     let zip_size = file
         .metadata()
         .context("stat artifact zip temp file")?
         .len();
+    ensure_artifact_size_limit(
+        "upload",
+        "ZIP payload",
+        zip_size,
+        RESULTS_ARTIFACT_MAX_UPLOAD_ZIP_BYTES,
+        "split the artifact into smaller uploads",
+    )?;
     drop(file);
 
     let zip_hash = hash_artifact_file(temp.path())?;
     Ok((temp, zip_size, zip_hash))
+}
+
+fn ensure_upload_file_count(count: usize) -> Result<()> {
+    if count > RESULTS_ARTIFACT_MAX_UPLOAD_FILES {
+        bail!(
+            "artifact contains {count} files, exceeding the {}-file upload limit; split it into artifacts",
+            RESULTS_ARTIFACT_MAX_UPLOAD_FILES
+        );
+    }
+    Ok(())
+}
+
+fn checked_upload_source_add(current: u64, additional: u64) -> Result<u64> {
+    let total = current
+        .checked_add(additional)
+        .context("artifact upload source byte count overflowed")?;
+    if total > RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES {
+        bail!(
+            "artifact upload source bytes exceed the {}-byte limit; split the artifact into smaller uploads",
+            RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES
+        );
+    }
+    Ok(total)
 }
 
 fn hash_artifact_file(path: &std::path::Path) -> Result<String> {
@@ -4365,6 +4459,7 @@ fn artifact_create_request(
     Ok(request)
 }
 
+#[derive(Debug)]
 struct ArtifactTempFile(std::path::PathBuf);
 
 impl ArtifactTempFile {
@@ -4413,8 +4508,6 @@ fn results_service_post(
     body: &str,
     operation: &str,
 ) -> Result<String> {
-    use std::io::Read;
-
     let response = client
         .post(url)
         .bearer_auth(token)
@@ -4425,24 +4518,50 @@ fn results_service_post(
         .send()
         .with_context(|| format!("send Results Service {operation}"))?;
     let status = response.status();
+    if !status.is_success() {
+        let mut response = response;
+        let response_body = read_bounded_response_preview(&mut response);
+        bail!(
+            "Results Service {operation}: status={status}, body={}",
+            response_body
+        );
+    }
+    if let Some(content_length) = response.content_length() {
+        ensure_artifact_size_limit(
+            "Results Service",
+            "control response",
+            content_length,
+            RESULTS_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES,
+            "reduce the response size",
+        )?;
+    }
+    let mut response = response;
+    read_bounded_response_body(
+        &mut response,
+        operation,
+        RESULTS_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES,
+    )
+}
+
+fn read_bounded_response_body(
+    reader: &mut impl std::io::Read,
+    operation: &str,
+    limit: u64,
+) -> Result<String> {
+    use std::io::Read;
+
     let mut bytes = Vec::new();
-    let mut limited = response.take(MAX_RESULTS_SERVICE_RESPONSE_BYTES + 1);
+    let mut limited = reader.take(limit.saturating_add(1));
     limited
         .read_to_end(&mut bytes)
         .with_context(|| format!("read Results Service {operation} response"))?;
-    if bytes.len() > usize::try_from(MAX_RESULTS_SERVICE_RESPONSE_BYTES).unwrap_or(usize::MAX) {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
         bail!(
-            "Results Service {operation} response exceeds the {MAX_RESULTS_SERVICE_RESPONSE_BYTES}-byte limit"
+            "Results Service {operation} response exceeds the {limit}-byte limit; reduce the response size"
         );
     }
-    let response_body = String::from_utf8_lossy(&bytes).into_owned();
-    if !status.is_success() {
-        bail!(
-            "Results Service {operation}: status={status}, body={}",
-            sanitize_response_body(&response_body)
-        );
-    }
-    Ok(response_body)
+    String::from_utf8(bytes)
+        .with_context(|| format!("Results Service {operation} response was not UTF-8"))
 }
 
 /// Upload artifact files to GitHub's Results Service (artifact v4 format).
@@ -4457,6 +4576,14 @@ pub struct ArtifactUploadOptions {
     pub retention_days: Option<u8>,
 }
 
+/// A file-backed artifact input. The upload path reads each source in bounded
+/// chunks, so artifact contents do not need to be materialized in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactUploadFile {
+    pub archive_path: String,
+    pub source_path: std::path::PathBuf,
+}
+
 pub fn upload_artifact_blocking(
     results_service_url: &str,
     token: &str,
@@ -4466,6 +4593,48 @@ pub fn upload_artifact_blocking(
     files: &[(String, Vec<u8>)], // (archive path, content)
     options: ArtifactUploadOptions,
 ) -> Result<String> {
+    upload_artifact_with_zip_builder(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        options,
+        |zip_path| write_artifact_zip_temp_file(zip_path, files, options.store_uncompressed),
+    )
+}
+
+pub fn upload_artifact_files_blocking(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    files: &[ArtifactUploadFile],
+    options: ArtifactUploadOptions,
+) -> Result<String> {
+    upload_artifact_with_zip_builder(
+        results_service_url,
+        token,
+        plan_id,
+        job_id,
+        name,
+        options,
+        |zip_path| {
+            write_artifact_zip_from_paths_temp_file(zip_path, files, options.store_uncompressed)
+        },
+    )
+}
+
+fn upload_artifact_with_zip_builder(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    options: ArtifactUploadOptions,
+    build_zip: impl FnOnce(std::path::PathBuf) -> Result<(ArtifactTempFile, u64, String)>,
+) -> Result<String> {
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let results_service_url = validate_known_service_url(
         results_service_url,
@@ -4474,6 +4643,8 @@ pub fn upload_artifact_blocking(
     )?;
     let base = results_service_url.as_str().trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
+    let zip_path = tmp_dir.join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
+    let (zip_path, zip_size, zip_hash) = build_zip(zip_path)?;
 
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -4507,11 +4678,8 @@ pub fn upload_artifact_blocking(
         .to_string();
     let upload_url = validate_signed_blob_url(&upload_url, "artifact upload")?;
 
-    // 2. Stream the zip archive into its mode-0600 temp file, hash that file,
-    // and PUT the same bytes without retaining a second full archive in RAM.
-    let zip_path = tmp_dir.join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
-    let (zip_path, zip_size, zip_hash) =
-        write_artifact_zip_temp_file(zip_path, files, options.store_uncompressed)?;
+    // 2. PUT the prepared mode-0600 temp archive without retaining a second
+    // full archive in RAM.
     let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
     let put_response = client
         .put(upload_url)
@@ -4563,82 +4731,22 @@ pub fn upload_artifact_blocking(
     Ok(artifact_id)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
+pub struct ResultsArtifactFile {
+    pub relative_path: std::path::PathBuf,
+    temp: ArtifactTempFile,
+}
+
+impl ResultsArtifactFile {
+    pub fn path(&self) -> &std::path::Path {
+        self.temp.path()
+    }
+}
+
+#[derive(Debug)]
 pub struct ResultsArtifactDownload {
     pub name: String,
-    pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
-}
-
-trait ArtifactDownloadSink {
-    fn begin_artifact(&mut self, name: &str) -> Result<()>;
-    fn write_file(
-        &mut self,
-        artifact_name: &str,
-        relative: std::path::PathBuf,
-        content: Vec<u8>,
-    ) -> Result<()>;
-}
-
-struct MemoryArtifactDownloadSink {
-    downloads: Vec<ResultsArtifactDownload>,
-}
-
-impl ArtifactDownloadSink for MemoryArtifactDownloadSink {
-    fn begin_artifact(&mut self, name: &str) -> Result<()> {
-        self.downloads.push(ResultsArtifactDownload {
-            name: name.to_owned(),
-            files: Vec::new(),
-        });
-        Ok(())
-    }
-
-    fn write_file(
-        &mut self,
-        artifact_name: &str,
-        relative: std::path::PathBuf,
-        content: Vec<u8>,
-    ) -> Result<()> {
-        let download = self
-            .downloads
-            .last_mut()
-            .filter(|download| download.name == artifact_name)
-            .context("artifact download sink lost current artifact")?;
-        download.files.push((relative, content));
-        Ok(())
-    }
-}
-
-struct DirectoryArtifactDownloadSink<'a> {
-    destination: &'a std::path::Path,
-    merge_multiple: bool,
-    exact_name: &'a str,
-}
-
-impl ArtifactDownloadSink for DirectoryArtifactDownloadSink<'_> {
-    fn begin_artifact(&mut self, _name: &str) -> Result<()> {
-        Ok(())
-    }
-
-    fn write_file(
-        &mut self,
-        artifact_name: &str,
-        relative: std::path::PathBuf,
-        content: Vec<u8>,
-    ) -> Result<()> {
-        let target = if self.merge_multiple || !self.exact_name.is_empty() {
-            self.destination.to_owned()
-        } else {
-            self.destination.join(artifact_name)
-        };
-        let output = target.join(relative);
-        if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create artifact target {}", parent.display()))?;
-        }
-        std::fs::write(&output, content)
-            .with_context(|| format!("write artifact file {}", output.display()))?;
-        Ok(())
-    }
+    pub files: Vec<ResultsArtifactFile>,
 }
 
 fn safe_raw_artifact_path(name: &str) -> Result<std::path::PathBuf> {
@@ -4830,15 +4938,15 @@ fn read_bounded_response_preview(response: &mut impl std::io::Read) -> String {
     sanitize_response_body(&preview)
 }
 
-fn read_zip_entry_bounded(
+fn copy_zip_entry_bounded(
     entry: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
     artifact_name: &str,
     path: &std::path::Path,
     limit: u64,
-) -> Result<Vec<u8>> {
+) -> Result<u64> {
     const BUFFER_BYTES: usize = 64 * 1024;
 
-    let mut content = Vec::new();
     let mut read_total = 0_u64;
     let mut buffer = [0_u8; BUFFER_BYTES];
     loop {
@@ -4856,7 +4964,7 @@ fn read_zip_entry_bounded(
             )
         })?;
         if read == 0 {
-            return Ok(content);
+            return Ok(read_total);
         }
         let read = u64::try_from(read).context("ZIP member read size overflowed")?;
         if read > remaining {
@@ -4865,9 +4973,140 @@ fn read_zip_entry_bounded(
                 path.display()
             );
         }
-        content.extend_from_slice(&buffer[..usize::try_from(read).unwrap_or(buffer.len())]);
+        writer
+            .write_all(&buffer[..usize::try_from(read).unwrap_or(buffer.len())])
+            .with_context(|| {
+                format!(
+                    "write ZIP member '{}' from artifact '{artifact_name}'",
+                    path.display()
+                )
+            })?;
         read_total += read;
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZipCentralDirectoryMetadata {
+    entries: u64,
+    size: u64,
+    offset: u64,
+}
+
+fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    bytes
+        .get(offset..offset.checked_add(2)?)
+        .map(|value| u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset.checked_add(4)?)
+        .map(|value| u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    bytes.get(offset..offset.checked_add(8)?).map(|value| {
+        u64::from_le_bytes([
+            value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+        ])
+    })
+}
+
+fn validate_zip_central_directory(
+    path: &std::path::Path,
+    artifact_name: &str,
+) -> Result<Option<ZipCentralDirectoryMetadata>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
+    const ZIP64_LOCATOR_SIGNATURE: &[u8; 4] = b"PK\x06\x07";
+    const ZIP64_EOCD_SIGNATURE: &[u8; 4] = b"PK\x06\x06";
+    const EOCD_BYTES: u64 = 22;
+    const MAX_ZIP_COMMENT_BYTES: u64 = u16::MAX as u64;
+    const ZIP64_LOCATOR_BYTES: u64 = 20;
+
+    let mut file = std::fs::File::open(path).context("open ZIP for metadata preflight")?;
+    let file_len = file
+        .metadata()
+        .context("stat ZIP for metadata preflight")?
+        .len();
+    if file_len < EOCD_BYTES {
+        return Ok(None);
+    }
+    let tail_len = file_len.min(EOCD_BYTES + MAX_ZIP_COMMENT_BYTES);
+    file.seek(SeekFrom::Start(file_len - tail_len))?;
+    let mut tail = vec![0_u8; usize::try_from(tail_len).context("ZIP tail length overflowed")?];
+    file.read_exact(&mut tail)?;
+    let eocd_offset = tail
+        .windows(EOCD_SIGNATURE.len())
+        .rposition(|window| window == EOCD_SIGNATURE)
+        .map(|offset| file_len - tail_len + u64::try_from(offset).unwrap_or(u64::MAX));
+    let Some(eocd_offset) = eocd_offset else {
+        return Ok(None);
+    };
+    let eocd_index = usize::try_from(eocd_offset - (file_len - tail_len))
+        .context("ZIP EOCD offset overflowed")?;
+    let eocd = tail
+        .get(eocd_index..eocd_index + usize::try_from(EOCD_BYTES).unwrap())
+        .context("truncated ZIP end record")?;
+    let entries16 = le_u16(eocd, 10).context("malformed ZIP entry count")?;
+    let size32 = le_u32(eocd, 12).context("malformed ZIP central-directory size")?;
+    let offset32 = le_u32(eocd, 16).context("malformed ZIP central-directory offset")?;
+
+    let metadata = if entries16 != u16::MAX && size32 != u32::MAX && offset32 != u32::MAX {
+        ZipCentralDirectoryMetadata {
+            entries: u64::from(entries16),
+            size: u64::from(size32),
+            offset: u64::from(offset32),
+        }
+    } else {
+        let locator_offset = eocd_offset
+            .checked_sub(ZIP64_LOCATOR_BYTES)
+            .context("ZIP64 locator offset underflowed")?;
+        file.seek(SeekFrom::Start(locator_offset))?;
+        let mut locator = [0_u8; 20];
+        file.read_exact(&mut locator)?;
+        if &locator[..4] != ZIP64_LOCATOR_SIGNATURE {
+            bail!("artifact '{artifact_name}' has ZIP64 markers but no ZIP64 locator");
+        }
+        let record_offset = le_u64(&locator, 8).context("malformed ZIP64 record offset")?;
+        file.seek(SeekFrom::Start(record_offset))?;
+        let mut record = [0_u8; 56];
+        file.read_exact(&mut record)?;
+        if &record[..4] != ZIP64_EOCD_SIGNATURE {
+            bail!("artifact '{artifact_name}' has an invalid ZIP64 end record");
+        }
+        let record_size = le_u64(&record, 4).context("malformed ZIP64 record size")?;
+        if record_size < 44 {
+            bail!("artifact '{artifact_name}' has a truncated ZIP64 end record");
+        }
+        ZipCentralDirectoryMetadata {
+            entries: le_u64(&record, 32).context("malformed ZIP64 entry count")?,
+            size: le_u64(&record, 40).context("malformed ZIP64 central-directory size")?,
+            offset: le_u64(&record, 48).context("malformed ZIP64 central-directory offset")?,
+        }
+    };
+
+    ensure_artifact_zip_member_limit(
+        artifact_name,
+        usize::try_from(metadata.entries).unwrap_or(usize::MAX),
+        RESULTS_ARTIFACT_MAX_ZIP_MEMBERS,
+    )?;
+    ensure_artifact_size_limit(
+        artifact_name,
+        "ZIP central directory",
+        metadata.size,
+        RESULTS_ARTIFACT_MAX_ZIP_CENTRAL_DIRECTORY_BYTES,
+        "split the artifact into smaller uploads",
+    )?;
+    let directory_end = metadata
+        .offset
+        .checked_add(metadata.size)
+        .context("ZIP central-directory range overflowed")?;
+    if directory_end > file_len || metadata.offset > file_len {
+        bail!("artifact '{artifact_name}' has a central directory outside the ZIP");
+    }
+    Ok(Some(metadata))
 }
 
 /// Download artifacts visible to this workflow run through the Results
@@ -4887,10 +5126,7 @@ pub fn download_artifacts_blocking(
     name: &str,
     pattern: &str,
 ) -> Result<Vec<ResultsArtifactDownload>> {
-    let mut sink = MemoryArtifactDownloadSink {
-        downloads: Vec::new(),
-    };
-    download_artifacts_with_sink(
+    download_artifacts_blocking_in_temp_dir(
         results_service_url,
         token,
         plan_id,
@@ -4898,12 +5134,9 @@ pub fn download_artifacts_blocking(
         name,
         pattern,
         &std::env::temp_dir(),
-        &mut sink,
-    )?;
-    Ok(sink.downloads)
+    )
 }
 
-#[cfg(test)]
 fn download_artifacts_blocking_in_temp_dir(
     results_service_url: &str,
     token: &str,
@@ -4913,63 +5146,6 @@ fn download_artifacts_blocking_in_temp_dir(
     pattern: &str,
     tmp_dir: &std::path::Path,
 ) -> Result<Vec<ResultsArtifactDownload>> {
-    let mut sink = MemoryArtifactDownloadSink {
-        downloads: Vec::new(),
-    };
-    download_artifacts_with_sink(
-        results_service_url,
-        token,
-        plan_id,
-        job_id,
-        name,
-        pattern,
-        tmp_dir,
-        &mut sink,
-    )?;
-    Ok(sink.downloads)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn download_artifacts_to_dir_blocking(
-    results_service_url: &str,
-    token: &str,
-    plan_id: &str,
-    job_id: &str,
-    name: &str,
-    pattern: &str,
-    destination: &std::path::Path,
-    merge_multiple: bool,
-) -> Result<usize> {
-    std::fs::create_dir_all(destination)
-        .with_context(|| format!("create artifact download dir {}", destination.display()))?;
-    let mut sink = DirectoryArtifactDownloadSink {
-        destination,
-        merge_multiple,
-        exact_name: name,
-    };
-    download_artifacts_with_sink(
-        results_service_url,
-        token,
-        plan_id,
-        job_id,
-        name,
-        pattern,
-        &std::env::temp_dir(),
-        &mut sink,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
-    results_service_url: &str,
-    token: &str,
-    plan_id: &str,
-    job_id: &str,
-    name: &str,
-    pattern: &str,
-    tmp_dir: &std::path::Path,
-    sink: &mut S,
-) -> Result<usize> {
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let results_service_url = validate_known_service_url(
         results_service_url,
@@ -5005,8 +5181,15 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
         .get("artifacts")
         .and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
-        .unwrap_or_default();
-    let mut selected_count = 0_usize;
+        .unwrap_or(&[]);
+    if artifacts.len() > RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS {
+        bail!(
+            "Results Service listed {} artifacts, exceeding the {}-artifact limit; narrow the workflow scope",
+            artifacts.len(),
+            RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS
+        );
+    }
+    let mut downloads = Vec::new();
     let mut total_returned_bytes = 0_u64;
     for artifact in artifacts {
         let Some(artifact_name) = artifact
@@ -5028,7 +5211,6 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
         if !selected {
             continue;
         }
-        sink.begin_artifact(artifact_name)?;
         let artifact_plan = artifact
             .get("workflow_run_backend_id")
             .or_else(|| artifact.get("workflowRunBackendId"))
@@ -5100,6 +5282,8 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
         )
         .context("write downloaded artifact zip")?;
         drop(output_file);
+        let is_zip = artifact_response_is_zip(content_type.as_deref(), signed_url.as_str());
+        validate_zip_central_directory(artifact_path.path(), artifact_name)?;
         let archive_file = std::fs::File::open(artifact_path.path())?;
         let mut archive = match zip::ZipArchive::new(archive_file) {
             Ok(archive) => archive,
@@ -5109,7 +5293,7 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
                 // their bytes under the artifact name; never silently drop a
                 // selected artifact. A ZIP content type with invalid bytes is
                 // still a protocol failure.
-                if artifact_response_is_zip(content_type.as_deref(), signed_url.as_str()) {
+                if is_zip {
                     bail!("artifact '{artifact_name}' is not a valid ZIP archive: {err}");
                 }
                 let raw_size = std::fs::metadata(artifact_path.path())
@@ -5130,13 +5314,13 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
                     RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
                     "narrow the artifact name or pattern selection",
                 )?;
-                let raw = std::fs::read(artifact_path.path()).context("read raw artifact")?;
-                sink.write_file(
-                    artifact_name,
-                    raw_artifact_filename(&response_headers, artifact_name)?,
-                    raw,
-                )?;
-                selected_count += 1;
+                downloads.push(ResultsArtifactDownload {
+                    name: artifact_name.to_string(),
+                    files: vec![ResultsArtifactFile {
+                        relative_path: raw_artifact_filename(&response_headers, artifact_name)?,
+                        temp: artifact_path,
+                    }],
+                });
                 continue;
             }
         };
@@ -5145,6 +5329,7 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
             archive.len(),
             RESULTS_ARTIFACT_MAX_ZIP_MEMBERS,
         )?;
+        let mut files = Vec::new();
         let mut zip_uncompressed_bytes = 0_u64;
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
@@ -5174,10 +5359,22 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
             let extraction_allowance = (RESULTS_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES
                 - zip_uncompressed_bytes)
                 .min(RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES - total_returned_bytes);
-            let content =
-                read_zip_entry_bounded(&mut entry, artifact_name, &path, extraction_allowance)?;
-            let content_size = u64::try_from(content.len())
-                .context("ZIP member content length does not fit u64")?;
+            let member_path = tmp_dir.join(format!(
+                "velnor-artifact-member-{}.tmp",
+                uuid::Uuid::new_v4()
+            ));
+            let (member_temp, mut member_file) =
+                open_artifact_temp_file(member_path).context("create extracted artifact file")?;
+            let content_size = copy_zip_entry_bounded(
+                &mut entry,
+                &mut member_file,
+                artifact_name,
+                &path,
+                extraction_allowance,
+            )?;
+            member_file
+                .sync_all()
+                .context("sync extracted artifact file")?;
             zip_uncompressed_bytes = checked_artifact_size_add(
                 artifact_name,
                 "ZIP uncompressed payload",
@@ -5194,11 +5391,17 @@ fn download_artifacts_with_sink<S: ArtifactDownloadSink>(
                 RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
                 "narrow the artifact name or pattern selection",
             )?;
-            sink.write_file(artifact_name, path, content)?;
+            files.push(ResultsArtifactFile {
+                relative_path: path,
+                temp: member_temp,
+            });
         }
-        selected_count += 1;
+        downloads.push(ResultsArtifactDownload {
+            name: artifact_name.to_string(),
+            files,
+        });
     }
-    Ok(selected_count)
+    Ok(downloads)
 }
 
 #[cfg(test)]
@@ -5463,6 +5666,33 @@ mod tests {
     }
 
     #[test]
+    fn artifact_path_writer_streams_source_into_zip() {
+        let source_path = std::env::temp_dir().join(format!(
+            "velnor-artifact-source-{}.bin",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&source_path, b"streamed artifact\n").unwrap();
+        let zip_path = std::env::temp_dir().join(format!(
+            "velnor-artifact-path-writer-{}.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let source = ArtifactUploadFile {
+            archive_path: "dist/output.txt".to_string(),
+            source_path: source_path.clone(),
+        };
+        let (zip_temp, _, _) =
+            write_artifact_zip_from_paths_temp_file(zip_path, &[source], false).unwrap();
+        let bytes = std::fs::read(zip_temp.path()).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut entry = archive.by_name("dist/output.txt").unwrap();
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut content).unwrap();
+        assert_eq!(content, "streamed artifact\n");
+        drop(zip_temp);
+        std::fs::remove_file(source_path).unwrap();
+    }
+
+    #[test]
     fn artifact_download_response_bound_stops_before_writing_excess_bytes() {
         let mut response = std::io::Cursor::new(b"12345".to_vec());
         let mut output = Vec::new();
@@ -5475,11 +5705,51 @@ mod tests {
     }
 
     #[test]
+    fn results_service_control_response_bound_rejects_chunked_excess() {
+        let mut response = std::io::Cursor::new(b"12345".to_vec());
+        let error = read_bounded_response_body(&mut response, "ListArtifacts", 4).unwrap_err();
+
+        assert!(error.to_string().contains("ListArtifacts"), "{error:#}");
+        assert!(error.to_string().contains("4-byte limit"), "{error:#}");
+    }
+
+    #[test]
+    fn zip_metadata_preflight_rejects_excess_zip64_members_before_parser() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-artifact-zip64-preflight-{}.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let mut zip64_end = [0_u8; 56];
+        zip64_end[..4].copy_from_slice(b"PK\x06\x06");
+        zip64_end[4..12].copy_from_slice(&44_u64.to_le_bytes());
+        zip64_end[32..40].copy_from_slice(&100_001_u64.to_le_bytes());
+        let mut locator = [0_u8; 20];
+        locator[..4].copy_from_slice(b"PK\x06\x07");
+        locator[8..16].copy_from_slice(&0_u64.to_le_bytes());
+        locator[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        let mut eocd = [0_u8; 22];
+        eocd[..4].copy_from_slice(b"PK\x05\x06");
+        eocd[10..12].copy_from_slice(&u16::MAX.to_le_bytes());
+        eocd[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        eocd[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&zip64_end);
+        bytes.extend_from_slice(&locator);
+        bytes.extend_from_slice(&eocd);
+        let temp = write_artifact_temp_file(path, &bytes).unwrap();
+
+        let error = validate_zip_central_directory(temp.path(), "release").unwrap_err();
+        assert!(error.to_string().contains("100001"), "{error:#}");
+    }
+
+    #[test]
     fn artifact_zip_entry_bound_rejects_excess_uncompressed_bytes() {
         let mut entry = std::io::Cursor::new(b"12345".to_vec());
+        let mut output = Vec::new();
 
-        let error = read_zip_entry_bounded(
+        let error = copy_zip_entry_bounded(
             &mut entry,
+            &mut output,
             "release",
             std::path::Path::new("dist/output.bin"),
             4,
@@ -5630,6 +5900,75 @@ mod tests {
         let finalize = String::from_utf8_lossy(&requests[2]);
         assert!(finalize.contains("\"hash\":{"));
         assert!(finalize.contains("sha256:"));
+    }
+
+    #[test]
+    fn artifact_upload_preparation_failure_sends_no_create_request() {
+        use std::io::{ErrorKind, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server_base = base.clone();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests += 1;
+                        let mut request = [0_u8; 4096];
+                        let _ = stream.read(&mut request);
+                        let body = serde_json::json!({
+                            "ok": true,
+                            "signed_upload_url": format!("{server_base}/upload")
+                        })
+                        .to_string();
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .unwrap();
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if stop_rx.recv_timeout(Duration::from_millis(10)).is_ok() {
+                            break;
+                        }
+                    }
+                    Err(error) => panic!("artifact test server failed: {error}"),
+                }
+            }
+            requests
+        });
+
+        let missing_source = std::env::temp_dir().join(format!(
+            "velnor-missing-artifact-source-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let error = upload_artifact_files_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "job",
+            "release",
+            &[ArtifactUploadFile {
+                archive_path: "dist/output.txt".to_string(),
+                source_path: missing_source,
+            }],
+            ArtifactUploadOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("stat artifact source"),
+            "{error:#}"
+        );
+
+        stop_tx.send(()).unwrap();
+        assert_eq!(server.join().unwrap(), 0);
     }
 
     #[test]
@@ -5976,12 +6315,14 @@ mod tests {
         .unwrap();
         assert_eq!(downloads.len(), 1);
         assert_eq!(downloads[0].name, "release-linux");
+        assert_eq!(downloads[0].files.len(), 1);
         assert_eq!(
-            downloads[0].files,
-            vec![(
-                std::path::PathBuf::from("dist/output.txt"),
-                b"artifact-v4\n".to_vec()
-            )]
+            downloads[0].files[0].relative_path,
+            std::path::PathBuf::from("dist/output.txt")
+        );
+        assert_eq!(
+            std::fs::read(downloads[0].files[0].path()).unwrap(),
+            b"artifact-v4\n"
         );
         let requests = server.join().unwrap();
         assert!(requests[0].contains("ArtifactService/ListArtifacts"));
@@ -6155,20 +6496,24 @@ mod tests {
         server.join().unwrap();
         assert_eq!(downloads.len(), 2);
         assert_eq!(downloads[0].name, "release-linux");
+        assert_eq!(downloads[0].files.len(), 1);
         assert_eq!(
-            downloads[0].files,
-            vec![(
-                std::path::PathBuf::from("dist/output.txt"),
-                b"artifact-v4\n".to_vec()
-            )]
+            downloads[0].files[0].relative_path,
+            std::path::PathBuf::from("dist/output.txt")
+        );
+        assert_eq!(
+            std::fs::read(downloads[0].files[0].path()).unwrap(),
+            b"artifact-v4\n"
         );
         assert_eq!(downloads[1].name, ".dockerbuild");
+        assert_eq!(downloads[1].files.len(), 1);
         assert_eq!(
-            downloads[1].files,
-            vec![(
-                std::path::PathBuf::from(".dockerbuild"),
-                expected_gzip_bytes
-            )]
+            downloads[1].files[0].relative_path,
+            std::path::PathBuf::from(".dockerbuild")
+        );
+        assert_eq!(
+            std::fs::read(downloads[1].files[0].path()).unwrap(),
+            expected_gzip_bytes
         );
     }
 
