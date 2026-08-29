@@ -110,8 +110,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/sccache-build \
     --mount=type=secret,id=mise_github_token,required=true \
     mkdir -p /opt/mise/bin && \
+    : > /tmp/mise-empty.toml && \
     cd /opt/mise/config && \
-    export MISE_GLOBAL_CONFIG_FILE=/dev/null && \
+    export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml && \
     # Baked bootstrap of the mise binary at the fleet-pinned version. This is
     # the read-only /opt/mise/bin bootstrap; runtime never rewrites it.
     curl -fsSL https://mise.run | MISE_VERSION="v2026.8.11" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
