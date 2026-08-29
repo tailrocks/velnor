@@ -48,10 +48,12 @@ three APT metadata artifacts—`Release`, clearsigned `InRelease`, and detached
 `Release.gpg`—with matching metadata bytes and checksums. If, and only if, a
 failed Velnor lane must build Velnor itself and urgent Sentry validation is
 required before the sole PR can merge, an explicitly authorized chicken-egg
-bootstrap may build one Debian package from the exact pushed campaign SHA.
+bootstrap may build one Debian package from the exact pushed campaign SHA only
+after verifying that the remote campaign branch tip equals that SHA.
 Bind the package version and source provenance to that SHA; record the
 package SHA-256 before and after transfer; transfer only that `.deb` via
-noninteractive `ssh sentry`; and publish it into the signed `velnor-apt`
+`ssh -o BatchMode=yes sentry` using a pinned and verified Sentry host identity
+and fail-closed authentication; and publish it into the signed `velnor-apt`
 repository through the authorized host/Sentry release path. Install the exact
 version through the configured HTTPS APT source using the current exclusive
 `flock` transaction lock, never `dpkg -i`. Verify the installed package/source

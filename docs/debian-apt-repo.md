@@ -238,22 +238,26 @@ one Debian package is built on this host from the exact pushed campaign SHA.
 When fresh evidence proves the Velnor lane is failed or unavailable and that
 failure prevents building Velnor itself, an explicitly authorized operator may
 temporarily build exactly one Debian package on this host from the exact pushed
-campaign SHA. This is incident recovery, not a second normal release mechanism:
+campaign SHA only after verifying that the remote campaign branch tip equals that
+SHA. This is incident recovery, not a second normal release mechanism:
 
-1. Build from a clean checkout at that exact SHA. Before transfer, publication,
-   or installation, create an immutable signed source record binding the exact
-   source SHA, package name, package version, architecture, package SHA-256,
-   and exact `velnor-apt` repository coordinate (HTTPS origin, suite,
-   component, and package path). Record the authorization, provenance, package
-   path, and authorized signing-key fingerprint; verify the record signature and
-   every binding before proceeding. Sign the repository metadata with the
-   authorized release key.
-2. Snapshot the current Sentry state and verify the Sentry host fingerprint.
+1. Before building, verify that the remote campaign branch tip equals the exact
+   pushed campaign SHA; abort if the remote ref is unavailable or the SHA does
+   not match. Then build from a clean checkout at that exact SHA. Before
+   transfer, publication, or installation, create an immutable signed source
+   record binding the exact source SHA, package name, package version,
+   architecture, package SHA-256, and exact `velnor-apt` repository coordinate
+   (HTTPS origin, suite, component, and package path). Record the authorization,
+   provenance, package path, and authorized signing-key fingerprint; verify the
+   record signature and every binding before proceeding. Sign the repository
+   metadata with the authorized release key.
+2. Snapshot the current Sentry state. Verify the pinned Sentry host identity
+   against its expected fingerprint, and require fail-closed authentication.
    Verify the signed source record and package SHA-256 before transfer, transfer
-   only that Debian package to the authorized staging path through noninteractive
-   `ssh sentry`, and verify the same SHA-256 again after transfer. Do not transfer
-   source, a checkout, a raw binary, or any other artifact; abort on any identity
-   or digest mismatch.
+   only that Debian package to the authorized staging path via
+   `ssh -o BatchMode=yes sentry`, and verify the same SHA-256 again after
+   transfer. Do not transfer source, a checkout, a raw binary, or any other
+   artifact; abort on any identity or digest mismatch.
 3. Publish that exact package into the signed `velnor-apt` repository through
    the authorized host/Sentry release path at the exact coordinate in the signed
    source record. Verify the record signature and binding, package checksum,
