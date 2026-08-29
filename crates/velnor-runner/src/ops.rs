@@ -521,6 +521,7 @@ impl OpsSink {
         let mut lease_guard = RetentionLeaseGuard::new(&self.store, lease);
 
         let mut committed = false;
+        let mut maintenance_retry = false;
         let completion;
         let prune_result = {
             #[cfg(test)]
@@ -541,7 +542,17 @@ impl OpsSink {
         match prune_result {
             Ok(report) => {
                 committed = true;
+                maintenance_retry = report.maintenance_deferred;
                 completion = completion_now();
+                if maintenance_retry {
+                    self.record_forensic_failure(
+                        "store.retention-maintenance-deferred",
+                        report
+                            .maintenance_reason
+                            .as_deref()
+                            .unwrap_or("physical retention maintenance deferred"),
+                    );
+                }
                 self.publish_prune_report(report);
             }
             Err(failure) if failure.is_post_commit() => {
@@ -585,7 +596,16 @@ impl OpsSink {
             // Completion is recorded before release. A release/reporting
             // failure must not cause already durable deletions to run again.
             self.last_prune_unix.store(completion, Ordering::Release);
-            self.clear_prune_retry();
+            if maintenance_retry {
+                // Deletion is already durable; retry only the bounded
+                // retention/maintenance cycle on its normal backoff. The
+                // explicit status prevents a physical failure from becoming
+                // silent, while never treating committed deletion as rolled
+                // back work.
+                self.schedule_prune_retry(completion);
+            } else {
+                self.clear_prune_retry();
+            }
         }
         if let Err(error) = lease_guard.release() {
             self.absorb("store.prune-lease-release", &error.to_string());
@@ -605,13 +625,21 @@ impl OpsSink {
         // Publish the coherent post-prune report so retention stays
         // observable from logs without a second full accounting scan.
         println!(
-            "forensics.ops event=retention deleted_jobs={} deleted_events={} deleted_transitions={} db_bytes={} wal_bytes={} total_bytes={} oldest_retained_at={}",
+            "forensics.ops event=retention deleted_jobs={} deleted_events={} deleted_transitions={} db_bytes={} wal_bytes={} total_bytes={} free_bytes={} reserve_bytes={} reserve_violation={} physical_budget_status={:?} checkpoint_attempted={} checkpoint_busy_frames={} checkpoint_log_frames={} checkpointed_frames={} oldest_retained_at={}",
             report.deleted_jobs,
             report.deleted_events,
             report.deleted_transitions,
             report.database_bytes,
             report.wal_bytes,
             report.total_bytes,
+            report.free_bytes.unwrap_or(0),
+            report.reserve_bytes,
+            report.reserve_violation,
+            report.physical_budget_status,
+            report.checkpoint.attempted,
+            report.checkpoint.busy_frames,
+            report.checkpoint.log_frames,
+            report.checkpoint.checkpointed_frames,
             report.oldest_retained_at.as_deref().unwrap_or("none"),
         );
     }

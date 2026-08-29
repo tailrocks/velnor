@@ -28,7 +28,11 @@ pub use records::{
     LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
     SlotRow, StoredEvent, Transition,
 };
-pub use retention::{PrunePhase, PruneReport, RetentionBudget, RetentionLease, StoreAccounting};
+pub use retention::{
+    PhysicalBudgetStatus, PrunePhase, PruneReport, RetentionBudget, RetentionLease,
+    RetentionMaintenanceBudget, RetentionMaintenanceReport, StoreAccounting, WalCheckpointStatus,
+    DEFAULT_RETENTION_RESERVE_BYTES,
+};
 
 /// Default operational database location; created only by deployment, never
 /// implicitly by the daemon when its parent directory is absent.
@@ -206,7 +210,9 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
     }
     conn.execute_batch(
         "PRAGMA foreign_keys=ON;
-         PRAGMA synchronous=NORMAL;",
+         PRAGMA synchronous=NORMAL;
+         PRAGMA wal_autocheckpoint=1000;
+         PRAGMA journal_size_limit=67108864;",
     )?;
     Ok(())
 }

@@ -1,8 +1,8 @@
 //! Bounded retention and database accounting (Plan 066 step 5).
 //!
-//! Pruning writes run inside one immediate transaction so a crash before its
-//! commit leaves the previous state fully intact. Post-commit maintenance is
-//! independently reported and cannot roll back those writes. Age comparisons
+//! Pruning writes run inside bounded immediate transactions so a crash before
+//! any commit leaves the previous state fully intact. Post-commit maintenance
+//! is independently reported and cannot roll back those writes. Age comparisons
 //! happen in Rust through
 //! [`velnor_model::Timestamp::parse`] rather than SQL string comparison,
 //! because variable-fraction RFC 3339 renderings do not order
@@ -12,6 +12,7 @@
 //! `retention_state` singleton for accounting.
 
 use std::collections::BTreeSet;
+use std::ffi::CString;
 use std::path::Path;
 use std::time::Duration;
 
@@ -34,13 +35,109 @@ pub struct RetentionBudget {
     pub max_terminal_job_age: Option<Duration>,
     /// Keep at most this many terminal jobs overall (newest first).
     pub max_terminal_job_rows: u64,
-    /// Logical pressure threshold for deleting oldest prunable rows. This is
-    /// not a physical byte ceiling: the job path defers WAL checkpointing, so
-    /// SQLite may retain file bytes above this value until bounded maintenance
-    /// runs separately.
+    /// Physical pressure threshold for the database plus WAL. Retention first
+    /// applies bounded logical deletion; the separate maintenance phase then
+    /// attempts to prove this physical target.
     pub max_database_bytes: u64,
     /// Rows examined/deleted per batch; bounds transaction work per step.
     pub batch_size: u64,
+}
+
+/// Conservative filesystem reserve used when the caller does not provide a
+/// more specific maintenance policy. This matches the runner's hard reserve
+/// contract and is deliberately absolute; percentages alone are unsafe on
+/// both small and large filesystems.
+pub const DEFAULT_RETENTION_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Bounds for the explicit post-prune maintenance operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionMaintenanceBudget {
+    /// Physical main-database plus WAL target. Zero disables this check.
+    pub max_database_bytes: u64,
+    /// Minimum available bytes on the filesystem containing the database.
+    pub min_free_bytes: u64,
+    /// Maximum PASSIVE checkpoint calls in one operation.
+    pub max_checkpoint_attempts: u8,
+    /// Maximum incremental-vacuum pages in one operation.
+    pub max_vacuum_pages: u64,
+}
+
+impl Default for RetentionMaintenanceBudget {
+    fn default() -> Self {
+        Self {
+            max_database_bytes: RetentionBudget::default().max_database_bytes,
+            min_free_bytes: DEFAULT_RETENTION_RESERVE_BYTES,
+            max_checkpoint_attempts: 1,
+            max_vacuum_pages: 500,
+        }
+    }
+}
+
+impl From<&RetentionBudget> for RetentionMaintenanceBudget {
+    fn from(budget: &RetentionBudget) -> Self {
+        Self {
+            max_database_bytes: budget.max_database_bytes,
+            ..Self::default()
+        }
+    }
+}
+
+/// Machine-readable result of one bounded WAL checkpoint attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalCheckpointStatus {
+    pub attempted: bool,
+    pub busy_frames: u64,
+    pub log_frames: u64,
+    pub checkpointed_frames: u64,
+}
+
+impl WalCheckpointStatus {
+    fn not_attempted() -> Self {
+        Self {
+            attempted: false,
+            busy_frames: 0,
+            log_frames: 0,
+            checkpointed_frames: 0,
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.attempted && self.busy_frames == 0 && self.checkpointed_frames >= self.log_frames
+    }
+}
+
+/// Physical-budget evaluation. `Unmeasurable` is intentionally distinct from
+/// `WithinBudget`; no caller may mistake a failed statvfs probe for proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalBudgetStatus {
+    Disabled,
+    WithinBudget,
+    Exceeded,
+    ReserveViolation,
+    Deferred,
+    Unmeasurable,
+    Unconfigured,
+}
+
+/// Result of the explicit bounded post-prune maintenance operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionMaintenanceReport {
+    pub database_bytes_before: u64,
+    pub wal_bytes_before: u64,
+    pub total_bytes_before: u64,
+    pub database_bytes_after: u64,
+    pub wal_bytes_after: u64,
+    pub total_bytes_after: u64,
+    pub free_bytes_before: Option<u64>,
+    pub free_bytes_after: Option<u64>,
+    pub reserve_bytes: u64,
+    pub reserve_violation: bool,
+    pub physical_budget_status: PhysicalBudgetStatus,
+    pub checkpoint: WalCheckpointStatus,
+    pub vacuum_pages_attempted: u64,
+    pub vacuum_pages_reclaimed: u64,
+    pub maintenance_deferred: bool,
+    pub maintenance_reason: Option<String>,
 }
 
 /// Opaque capability authorizing one retention owner and fencing generation.
@@ -80,6 +177,7 @@ const MIN_EFFECTIVE_BATCH_SIZE: u64 = 1;
 const MAX_PRUNE_BATCH_SIZE: u64 = 64;
 const MIN_PRUNE_BATCHES: u64 = 8;
 const MAX_PRUNE_BATCHES: u64 = 8;
+const MAX_MAINTENANCE_VACUUM_PAGES: u64 = 500;
 /// Configured defaults are valid, but an unbounded newest-N query is not. A
 /// caller above this explicit supported ceiling gets a typed error instead of
 /// silently disabling row retention. The query returns one row and is backed
@@ -111,6 +209,12 @@ pub struct PruneReport {
     pub database_bytes: u64,
     pub wal_bytes: u64,
     pub total_bytes: u64,
+    pub free_bytes: Option<u64>,
+    pub reserve_bytes: u64,
+    pub reserve_violation: bool,
+    pub physical_budget_status: PhysicalBudgetStatus,
+    pub checkpoint: WalCheckpointStatus,
+    pub vacuum_pages_reclaimed: u64,
     pub oldest_retained_at: Option<String>,
     /// False means the oldest timestamp is only a bounded observation and is
     /// intentionally omitted from `oldest_retained_at`.
@@ -168,15 +272,6 @@ impl PruneFailure {
     }
 }
 
-/// Maintenance status after a prune commit. SQLite does not expose a bounded
-/// WAL-checkpoint frame count, so the job-path policy defers checkpointing and
-/// reports that fact instead of running potentially unbounded work.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MaintenanceStatus {
-    deferred: bool,
-    reason: Option<String>,
-}
-
 /// Point-in-time accounting snapshot published by the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreAccounting {
@@ -186,6 +281,11 @@ pub struct StoreAccounting {
     pub database_bytes: u64,
     pub wal_bytes: u64,
     pub total_bytes: u64,
+    pub free_bytes: Option<u64>,
+    pub reserve_bytes: u64,
+    pub reserve_violation: bool,
+    pub physical_budget_status: PhysicalBudgetStatus,
+    pub checkpoint: WalCheckpointStatus,
     pub oldest_retained_at: Option<String>,
     /// False means the oldest timestamp is only a bounded observation and is
     /// intentionally omitted from `oldest_retained_at`.
@@ -207,12 +307,12 @@ struct RetentionSnapshot {
     database_bytes: u64,
     wal_bytes: u64,
     total_bytes: u64,
+    free_bytes: Option<u64>,
     oldest_retained_at: Option<String>,
     oldest_retained_at_complete: bool,
     last_prune_at: Option<String>,
     last_deleted_events: u64,
     last_deleted_jobs: u64,
-    maintenance_status: MaintenanceStatus,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -536,6 +636,18 @@ impl Store {
         self.prune_history_outcome_inner(budget, None, lease)
     }
 
+    /// Run only the bounded physical maintenance phase under an already
+    /// acquired lease. This is intentionally separate from job persistence:
+    /// callers may schedule it independently and a deferred/failed
+    /// checkpoint never makes durable deletion look uncommitted.
+    pub fn run_bounded_maintenance_with_lease(
+        &self,
+        budget: &RetentionMaintenanceBudget,
+        lease: &RetentionLease,
+    ) -> StoreResult<RetentionMaintenanceReport> {
+        self.maintain_after_prune(budget, lease)
+    }
+
     #[cfg(test)]
     pub(crate) fn prune_history_inner(
         &self,
@@ -710,30 +822,41 @@ impl Store {
             hook(PrunePhase::AfterJobPrune).map_err(PruneFailure::PostCommit)?;
         }
 
-        // Maintenance uses a separate zero-wait connection. Checkpointing is
-        // intentionally deferred because SQLite cannot bound its frame work.
-        let snapshot = self.maintain_after_prune(budget, lease).map_err(|error| {
-            if error.envelope.reason == "store.retention.lease.lost" {
-                PruneFailure::LeaseLost {
-                    committed: true,
-                    error,
+        // Physical maintenance is a separate bounded phase. It still runs in
+        // the retention worker, never in the job completion transaction.
+        let maintenance = self
+            .maintain_after_prune(&RetentionMaintenanceBudget::from(budget), lease)
+            .map_err(|error| {
+                if error.envelope.reason == "store.retention.lease.lost" {
+                    PruneFailure::LeaseLost {
+                        committed: true,
+                        error,
+                    }
+                } else {
+                    PruneFailure::PostCommit(error)
                 }
-            } else {
-                PruneFailure::PostCommit(error)
-            }
-        })?;
+            })?;
+        let snapshot = self
+            .read_snapshot_for_maintenance()
+            .map_err(PruneFailure::PostCommit)?;
 
         Ok(PruneReport {
             deleted_events: totals.deleted_events,
             deleted_jobs: totals.deleted_jobs,
             deleted_transitions: totals.deleted_transitions,
-            database_bytes: snapshot.database_bytes,
-            wal_bytes: snapshot.wal_bytes,
-            total_bytes: snapshot.total_bytes,
+            database_bytes: maintenance.database_bytes_after,
+            wal_bytes: maintenance.wal_bytes_after,
+            total_bytes: maintenance.total_bytes_after,
+            free_bytes: maintenance.free_bytes_after,
+            reserve_bytes: maintenance.reserve_bytes,
+            reserve_violation: maintenance.reserve_violation,
+            physical_budget_status: maintenance.physical_budget_status,
+            checkpoint: maintenance.checkpoint,
+            vacuum_pages_reclaimed: maintenance.vacuum_pages_reclaimed,
             oldest_retained_at: snapshot.oldest_retained_at,
             oldest_retained_at_complete: snapshot.oldest_retained_at_complete,
-            maintenance_deferred: snapshot.maintenance_status.deferred,
-            maintenance_reason: snapshot.maintenance_status.reason,
+            maintenance_deferred: maintenance.maintenance_deferred,
+            maintenance_reason: maintenance.maintenance_reason,
         })
     }
 
@@ -826,46 +949,135 @@ impl Store {
         Ok(batch)
     }
 
+    fn read_snapshot_for_maintenance(&self) -> StoreResult<RetentionSnapshot> {
+        let mut connection = self
+            .open_maintenance_connection()
+            .map_err(|error| maintenance_error("open accounting connection", error))?;
+        read_retention_snapshot(&mut connection, &self.path)
+    }
+
     fn maintain_after_prune(
         &self,
-        budget: &RetentionBudget,
+        budget: &RetentionMaintenanceBudget,
         lease: &RetentionLease,
-    ) -> StoreResult<RetentionSnapshot> {
+    ) -> StoreResult<RetentionMaintenanceReport> {
         self.renew_retention_lease(lease)?;
-        let mut maintenance = self
+        let maintenance = self
             .open_maintenance_connection()
             .map_err(|error| maintenance_error("open", error))?;
         Self::require_retention_lease_connection(&maintenance, lease)?;
-        let maintenance_status = MaintenanceStatus {
-            deferred: true,
-            reason: Some(
-                "WAL checkpoint deferred: SQLite exposes no bounded frame-count checkpoint; a dedicated maintenance worker must perform it".to_owned(),
-            ),
-        };
-        let (database_bytes, wal_bytes) = Self::total_database_bytes(&maintenance, &self.path)
-            .map_err(|error| maintenance_error("database accounting", error))?;
-        if budget.max_database_bytes > 0
-            && database_bytes.saturating_add(wal_bytes) > budget.max_database_bytes
-        {
-            Self::require_retention_lease_connection(&maintenance, lease)?;
-            maintenance
-                .execute_batch("PRAGMA incremental_vacuum(500)")
-                .map_err(|error| maintenance_error("incremental vacuum", error))?;
+        let (database_bytes_before, wal_bytes_before) =
+            Self::total_database_bytes(&maintenance, &self.path)
+                .map_err(|error| maintenance_error("database accounting before", error))?;
+        let total_bytes_before = database_bytes_before.saturating_add(wal_bytes_before);
+        let free_bytes_before = filesystem_free_bytes(&self.path);
+        let reserve_violation_before =
+            free_bytes_before.is_some_and(|free_bytes| free_bytes < budget.min_free_bytes);
+
+        let mut checkpoint = WalCheckpointStatus::not_attempted();
+        let mut vacuum_pages_attempted = 0;
+        let mut vacuum_pages_reclaimed = 0;
+        let mut deferred_reason = None;
+
+        if reserve_violation_before {
+            deferred_reason = Some(
+                "filesystem reserve is already violated; maintenance deferred to avoid consuming emergency space"
+                    .to_owned(),
+            );
+        } else if free_bytes_before.is_none() {
+            deferred_reason = Some(
+                "filesystem free-space accounting is unavailable; physical enforcement is unmeasurable"
+                    .to_owned(),
+            );
+        } else {
+            let attempts = budget.max_checkpoint_attempts.min(1);
+            for _ in 0..attempts {
+                Self::require_retention_lease_connection(&maintenance, lease)?;
+                checkpoint = Self::passive_checkpoint(&maintenance)
+                    .map_err(|error| maintenance_error("PASSIVE WAL checkpoint", error))?;
+            }
+            if !checkpoint.complete() {
+                deferred_reason = Some(format!(
+                    "PASSIVE checkpoint incomplete: busy_frames={} log_frames={} checkpointed_frames={}",
+                    checkpoint.busy_frames,
+                    checkpoint.log_frames,
+                    checkpoint.checkpointed_frames
+                ));
+            } else {
+                let auto_vacuum: i64 = maintenance
+                    .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+                    .map_err(|error| maintenance_error("read auto-vacuum mode", error))?;
+                let vacuum_pages = budget.max_vacuum_pages.min(MAX_MAINTENANCE_VACUUM_PAGES);
+                if budget.max_database_bytes > 0
+                    && total_bytes_before > budget.max_database_bytes
+                    && auto_vacuum == 2
+                    && vacuum_pages > 0
+                {
+                    Self::require_retention_lease_connection(&maintenance, lease)?;
+                    let before: i64 = maintenance
+                        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+                        .map_err(|error| maintenance_error("read free pages", error))?;
+                    vacuum_pages_attempted = vacuum_pages;
+                    maintenance
+                        .execute_batch(&format!("PRAGMA incremental_vacuum({});", vacuum_pages))
+                        .map_err(|error| maintenance_error("incremental vacuum", error))?;
+                    let after: i64 = maintenance
+                        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+                        .map_err(|error| maintenance_error("read reclaimed pages", error))?;
+                    vacuum_pages_reclaimed =
+                        before.saturating_sub(after).max(0).try_into().unwrap_or(0);
+                }
+            }
         }
+
         Self::require_retention_lease_connection(&maintenance, lease)?;
-        read_retention_snapshot(&mut maintenance, &self.path).map(|snapshot| RetentionSnapshot {
-            job_rows: snapshot.job_rows,
-            event_rows: snapshot.event_rows,
-            transition_rows: snapshot.transition_rows,
-            last_prune_at: snapshot.last_prune_at,
-            last_deleted_events: snapshot.last_deleted_events,
-            last_deleted_jobs: snapshot.last_deleted_jobs,
-            database_bytes: snapshot.database_bytes,
-            wal_bytes: snapshot.wal_bytes,
-            total_bytes: snapshot.total_bytes,
-            oldest_retained_at: snapshot.oldest_retained_at,
-            oldest_retained_at_complete: snapshot.oldest_retained_at_complete,
-            maintenance_status,
+        let (database_bytes_after, wal_bytes_after) =
+            Self::total_database_bytes(&maintenance, &self.path)
+                .map_err(|error| maintenance_error("database accounting after", error))?;
+        let total_bytes_after = database_bytes_after.saturating_add(wal_bytes_after);
+        let free_bytes_after = filesystem_free_bytes(&self.path);
+        let reserve_violation =
+            free_bytes_after.is_some_and(|free_bytes| free_bytes < budget.min_free_bytes);
+        let physical_budget_status = if budget.max_database_bytes == 0 {
+            PhysicalBudgetStatus::Disabled
+        } else if free_bytes_after.is_none() || free_bytes_before.is_none() {
+            PhysicalBudgetStatus::Unmeasurable
+        } else if reserve_violation {
+            PhysicalBudgetStatus::ReserveViolation
+        } else if deferred_reason.is_some() {
+            PhysicalBudgetStatus::Deferred
+        } else if total_bytes_after > budget.max_database_bytes {
+            PhysicalBudgetStatus::Exceeded
+        } else {
+            PhysicalBudgetStatus::WithinBudget
+        };
+        let maintenance_deferred = !matches!(
+            physical_budget_status,
+            PhysicalBudgetStatus::Disabled | PhysicalBudgetStatus::WithinBudget
+        );
+        if deferred_reason.is_none() && physical_budget_status == PhysicalBudgetStatus::Exceeded {
+            deferred_reason = Some(format!(
+                "bounded maintenance completed but physical budget remains exceeded: total_bytes={} limit={}",
+                total_bytes_after, budget.max_database_bytes
+            ));
+        }
+        Ok(RetentionMaintenanceReport {
+            database_bytes_before,
+            wal_bytes_before,
+            total_bytes_before,
+            database_bytes_after,
+            wal_bytes_after,
+            total_bytes_after,
+            free_bytes_before,
+            free_bytes_after,
+            reserve_bytes: budget.min_free_bytes,
+            reserve_violation,
+            physical_budget_status,
+            checkpoint,
+            vacuum_pages_attempted,
+            vacuum_pages_reclaimed,
+            maintenance_deferred,
+            maintenance_reason: deferred_reason,
         })
     }
 
@@ -886,6 +1098,13 @@ impl Store {
             database_bytes: snapshot.database_bytes,
             wal_bytes: snapshot.wal_bytes,
             total_bytes: snapshot.total_bytes,
+            free_bytes: snapshot.free_bytes,
+            reserve_bytes: DEFAULT_RETENTION_RESERVE_BYTES,
+            reserve_violation: snapshot
+                .free_bytes
+                .is_some_and(|free| free < DEFAULT_RETENTION_RESERVE_BYTES),
+            physical_budget_status: PhysicalBudgetStatus::Unconfigured,
+            checkpoint: WalCheckpointStatus::not_attempted(),
             oldest_retained_at: snapshot.oldest_retained_at,
             oldest_retained_at_complete: snapshot.oldest_retained_at_complete,
             maintenance_deferred: true,
@@ -920,6 +1139,14 @@ impl Store {
 
     fn total_database_bytes(conn: &rusqlite::Connection, path: &Path) -> StoreResult<(u64, u64)> {
         Ok((Self::database_bytes(conn)?, Self::wal_bytes_for_path(path)?))
+    }
+
+    /// Run SQLite's non-blocking checkpoint primitive and preserve all three
+    /// status counters. PASSIVE is the only checkpoint mode permitted here:
+    /// it never waits for readers and never truncates a live WAL from a job
+    /// path.
+    fn passive_checkpoint(conn: &rusqlite::Connection) -> StoreResult<WalCheckpointStatus> {
+        passive_checkpoint(conn)
     }
 
     /// One event batch. Age and row-cap phases are deliberately separate so
@@ -1081,6 +1308,75 @@ impl Store {
     }
 }
 
+fn passive_checkpoint(conn: &rusqlite::Connection) -> StoreResult<WalCheckpointStatus> {
+    let (busy_frames, log_frames, checkpointed_frames): (i64, i64, i64) =
+        conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    let to_u64 = |value: i64| {
+        u64::try_from(value).map_err(|_| {
+            StoreError::new(ExitClass::Operation, "store.retention.maintenance.status")
+                .with_remediation("SQLite returned a negative WAL checkpoint counter")
+        })
+    };
+    Ok(WalCheckpointStatus {
+        attempted: true,
+        busy_frames: to_u64(busy_frames)?,
+        log_frames: to_u64(log_frames)?,
+        checkpointed_frames: to_u64(checkpointed_frames)?,
+    })
+}
+
+/// Return available bytes on the filesystem containing `path` without
+/// invoking a shell or parsing human-formatted `df` output. The small FFI
+/// buffer intentionally contains more words than every supported Unix
+/// `statvfs` layout; only the POSIX prefix (block size and available blocks)
+/// is read. The call writes a plain C structure into an aligned buffer and
+/// does not retain any pointer after returning.
+#[cfg(unix)]
+fn filesystem_free_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct StatvfsBuffer {
+        words: [usize; 32],
+    }
+
+    unsafe extern "C" {
+        fn statvfs(path: *const std::ffi::c_char, buffer: *mut StatvfsBuffer) -> i32;
+    }
+
+    let probe = if path.exists() {
+        path
+    } else {
+        path.parent().filter(|parent| parent.exists())?
+    };
+    let path = CString::new(probe.as_os_str().as_bytes()).ok()?;
+    let mut buffer = StatvfsBuffer { words: [0; 32] };
+    // POSIX statvfs stores f_frsize at word 1. Linux keeps f_bavail at word
+    // 4; macOS uses 32-bit block counters packed into the preceding words.
+    // The oversized repr(C) buffer is aligned and large enough for the full
+    // platform structure, while avoiding shell utilities and platform-
+    // specific struct declarations.
+    let result = unsafe { statvfs(path.as_ptr(), &mut buffer) };
+    if result != 0 {
+        return None;
+    }
+    let block_size = buffer.words[1];
+    #[cfg(target_os = "macos")]
+    let available_blocks = buffer.words[3] & (u32::MAX as usize);
+    #[cfg(not(target_os = "macos"))]
+    let available_blocks = buffer.words[4];
+    block_size
+        .checked_mul(available_blocks)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
+#[cfg(not(unix))]
+fn filesystem_free_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
 fn release_retention_lease_connection(
     conn: &mut rusqlite::Connection,
     lease: &RetentionLease,
@@ -1132,15 +1428,12 @@ fn read_retention_snapshot(
         database_bytes,
         wal_bytes,
         total_bytes: database_bytes.saturating_add(wal_bytes),
+        free_bytes: filesystem_free_bytes(path),
         oldest_retained_at,
         oldest_retained_at_complete,
         last_prune_at,
         last_deleted_events: last_deleted_events.max(0) as u64,
         last_deleted_jobs: last_deleted_jobs.max(0) as u64,
-        maintenance_status: MaintenanceStatus {
-            deferred: false,
-            reason: None,
-        },
     })
 }
 
@@ -2252,12 +2545,147 @@ mod tests {
             report.total_bytes,
             report.database_bytes.saturating_add(report.wal_bytes)
         );
+        assert_eq!(
+            report.physical_budget_status,
+            PhysicalBudgetStatus::WithinBudget
+        );
+        assert!(!report.maintenance_deferred);
+        assert!(report.checkpoint.attempted);
+        assert_eq!(report.checkpoint.busy_frames, 0);
+        drop(store);
+        // The PASSIVE result is explicit even when SQLite keeps the sidecar
+        // inode allocated after all frames have been checkpointed.
+    }
+
+    #[test]
+    fn bounded_maintenance_reports_wal_status_and_survives_reopen() {
+        let (dir, store) = temp_store("bounded-maintenance-reopen");
+        seed_expired_events(&store, 2);
+        let lease = store
+            .try_acquire_retention_lease("maint-owner-1", MAX_RETENTION_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let report = store
+            .run_bounded_maintenance_with_lease(
+                &RetentionMaintenanceBudget {
+                    max_database_bytes: u64::MAX,
+                    min_free_bytes: 0,
+                    max_checkpoint_attempts: 1,
+                    max_vacuum_pages: 1,
+                },
+                &lease,
+            )
+            .unwrap();
+
+        assert!(report.checkpoint.attempted);
+        assert!(report.checkpoint.checkpointed_frames <= report.checkpoint.log_frames);
+        assert_eq!(
+            report.physical_budget_status,
+            PhysicalBudgetStatus::WithinBudget
+        );
+        assert!(!report.reserve_violation);
+        assert!(report.free_bytes_before.is_some());
+        assert!(report.free_bytes_after.is_some());
+        assert!(report.vacuum_pages_attempted <= 1);
+        store.release_retention_lease(&lease).unwrap();
+
+        drop(store);
+        let reopened = Store::open(dir.join("state.db")).unwrap();
+        let accounting = reopened.accounting().unwrap();
+        assert!(accounting.free_bytes.is_some());
+        assert_eq!(
+            accounting.physical_budget_status,
+            PhysicalBudgetStatus::Unconfigured
+        );
+        assert!(!accounting.checkpoint.attempted);
+    }
+
+    #[test]
+    fn maintenance_defers_when_reserve_is_violated() {
+        let (_dir, store) = temp_store("maintenance-reserve");
+        let lease = store
+            .try_acquire_retention_lease("reserve-owner-1", MAX_RETENTION_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let report = store
+            .run_bounded_maintenance_with_lease(
+                &RetentionMaintenanceBudget {
+                    max_database_bytes: 1,
+                    min_free_bytes: u64::MAX,
+                    max_checkpoint_attempts: 1,
+                    max_vacuum_pages: 500,
+                },
+                &lease,
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.physical_budget_status,
+            PhysicalBudgetStatus::ReserveViolation
+        );
+        assert!(report.reserve_violation);
+        assert!(!report.checkpoint.attempted);
         assert!(report.maintenance_deferred);
         assert!(report
             .maintenance_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("checkpoint deferred")));
-        drop(store);
-        // Checkpointing is intentionally deferred from the job path.
+            .is_some_and(|reason| reason.contains("reserve")));
+        store.release_retention_lease(&lease).unwrap();
+    }
+
+    #[test]
+    fn maintenance_reports_deferred_when_checkpoint_budget_is_zero() {
+        let (_dir, store) = temp_store("maintenance-bounded");
+        let lease = store
+            .try_acquire_retention_lease("bounded-owner-1", MAX_RETENTION_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let report = store
+            .run_bounded_maintenance_with_lease(
+                &RetentionMaintenanceBudget {
+                    max_database_bytes: 1,
+                    min_free_bytes: 0,
+                    max_checkpoint_attempts: 0,
+                    max_vacuum_pages: 0,
+                },
+                &lease,
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.physical_budget_status,
+            PhysicalBudgetStatus::Deferred
+        );
+        assert!(report.maintenance_deferred);
+        assert!(!report.checkpoint.attempted);
+        assert_eq!(report.vacuum_pages_attempted, 0);
+        store.release_retention_lease(&lease).unwrap();
+    }
+
+    #[test]
+    fn maintenance_clamps_hostile_vacuum_page_budget() {
+        let (_dir, store) = temp_store("maintenance-vacuum-cap");
+        let lease = store
+            .try_acquire_retention_lease("vacuum-owner-1", MAX_RETENTION_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let report = store
+            .run_bounded_maintenance_with_lease(
+                &RetentionMaintenanceBudget {
+                    max_database_bytes: 1,
+                    min_free_bytes: 0,
+                    max_checkpoint_attempts: 1,
+                    max_vacuum_pages: u64::MAX,
+                },
+                &lease,
+            )
+            .unwrap();
+
+        assert!(report.vacuum_pages_attempted <= MAX_MAINTENANCE_VACUUM_PAGES);
+        assert_ne!(
+            report.physical_budget_status,
+            PhysicalBudgetStatus::WithinBudget
+        );
+        store.release_retention_lease(&lease).unwrap();
     }
 }
