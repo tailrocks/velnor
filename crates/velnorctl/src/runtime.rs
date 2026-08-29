@@ -242,6 +242,10 @@ impl SocketIdentity {
         }
         // SAFETY: fstat initialized the structure on success.
         let stat = unsafe { stat.assume_init() };
+        // `st_dev` is `i32` on macOS and `u64` on Linux: the widening cast
+        // is load-bearing off Linux, so the same-type cast lint does not
+        // apply cross-platform.
+        #[allow(clippy::unnecessary_cast)]
         Ok(Self {
             device: stat.st_dev as u64,
             inode: stat.st_ino,

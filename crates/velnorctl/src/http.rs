@@ -201,7 +201,7 @@ pub fn bind_unix(
     }
     // SAFETY: fstat initialized `stat` on success.
     let stat = unsafe { stat.assume_init() };
-    if stat.st_gid != group || stat.st_mode as u32 & 0o777 != mode {
+    if stat.st_gid != group || u64::from(stat.st_mode) & 0o777 != u64::from(mode) {
         drop(listener);
         return Err(std::io::Error::other(
             "bound control socket ownership or mode was not enforced",
@@ -371,7 +371,9 @@ fn peer_groups(stream: &tokio::net::UnixStream) -> (Box<[u32]>, bool) {
             &mut length,
         )
     };
-    if result != 0 || length as usize % std::mem::size_of::<libc::gid_t>() != 0 {
+    if result != 0
+        || !(length as usize).is_multiple_of(std::mem::size_of::<libc::gid_t>())
+    {
         return (Box::new([]), false);
     }
     let byte_length = length as usize;
@@ -383,7 +385,7 @@ fn peer_groups(stream: &tokio::net::UnixStream) -> (Box<[u32]>, bool) {
     let complete = byte_length < buffer_length;
     let groups = groups[..count]
         .iter()
-        .map(|gid| *gid as u32)
+        .copied()
         .collect::<Vec<_>>()
         .into_boxed_slice();
     (groups, complete)
