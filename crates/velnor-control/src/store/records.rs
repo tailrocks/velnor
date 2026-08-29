@@ -1327,12 +1327,10 @@ fn secret_keys_match(actual: &str, expected: &str) -> bool {
         .chars()
         .filter(|character| !matches!(*character, '-' | '_'))
         .map(|character| character.to_ascii_lowercase())
-        .eq(
-            expected
-                .chars()
-                .filter(|character| !matches!(*character, '-' | '_'))
-                .map(|character| character.to_ascii_lowercase()),
-        )
+        .eq(expected
+            .chars()
+            .filter(|character| !matches!(*character, '-' | '_'))
+            .map(|character| character.to_ascii_lowercase()))
 }
 
 fn normalize_secret_key_separators(value: &str) -> String {
