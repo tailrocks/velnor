@@ -12,13 +12,13 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot},
+    sync::{mpsc::UnboundedReceiver, oneshot, Semaphore},
     task::JoinHandle,
 };
 use tracing::Instrument as _;
@@ -100,6 +100,58 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
+/// SQLite admission is a single-writer boundary. Keep the Tokio blocking
+/// queue bounded by acquiring the only admission permit before spawning work.
+const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
+static OPERATIONAL_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionPersistenceOutcome {
+    Accepted,
+    Rejected,
+    InfrastructureFailure,
+}
+
+fn operational_admission_permits() -> Arc<Semaphore> {
+    Arc::clone(
+        OPERATIONAL_ADMISSION_PERMITS
+            .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
+    )
+}
+
+async fn persist_admission_on_blocking_pool(
+    sink: Arc<crate::ops::OpsSink>,
+    admission: crate::ops::JobAdmission,
+) -> AdmissionPersistenceOutcome {
+    persist_admission_on_blocking_pool_with(sink, admission, |sink, admission| {
+        sink.record_admission(&admission)
+    })
+    .await
+}
+
+async fn persist_admission_on_blocking_pool_with<F>(
+    sink: Arc<crate::ops::OpsSink>,
+    admission: crate::ops::JobAdmission,
+    persist: F,
+) -> AdmissionPersistenceOutcome
+where
+    F: FnOnce(Arc<crate::ops::OpsSink>, crate::ops::JobAdmission) -> bool + Send + 'static,
+{
+    let permits = operational_admission_permits();
+    let Ok(permit) = permits.acquire_owned().await else {
+        return AdmissionPersistenceOutcome::InfrastructureFailure;
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        persist(sink, admission)
+    })
+    .await
+    {
+        Ok(true) => AdmissionPersistenceOutcome::Accepted,
+        Ok(false) => AdmissionPersistenceOutcome::Rejected,
+        Err(_join_error) => AdmissionPersistenceOutcome::InfrastructureFailure,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
@@ -4217,24 +4269,33 @@ async fn handle_job_request(
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
         };
-        if !sink.record_admission(&admission) {
-            const REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
+        let admission_outcome =
+            persist_admission_on_blocking_pool(Arc::clone(sink), admission).await;
+        if admission_outcome != AdmissionPersistenceOutcome::Accepted {
+            const REJECTED_REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
+            const WORKER_FAILURE_REASON: &str =
+                "operational store admission worker failed; job failed closed before execution";
+            let reason = if admission_outcome == AdmissionPersistenceOutcome::Rejected {
+                REJECTED_REASON
+            } else {
+                WORKER_FAILURE_REASON
+            };
             sink.emit(
                 velnor_model::EventReason::JobRejected,
                 &job.job_id,
-                Some(REASON.to_owned()),
+                Some(reason.to_owned()),
             );
             let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
                 Some(&job),
                 Some("operational_store".to_string()),
-                REASON,
+                reason,
             )
             .await;
             completion.context("failed to complete the rejected job")?;
             clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
-            bail!("{REASON}");
+            bail!("{reason}");
         }
     } else {
         const REASON: &str = "operational store is unavailable; job failed closed before execution";
@@ -12574,6 +12635,93 @@ jobs:
             completion.annotations[0].message
         );
         assert!(completion.telemetry.is_empty());
+    }
+
+    fn blocking_admission_test_input(job_id: &str) -> crate::ops::JobAdmission {
+        crate::ops::JobAdmission {
+            instance_slug: "test-instance".to_owned(),
+            job_uid: job_id.to_owned(),
+            repository_full_name: "tailrocks/velnor-actions-fixture".to_owned(),
+            workflow: "control plane".to_owned(),
+            job_name: "hold".to_owned(),
+            run_id: Some(1),
+            attempt: Some(1),
+            head_ref: Some("refs/heads/main".to_owned()),
+            head_sha: Some("deadbeef".to_owned()),
+            trigger_event: Some("workflow_dispatch".to_owned()),
+            queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
+            runner_name: Some("fixture-runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            masks: vec!["worker-test-secret".to_owned()],
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_admission_persists_once_and_maps_rejection() {
+        let base = unique_temp_dir("blocking-admission");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        assert_eq!(
+            persist_admission_on_blocking_pool(
+                Arc::clone(&sink),
+                blocking_admission_test_input("job-blocking-accepted"),
+            )
+            .await,
+            AdmissionPersistenceOutcome::Accepted
+        );
+        assert!(!sink.degraded());
+
+        let mut rejected = blocking_admission_test_input("job-blocking-rejected");
+        rejected.run_id = None;
+        assert_eq!(
+            persist_admission_on_blocking_pool(Arc::clone(&sink), rejected).await,
+            AdmissionPersistenceOutcome::Rejected
+        );
+        assert!(sink.degraded());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocking_admission_maps_worker_join_failure_to_infrastructure_rejection() {
+        let base = unique_temp_dir("blocking-admission-panic");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        let outcome = persist_admission_on_blocking_pool_with(
+            sink,
+            blocking_admission_test_input("job-blocking-panic"),
+            |_sink, _admission| -> bool { panic!("test-only admission worker panic") },
+        )
+        .await;
+
+        assert_eq!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
+        let completion = failed_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan".to_owned(),
+                job_id: "job-blocking-panic".to_owned(),
+            },
+            None,
+            Some("operational_store".to_owned()),
+            "operational store admission worker failed; job failed closed before execution",
+        );
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("operational_store")
+        );
+        assert!(completion.annotations[0]
+            .message
+            .contains("failed closed before execution"));
+
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]
