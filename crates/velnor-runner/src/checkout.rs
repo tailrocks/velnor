@@ -146,18 +146,28 @@ fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
 }
 
 #[cfg(test)]
-pub fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan, log: &mut Vec<String>) -> Result<()>
+pub fn execute_checkout<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+    preserve_workspace_target: bool,
+) -> Result<()>
 where
     R: CommandRunner,
 {
-    execute_checkout_with_mirror(runner, plan, log, None)
+    execute_checkout_with_mirror(runner, plan, log, None, preserve_workspace_target)
 }
 
+/// `preserve_workspace_target` is true while target snapshots are active for
+/// this job (`auto`/`on`): the runner-owned warm `target/` tree must survive
+/// `git clean -ffdx`. With snapshots off the target dir is disposable, so
+/// cleaning it is correct and nothing is preserved.
 pub fn execute_checkout_with_mirror<R>(
     runner: &mut R,
     plan: &CheckoutPlan,
     log: &mut Vec<String>,
     mirror_store: Option<&Path>,
+    preserve_workspace_target: bool,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -190,6 +200,7 @@ where
         plan.persist_credentials,
         plan.clean,
         plan.lfs,
+        preserve_workspace_target,
         mirror.as_deref(),
         log,
     )?;
@@ -357,6 +368,9 @@ fn checkout_container_path(workspace_host: &Path, destination: &Path) -> Option<
     Some(format!("/__w/{relative}"))
 }
 
+/// `preserve_workspace_target` keeps the runner-owned warm `target/` tree out
+/// of `git clean -ffdx` when target snapshots are active for the primary
+/// workspace checkout. Action-repository fetches always pass `false`.
 #[allow(clippy::too_many_arguments)]
 pub fn fetch_git_ref<R>(
     runner: &mut R,
@@ -369,6 +383,7 @@ pub fn fetch_git_ref<R>(
     persist_credentials: bool,
     clean: bool,
     lfs: bool,
+    preserve_workspace_target: bool,
     mirror: Option<&Path>,
     log: &mut Vec<String>,
 ) -> Result<()>
@@ -482,14 +497,6 @@ where
             "HEAD".to_string(),
         ]);
         run_git(runner, &reset, log)?;
-        let preserve_workspace_target = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
-            .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
         run_git(
             runner,
             &checkout_clean_args(destination, preserve_workspace_target),
@@ -513,12 +520,13 @@ fn checkout_clean_args(destination: &Path, preserve_workspace_target: bool) -> V
         "clean".to_string(),
         "-ffdx".to_string(),
     ];
-    // The persistent Cargo bucket is bind-mounted at the workflow-visible
-    // `target/` path before checkout. Native checkout must keep that one
-    // runner-owned cache mount; otherwise `git clean -ffdx` empties the bucket
-    // at the beginning of every job and defeats no-change reruns. All other
-    // ignored and untracked workspace content retains actions/checkout's clean
-    // semantics.
+    // While target snapshots are active, the warm `target/` tree materialized
+    // from the snapshot store is runner-owned cache state inside the
+    // workspace. Native checkout must keep it; otherwise `git clean -ffdx`
+    // empties it at the start of every job and defeats warm reruns. With
+    // snapshots off the target dir is disposable, so plain clean semantics
+    // are correct. All other ignored and untracked workspace content always
+    // retains actions/checkout's clean behavior.
     if preserve_workspace_target {
         args.extend(["-e".to_string(), "target/".to_string()]);
     }
@@ -1236,7 +1244,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        execute_checkout(&mut runner, &plan, &mut Vec::new()).unwrap();
+        execute_checkout(&mut runner, &plan, &mut Vec::new(), false).unwrap();
 
         assert_eq!(runner.calls[0].0, "git");
         assert_eq!(runner.calls[0].1[0], "init");
@@ -1282,7 +1290,8 @@ mod tests {
         let mut runner = RecordingRunner::default();
         let mut log = Vec::new();
 
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&mirror_store)).unwrap();
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&mirror_store), false)
+            .unwrap();
 
         let mirror = mirror_store.join("acme__repo.git");
         assert!(runner.calls.iter().any(|(_, args)| {
@@ -1324,6 +1333,7 @@ mod tests {
             &plan,
             &mut Vec::new(),
             Some(&root.join("mirrors")),
+            false,
         )
         .unwrap();
 
@@ -1438,7 +1448,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        execute_checkout(&mut runner, &plan, &mut Vec::new()).unwrap();
+        execute_checkout(&mut runner, &plan, &mut Vec::new(), false).unwrap();
 
         let fetch = runner
             .calls
@@ -1525,6 +1535,7 @@ mod tests {
             true,
             false,
             true,
+            false,
             false,
             None,
             &mut Vec::new(),

@@ -12,9 +12,10 @@ use crate::{
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
 
-/// Bump whenever target mounting or compiler-visible path semantics change.
-/// Old generations remain inactive, owned cache data and are reclaimed by GC.
-const CARGO_TARGET_GENERATION: &str = "workspace-v4-success-only";
+/// Bump whenever target-store identity semantics change; see
+/// [`crate::target_snapshot`] for the layout. Old generations remain
+/// inactive, owned cache data and are reclaimed by GC as orphans.
+const CARGO_TARGET_GENERATION: &str = crate::target_snapshot::CARGO_TARGET_GENERATION;
 
 pub struct GitHubJobContainerPaths {
     pub workspace_host: PathBuf,
@@ -37,18 +38,15 @@ pub fn github_job_container_spec(
     trust_scope: &str,
     acceleration: &crate::acceleration::AccelerationPolicy,
 ) -> JobContainerSpec {
-    // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
-    // trust boundary plus workflow/job class so warm state cannot cross repos
-    // or unrelated workflows when an operator enables the speed-up per daemon.
-    let cargo_target_host = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
-        .ok()
-        .filter(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
+    // Automatic Cargo target snapshots (acceleration policy): trusted and
+    // untrusted pools both keep them, each strictly inside its own trust
+    // directory — an untrusted job can never publish into the trusted
+    // namespace because the trust scope is a path component of the store.
+    // `off` degrades visibly for Rust jobs instead of silently running cold.
+    let snapshot_activation = crate::target_snapshot::resolve_activation(acceleration, job);
+    let cargo_target_host = snapshot_activation
+        .active
+        .then(|| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
     JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -72,10 +70,17 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
+        target_degradations: snapshot_activation.degradation,
         compiler_cache: crate::compiler_cache::resolve_backend(acceleration, job),
     }
 }
 
+/// Store parent directory for one job's target snapshots:
+/// `<targets>/<trust>/<generation>/<sanitized-repo>`. The compatibility class
+/// and generation directories below it are resolved per job after checkout
+/// (they digest workspace files that only exist then). Workflow and job
+/// display names are deliberately NOT path components: they are provenance,
+/// not compatibility identity.
 pub(crate) fn github_cargo_target_store_host(
     job: &AgentJobRequestMessage,
     temp_host: &std::path::Path,
@@ -90,27 +95,12 @@ pub(crate) fn github_cargo_target_store_host(
             .join("_velnor/ephemeral/targets")
             .join(crate::container::sanitize_store_key(&job.job_id));
     };
-    let workflow = job_variable(job, "github.workflow_ref")
-        .and_then(|value| value.split('@').next())
-        .and_then(|value| value.strip_prefix(&format!("{repository}/")))
-        .or_else(|| job_variable(job, "github.workflow"))
-        .filter(|value| !value.is_empty());
-    let Some(workflow) = workflow else {
-        eprintln!(
-            "forensics.lifecycle: persistent target store refused: missing github.workflow_ref and github.workflow"
-        );
-        return temp_host
-            .join("_velnor/ephemeral/targets")
-            .join(crate::container::sanitize_store_key(&job.job_id));
-    };
     crate::storage::append_legacy_trust(
         crate::container::cargo_target_store_host(temp_host),
         &cargo_target_trust_scope_from(Some(trust_scope)),
     )
     .join(CARGO_TARGET_GENERATION)
     .join(crate::container::sanitize_store_key(repository))
-    .join(crate::container::sanitize_store_key(workflow))
-    .join(crate::container::sanitize_store_key(&job.job_display_name))
 }
 
 pub(crate) fn cargo_target_trust_scope() -> String {
@@ -925,6 +915,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
+            target_degradations: crate::acceleration::DegradationLog::default(),
             compiler_cache: crate::compiler_cache::ResolvedBackend::selected(
                 crate::compiler_cache::CompilerCacheBackend::Sccache,
                 crate::compiler_cache::CompilerCacheOrigin::PolicyExplicit,
@@ -978,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn github_cargo_target_store_is_scoped_by_trust_repo_workflow_and_job() {
+    fn github_cargo_target_store_is_scoped_by_trust_and_repo_only() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "RunnerJobRequest",
             "plan": { "planId": "plan-1" },
@@ -997,12 +988,103 @@ mod tests {
         let host =
             github_cargo_target_store_host(&job, std::path::Path::new("/velnor/work"), "trusted");
 
+        // Workflow and job display names are provenance, not identity: the
+        // store parent stops at the repository, below which the per-job
+        // compatibility class is resolved after checkout.
         assert_eq!(
             host,
             std::path::PathBuf::from(
-                "/velnor/work/_velnor_targets/trusted/workspace-v4-success-only/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
+                "/velnor/work/_velnor_targets/trusted/workspace-v5-compat/ChainArgos_java-monorepo"
             )
         );
+    }
+
+    #[test]
+    fn untrusted_pool_never_shares_the_trusted_target_namespace() {
+        let job_for = |display: &str| AgentJobRequestMessage {
+            job_display_name: display.to_string(),
+            ..serde_json::from_value::<AgentJobRequestMessage>(serde_json::json!({
+                "messageType": "RunnerJobRequest",
+                "plan": { "planId": "plan-1" },
+                "timeline": { "id": "timeline-1" },
+                "jobId": "job-1",
+                "jobDisplayName": "Public fork check",
+                "requestId": 42,
+                "variables": {
+                    "github.repository": { "value": "tailrocks/open-lib", "isSecret": false }
+                }
+            }))
+            .unwrap()
+        };
+        let untrusted = github_cargo_target_store_host(
+            &job_for("Public fork check"),
+            std::path::Path::new("/velnor/work"),
+            "public-forks",
+        );
+        let trusted = github_cargo_target_store_host(
+            &job_for("Public fork check"),
+            std::path::Path::new("/velnor/work"),
+            "trusted",
+        );
+
+        assert_eq!(
+            untrusted,
+            std::path::PathBuf::from(
+                "/velnor/work/_velnor_targets/public-forks/workspace-v5-compat/tailrocks_open-lib"
+            )
+        );
+        assert!(untrusted.starts_with("/velnor/work/_velnor_targets/public-forks"));
+        assert!(trusted.starts_with("/velnor/work/_velnor_targets/trusted"));
+        assert_ne!(untrusted, trusted);
+        assert!(!untrusted.starts_with("/velnor/work/_velnor_targets/trusted"));
+    }
+
+    #[test]
+    fn off_policy_leaves_the_store_untouched_and_degrades() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Rust",
+            "requestId": 42,
+            "steps": [
+                { "reference": { "type": "Script" }, "inputs": { "script": "cargo nextest run" } }
+            ],
+            "variables": {
+                "github.repository": { "value": "tailrocks/open-lib", "isSecret": false }
+            }
+        }))
+        .unwrap();
+        let mut policy = crate::acceleration::AccelerationPolicy::maximum();
+        policy.target_persistence = velnor_model::TargetPersistenceChoice::Off;
+
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "trusted",
+            &policy,
+        );
+
+        assert!(
+            spec.cargo_target_host.is_none(),
+            "off means the store is never read or written"
+        );
+        let records = spec.target_degradations.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].feature, "acceleration.target_persistence");
     }
 
     #[test]

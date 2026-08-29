@@ -1285,6 +1285,9 @@ where
             temp_host,
         );
         state.acceleration_degradations = container.compiler_cache.degradation.clone();
+        state
+            .acceleration_degradations
+            .extend(container.target_degradations.records().iter().cloned());
         state.compiler_cache_origin = container.compiler_cache.origin;
         state.persistent_workspace_target = container.cargo_target_host.is_some();
         state.cargo_target_host = container
@@ -1313,10 +1316,38 @@ where
                     } if invocation.adapter == NativeActionAdapter::Checkout
                 )
             {
-                materialize_persistent_target(
+                let identity = target_compat_identity(container, &self.trust_scope);
+                let job_branch = state
+                    .env
+                    .get("GITHUB_REF")
+                    .and_then(|reference| crate::target_snapshot::normalize_branch(reference));
+                let decision = match materialize_persistent_target(
                     container,
-                    state.env.get("GITHUB_SHA").map(String::as_str),
-                )?;
+                    &identity,
+                    job_branch.as_deref(),
+                ) {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        // A broken store costs speed, never the job:
+                        // record the degradation and continue cold.
+                        let detail = format!("{error:#}");
+                        eprintln!(
+                            "forensics.lifecycle: target snapshot materialize failed: {detail}"
+                        );
+                        state.acceleration_degradations.record(
+                            crate::acceleration::DegradationRecord::target_store_unusable(
+                                "materialize",
+                                &detail,
+                            ),
+                        );
+                        let class_digest = crate::target_snapshot::cargo_target_compat_class(
+                            &identity,
+                            &container.workspace_host,
+                        );
+                        crate::target_snapshot::TargetSnapshotDecision::cold(class_digest, detail)
+                    }
+                };
+                state.target_snapshot = Some(decision);
                 target_materialized = true;
             }
             match step {
@@ -1908,15 +1939,27 @@ where
             && step_error.is_none()
             && persistent_target_results_publishable(&results)
         {
-            if let Err(error) = publish_persistent_target(
-                container,
-                state.env.get("GITHUB_SHA").map(String::as_str),
-            ) {
+            // Publish into <compat-class>/<gen-id> and flip the class `current`
+            // pointer atomically; failed or cancelled jobs never reach here, so
+            // the pointer only ever names a fully successful generation.
+            if let Err(error) = publish_persistent_target(container, &self.trust_scope, &state) {
+                let detail = format!("{error:#}");
                 eprintln!(
-                    "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
+                    "forensics.lifecycle: persistent target publish skipped for '{}': {detail}",
                     container.name
                 );
+                state.acceleration_degradations.record(
+                    crate::acceleration::DegradationRecord::target_store_unusable(
+                        "publish", &detail,
+                    ),
+                );
             }
+        }
+        if let Some(decision) = state.target_snapshot_decision() {
+            eprintln!(
+                "forensics.acceleration: target snapshot decision {}",
+                decision.to_json()
+            );
         }
         if let Some(error) = step_error {
             return Err(error);
@@ -2030,7 +2073,15 @@ where
             crate::container::git_mirror_store_host(&container.temp_host, &self.trust_scope);
         let checkout_result = {
             let _span = tracing::info_span!("job-checkout").entered();
-            execute_checkout_with_mirror(&mut self.runner, &plan, &mut trace, Some(&mirror_store))
+            execute_checkout_with_mirror(
+                &mut self.runner,
+                &plan,
+                &mut trace,
+                Some(&mirror_store),
+                // The warm target tree survives `git clean` exactly while
+                // snapshots are active for this job (auto/on policy).
+                container.cargo_target_host.is_some(),
+            )
         };
         if let Err(error) = checkout_result {
             if let Some(failure) = error.downcast_ref::<StepLogicFailure>() {
@@ -5593,52 +5644,69 @@ fn cache_entry_complete(path: &Path) -> bool {
     path.is_dir() && path.join(".velnor-complete-v1").is_file()
 }
 
-const TARGET_SOURCE_REVISION_MARKER: &str = ".velnor-source-revision-v1";
+/// Compatibility identity for this job's target snapshots: repository (raw
+/// `github.repository`), the pool trust scope, and the runner host triple.
+/// The toolchain/flag dimensions are probed from the checked-out workspace
+/// inside [`materialize_persistent_target`]/[`publish_persistent_target`].
+fn target_compat_identity(
+    container: &JobContainerSpec,
+    trust_scope: &str,
+) -> crate::target_snapshot::TargetCompatIdentity {
+    crate::target_snapshot::TargetCompatIdentity {
+        repository: container
+            .repository
+            .clone()
+            .unwrap_or_else(|| "unknown-repository".to_string()),
+        trust_scope: trust_scope.to_string(),
+        host_triple: crate::target_snapshot::runner_host_triple(),
+    }
+}
 
+/// Select the best compatible generation in this job's compatibility class
+/// and reflink/copy it into the job-local workspace `target/`.
+///
+/// The selected base generation is never written by the job: the full-dir
+/// copy IS the private writable view (`fs_copy` reflinks first, so on
+/// reflink-capable filesystems it is a true copy-on-write clone; elsewhere a
+/// physical copy). There is deliberately no exact-revision wipe anymore —
+/// that was over-conservatism that threw away every dependency artifact on
+/// any commit change. Correctness comes from Cargo's own fingerprints plus
+/// checkout's commit-pinned mtimes: restored dependency artifacts keep their
+/// older store mtimes, fresh workspace sources are newer, so dependencies
+/// stay fresh and only changed workspace crates rebuild.
 fn materialize_persistent_target(
     container: &JobContainerSpec,
-    source_revision: Option<&str>,
-) -> Result<()> {
+    identity: &crate::target_snapshot::TargetCompatIdentity,
+    job_branch: Option<&str>,
+) -> Result<crate::target_snapshot::TargetSnapshotDecision> {
     let Some(store) = container.cargo_target_host.as_deref() else {
-        return Ok(());
+        bail!("materialize_persistent_target called without a target store");
     };
-    let _lock = CacheEntryLock::shared(store)?;
-    let payload = store.join("data");
-    if !store.join(".velnor-target-complete-v1").is_file() || !payload.is_dir() {
-        return Ok(());
-    }
-    let stored_revision = fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER))
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let source_revision = workspace_source_revision(&container.workspace_host, source_revision);
-    let target = container.workspace_host.join("target");
-    if source_revision
-        .as_deref()
-        .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
-    {
-        // Checkout pins source mtimes to the commit timestamp. Restoring a
-        // different revision and then touching sources would poison the
-        // published fingerprints for every later unchanged run.
-        eprintln!(
-            "forensics.lifecycle: persistent target generation invalidated (stored={}, current={})",
-            stored_revision.as_deref().unwrap_or("unknown"),
-            source_revision.as_deref().unwrap_or("unknown")
-        );
+    let class_digest =
+        crate::target_snapshot::cargo_target_compat_class(identity, &container.workspace_host);
+    let class_dir = crate::target_snapshot::class_directory(store, &class_digest);
+    let _lock = CacheEntryLock::shared(&class_dir)?;
+    let decision = crate::target_snapshot::select_snapshot(&class_dir, &class_digest, job_branch);
+    if let Some(generation) = &decision.selected_generation {
+        let payload = class_dir.join(generation).join("data");
+        let target = container.workspace_host.join("target");
         if target.exists() {
+            // Stale job-local leftovers from a previous materialization
+            // attempt in this same workspace — never a revision wipe.
             fs::remove_dir_all(&target)
-                .with_context(|| format!("clear stale job-local target {}", target.display()))?;
+                .with_context(|| format!("clear job-local target {}", target.display()))?;
         }
-        return Ok(());
+        fs::create_dir_all(&target)
+            .with_context(|| format!("create job-local target {}", target.display()))?;
+        copy_dir_contents(&payload, &target)
+            .with_context(|| format!("restore target generation {generation}"))?;
+    } else {
+        eprintln!(
+            "forensics.lifecycle: target snapshot cold start (class={class_digest}, branch={})",
+            job_branch.unwrap_or("unknown")
+        );
     }
-    if target.exists() {
-        fs::remove_dir_all(&target)
-            .with_context(|| format!("clear job-local target {}", target.display()))?;
-    }
-    fs::create_dir_all(&target)
-        .with_context(|| format!("create job-local target {}", target.display()))?;
-    copy_dir_contents(&payload, &target)?;
-    Ok(())
+    Ok(decision)
 }
 
 fn workspace_source_revision(workspace: &Path, fallback: Option<&str>) -> Option<String> {
@@ -5655,9 +5723,13 @@ fn workspace_source_revision(workspace: &Path, fallback: Option<&str>) -> Option
         .or_else(|| fallback.map(str::to_owned))
 }
 
+/// Publish the completed job-local target tree as a new immutable generation
+/// of the job's compatibility class, then flip the class `current` pointer
+/// atomically. Called only when every step succeeded.
 fn publish_persistent_target(
     container: &JobContainerSpec,
-    source_revision: Option<&str>,
+    trust_scope: &str,
+    state: &JobExecutionState,
 ) -> Result<()> {
     let Some(store) = container.cargo_target_host.as_deref() else {
         return Ok(());
@@ -5666,38 +5738,52 @@ fn publish_persistent_target(
     if !target.is_dir() {
         return Ok(());
     }
-    let name = store
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("target");
-    let staging = store.with_file_name(cache_staging_name(name));
-    fs::remove_dir_all(&staging).ok();
-    let payload = staging.join("data");
-    fs::create_dir_all(&payload)
-        .with_context(|| format!("create target staging directory {}", payload.display()))?;
-    if let Err(error) = copy_dir_contents(&target, &payload) {
-        fs::remove_dir_all(&staging).ok();
-        return Err(error).context("stage persistent target generation");
-    }
-    fs::write(staging.join(".velnor-target-complete-v1"), b"complete\n")
-        .with_context(|| format!("write target completion marker {}", staging.display()))?;
-    if let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision) {
-        fs::write(
-            staging.join(TARGET_SOURCE_REVISION_MARKER),
-            format!("{revision}\n"),
-        )
-        .with_context(|| format!("write target source revision {}", staging.display()))?;
-    }
-
-    let _lock = CacheEntryLock::exclusive(store)?;
-    fs::remove_dir_all(store).ok();
-    if let Err(error) = fs::rename(&staging, store)
-        .with_context(|| format!("publish persistent target {}", store.display()))
-    {
-        fs::remove_dir_all(&staging).ok();
-        return Err(error);
-    }
+    let identity = target_compat_identity(container, trust_scope);
+    let class_digest =
+        crate::target_snapshot::cargo_target_compat_class(&identity, &container.workspace_host);
+    let class_dir = crate::target_snapshot::class_directory(store, &class_digest);
+    let manifest = crate::target_snapshot::TargetGenerationManifest {
+        schema: crate::target_snapshot::MANIFEST_SCHEMA,
+        compat_class: class_digest.clone(),
+        repository: identity.repository.clone(),
+        branch: state
+            .env
+            .get("GITHUB_REF")
+            .and_then(|reference| crate::target_snapshot::normalize_branch(reference))
+            .or_else(|| workspace_branch(&container.workspace_host)),
+        commit: workspace_source_revision(
+            &container.workspace_host,
+            state.env.get("GITHUB_SHA").map(String::as_str),
+        ),
+        created_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default(),
+        // Provenance is recorded for operators, never part of the class
+        // identity. GITHUB_JOB is the YAML job id — the closest label the
+        // engine sees; the plan's display name stays in the job plan.
+        provenance: crate::target_snapshot::TargetSnapshotProvenance {
+            workflow: state.env.get("GITHUB_WORKFLOW").cloned(),
+            job_display_name: state.env.get("GITHUB_JOB").cloned(),
+        },
+    };
+    crate::target_snapshot::publish_generation(&class_dir, &target, &manifest)?;
     Ok(())
+}
+
+/// Branch of the checked-out workspace from git itself, used only when the
+/// job env did not carry `GITHUB_REF` (e.g. detached test harnesses).
+fn workspace_branch(workspace: &Path) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(workspace)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|branch| branch.trim().to_owned())
+        .filter(|branch| !branch.is_empty())
 }
 
 fn persistent_target_results_publishable(results: &[StepExecutionResult]) -> bool {
@@ -7686,7 +7772,7 @@ fn copy_cache_glob_dir_contents(source: &Path, destination: &Path) -> Result<()>
 /// Each directory entry is either recursively materialized or rejected. The
 /// copy primitive already reports a failed file operation, so a second full
 /// metadata traversal only adds warm-path latency for large Rust target trees.
-fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
     for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
         let entry = entry?;
         let source_path = entry.path();
@@ -8259,6 +8345,11 @@ pub(crate) struct JobExecutionState {
     /// acceleration report can be emitted from the executed job without
     /// re-deriving decisions.
     acceleration_degradations: crate::acceleration::DegradationLog,
+    /// Target-snapshot decision for this job (compat class, selected
+    /// generation, candidate chain); attached after materialization, also
+    /// when the store was unusable and the job ran cold. Feeds the same
+    /// acceleration report.
+    target_snapshot: Option<crate::target_snapshot::TargetSnapshotDecision>,
     /// Origin of the resolved compiler-cache backend, for the same report.
     compiler_cache_origin: crate::compiler_cache::CompilerCacheOrigin,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
@@ -8336,6 +8427,7 @@ impl JobExecutionState {
             persistent_workspace_target: false,
             cargo_target_host: None,
             acceleration_degradations: crate::acceleration::DegradationLog::default(),
+            target_snapshot: None,
             compiler_cache_origin: crate::compiler_cache::CompilerCacheOrigin::Off,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
@@ -8364,6 +8456,15 @@ impl JobExecutionState {
         crate::compiler_cache::CompilerCacheOrigin,
     ) {
         (&self.acceleration_degradations, self.compiler_cache_origin)
+    }
+
+    /// The target-snapshot decision recorded when this job's target store was
+    /// resolved (restored generation, or the cold reason). `None` until
+    /// materialization runs or when snapshots are off for the job.
+    pub(crate) fn target_snapshot_decision(
+        &self,
+    ) -> Option<&crate::target_snapshot::TargetSnapshotDecision> {
+        self.target_snapshot.as_ref()
     }
 
     pub(crate) fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
@@ -8397,6 +8498,7 @@ impl JobExecutionState {
             persistent_workspace_target: self.persistent_workspace_target,
             cargo_target_host: self.cargo_target_host.clone(),
             acceleration_degradations: self.acceleration_degradations.clone(),
+            target_snapshot: self.target_snapshot.clone(),
             compiler_cache_origin: self.compiler_cache_origin,
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
@@ -8424,6 +8526,7 @@ impl JobExecutionState {
             persistent_workspace_target: self.persistent_workspace_target,
             cargo_target_host: self.cargo_target_host.clone(),
             acceleration_degradations: self.acceleration_degradations.clone(),
+            target_snapshot: self.target_snapshot.clone(),
             compiler_cache_origin: self.compiler_cache_origin,
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
@@ -11077,6 +11180,7 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
+            target_degradations: crate::acceleration::DegradationLog::default(),
             compiler_cache: crate::compiler_cache::ResolvedBackend::selected(
                 crate::compiler_cache::CompilerCacheBackend::Sccache,
                 crate::compiler_cache::CompilerCacheOrigin::PolicyExplicit,
@@ -13152,79 +13256,163 @@ esac
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn target_job_state(reference: &str, commit: &str, job: &str) -> JobExecutionState {
+        JobExecutionState::default().with_env(vec![
+            ("GITHUB_REF".into(), reference.into()),
+            ("GITHUB_SHA".into(), commit.into()),
+            ("GITHUB_WORKFLOW".into(), "CI".into()),
+            ("GITHUB_JOB".into(), job.into()),
+        ])
+    }
+
     #[test]
-    fn persistent_target_is_job_local_and_published_as_complete_generation() {
+    fn persistent_target_round_trips_generations_without_revision_wipes() {
         let root = temp_dir();
         let temp = root.join("job/temp");
         fs::create_dir_all(&temp).unwrap();
         let mut spec = container(&temp);
         let store = root.join("target-store");
-        fs::create_dir_all(store.join("data/debug")).unwrap();
-        fs::write(store.join(".velnor-target-complete-v1"), "complete\n").unwrap();
-        fs::write(store.join(TARGET_SOURCE_REVISION_MARKER), "old-revision\n").unwrap();
-        fs::write(store.join("data/debug/seed"), "warm\n").unwrap();
         fs::create_dir_all(&spec.workspace_host).unwrap();
         fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
-        let stale_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
-        fs::File::options()
-            .append(true)
-            .open(spec.workspace_host.join("Cargo.toml"))
-            .unwrap()
-            .set_modified(stale_time)
-            .unwrap();
         spec.cargo_target_host = Some(store.clone());
+        let identity = target_compat_identity(&spec, "trusted");
         assert!(!spec
             .start_args()
             .iter()
             .any(|arg| arg.contains(":/__w/target")));
 
-        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
-        let target = spec.workspace_host.join("target");
-        assert!(!target.exists());
-        assert_eq!(
-            fs::metadata(spec.workspace_host.join("Cargo.toml"))
-                .unwrap()
-                .modified()
-                .unwrap(),
-            stale_time
-        );
+        // Cold start: the class holds no generation yet, nothing materializes
+        // and the workspace target stays untouched.
+        let cold = materialize_persistent_target(&spec, &identity, Some("main")).unwrap();
+        assert_eq!(cold.selected_generation, None);
+        assert!(matches!(
+            cold.materialization,
+            crate::target_snapshot::TargetMaterialization::Cold { .. }
+        ));
+        assert!(!spec.workspace_host.join("target").exists());
 
-        // Both paths remain inside the workspace mount, so the workflow's
-        // ordinary atomic promotion cannot fail with EXDEV.
-        fs::create_dir_all(target.join("debug")).unwrap();
-        fs::write(target.join("debug/seed"), "compiled\n").unwrap();
-        fs::create_dir_all(spec.workspace_host.join(".ci-target-cache")).unwrap();
-        fs::rename(
-            target.join("debug/seed"),
-            spec.workspace_host.join(".ci-target-cache/target.tar.zst"),
+        // One successful build publishes an immutable generation plus the
+        // class `current` pointer flip.
+        let target = spec.workspace_host.join("target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(target.join("debug/deps/libexample.rmeta"), "warm\n").unwrap();
+        publish_persistent_target(
+            &spec,
+            "trusted",
+            &target_job_state("refs/heads/main", "commit-a", "build"),
         )
         .unwrap();
-        fs::write(target.join("new-output"), "compiled\n").unwrap();
-        publish_persistent_target(&spec, Some("new-revision")).unwrap();
 
-        assert!(store.join(".velnor-target-complete-v1").is_file());
-        assert_eq!(
-            fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER)).unwrap(),
-            "new-revision\n"
+        let class_dir = store.join(&cold.class_digest);
+        let first = crate::target_snapshot::pointer_referenced_generation(&class_dir).unwrap();
+        assert!(first.join("data/debug/deps/libexample.rmeta").is_file());
+        assert!(first
+            .join(crate::target_snapshot::TARGET_COMPLETE_MARKER)
+            .is_file());
+        let manifest = fs::read_to_string(first.join("manifest.json")).unwrap();
+        assert!(manifest.contains("commit-a"), "{manifest}");
+        assert!(
+            manifest.contains("build"),
+            "provenance recorded: {manifest}"
         );
+
+        // Same class, newer commit, same branch: restore, never wipe. The
+        // dependency artifacts from the previous commit must survive.
+        fs::remove_dir_all(&target).unwrap();
+        let restored = materialize_persistent_target(&spec, &identity, Some("main")).unwrap();
         assert_eq!(
-            fs::read_to_string(store.join("data/new-output")).unwrap(),
-            "compiled\n"
+            restored.selected_generation.as_deref(),
+            first.file_name().and_then(|name| name.to_str())
         );
-        fs::File::options()
-            .append(true)
-            .open(spec.workspace_host.join("Cargo.toml"))
+        assert!(matches!(
+            restored.materialization,
+            crate::target_snapshot::TargetMaterialization::Restored { .. }
+        ));
+        assert!(
+            target.join("debug/deps/libexample.rmeta").is_file(),
+            "dependency artifacts survive the commit change"
+        );
+
+        // A second successful commit publishes a second generation; selection
+        // prefers it and records the superseded one with a reason.
+        fs::write(target.join("debug/deps/libexample.rmeta"), "warmer\n").unwrap();
+        publish_persistent_target(
+            &spec,
+            "trusted",
+            &target_job_state("refs/heads/main", "commit-b", "build"),
+        )
+        .unwrap();
+        let newest = crate::target_snapshot::pointer_referenced_generation(&class_dir).unwrap();
+        assert_ne!(newest, first);
+        let decision = materialize_persistent_target(&spec, &identity, Some("main")).unwrap();
+        assert_eq!(
+            decision.selected_generation.as_deref(),
+            newest.file_name().and_then(|name| name.to_str())
+        );
+        assert_eq!(decision.candidates.len(), 2, "{:?}", decision.candidates);
+        assert!(decision
+            .candidates
+            .iter()
+            .any(|candidate| !candidate.accepted && candidate.reason.contains("superseded")));
+        assert_eq!(
+            fs::read_to_string(target.join("debug/deps/libexample.rmeta")).unwrap(),
+            "warmer\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn target_class_is_shared_across_job_display_names() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        let store = root.join("target-store");
+        fs::create_dir_all(&spec.workspace_host).unwrap();
+        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
+        spec.cargo_target_host = Some(store.clone());
+        let identity = target_compat_identity(&spec, "trusted");
+
+        let target = spec.workspace_host.join("target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("debug/seed"), "warm\n").unwrap();
+        publish_persistent_target(
+            &spec,
+            "trusted",
+            &target_job_state("refs/heads/main", "commit-a", "build"),
+        )
+        .unwrap();
+
+        // A different job display name with everything else identical joins
+        // the SAME class; only the recorded provenance differs.
+        publish_persistent_target(
+            &spec,
+            "trusted",
+            &target_job_state("refs/heads/main", "commit-a", "clippy-lint"),
+        )
+        .unwrap();
+
+        let classes: Vec<_> = fs::read_dir(&store)
             .unwrap()
-            .set_modified(stale_time)
-            .unwrap();
-        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| !name.to_string_lossy().starts_with('.'))
+            .collect();
+        assert_eq!(classes.len(), 1, "one class serves both jobs: {classes:?}");
+        let class_dir = store.join(&classes[0]);
+        let newest = crate::target_snapshot::pointer_referenced_generation(&class_dir).unwrap();
+        let manifest = fs::read_to_string(newest.join("manifest.json")).unwrap();
+        assert!(manifest.contains("clippy-lint"), "{manifest}");
+
+        let decision = materialize_persistent_target(&spec, &identity, Some("main")).unwrap();
         assert_eq!(
-            fs::metadata(spec.workspace_host.join("Cargo.toml"))
-                .unwrap()
-                .modified()
-                .unwrap(),
-            stale_time
+            decision.selected_generation.as_deref(),
+            newest.file_name().and_then(|name| name.to_str())
         );
+        assert!(target.join("debug/seed").is_file());
+        assert!(decision
+            .candidates
+            .iter()
+            .any(|candidate| candidate.accepted && candidate.reason == "same-branch newest"));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -44,12 +44,20 @@ pub struct JobContainerSpec {
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
     pub repository: Option<String>,
-    /// Host-persistent incremental-build generation. The runner reflink/copies
-    /// it into the job-local workspace target after checkout and publishes the
-    /// completed job tree back atomically. It is never a nested bind mount:
-    /// one would make rename(2) across `target` return EXDEV even though the
-    /// same workflow succeeds on GitHub-hosted runners.
+    /// Host-persistent target snapshot store parent (`<trust>/<generation>/
+    /// <repo>`). The compatibility class below it is resolved per job after
+    /// checkout. The runner reflink-copies the selected generation into the
+    /// job-local workspace `target/` and publishes the completed tree back as
+    /// a new immutable generation plus an atomic `current` pointer flip. The
+    /// copy IS the private writable view (reflink = CoW), so the stored base
+    /// generation is never written by the job; and it is never a nested bind
+    /// mount — one would make rename(2) across `target` return EXDEV even
+    /// though the same workflow succeeds on GitHub-hosted runners.
     pub cargo_target_host: Option<PathBuf>,
+    /// Degradations recorded while resolving target snapshots (policy `off`
+    /// on a Rust-compiling job). Merged into the job acceleration report
+    /// alongside the compiler-cache log.
+    pub target_degradations: crate::acceleration::DegradationLog,
     /// The resolved compiler-cache decision for this job (backend, origin,
     /// degradation records) — the single source of truth for mounts, setup,
     /// and the job acceleration report. The backend is never `Auto`.
@@ -1287,6 +1295,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
+            target_degradations: crate::acceleration::DegradationLog::default(),
             compiler_cache: ResolvedBackend::selected(
                 CompilerCacheBackend::Sccache,
                 crate::compiler_cache::CompilerCacheOrigin::PolicyExplicit,

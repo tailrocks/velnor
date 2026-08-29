@@ -45,6 +45,7 @@ mod sd_notify;
 pub mod service;
 mod slot_log;
 mod storage;
+mod target_snapshot;
 mod telemetry;
 mod workflow_command;
 

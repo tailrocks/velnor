@@ -176,6 +176,7 @@ fn run_gc(
         max_total_bytes: args.max_size_bytes,
         class_budgets,
         in_use_scopes,
+        protected_paths: pointer_protected_target_generations(work_root),
     };
     let candidates = select_eviction_candidates(&listing, &policy);
 
@@ -401,12 +402,20 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
         },
+        // Targets scopes are compatibility classes; candidates are the
+        // immutable generations inside them. `workspace-v4-success-only` and
+        // older stores are NOT migrated — their job-name buckets live at the
+        // old depth, surface here as their `data` payloads, and are reclaimed
+        // as orphans. Legacy layout below the targets root:
+        // `<trust>/<generation>/<repo>/<class>/<gen-id>`; canonical:
+        // `<generation>/<repo>/<class>/<gen-id>` (the trust component is
+        // already part of the store path).
         StoreRoot {
             kind: CacheStore::Targets,
             path: targets,
             scope_prefix: Vec::new(),
             scope_depth: if targets_legacy { 4 } else { 3 },
-            candidate_depth: if targets_legacy { 4 } else { 3 },
+            candidate_depth: if targets_legacy { 5 } else { 4 },
             gc_managed: true,
         },
         StoreRoot {
@@ -540,6 +549,9 @@ pub(crate) fn reclaim_work_root(
         max_total_bytes: None,
         class_budgets: BTreeMap::new(),
         in_use_scopes: protected,
+        // Pointer-referenced generations survive even emergency reclaim: the
+        // next job restores from them.
+        protected_paths: pointer_protected_target_generations(work_root),
     };
     entries.retain(|entry| !in_use(entry, &policy));
     entries.sort_by(|left, right| {
@@ -646,6 +658,16 @@ fn collect_candidates(
         return Ok(());
     }
     if depth >= store.candidate_depth {
+        // Hidden entries at candidate depth are runner plumbing, never cache
+        // payloads: class directories hold `.staging-*` in-flight publishes
+        // and `.velnor-locks` coordination dirs, plus the `current` pointer
+        // file. Evicting any of them is either wrong or pointless.
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        {
+            return Ok(());
+        }
         let (bytes, modified) = size_and_modified(path)?;
         if bytes > 0 {
             entries.push(CacheEntry {
@@ -798,6 +820,10 @@ pub(crate) struct EvictionPolicy {
     pub(crate) max_total_bytes: Option<u64>,
     pub(crate) class_budgets: BTreeMap<CacheStore, u64>,
     pub(crate) in_use_scopes: BTreeSet<String>,
+    /// Generation directories a class `current` pointer names. They are the
+    /// default restore source; eviction may only take generations the pointer
+    /// no longer references.
+    pub(crate) protected_paths: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -820,8 +846,9 @@ pub(crate) fn select_eviction_candidates(
     policy: &EvictionPolicy,
 ) -> Vec<EvictionCandidate> {
     let mut candidates: BTreeMap<PathBuf, EvictionCandidate> = BTreeMap::new();
+    let evictable = |entry: &&CacheEntry| !in_use(entry, policy) && !protected(entry, policy);
 
-    for entry in entries.iter().filter(|entry| !in_use(entry, policy)) {
+    for entry in entries.iter().filter(evictable) {
         if is_older_than(entry.modified, policy.now, policy.max_age) {
             add_candidate(&mut candidates, entry, "older-than-max-age");
         }
@@ -830,7 +857,7 @@ pub(crate) fn select_eviction_candidates(
     let mut target_scopes: BTreeMap<String, Vec<&CacheEntry>> = BTreeMap::new();
     for entry in entries
         .iter()
-        .filter(|entry| entry.store == CacheStore::Targets && !in_use(entry, policy))
+        .filter(|entry| entry.store == CacheStore::Targets && evictable(entry))
     {
         target_scopes
             .entry(entry.scope_key())
@@ -856,10 +883,7 @@ pub(crate) fn select_eviction_candidates(
         let total: u64 = entries.iter().map(|entry| entry.bytes).sum();
         if total > max_total_bytes {
             let mut remaining = total;
-            let mut oldest: Vec<&CacheEntry> = entries
-                .iter()
-                .filter(|entry| !in_use(entry, policy))
-                .collect();
+            let mut oldest: Vec<&CacheEntry> = entries.iter().filter(evictable).collect();
             oldest.sort_by(|left, right| {
                 left.modified
                     .cmp(&right.modified)
@@ -886,7 +910,7 @@ pub(crate) fn select_eviction_candidates(
             .sum();
         let mut oldest: Vec<&CacheEntry> = entries
             .iter()
-            .filter(|entry| entry.store == *store && !in_use(entry, policy))
+            .filter(|entry| entry.store == *store && evictable(entry))
             .collect();
         oldest.sort_by(|left, right| {
             left.modified
@@ -903,6 +927,12 @@ pub(crate) fn select_eviction_candidates(
     }
 
     candidates.into_values().collect()
+}
+
+/// Explicitly protected entry: a generation named by a class `current`
+/// pointer. Age, budgets, and retention never override the pointer.
+fn protected(entry: &CacheEntry, policy: &EvictionPolicy) -> bool {
+    policy.protected_paths.contains(&entry.path)
 }
 
 fn add_candidate(
@@ -933,7 +963,7 @@ fn add_candidate(
 
 fn in_use(entry: &CacheEntry, policy: &EvictionPolicy) -> bool {
     let candidate = format!("{}/{}", entry.store, entry.scope_key());
-    policy.in_use_scopes.iter().any(|active| {
+    let mut protected = policy.in_use_scopes.iter().any(|active| {
         candidate == *active
             || candidate
                 .strip_prefix(active)
@@ -941,7 +971,54 @@ fn in_use(entry: &CacheEntry, policy: &EvictionPolicy) -> bool {
             || active
                 .strip_prefix(&candidate)
                 .is_some_and(|suffix| suffix.starts_with('/'))
-    })
+    });
+    if !protected && entry.store == CacheStore::Targets {
+        // Target leases are held at the repository level (the lease holder
+        // appends its job id as a SIBLING of the class directories), so a
+        // class-level candidate is protected whenever an active scope covers
+        // the candidate's parent scope: `active == parent` (the bare
+        // repository scope) or `active` starts with `parent/` (a holder).
+        if let Some((parent, _)) = candidate.rsplit_once('/') {
+            protected = policy.in_use_scopes.iter().any(|active| {
+                active == parent
+                    || active
+                        .strip_prefix(parent)
+                        .is_some_and(|r| r.starts_with('/'))
+            });
+        }
+    }
+    protected
+}
+
+/// Every target generation a class `current` pointer currently names. These
+/// are the default restore sources for the next job of the class and must
+/// survive age-, retention-, and budget-driven eviction alike.
+pub(crate) fn pointer_protected_target_generations(work_root: &Path) -> BTreeSet<PathBuf> {
+    let mut protected = BTreeSet::new();
+    for store in store_roots(work_root)
+        .into_iter()
+        .filter(|store| store.kind == CacheStore::Targets)
+    {
+        collect_pointer_protected(&store.path, store.scope_depth, &mut protected);
+    }
+    protected
+}
+
+fn collect_pointer_protected(path: &Path, depth: usize, protected: &mut BTreeSet<PathBuf>) {
+    if depth == 0 {
+        if let Some(generation) = crate::target_snapshot::pointer_referenced_generation(path) {
+            protected.insert(generation);
+        }
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            collect_pointer_protected(&entry.path(), depth - 1, protected);
+        }
+    }
 }
 
 fn is_older_than(modified: SystemTime, now: SystemTime, max_age: Duration) -> bool {
@@ -976,37 +1053,38 @@ mod tests {
             max_total_bytes: None,
             class_budgets: BTreeMap::new(),
             in_use_scopes: BTreeSet::new(),
+            protected_paths: BTreeSet::new(),
         }
     }
 
     #[test]
-    fn cache_gc_keeps_newest_target_buckets_per_scope() {
+    fn cache_gc_keeps_newest_target_generations_per_class() {
         let entries = vec![
             entry(
                 "/target/old",
                 CacheStore::Targets,
-                &["trusted", "repo", "wf", "job"],
+                &["trusted", "workspace-v5-compat", "repo", "class"],
                 20,
                 1,
             ),
             entry(
                 "/target/new",
                 CacheStore::Targets,
-                &["trusted", "repo", "wf", "job"],
+                &["trusted", "workspace-v5-compat", "repo", "class"],
                 1,
                 1,
             ),
             entry(
                 "/target/mid",
                 CacheStore::Targets,
-                &["trusted", "repo", "wf", "job"],
+                &["trusted", "workspace-v5-compat", "repo", "class"],
                 10,
                 1,
             ),
             entry(
                 "/target/other",
                 CacheStore::Targets,
-                &["trusted", "repo", "wf", "other"],
+                &["trusted", "workspace-v5-compat", "repo", "other-class"],
                 40,
                 1,
             ),
@@ -1263,7 +1341,10 @@ mod tests {
             std::env::temp_dir().join(format!("velnor-active-stores-{}", uuid::Uuid::new_v4()));
         let stale_after = Duration::from_secs(60);
         let scopes = [
-            ("targets", "workspace-v2/tailrocks_playground/ci.yml"),
+            (
+                "targets",
+                "trusted/workspace-v5-compat/tailrocks_playground",
+            ),
             ("actions-cache", "tailrocks_playground"),
             ("cargo", "registry"),
             ("cargo", "git"),
@@ -1292,7 +1373,7 @@ mod tests {
         // A concurrent job from another repository shares Cargo registry/git
         // and mise cache, while protecting its own executable/cache/target scopes.
         for (class, scope) in [
-            ("targets", "workspace-v2/tailrocks_other/ci.yml"),
+            ("targets", "trusted/workspace-v5-compat/tailrocks_other"),
             ("actions-cache", "tailrocks_other"),
             ("cargo", "registry"),
             ("cargo", "git"),
@@ -1317,14 +1398,24 @@ mod tests {
             entry(
                 "/targets/playground",
                 CacheStore::Targets,
-                &["workspace-v2", "tailrocks_playground", "ci.yml"],
+                &[
+                    "trusted",
+                    "workspace-v5-compat",
+                    "tailrocks_playground",
+                    "class-a",
+                ],
                 90,
                 10,
             ),
             entry(
                 "/targets/other",
                 CacheStore::Targets,
-                &["workspace-v2", "tailrocks_other", "ci.yml"],
+                &[
+                    "trusted",
+                    "workspace-v5-compat",
+                    "tailrocks_other",
+                    "class-b",
+                ],
                 90,
                 10,
             ),
@@ -1413,5 +1504,98 @@ mod tests {
         assert!(paths.is_empty());
         drop(leases);
         fs::remove_dir_all(run_root).unwrap();
+    }
+
+    #[test]
+    fn pointer_referenced_target_generations_survive_eviction() {
+        let root = std::env::temp_dir().join(format!("velnor-target-gc-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        let store = store_roots(&work)
+            .into_iter()
+            .find(|store| store.kind == CacheStore::Targets)
+            .unwrap();
+        let legacy = store
+            .path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"));
+        let relative: Vec<&str> = if legacy {
+            vec![
+                "trusted",
+                "workspace-v5-compat",
+                "tailrocks_playground",
+                "class-digest",
+            ]
+        } else {
+            vec![
+                "workspace-v5-compat",
+                "tailrocks_playground",
+                "class-digest",
+            ]
+        };
+        assert_eq!(
+            relative.len(),
+            store.scope_depth,
+            "class directories sit at scope depth in both layouts"
+        );
+        assert_eq!(store.candidate_depth, store.scope_depth + 1);
+        let class_dir = relative
+            .iter()
+            .fold(store.path.clone(), |path, part| path.join(part));
+
+        let target = root.join("target");
+        let publish = |content: &str| {
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("payload"), content).unwrap();
+            let manifest = crate::target_snapshot::TargetGenerationManifest {
+                schema: crate::target_snapshot::MANIFEST_SCHEMA,
+                compat_class: "class-digest".into(),
+                repository: "tailrocks/playground".into(),
+                branch: Some("main".into()),
+                commit: None,
+                created_unix: 0,
+                provenance: crate::target_snapshot::TargetSnapshotProvenance::default(),
+            };
+            crate::target_snapshot::publish_generation(&class_dir, &target, &manifest).unwrap()
+        };
+        let superseded = publish("old");
+        let current = publish("new");
+        assert_eq!(
+            crate::target_snapshot::pointer_referenced_generation(&class_dir),
+            Some(class_dir.join(&current))
+        );
+
+        // Class plumbing is never a candidate: only the generation dirs are.
+        let mut entries = cache_listing(&work).unwrap();
+        entries.retain(|entry| entry.store == CacheStore::Targets);
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].path, class_dir.join(&superseded));
+        assert_eq!(entries[1].path, class_dir.join(&current));
+        assert_eq!(entries[0].scope_key(), entries[1].scope_key());
+
+        // Make every generation older than any threshold: only the pointer's
+        // generation may survive.
+        for entry in &entries {
+            let file = fs::File::options()
+                .append(true)
+                .open(entry.path.join("data/payload"))
+                .unwrap();
+            file.set_modified(SystemTime::UNIX_EPOCH + DAY).unwrap();
+        }
+        let policy = EvictionPolicy {
+            now: SystemTime::now(),
+            keep_newest_per_target_scope: 0,
+            max_age: Duration::ZERO,
+            max_total_bytes: None,
+            class_budgets: BTreeMap::new(),
+            in_use_scopes: BTreeSet::new(),
+            protected_paths: pointer_protected_target_generations(&work),
+        };
+        let candidates = select_eviction_candidates(&cache_listing(&work).unwrap(), &policy);
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].path, class_dir.join(&superseded));
+        assert!(candidates[0].reason.contains("older-than-max-age"));
+        assert!(class_dir.join(&current).join("data/payload").is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -245,6 +245,44 @@ impl DegradationRecord {
         }
     }
 
+    /// Target snapshots turned off while the maximum policy expects them: the
+    /// job runs with an ephemeral target directory and rebuilds from scratch.
+    #[must_use]
+    pub fn target_persistence_disabled(cause: &str) -> Self {
+        Self {
+            feature: "acceleration.target_persistence".to_string(),
+            reason: "target snapshots disabled: the job keeps an ephemeral workspace target "
+                .to_string()
+                + "and cannot restore or publish warm generations",
+            cause: cause.to_string(),
+            expected_impact: "Rust jobs rebuild every dependency from source; warm-restore "
+                .to_string()
+                + "and cross-job reuse of compiled artifacts are lost",
+            restore_hint: "restore [acceleration] target_persistence = \"auto\" (or remove the "
+                .to_string()
+                + "override) so Rust jobs restore compatible snapshots",
+        }
+    }
+
+    /// The target snapshot store exists by policy but a lifecycle phase could
+    /// not use it (`materialize` or `publish`). The job continues cold rather
+    /// than failing — a broken cache must cost speed, never correctness — and
+    /// the degradation stays visible so the store gets fixed.
+    #[must_use]
+    pub fn target_store_unusable(phase: &str, detail: &str) -> Self {
+        Self {
+            feature: "acceleration.target_persistence".to_string(),
+            reason: format!("target snapshot store unusable during {phase}: job ran cold"),
+            cause: detail.to_string(),
+            expected_impact: "the job rebuilt from source and could not publish a warm "
+                .to_string()
+                + "generation for the next job",
+            restore_hint: "inspect the target store permissions, disk space, and locks named "
+                .to_string()
+                + "in the cause; the next healthy job restores automatically",
+        }
+    }
+
     /// Defensive record for a state admission already rejects (e.g. mixed
     /// cache wrappers): resolution degrades rather than guessing.
     #[must_use]
@@ -381,5 +419,21 @@ mod tests {
             DegradationRecord::compiler_cache_disabled("VELNOR_ACCELERATION_COMPILER_CACHE=off");
         assert!(record.reason.contains("cold"));
         assert!(record.restore_hint.contains("compiler_cache"));
+    }
+
+    #[test]
+    fn target_persistence_records_name_their_phase() {
+        let off = DegradationRecord::target_persistence_disabled(
+            "policy [acceleration] target_persistence = \"off\"",
+        );
+        assert_eq!(off.feature, "acceleration.target_persistence");
+        assert!(off.reason.contains("ephemeral"));
+        assert!(off.restore_hint.contains("auto"));
+
+        let unusable =
+            DegradationRecord::target_store_unusable("materialize", "read-only store dir");
+        assert!(unusable.reason.contains("materialize"));
+        assert!(unusable.cause.contains("read-only"));
+        assert!(unusable.reason.contains("cold"));
     }
 }

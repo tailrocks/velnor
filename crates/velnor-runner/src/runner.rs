@@ -4032,16 +4032,19 @@ async fn handle_job_request(
                 let trust_key = crate::container::sanitize_store_key(&args.trust_scope);
                 let cargo_root = crate::container::cargo_store_host(&work_root);
                 let mise_root = crate::container::mise_store_host(&work_root);
-                let target_root = crate::storage::append_legacy_trust(
-                    crate::container::cargo_target_store_host(&work_root),
-                    &trust_key,
-                );
+                // The lease scope is the store-parent prefix every
+                // compatibility class of this repository shares —
+                // `<trust>/<generation>/<repo>` in the legacy layout,
+                // `<generation>/<repo>` in the canonical one (the store path
+                // already carries trust there). ScopeLease appends the job id
+                // as a holder suffix, and GC protects any class-level
+                // candidate whose parent scope an active lease covers.
+                let target_root = crate::container::cargo_target_store_host(&work_root);
                 let target_job = crate::github_adapter::github_cargo_target_store_host(
                     &job, &work_root, &trust_key,
                 );
                 let target_scope = target_job
-                    .parent()
-                    .and_then(|path| path.strip_prefix(&target_root).ok())
+                    .strip_prefix(&target_root)
                     .context("derive persistent target GC scope")?
                     .to_string_lossy()
                     .to_string();
@@ -6367,6 +6370,7 @@ fn execute_script_job_inner(
                 plan,
                 &mut checkout_trace,
                 Some(&git_mirror_store),
+                container.cargo_target_host.is_some(),
             )
         };
         checkout_duration = checkout_duration.saturating_add(checkout_started.elapsed());
@@ -15096,6 +15100,7 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
+            target_degradations: crate::acceleration::DegradationLog::default(),
             compiler_cache: crate::compiler_cache::ResolvedBackend::off(),
         }
     }

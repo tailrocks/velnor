@@ -110,20 +110,31 @@ that temporary mismatch until the operator activates the new signed record.
   install only with `mise install --locked` (recorded checksums/provenance) and
   each exact mise binary version is verified and persisted for reuse instead of
   re-fetched — the baked `/opt/mise/bin` bootstrap is never mutated.
-- Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
-  the daemon env only for trusted target scopes. Velnor stores targets under
-  `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`
-  so warm state is shared only across matching trust scope, repository,
-  workflow, and job classes. After checkout, Velnor reflink/copies a complete
-  generation into the job-local workspace `target/`; after the job it publishes
-  the completed tree atomically. It never adds a nested `/__w/target` bind
-  mount: nested mounts make an ordinary rename between `target/` and another
-  workspace directory fail with `EXDEV`. Velnor does not set
-  `CARGO_TARGET_DIR`, so paths and same-filesystem semantics remain identical
-  to GitHub-hosted execution. Set `VELNOR_TRUST_SCOPE` per
-  daemon/pool (`trusted` by default;
-  use a distinct value such as `public-forks` for untrusted lanes) before
-  enabling target persistence.
+- Automatic Rust target snapshots: trusted pools read and publish compatible
+  target generations with no opt-in. Store layout is
+  `_velnor_targets/<trust-scope>/workspace-v5-compat/<repo>/<compat-class>/<gen-id>`
+  (plus a `current` pointer per class). The compatibility class is a digest
+  over repository identity, trust scope, store generation, host triple, the
+  workspace toolchain (rust-toolchain files, mise.lock rust/cargo pins, job
+  image rust version) and workspace `RUSTFLAGS`/`RUSTDOCFLAGS` — deliberately
+  not over commit SHA, job display name, workflow, profile, or features, so
+  identical jobs and cross-workflow runs reuse dependency artifacts instead of
+  rebuilding from scratch. After checkout Velnor reflink/copies the best
+  compatible generation (same-branch newest, then default-branch, then any
+  branch) into the job-local workspace `target/`; a fully successful job
+  publishes its target tree as a new immutable generation and flips `current`
+  atomically. Failed or cancelled jobs never publish. GC keeps the newest N
+  generations per class and always protects the `current` generation and any
+  generation an active job lease covers. Untrusted pools get the same
+  mechanism inside their own trust namespace and never publish into the
+  trusted one. `target_persistence = "off"` in `[acceleration]` gives every
+  job an ephemeral target and records a degradation for Rust-compiling jobs.
+  Velnor never adds a nested `/__w/target` bind mount (nested mounts make an
+  ordinary rename between `target/` and another workspace directory fail with
+  `EXDEV`) and does not set `CARGO_TARGET_DIR`, so paths and same-filesystem
+  semantics remain identical to GitHub-hosted execution. Set
+  `VELNOR_TRUST_SCOPE` per daemon/pool (`trusted` by default; use a distinct
+  value such as `public-forks` for untrusted lanes).
 - Trust scopes are enforced at runtime. The `trusted` scope keeps the current
   full-capability lane, including the host Docker socket for Docker/buildx
   jobs. Any other `VELNOR_TRUST_SCOPE` refuses jobs when GitHub sends

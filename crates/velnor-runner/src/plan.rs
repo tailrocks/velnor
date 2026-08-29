@@ -116,6 +116,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
+            target_degradations: crate::acceleration::DegradationLog::default(),
             compiler_cache: crate::compiler_cache::ResolvedBackend::selected(
                 crate::compiler_cache::CompilerCacheBackend::Sccache,
                 crate::compiler_cache::CompilerCacheOrigin::PolicyExplicit,

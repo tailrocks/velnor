@@ -479,6 +479,7 @@ where
                 true,
                 true,
                 false,           // lfs: action repos don't use LFS
+                false,           // action repos never carry the workspace target store
                 None,            // action bundles are not primary-repository mirrors
                 &mut Vec::new(), // action-repo fetch trace is internal, not surfaced
             )?;
