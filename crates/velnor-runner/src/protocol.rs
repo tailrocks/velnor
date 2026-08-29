@@ -231,8 +231,9 @@ impl GitHubRetryHint {
 ///
 /// GitHub response data and job messages can supply URLs. HTTPS is mandatory
 /// for remote endpoints so bearer tokens, PATs, and OAuth assertions cannot
-/// be sent in cleartext. Loopback HTTP remains available for local protocol
-/// tests only; production daemons never send credentials over cleartext HTTP.
+/// be sent in cleartext. Loopback HTTP is available only to unit tests and the
+/// explicit non-default integration-test feature; release daemons never send
+/// credentials over cleartext HTTP.
 pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     let safe = redacted_authenticated_url(raw);
     let url = Url::parse(raw).with_context(|| format!("parse authenticated URL '{safe}'"))?;

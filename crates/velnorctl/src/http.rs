@@ -261,7 +261,7 @@ pub fn bind_unix(
 /// never removed; only an unconnected socket with the same identity observed
 /// before unlink is eligible.
 pub fn remove_stale_socket(path: &FsPath) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::os::unix::net::UnixStream;
 
     let metadata = match std::fs::symlink_metadata(path) {
@@ -273,6 +273,12 @@ pub fn remove_stale_socket(path: &FsPath) -> Result<(), std::io::Error> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "existing socket path is not a socket",
+        ));
+    }
+    if metadata.uid() != current_uid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to replace a foreign-owned control socket",
         ));
     }
     let identity = socket_identity(path)
@@ -287,10 +293,7 @@ pub fn remove_stale_socket(path: &FsPath) -> Result<(), std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
         Err(error) => return Err(error),
     }
-    if socket_identity(path) == Some(identity) {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
+    remove_socket_if_unchanged(path, identity.device, identity.inode)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +312,92 @@ fn socket_identity(path: &FsPath) -> Option<SocketIdentity> {
     })
 }
 
+pub(crate) fn remove_socket_if_unchanged(
+    path: &FsPath,
+    expected_device: u64,
+    expected_inode: u64,
+) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket must have a parent",
+        )
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket must have a filename",
+        )
+    })?;
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket filename contains NUL",
+        )
+    })?;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
+    if socket_identity_at(directory.as_raw_fd(), &name)?
+        != Some(SocketIdentity {
+            device: expected_device,
+            inode: expected_inode,
+        })
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "stale control socket changed before cleanup",
+        ));
+    }
+    // A stable directory descriptor prevents parent-path replacement or
+    // symlink traversal between the identity check and unlink.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn socket_identity_at(
+    directory_fd: std::os::fd::RawFd,
+    name: &std::ffi::CStr,
+) -> Result<Option<SocketIdentity>, std::io::Error> {
+    use std::mem::MaybeUninit;
+
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `directory_fd` is an open directory descriptor and `name` is a
+    // valid NUL-terminated relative pathname. `stat` is initialized on zero.
+    let result = unsafe {
+        libc::fstatat(
+            directory_fd,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    // SAFETY: fstatat initialized `stat` on success.
+    let stat = unsafe { stat.assume_init() };
+    let file_type = (stat.st_mode as u32) & (libc::S_IFMT as u32);
+    if file_type != libc::S_IFSOCK as u32 {
+        return Ok(None);
+    }
+    Ok(Some(SocketIdentity {
+        device: stat.st_dev as u64,
+        inode: stat.st_ino,
+    }))
+}
+
 /// Remove only the exact socket pathname captured just after bind when
 /// post-bind setup fails. Dropping a Unix listener does not remove its
 /// pathname, so leaving this cleanup to the next daemon start would create a
@@ -321,9 +410,7 @@ fn cleanup_failed_bind(
 ) {
     drop(listener);
 
-    if socket_identity(path) == Some(identity) {
-        let _ = std::fs::remove_file(path);
-    }
+    let _ = remove_socket_if_unchanged(path, identity.device, identity.inode);
 }
 
 fn inspect_directory_chain(path: &FsPath) -> Result<(), std::io::Error> {
@@ -1004,8 +1091,9 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        let parent = std::env::current_dir()
-            .expect("current directory")
+        let parent = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .expect("HOME is set for tests")
             .join(format!(
                 ".velnorctl-instance-dir-{}-{suffix}",
                 std::process::id()
