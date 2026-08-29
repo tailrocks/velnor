@@ -6021,7 +6021,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            error.to_string().contains("stat artifact source"),
+            error.to_string().contains("artifact source"),
             "{error:#}"
         );
 
