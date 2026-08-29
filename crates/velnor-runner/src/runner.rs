@@ -2447,7 +2447,8 @@ async fn configure_daemon_slots(
         // restart once the stale runner ages out.
         if let Err(error) = result {
             eprintln!(
-                "Warning: could not configure daemon slot-{slot_index} (skipping; running on the remaining slots): {error:#}"
+                "Warning: could not configure daemon slot-{slot_index} (skipping; running on the remaining slots): {}",
+                sanitized_retry_error(&error)
             );
             skipped_slots.push(slot_index);
             continue;
