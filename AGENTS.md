@@ -22,7 +22,7 @@ Velnor unified CI contract (2026-08-09):
 - **actions/runner is protocol source of truth** (https://github.com/actions/runner): before writing runner protocol code (job messages, broker, expressions, credentials, run-service, timeline), find and match its equivalent logic exactly; never guess.
 - **velnor-actions-fixture is ground truth**: never modify it to work around Velnor gaps; implement the missing feature in Velnor; strengthen coverage, never weaken.
 - **Strict capabilities**: support only what the Rust capability manifest and [docs/strict-capability-contract.md](docs/strict-capability-contract.md) declare; validate the whole job before side effects; fail unsupported config immediately with exact field/value and manifest version; no silent fallbacks — every approved `uses:` has a pinned native Rust adapter; new capabilities need explicit operator approval.
-- **Velnor blocker loop**: fix failed Velnor execution in Velnor on the single campaign branch, commit and push every iteration, and merge the sole campaign PR to `main` at the authorized safe integration checkpoint. If urgent Sentry validation is authorized before merge, use only an immutable signed-APT release bound to the exact branch SHA over `ssh sentry`; never copy binaries, install local packages, or use direct `dpkg -i`. Verify exact identity, health, rollback, and `velnor`, `github`, and `both` lanes; fresh security, performance, goal, verifier, and reviewer subagents audit each pushed iteration.
+- **Velnor blocker loop**: fix failed Velnor execution in Velnor on the single campaign branch, commit and push every iteration, and merge the sole campaign PR to `main` at the authorized safe integration checkpoint; when the Velnor lane cannot build its required Velnor revision, build one Debian package from the exact pushed campaign SHA on this host, verify its SHA-256 before and after transfer, transfer only that package over noninteractive `ssh sentry`, publish it into the signed Sentry APT repository, install only through APT, and verify installed identity, signature/checksum, health, and rollback before retrying `velnor`, `github`, and `both`. Never transfer raw binaries, expose secrets, use `dpkg -i`, or silently fall back to GitHub; fresh security, performance, goal, verifier, and reviewer subagents audit each pushed iteration.
 - **Branch freshness and merge closure**: before each new fix/change, fetch `origin/main`; for a new campaign, fast-forward clean local `main` with `git pull --ff-only origin main`, verify SHA equality, and branch from it; for the active campaign, retain its sole branch/PR and integrate latest `origin/main`. Before merging any PR, inspect all conversation/comments, reviews, inline threads, and checks; classify each item, answer/fix or mark obsolete with a reason, re-check the final exact head SHA, and merge only with no unanswered questions, unresolved requests, or failing required checks.
 
 ## Decision and bug-fix discipline
@@ -52,7 +52,10 @@ Active decisions: two explicit backends `[execution] backend = "docker" | "micro
 2026-08-29 decision: the one campaign branch/one PR topology remains; Velnor
 blockers are fixed and pushed there, the sole PR merges to `main` at its safe
 authorized integration point, and urgent pre-merge Sentry validation is
-signed-APT-only from the exact branch SHA over `ssh sentry` with dual-lane
-evidence and rollback proof.
+signed-APT-only from the exact branch SHA over `ssh sentry`, including the
+permitted chicken-egg bootstrap: build one exact-SHA Debian package on this
+host, transfer and publish only that package into the signed Sentry APT
+repository, install through APT, and retain identity, dual-lane, health, and
+rollback proof.
 
 Full history: `git log -p -- AGENTS.md`; entries predating the marked contract that conflict with it are historical and non-executable.
