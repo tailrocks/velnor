@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 12;
+pub const LATEST_SCHEMA_VERSION: u32 = 13;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -353,6 +353,41 @@ CREATE INDEX IF NOT EXISTS idx_events_instance_reconciliation_id
 ON events (instance_slug, reconciliation_id, id);
 ";
 
+/// Durable per-job write claims. The fixed claim bounds future lifecycle
+/// writes while the counter lets concurrent admissions reserve capacity in one
+/// SQLite write transaction.
+const SCHEMA_V13: &str = "
+CREATE TABLE IF NOT EXISTS job_storage_reservations (
+    instance_slug TEXT NOT NULL CHECK (length(instance_slug) > 0),
+    job_uid TEXT NOT NULL CHECK (length(job_uid) > 0),
+    reserved_bytes INTEGER NOT NULL CHECK (reserved_bytes = 262144),
+    reserved_at TEXT NOT NULL,
+    PRIMARY KEY (instance_slug, job_uid)
+);
+CREATE TABLE IF NOT EXISTS storage_reservation_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+    reserved_bytes INTEGER NOT NULL CHECK (reserved_bytes >= 0)
+);
+INSERT OR IGNORE INTO storage_reservation_state (singleton, reserved_bytes)
+VALUES (0, 0);
+CREATE INDEX IF NOT EXISTS idx_job_storage_reservations_job
+ON job_storage_reservations (instance_slug, job_uid);
+CREATE TRIGGER IF NOT EXISTS storage_reservations_insert
+AFTER INSERT ON job_storage_reservations
+BEGIN
+    UPDATE storage_reservation_state
+    SET reserved_bytes = reserved_bytes + NEW.reserved_bytes
+    WHERE singleton = 0;
+END;
+CREATE TRIGGER IF NOT EXISTS storage_reservations_delete
+AFTER DELETE ON job_storage_reservations
+BEGIN
+    UPDATE storage_reservation_state
+    SET reserved_bytes = reserved_bytes - OLD.reserved_bytes
+    WHERE singleton = 0;
+END;
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -444,6 +479,11 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "exact-lifecycle-event-ancestry",
         sql: SCHEMA_V12,
     },
+    Migration {
+        version: 13,
+        name: "durable-job-storage-reservations",
+        sql: SCHEMA_V13,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -483,13 +523,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
         [],
         |row| row.get(0),
     )?;
-    if version >= LATEST_SCHEMA_VERSION && !v12_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v13_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 12 is recorded but its exact lifecycle-event identity columns or indexes are incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 13 is recorded but its exact lifecycle-event identity or storage-reservation schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -675,6 +715,15 @@ pub(crate) fn apply_pending(
                 "v12 exact lifecycle-event identity columns and indexes did not converge transactionally; the schema version remains unchanged",
             ));
         }
+        if migration.version == 13 && !v13_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v13 durable storage-reservation tables, counter, index, and triggers did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
         if let Some(hook) = hook {
             hook(migration.version)?;
         }
@@ -827,6 +876,24 @@ fn v12_schema_complete(conn: &Connection) -> StoreResult<bool> {
     .try_fold(true, |complete, (index, table, columns)| {
         Ok(complete && has_index_columns(conn, index, table, columns)?)
     })
+}
+
+fn v13_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v12_schema_complete(conn)?
+        || !has_column_connection(conn, "job_storage_reservations", "instance_slug")?
+        || !has_column_connection(conn, "job_storage_reservations", "job_uid")?
+        || !has_column_connection(conn, "job_storage_reservations", "reserved_bytes")?
+        || !has_column_connection(conn, "job_storage_reservations", "reserved_at")?
+        || !has_column_connection(conn, "storage_reservation_state", "reserved_bytes")?
+    {
+        return Ok(false);
+    }
+    has_index_columns(
+        conn,
+        "idx_job_storage_reservations_job",
+        "job_storage_reservations",
+        ["instance_slug", "job_uid"].as_slice(),
+    )
 }
 
 #[cfg(test)]

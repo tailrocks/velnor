@@ -14,7 +14,10 @@ use velnor_model::{
 };
 
 use super::error::{StoreError, StoreResult};
-use super::retention::{PhysicalBudgetStatus, RetentionMaintenanceBudget};
+use super::retention::{
+    storage_reservation_bytes_with_connection, PhysicalBudgetStatus, RetentionMaintenanceBudget,
+    JOB_STORAGE_RESERVATION_BYTES,
+};
 use super::rfc3339;
 use super::Store;
 
@@ -574,6 +577,7 @@ impl Store {
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         insert_summary(&transaction, summary)?;
+        ensure_job_storage_reservation(&transaction, instance_slug, job_uid)?;
         record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
         transaction.commit()?;
         Ok(())
@@ -603,11 +607,20 @@ impl Store {
         let mut conn = self.lock_conn()?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let status = self.physical_budget_status_with_connection(&transaction, budget)?;
+        let additional_reservation_bytes =
+            admission_reservation_bytes(&transaction, instance_slug, job_uid)?;
+        let status = self.physical_budget_status_with_connection_and_reservation(
+            &transaction,
+            budget,
+            additional_reservation_bytes,
+        )?;
         if !status.admits_job() {
             return Ok(status);
         }
         insert_summary(&transaction, summary)?;
+        if additional_reservation_bytes != 0 {
+            insert_job_storage_reservation(&transaction, instance_slug, job_uid)?;
+        }
         record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
         transaction.commit()?;
         Ok(status)
@@ -1625,7 +1638,91 @@ fn record_job_transition_in_transaction(
         Some(transaction_id),
         None,
     )?;
+    if target.is_terminal() {
+        transaction.execute(
+            "DELETE FROM job_storage_reservations
+             WHERE instance_slug = ?1 AND job_uid = ?2",
+            params![instance_slug, job_uid],
+        )?;
+    }
     Ok(true)
+}
+
+fn admission_reservation_bytes(
+    transaction: &Transaction<'_>,
+    instance_slug: &str,
+    job_uid: &str,
+) -> StoreResult<u64> {
+    // Validate the complete aggregate before deciding whether this job is a
+    // replay. A damaged counter or orphaned row must never open a bypass.
+    storage_reservation_bytes_with_connection(transaction)?;
+    let existing_job: bool = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM jobs WHERE instance_slug = ?1 AND job_uid = ?2
+         )",
+        params![instance_slug, job_uid],
+        |row| row.get(0),
+    )?;
+    let existing_reservation: Option<i64> = transaction
+        .query_row(
+            "SELECT reserved_bytes FROM job_storage_reservations
+             WHERE instance_slug = ?1 AND job_uid = ?2",
+            params![instance_slug, job_uid],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match (existing_job, existing_reservation) {
+        (_, Some(_)) => Ok(0),
+        (true, None) => Err(StoreError::new(
+            ExitClass::Operation,
+            "store.admission.reservation.missing",
+        )
+        .with_remediation(
+            "reconcile the admitted job before retrying; its durable storage reservation is missing",
+        )),
+        (false, None) => Ok(JOB_STORAGE_RESERVATION_BYTES),
+    }
+}
+
+fn ensure_job_storage_reservation(
+    transaction: &Transaction<'_>,
+    instance_slug: &str,
+    job_uid: &str,
+) -> StoreResult<()> {
+    let existing: Option<i64> = transaction
+        .query_row(
+            "SELECT reserved_bytes FROM job_storage_reservations
+             WHERE instance_slug = ?1 AND job_uid = ?2",
+            params![instance_slug, job_uid],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    insert_job_storage_reservation(transaction, instance_slug, job_uid)
+}
+
+fn insert_job_storage_reservation(
+    transaction: &Transaction<'_>,
+    instance_slug: &str,
+    job_uid: &str,
+) -> StoreResult<()> {
+    transaction.execute(
+        "INSERT INTO job_storage_reservations
+             (instance_slug, job_uid, reserved_bytes, reserved_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            instance_slug,
+            job_uid,
+            i64::try_from(JOB_STORAGE_RESERVATION_BYTES).map_err(|_| {
+                StoreError::new(ExitClass::Operation, "store.admission.reservation.range")
+                    .with_remediation("the fixed storage reservation exceeds SQLite range")
+            })?,
+            rfc3339(Timestamp::now()),
+        ],
+    )?;
+    Ok(())
 }
 
 fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobSummary> {

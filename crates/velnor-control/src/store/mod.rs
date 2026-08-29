@@ -1295,6 +1295,174 @@ mod tests {
     }
 
     #[test]
+    fn terminal_transition_releases_durable_storage_reservation_after_reopen() {
+        let temp = TempDb::new("reservation-release");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("reserve")).unwrap();
+        store
+            .record_job(&job("reserve", "j", "org/reserve"))
+            .unwrap();
+        {
+            let mut connection = test_connection(&store);
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO job_storage_reservations
+                     (instance_slug, job_uid, reserved_bytes, reserved_at)
+                     VALUES ('reserve', 'j', ?1, ?2)",
+                    params![
+                        crate::store::retention::JOB_STORAGE_RESERVATION_BYTES as i64,
+                        rfc3339(Timestamp::now()),
+                    ],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        let reserved: i64 = test_connection(&store)
+            .query_row(
+                "SELECT reserved_bytes FROM storage_reservation_state WHERE singleton = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            reserved,
+            crate::store::retention::JOB_STORAGE_RESERVATION_BYTES as i64
+        );
+
+        walk_happy_path(&store, "reserve", "j");
+        let remaining: i64 = test_connection(&store)
+            .query_row(
+                "SELECT reserved_bytes FROM storage_reservation_state WHERE singleton = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            test_connection(&store)
+                .query_row("SELECT COUNT(*) FROM job_storage_reservations", [], |row| {
+                    row.get::<_, i64>(0)
+                },)
+                .unwrap(),
+            0
+        );
+        drop(store);
+
+        let reopened = Store::open(&temp.path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            test_connection(&reopened)
+                .query_row(
+                    "SELECT reserved_bytes FROM storage_reservation_state WHERE singleton = 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn budgeted_admission_replays_one_reservation_and_rejects_corrupt_aggregate() {
+        use velnor_model::{JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef};
+
+        let temp = TempDb::new("reservation-admission");
+        let store = Store::open(&temp.path).unwrap();
+        let summary = ModelJobSummary::from_normalized(NormalizedJob {
+            instance_slug: "admission".to_owned(),
+            job_uid: "job-1".to_owned(),
+            repository: RepositoryRef::new("org", "repo"),
+            workflow: ".github/workflows/ci.yml".to_owned(),
+            job_name: "build".to_owned(),
+            run_id: Some(7),
+            attempt: Some(1),
+            head_ref: None,
+            head_sha: None,
+            trigger_event: None,
+            queued_at: Some(Timestamp::now()),
+            acquired_at: None,
+            slot_name: None,
+            runner_name: None,
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            phase: JobPhase::Queued,
+            conclusion: None,
+            infrastructure_category: None,
+        })
+        .unwrap();
+        let acquired = acquire("reservation");
+        let budget = RetentionMaintenanceBudget {
+            max_database_bytes: u64::MAX,
+            min_free_bytes: 0,
+            ..RetentionMaintenanceBudget::default()
+        };
+        assert_eq!(
+            store
+                .persist_summary_and_transition_with_budget(
+                    &summary,
+                    "admission",
+                    "job-1",
+                    &acquired,
+                    &budget,
+                )
+                .unwrap(),
+            PhysicalBudgetStatus::WithinBudget
+        );
+        assert_eq!(
+            test_connection(&store)
+                .query_row("SELECT COUNT(*) FROM job_storage_reservations", [], |row| {
+                    row.get::<_, i64>(0)
+                },)
+                .unwrap(),
+            1
+        );
+
+        // The same identity/token is an atomic replay, not a second claim.
+        assert_eq!(
+            store
+                .persist_summary_and_transition_with_budget(
+                    &summary,
+                    "admission",
+                    "job-1",
+                    &acquired,
+                    &budget,
+                )
+                .unwrap(),
+            PhysicalBudgetStatus::WithinBudget
+        );
+        assert_eq!(
+            test_connection(&store)
+                .query_row(
+                    "SELECT reserved_bytes FROM storage_reservation_state WHERE singleton = 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            crate::store::retention::JOB_STORAGE_RESERVATION_BYTES as i64
+        );
+
+        // A counter mismatch is a hard admission failure, before any row
+        // update can occur.
+        test_connection(&store)
+            .execute(
+                "UPDATE storage_reservation_state SET reserved_bytes = 0 WHERE singleton = 0",
+                [],
+            )
+            .unwrap();
+        let error = store
+            .persist_summary_and_transition_with_budget(
+                &summary,
+                "admission",
+                "job-1",
+                &acquired,
+                &budget,
+            )
+            .expect_err("corrupt aggregate must fail closed");
+        assert_eq!(error.envelope.reason, "store.admission.reservation.corrupt");
+    }
+
+    #[test]
     fn different_event_after_terminal_is_rejected_naming_from_to() {
         let temp = TempDb::new("after-terminal");
         let store = Store::open(&temp.path).unwrap();
