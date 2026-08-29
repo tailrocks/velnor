@@ -388,12 +388,19 @@ fn socket_identity_at(
     }
     // SAFETY: fstatat initialized `stat` on success.
     let stat = unsafe { stat.assume_init() };
+    // libc exposes these stat fields with platform-specific integer widths.
+    // Keep the normalized comparison explicit; Linux clippy sees some casts
+    // as same-type while macOS requires them.
+    #[allow(clippy::unnecessary_cast)]
     let file_type = (stat.st_mode as u32) & (libc::S_IFMT as u32);
+    #[allow(clippy::unnecessary_cast)]
     if file_type != libc::S_IFSOCK as u32 {
         return Ok(None);
     }
+    #[allow(clippy::unnecessary_cast)]
+    let device = stat.st_dev as u64;
     Ok(Some(SocketIdentity {
-        device: stat.st_dev as u64,
+        device,
         inode: stat.st_ino,
     }))
 }
