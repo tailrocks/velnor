@@ -67,8 +67,10 @@ impl Default for OpenOptions {
 
 /// Handle over the shared operational database.
 ///
-/// The inner connection is mutex-serialized per handle; concurrent daemon
-/// *processes* rely on WAL mode and the busy timeout instead.
+/// The primary connection is mutex-serialized per handle; concurrent daemon
+/// *processes* rely on WAL mode and the busy timeout instead. Retention
+/// maintenance opens a separate, nonblocking connection so checkpointing and
+/// accounting never wait behind this handle's ordinary store work.
 #[derive(Debug)]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -151,6 +153,21 @@ impl Store {
         self.conn
             .lock()
             .map_err(|_| StoreError::new(ExitClass::Operation, "store.lock.poisoned"))
+    }
+
+    /// Open a short-lived connection for post-commit maintenance and
+    /// accounting. It deliberately never waits on a competing database
+    /// writer; callers must surface a busy result instead of delaying job
+    /// execution behind maintenance.
+    pub(crate) fn open_maintenance_connection(&self) -> StoreResult<Connection> {
+        let connection = Connection::open(&self.path).map_err(|error| {
+            StoreError::from(error).with_remediation(format!(
+                "open the nonblocking maintenance connection for {}",
+                self.path.display()
+            ))
+        })?;
+        connection.busy_timeout(Duration::ZERO)?;
+        Ok(connection)
     }
 
     /// Current schema version of the opened database.

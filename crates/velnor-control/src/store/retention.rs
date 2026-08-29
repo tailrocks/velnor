@@ -1,7 +1,9 @@
 //! Bounded retention and database accounting (Plan 066 step 5).
 //!
-//! Pruning runs inside one immediate transaction so a crash mid-prune leaves
-//! the previous state fully intact. Age comparisons happen in Rust through
+//! Pruning writes run inside one immediate transaction so a crash before its
+//! commit leaves the previous state fully intact. Post-commit maintenance is
+//! independently reported and cannot roll back those writes. Age comparisons
+//! happen in Rust through
 //! [`velnor_model::Timestamp::parse`] rather than SQL string comparison,
 //! because variable-fraction RFC 3339 renderings do not order
 //! lexicographically. Deletion is bounded per call (`batch_size`, loop caps),
@@ -12,7 +14,7 @@
 use std::time::Duration;
 
 use rusqlite::{params, params_from_iter};
-use velnor_model::{ExitClass, JobState, Timestamp};
+use velnor_model::{ExitClass, Timestamp};
 
 use super::error::{StoreError, StoreResult};
 use super::rfc3339;
@@ -30,8 +32,8 @@ pub struct RetentionBudget {
     /// Keep at most this many terminal jobs overall (newest first).
     pub max_terminal_job_rows: u64,
     /// Best-effort byte ceiling: once total database bytes exceed it, oldest
-    /// prunable rows keep going in batches until under the ceiling or until
-    /// nothing prunable remains.
+    /// prunable rows are removed in bounded batches until under the ceiling or
+    /// the pass limit is reached.
     pub max_database_bytes: u64,
     /// Rows examined/deleted per batch; bounds transaction work per step.
     pub batch_size: u64,
@@ -49,6 +51,26 @@ impl Default for RetentionBudget {
             batch_size: 500,
         }
     }
+}
+
+const MIN_EFFECTIVE_BATCH_SIZE: u64 = 1;
+const MAX_EFFECTIVE_BATCH_SIZE: u64 = 512;
+const MIN_PRUNE_BATCHES: u64 = 8;
+const MAX_PRUNE_BATCHES: u64 = 64;
+
+fn effective_batch_size(budget: &RetentionBudget) -> u64 {
+    budget
+        .batch_size
+        .clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE)
+}
+
+fn prune_pass_batch_limit(budget: &RetentionBudget) -> u64 {
+    let batch_size = effective_batch_size(budget);
+    let retained_rows = budget
+        .max_event_rows
+        .saturating_add(budget.max_terminal_job_rows);
+    let configured_batches = retained_rows.div_ceil(batch_size).saturating_add(2);
+    configured_batches.clamp(MIN_PRUNE_BATCHES, MAX_PRUNE_BATCHES)
 }
 
 /// What one completed prune pass did.
@@ -81,27 +103,17 @@ pub enum PrunePhase {
     AfterJobPrune,
 }
 
-/// The closed taxonomy's active (nonterminal) phase spellings; derived, so
-/// taxonomy changes update the SQL automatically.
-fn active_phase_list() -> String {
-    let states: Vec<String> = JobState::ALL
-        .iter()
-        .filter(|state| !state.is_terminal())
-        .map(|state| concat_quote(state.as_str()))
-        .collect();
-    format!("({})", states.join(","))
-}
-
-fn concat_quote(raw: &str) -> String {
-    format!("'{raw}'")
-}
+/// Only these exact spellings are terminal for retention. Any other value,
+/// including a future or malformed phase, protects its event ancestry.
+const CANONICAL_TERMINAL_PHASES: &str = "('completed','canceled','rejected')";
 
 impl Store {
     /// Run one bounded prune pass with the given budget.
     ///
     /// # Errors
-    /// Any persistence failure; the transaction rolls back so a failed pass
-    /// deletes nothing.
+    /// Pre-commit persistence failures roll back the prune transaction. A
+    /// post-commit maintenance failure is returned explicitly; committed
+    /// deletions remain durable and are not rolled back.
     pub fn prune_history(&self, budget: &RetentionBudget) -> StoreResult<PruneReport> {
         self.prune_history_inner(budget, None)
     }
@@ -111,10 +123,10 @@ impl Store {
         budget: &RetentionBudget,
         hook: Option<&dyn Fn(PrunePhase) -> StoreResult<()>>,
     ) -> StoreResult<PruneReport> {
-        let mut conn = self.lock_conn()?;
         let now = Timestamp::now();
 
         let (deleted_events, deleted_jobs, deleted_transitions) = {
+            let mut conn = self.lock_conn()?;
             let transaction =
                 conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let deleted_events = Self::prune_expired_events(&transaction, budget, now)?;
@@ -142,26 +154,45 @@ impl Store {
             (deleted_events, deleted_jobs, deleted_transitions)
         };
 
-        // Post-commit accounting uses the still-held connection guard. The
-        // checkpoint keeps the WAL from growing without bound; when the
-        // ceiling is still exceeded, a bounded incremental vacuum releases
-        // freed pages so the byte budget converges. A busy sibling writer
-        // can skip the truncation but never fails the prune.
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        if Self::database_bytes(&conn)? > budget.max_database_bytes {
-            // Page-bounded: at most 500 pages per pass.
-            conn.execute_batch("PRAGMA incremental_vacuum(500);")?;
-        }
-        let database_bytes = Self::database_bytes(&conn)?;
-        drop(conn);
+        // Maintenance uses a separate zero-wait connection. A busy result is
+        // explicit because the prune transaction already committed.
+        let (database_bytes, wal_bytes) = self.maintain_after_prune(budget)?;
 
         Ok(PruneReport {
             deleted_events,
             deleted_jobs,
             deleted_transitions,
             database_bytes,
-            wal_bytes: Self::wal_bytes_for_path(&self.path),
+            wal_bytes,
         })
+    }
+
+    fn maintain_after_prune(&self, budget: &RetentionBudget) -> StoreResult<(u64, u64)> {
+        let maintenance = self
+            .open_maintenance_connection()
+            .map_err(|error| maintenance_error("open", error))?;
+        let (busy, _wal_pages, _checkpointed_pages): (i64, i64, i64) = maintenance
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|error| maintenance_error("PASSIVE WAL checkpoint", error))?;
+        if busy != 0 {
+            return Err(maintenance_error(
+                "PASSIVE WAL checkpoint",
+                "a competing reader prevented checkpoint progress",
+            ));
+        }
+        let database_bytes = Self::database_bytes(&maintenance)
+            .map_err(|error| maintenance_error("database accounting", error))?;
+        if database_bytes > budget.max_database_bytes {
+            maintenance
+                .execute_batch("PRAGMA incremental_vacuum(500)")
+                .map_err(|error| maintenance_error("incremental vacuum", error))?;
+        }
+        let database_bytes = Self::database_bytes(&maintenance)
+            .map_err(|error| maintenance_error("database accounting", error))?;
+        let wal_bytes = Self::wal_bytes_checked(&self.path)?;
+        Ok((database_bytes, wal_bytes))
     }
 
     /// Current accounting snapshot; never mutates resource state.
@@ -169,26 +200,34 @@ impl Store {
     /// # Errors
     /// Any read failure.
     pub fn accounting(&self) -> StoreResult<StoreAccounting> {
-        let conn = self.lock_conn()?;
-        let job_rows: i64 = conn.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))?;
-        let event_rows: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
-        let transition_rows: i64 =
-            conn.query_row("SELECT COUNT(*) FROM job_transitions", [], |r| r.get(0))?;
-        let database_bytes = Self::database_bytes(&conn)?;
+        let conn = self
+            .open_maintenance_connection()
+            .map_err(|error| maintenance_error("open", error))?;
+        let job_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+            .map_err(|error| maintenance_error("job accounting", error))?;
+        let event_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .map_err(|error| maintenance_error("event accounting", error))?;
+        let transition_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM job_transitions", [], |r| r.get(0))
+            .map_err(|error| maintenance_error("transition accounting", error))?;
+        let database_bytes = Self::database_bytes(&conn)
+            .map_err(|error| maintenance_error("database accounting", error))?;
         let (last_prune_at, last_deleted_events, last_deleted_jobs): (Option<String>, i64, i64) =
             conn.query_row(
                 "SELECT last_prune_at, deleted_events, deleted_jobs FROM retention_state
              WHERE singleton = 0",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-        drop(conn);
+            )
+            .map_err(|error| maintenance_error("retention accounting", error))?;
         Ok(StoreAccounting {
             job_rows: job_rows.max(0) as u64,
             event_rows: event_rows.max(0) as u64,
             transition_rows: transition_rows.max(0) as u64,
             database_bytes,
-            wal_bytes: Self::wal_bytes_for_path(&self.path),
+            wal_bytes: Self::wal_bytes_checked(&self.path)?,
             last_prune_at,
             last_deleted_events: last_deleted_events.max(0) as u64,
             last_deleted_jobs: last_deleted_jobs.max(0) as u64,
@@ -213,8 +252,19 @@ impl Store {
             .unwrap_or_default()
     }
 
+    fn wal_bytes_checked(path: &std::path::Path) -> StoreResult<u64> {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        match std::path::PathBuf::from(wal).metadata() {
+            Ok(meta) => Ok(meta.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(maintenance_error("WAL accounting", error)),
+        }
+    }
+
     /// Delete expired events, protecting events whose subject is still an
-    /// active (nonterminal) job. Bounded by `batch_size` per statement.
+    /// active or unknown-phase job. Bounded by the effective batch size per
+    /// statement.
     fn prune_expired_events(
         conn: &rusqlite::Connection,
         budget: &RetentionBudget,
@@ -224,12 +274,12 @@ impl Store {
         if let Some(max_age) = budget.max_event_age {
             let cutoff = minus_age(now, max_age);
             let mut cursor = 0_i64;
-            loop {
+            for _ in 0..prune_pass_batch_limit(budget) {
                 let batch = protected_expired_older_than(
                     conn,
                     "events",
                     "occurred_at",
-                    budget.batch_size,
+                    effective_batch_size(budget),
                     cutoff,
                     cursor,
                 )?;
@@ -250,16 +300,20 @@ impl Store {
                 |r| r.get(0),
             )?;
             if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
-                // Bounded batches until the cap window is enforced so one
-                // pass converges even when the backlog exceeds `batch_size`.
-                for _ in 0..10_000 {
-                    let victims =
-                        protected_ids_below(conn, "events", keep_from_id, budget.batch_size)?;
+                // Bounded batches move toward the cap; repeated passes finish
+                // larger backlogs without one pass monopolizing the store.
+                for _ in 0..prune_pass_batch_limit(budget) {
+                    let victims = protected_ids_below(
+                        conn,
+                        "events",
+                        keep_from_id,
+                        effective_batch_size(budget),
+                    )?;
                     if victims.is_empty() {
                         break;
                     }
                     deleted += delete_by_ids(conn, "DELETE FROM events WHERE id IN", &victims)?;
-                    if (victims.len() as u64) < budget.batch_size {
+                    if (victims.len() as u64) < effective_batch_size(budget) {
                         break;
                     }
                 }
@@ -277,7 +331,6 @@ impl Store {
         budget: &RetentionBudget,
         now: Timestamp,
     ) -> StoreResult<(u64, u64, u64)> {
-        const TERMINAL_STATES: &str = "('completed','canceled','rejected')";
         let mut deleted_jobs = 0u64;
         let mut deleted_transitions = 0u64;
         let mut deleted_events = 0u64;
@@ -287,15 +340,15 @@ impl Store {
         if let Some(max_age) = budget.max_terminal_job_age {
             let cutoff = minus_age(now, max_age);
             let mut cursor = 0_i64;
-            loop {
+            for _ in 0..prune_pass_batch_limit(budget) {
                 let batch = unprotected_expired_batch(
                     conn,
                     &format!(
                         "SELECT id, updated_at FROM jobs
-                         WHERE phase IN {TERMINAL_STATES}
+                         WHERE phase IN {CANONICAL_TERMINAL_PHASES}
                            AND id > ?2 ORDER BY id ASC LIMIT ?1"
                     ),
-                    budget.batch_size,
+                    effective_batch_size(budget),
                     cutoff,
                     cursor,
                 )?;
@@ -314,13 +367,13 @@ impl Store {
             }
         }
 
-        // Row-cap rule: everything strictly below the newest-N window goes.
-        // The window query is unbounded above so the cap always converges.
+        // Row-cap rule: everything strictly below the newest-N window is
+        // eligible. The bounded pass may require another invocation.
         if budget.max_terminal_job_rows > 0 {
             let keep_from_id: Option<i64> = conn.query_row(
                 &format!(
                     "SELECT MIN(id) FROM (
-                         SELECT id FROM jobs WHERE phase IN {TERMINAL_STATES}
+                         SELECT id FROM jobs WHERE phase IN {CANONICAL_TERMINAL_PHASES}
                          ORDER BY id DESC LIMIT ?1
                      )"
                 ),
@@ -328,16 +381,16 @@ impl Store {
                 |r| r.get(0),
             )?;
             if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
-                for _ in 0..10_000 {
+                for _ in 0..prune_pass_batch_limit(budget) {
                     let victims: Vec<i64> = {
                         let mut statement = conn.prepare_cached(&format!(
                             "SELECT id FROM jobs
-                             WHERE id < ?1 AND phase IN {TERMINAL_STATES}
+                             WHERE id < ?1 AND phase IN {CANONICAL_TERMINAL_PHASES}
                              ORDER BY id ASC LIMIT ?2"
                         ))?;
                         let mut rows = statement.query(params![
                             keep_from_id,
-                            i64::try_from(budget.batch_size).unwrap_or(i64::MAX),
+                            i64::try_from(effective_batch_size(budget)).unwrap_or(i64::MAX),
                         ])?;
                         let mut ids = Vec::new();
                         while let Some(row) = rows.next()? {
@@ -361,15 +414,17 @@ impl Store {
         // Byte-ceiling passes with hard iteration bounds so one pathological
         // database cannot hold the write lock forever.
         if budget.max_database_bytes > 0 {
-            for _ in 0..200 {
+            for _ in 0..prune_pass_batch_limit(budget) {
                 if Self::database_bytes(conn)? <= budget.max_database_bytes {
                     break;
                 }
                 let victim: Option<i64> = conn
                     .query_row(
-                        "SELECT id FROM jobs
-                         WHERE phase IN ('completed','canceled','rejected')
-                         ORDER BY id ASC LIMIT 1",
+                        &format!(
+                            "SELECT id FROM jobs
+                             WHERE phase IN {CANONICAL_TERMINAL_PHASES}
+                             ORDER BY id ASC LIMIT 1"
+                        ),
                         [],
                         |r| r.get(0),
                     )
@@ -384,11 +439,12 @@ impl Store {
                 deleted_transitions += transitions;
                 deleted_events += events;
             }
-            for _ in 0..200 {
+            for _ in 0..prune_pass_batch_limit(budget) {
                 if Self::database_bytes(conn)? <= budget.max_database_bytes {
                     break;
                 }
-                let victims = protected_ids_below(conn, "events", i64::MAX, budget.batch_size)?;
+                let victims =
+                    protected_ids_below(conn, "events", i64::MAX, effective_batch_size(budget))?;
                 if victims.is_empty() {
                     break;
                 }
@@ -464,8 +520,9 @@ fn scan_expired_batch(
     cutoff: Timestamp,
     cursor: i64,
 ) -> StoreResult<ExpiredBatch> {
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE);
     let mut statement = conn.prepare_cached(sql)?;
-    let mut rows = statement.query(params![batch as i64, cursor])?;
+    let mut rows = statement.query(params![i64::try_from(batch).unwrap_or(i64::MAX), cursor])?;
     let mut ids = Vec::new();
     let mut last_id = None;
     let mut row_count = 0;
@@ -487,9 +544,9 @@ fn scan_expired_batch(
 }
 
 /// Events version of [`scan_expired_batch`]: additionally skips (and scans
-/// past) events whose subject belongs to an active (nonterminal) job, so a
-/// long-running job's early events never unprotect later prunable rows nor
-/// get deleted themselves.
+/// past) events whose subject belongs to a nonterminal or unknown-phase job,
+/// so a long-running job's early events never unprotect later prunable rows
+/// nor get deleted themselves.
 fn protected_expired_older_than(
     conn: &rusqlite::Connection,
     table: &str,
@@ -504,10 +561,10 @@ fn protected_expired_older_than(
              SELECT 1 FROM jobs j
              WHERE j.instance_slug = {table}.instance_slug
                AND j.job_uid = {table}.subject
-               AND j.phase IN {active}
+               AND j.phase NOT IN {terminal}
          ) AND {table}.id > ?2
          ORDER BY id ASC LIMIT ?1",
-        active = active_phase_list(),
+        terminal = CANONICAL_TERMINAL_PHASES,
     );
     scan_expired_batch(conn, &sql, batch, cutoff, cursor)
 }
@@ -525,14 +582,15 @@ fn unprotected_expired_batch(
 }
 
 /// IDs strictly below `keep_from_id`, excluding rows whose `(instance_slug,
-/// subject)` pair belongs to an active (nonterminal) job. Only meaningful
-/// for the events table.
+/// subject)` pair belongs to a nonterminal or unknown-phase job. Only
+/// meaningful for the events table.
 fn protected_ids_below(
     conn: &rusqlite::Connection,
     table: &str,
     keep_from_id: i64,
     batch: u64,
 ) -> StoreResult<Vec<i64>> {
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_EFFECTIVE_BATCH_SIZE);
     let sql = format!(
         "SELECT id FROM {table}
          WHERE id < ?1
@@ -540,13 +598,16 @@ fn protected_ids_below(
                SELECT 1 FROM jobs j
                WHERE j.instance_slug = {table}.instance_slug
                  AND j.job_uid = {table}.subject
-                 AND j.phase IN {active}
+                 AND j.phase NOT IN {terminal}
            )
          ORDER BY id ASC LIMIT ?2",
-        active = active_phase_list(),
+        terminal = CANONICAL_TERMINAL_PHASES,
     );
     let mut statement = conn.prepare_cached(&sql)?;
-    let mut rows = statement.query(params![keep_from_id, batch as i64])?;
+    let mut rows = statement.query(params![
+        keep_from_id,
+        i64::try_from(batch).unwrap_or(i64::MAX)
+    ])?;
     let mut ids = Vec::new();
     while let Some(row) = rows.next()? {
         ids.push(row.get(0)?);
@@ -573,6 +634,12 @@ fn stale_timestamp_error() -> StoreError {
     )
 }
 
+fn maintenance_error(operation: &str, detail: impl std::fmt::Display) -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.retention.maintenance").with_remediation(format!(
+        "retention maintenance {operation} failed; a prior prune commit is not rolled back: {detail}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +654,111 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.db");
         (dir, Store::open(&path).unwrap())
+    }
+
+    #[test]
+    fn prune_batch_limit_scales_and_stays_bounded() {
+        let budget = RetentionBudget {
+            max_event_rows: 10_000,
+            max_terminal_job_rows: 2_000,
+            batch_size: 500,
+            ..RetentionBudget::default()
+        };
+        assert_eq!(prune_pass_batch_limit(&budget), 26);
+
+        let tiny_budget = RetentionBudget {
+            max_event_rows: 0,
+            max_terminal_job_rows: 0,
+            batch_size: 0,
+            ..RetentionBudget::default()
+        };
+        assert_eq!(prune_pass_batch_limit(&tiny_budget), MIN_PRUNE_BATCHES);
+        assert_eq!(effective_batch_size(&tiny_budget), MIN_EFFECTIVE_BATCH_SIZE);
+
+        let huge_budget = RetentionBudget {
+            max_event_rows: u64::MAX,
+            max_terminal_job_rows: u64::MAX,
+            batch_size: u64::MAX,
+            ..RetentionBudget::default()
+        };
+        assert_eq!(prune_pass_batch_limit(&huge_budget), MAX_PRUNE_BATCHES);
+        assert_eq!(effective_batch_size(&huge_budget), MAX_EFFECTIVE_BATCH_SIZE);
+    }
+
+    #[test]
+    fn age_pruning_stops_at_the_conservative_pass_bound() {
+        let (_dir, store) = temp_store("age-bound");
+        seed_expired_events(&store, 10);
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let report = store.prune_history(&budget).unwrap();
+
+        assert_eq!(prune_pass_batch_limit(&budget), MIN_PRUNE_BATCHES);
+        assert_eq!(report.deleted_events, MIN_PRUNE_BATCHES);
+        assert_eq!(store.accounting().unwrap().event_rows, 2);
+    }
+
+    #[test]
+    fn unknown_job_phase_protects_event_ancestry() {
+        let (_dir, store) = temp_store("unknown-phase");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO jobs
+                 (instance_slug, job_uid, repository, workflow, job_name, phase, updated_at)
+                 VALUES ('u', 'job-unknown', 'repo', 'workflow', 'job', 'future_phase',
+                         '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at, detail)
+                 VALUES ('u', 'job.updated', 'job-unknown', '2000-01-01T00:00:00Z', NULL)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let report = store.prune_history(&budget).unwrap();
+
+        assert_eq!(report.deleted_events, 0);
+        assert_eq!(store.accounting().unwrap().event_rows, 1);
+    }
+
+    #[test]
+    fn maintenance_connection_does_not_wait_on_busy_writers() {
+        let (_dir, store) = temp_store("maintenance-connection");
+        let connection = store.open_maintenance_connection().unwrap();
+        let timeout: i64 = connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 0);
+
+        let error = maintenance_error("test", "busy");
+        assert_eq!(error.envelope.reason, "store.retention.maintenance");
+        assert!(error
+            .envelope
+            .remediation
+            .as_deref()
+            .is_some_and(|message| message.contains("not rolled back")));
     }
 
     fn seed_expired_events(store: &Store, count: u64) {
@@ -653,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_pass_records_state_and_truncates_wal() {
+    fn successful_pass_records_state_and_reports_wal() {
         let (dir, store) = temp_store("wal-truncate");
         seed_expired_events(&store, 5);
         let budget = RetentionBudget {
@@ -662,10 +834,12 @@ mod tests {
         };
         let report = store.prune_history(&budget).unwrap();
         assert_eq!(report.deleted_events, 5);
-        assert_eq!(report.wal_bytes, 0);
+        assert_eq!(
+            report.wal_bytes,
+            Store::wal_bytes_for_path(&dir.join("state.db"))
+        );
         drop(store);
-        // WAL sidecar is gone or zero-length after the truncate checkpoint.
-        let wal_bytes = Store::wal_bytes_for_path(&dir.join("state.db"));
-        assert_eq!(wal_bytes, 0);
+        // PASSIVE checkpointing reports the remaining sidecar instead of
+        // blocking or pretending that all frames were truncated.
     }
 }
