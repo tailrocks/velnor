@@ -31,8 +31,9 @@ pub use cli_meta::{CommandMetadata, FlagMetadata, SchemaDocument};
 pub use condition::{Condition, ConditionStatus, Labels, ResourceMeta};
 pub use error_envelope::{exit_code_for_class, ExitClass, MachineErrorEnvelope};
 pub use execution::{
-    ExecutionBackendKind, ExecutionBackendRejected, ExecutionConfigError, ExecutionFile,
-    ExecutionSection, MicroVmPreflightFailure,
+    AccelerationMode, AccelerationSection, CompilerCacheChoice, ExecutionBackendKind,
+    ExecutionBackendRejected, ExecutionConfigError, ExecutionFile, ExecutionSection,
+    MicroVmPreflightFailure, NativeActionsChoice, ResultCacheChoice, TargetPersistenceChoice,
 };
 pub use guest_plan::{
     GuestArtifactOp, GuestCacheOp, GuestEnvVar, GuestJobPlan, GuestOutput, GuestService, GuestStep,

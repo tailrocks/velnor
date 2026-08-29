@@ -87,12 +87,124 @@ impl<'de> Deserialize<'de> for ExecutionBackendKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionFile {
     pub execution: ExecutionSection,
+    /// `[acceleration]` table. Absent means maximum; unknown keys fail closed.
+    #[serde(default)]
+    pub acceleration: AccelerationSection,
 }
 
 /// `[execution]` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionSection {
     pub backend: ExecutionBackendKind,
+}
+
+/// `[acceleration]` table: the operator dial for Velnor's performance surface.
+///
+/// The default of every field is the maximum policy — all acceleration
+/// features on — so an absent section (the packaged conffile) is maximum and
+/// an operator only ever restricts explicitly. `deny_unknown_fields` keeps a
+/// typo from silently ignoring a restriction; runtime env overrides live in
+/// the runner's `acceleration` module and always emit degradation records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccelerationSection {
+    /// Only `maximum` exists today; any other value fails closed so a typo
+    /// can never select a slower, half-implemented mode.
+    #[serde(default)]
+    pub mode: AccelerationMode,
+    #[serde(default)]
+    pub target_persistence: TargetPersistenceChoice,
+    #[serde(default)]
+    pub compiler_cache: CompilerCacheChoice,
+    #[serde(default = "default_true")]
+    pub typed_stores: bool,
+    #[serde(default = "default_true")]
+    pub singleflight: bool,
+    #[serde(default = "default_true")]
+    pub prefetch: bool,
+    #[serde(default = "default_true")]
+    pub cache_aware_scheduling: bool,
+    #[serde(default)]
+    pub native_actions: NativeActionsChoice,
+    #[serde(default = "default_true")]
+    pub buildkit_local: bool,
+    #[serde(default)]
+    pub result_cache: ResultCacheChoice,
+}
+
+impl Default for AccelerationSection {
+    fn default() -> Self {
+        Self {
+            mode: AccelerationMode::Maximum,
+            target_persistence: TargetPersistenceChoice::Auto,
+            compiler_cache: CompilerCacheChoice::Auto,
+            typed_stores: true,
+            singleflight: true,
+            prefetch: true,
+            cache_aware_scheduling: true,
+            native_actions: NativeActionsChoice::Prefer,
+            buildkit_local: true,
+            result_cache: ResultCacheChoice::HermeticOnly,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Acceleration mode. `maximum` is the only mode; the field is the operator
+/// contract for future modes and rejects everything else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccelerationMode {
+    #[serde(rename = "maximum")]
+    #[default]
+    Maximum,
+}
+
+/// `[acceleration] target_persistence`: whether persistent target stores are
+/// automatic per job, forced on, or disabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetPersistenceChoice {
+    #[serde(rename = "auto")]
+    #[default]
+    Auto,
+    #[serde(rename = "on")]
+    On,
+    #[serde(rename = "off")]
+    Off,
+}
+
+/// `[acceleration] compiler_cache`: which local compiler cache engages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompilerCacheChoice {
+    #[serde(rename = "auto")]
+    #[default]
+    Auto,
+    #[serde(rename = "kache")]
+    Kache,
+    #[serde(rename = "sccache")]
+    Sccache,
+    #[serde(rename = "off")]
+    Off,
+}
+
+/// `[acceleration] native_actions`. `prefer` is the only policy: approved
+/// marketplace actions run as pinned native Rust adapters, never Node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeActionsChoice {
+    #[serde(rename = "prefer")]
+    #[default]
+    Prefer,
+}
+
+/// `[acceleration] result_cache`. `hermetic-only` is the only policy: action
+/// results are reused only when hermetic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResultCacheChoice {
+    #[serde(rename = "hermetic-only")]
+    #[default]
+    HermeticOnly,
 }
 
 impl ExecutionFile {
@@ -126,14 +238,32 @@ impl ExecutionFile {
             });
         };
         let backend = ExecutionBackendKind::parse_value(raw).map_err(ExecutionConfigError::from)?;
+        let acceleration = match parsed.get("acceleration") {
+            None => AccelerationSection::default(),
+            Some(table) => table
+                .clone()
+                .try_into()
+                .map_err(|error| ExecutionConfigError {
+                    field: "[acceleration]",
+                    detail: format!("invalid [acceleration] table: {error}"),
+                })?,
+        };
         Ok(Self {
             execution: ExecutionSection { backend },
+            acceleration,
         })
     }
 
     #[must_use]
     pub fn backend(&self) -> ExecutionBackendKind {
         self.execution.backend
+    }
+
+    /// The `[acceleration]` section; absent sections parse to the maximum
+    /// default, so this is never `None`.
+    #[must_use]
+    pub fn acceleration(&self) -> &AccelerationSection {
+        &self.acceleration
     }
 }
 
@@ -288,6 +418,92 @@ mod tests {
                 ExecutionBackendKind::Docker
             )),
             None
+        );
+    }
+
+    #[test]
+    fn acceleration_section_defaults_to_maximum() {
+        let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+        assert_eq!(*file.acceleration(), AccelerationSection::default());
+        assert_eq!(file.acceleration().mode, AccelerationMode::Maximum);
+        assert_eq!(
+            file.acceleration().target_persistence,
+            TargetPersistenceChoice::Auto
+        );
+        assert_eq!(
+            file.acceleration().compiler_cache,
+            CompilerCacheChoice::Auto
+        );
+        assert!(file.acceleration().typed_stores);
+        assert!(file.acceleration().singleflight);
+        assert!(file.acceleration().prefetch);
+        assert!(file.acceleration().cache_aware_scheduling);
+        assert_eq!(
+            file.acceleration().native_actions,
+            NativeActionsChoice::Prefer
+        );
+        assert!(file.acceleration().buildkit_local);
+        assert_eq!(
+            file.acceleration().result_cache,
+            ResultCacheChoice::HermeticOnly
+        );
+    }
+
+    #[test]
+    fn acceleration_section_accepts_explicit_values() {
+        let file = ExecutionFile::parse_toml(
+            "[execution]\nbackend = \"docker\"\n\n[acceleration]\nmode = \"maximum\"\ntarget_persistence = \"off\"\ncompiler_cache = \"kache\"\ntyped_stores = false\nsingleflight = false\nprefetch = false\ncache_aware_scheduling = false\nnative_actions = \"prefer\"\nbuildkit_local = false\nresult_cache = \"hermetic-only\"\n",
+        )
+        .unwrap();
+        let acceleration = file.acceleration();
+        assert_eq!(acceleration.mode, AccelerationMode::Maximum);
+        assert_eq!(
+            acceleration.target_persistence,
+            TargetPersistenceChoice::Off
+        );
+        assert_eq!(acceleration.compiler_cache, CompilerCacheChoice::Kache);
+        assert!(!acceleration.typed_stores);
+        assert!(!acceleration.singleflight);
+        assert!(!acceleration.prefetch);
+        assert!(!acceleration.cache_aware_scheduling);
+        assert_eq!(acceleration.native_actions, NativeActionsChoice::Prefer);
+        assert!(!acceleration.buildkit_local);
+        assert_eq!(acceleration.result_cache, ResultCacheChoice::HermeticOnly);
+    }
+
+    #[test]
+    fn acceleration_section_partial_table_keeps_maximum_defaults() {
+        let file = ExecutionFile::parse_toml(
+            "[execution]\nbackend = \"docker\"\n\n[acceleration]\ncompiler_cache = \"off\"\n",
+        )
+        .unwrap();
+        assert_eq!(file.acceleration().compiler_cache, CompilerCacheChoice::Off);
+        assert!(file.acceleration().prefetch);
+    }
+
+    #[test]
+    fn acceleration_section_rejects_unknown_keys_and_values() {
+        let unknown = ExecutionFile::parse_toml(
+            "[execution]\nbackend = \"docker\"\n\n[acceleration]\nturbo = true\n",
+        )
+        .unwrap_err();
+        assert_eq!(unknown.field, "[acceleration]");
+        assert!(unknown.detail.contains("turbo"), "{unknown}");
+
+        let bad_mode = ExecutionFile::parse_toml(
+            "[execution]\nbackend = \"docker\"\n\n[acceleration]\nmode = \"balanced\"\n",
+        )
+        .unwrap_err();
+        assert_eq!(bad_mode.field, "[acceleration]");
+
+        let bad_backend = ExecutionFile::parse_toml(
+            "[execution]\nbackend = \"docker\"\n\n[acceleration]\ncompiler_cache = \"gha\"\n",
+        )
+        .unwrap_err();
+        assert_eq!(bad_backend.field, "[acceleration]");
+        assert!(
+            bad_backend.detail.contains("compiler_cache"),
+            "{bad_backend}"
         );
     }
 
