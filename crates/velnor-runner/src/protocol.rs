@@ -4340,19 +4340,49 @@ fn write_artifact_zip_from_paths_temp_file(
     let options = zip::write::FileOptions::<()>::default().compression_method(method);
     let mut source_total = 0_u64;
     for source in files {
-        let metadata = std::fs::metadata(&source.source_path)
-            .with_context(|| format!("stat artifact source {}", source.source_path.display()))?;
-        if !metadata.is_file() {
-            bail!(
-                "artifact source {} is not a regular file",
-                source.source_path.display()
-            );
-        }
-        checked_upload_source_add(source_total, metadata.len())?;
+        #[cfg(unix)]
+        let mut input = {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let input = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&source.source_path)
+                .with_context(|| {
+                    format!("open artifact source {}", source.source_path.display())
+                })?;
+            let metadata = input.metadata().with_context(|| {
+                format!(
+                    "stat opened artifact source {}",
+                    source.source_path.display()
+                )
+            })?;
+            if !metadata.is_file() {
+                bail!(
+                    "artifact source {} is not a regular file",
+                    source.source_path.display()
+                );
+            }
+            checked_upload_source_add(source_total, metadata.len())?;
+            input
+        };
+        #[cfg(not(unix))]
+        let mut input = {
+            let metadata = std::fs::metadata(&source.source_path).with_context(|| {
+                format!("stat artifact source {}", source.source_path.display())
+            })?;
+            if !metadata.is_file() {
+                bail!(
+                    "artifact source {} is not a regular file",
+                    source.source_path.display()
+                );
+            }
+            checked_upload_source_add(source_total, metadata.len())?;
+            std::fs::File::open(&source.source_path)
+                .with_context(|| format!("open artifact source {}", source.source_path.display()))?
+        };
         zip.start_file(&source.archive_path, options)
             .context("zip start_file")?;
-        let mut input = std::fs::File::open(&source.source_path)
-            .with_context(|| format!("open artifact source {}", source.source_path.display()))?;
         let remaining = RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES - source_total;
         let mut limited = (&mut input).take(remaining.saturating_add(1));
         let copied = std::io::copy(&mut limited, &mut zip)
@@ -5690,6 +5720,34 @@ mod tests {
         assert_eq!(content, "streamed artifact\n");
         drop(zip_temp);
         std::fs::remove_file(source_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_path_writer_rejects_symlink_at_descriptor_open() {
+        let root = std::env::temp_dir().join(format!("velnor-artifact-symlink-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.txt");
+        let source = root.join("source.txt");
+        let zip_path = root.join("artifact.zip");
+        std::fs::write(&target, b"must not upload").unwrap();
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+
+        let error = write_artifact_zip_from_paths_temp_file(
+            zip_path,
+            &[ArtifactUploadFile {
+                archive_path: "source.txt".to_string(),
+                source_path: source,
+            }],
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("open artifact source"),
+            "{error:#}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

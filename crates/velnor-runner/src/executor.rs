@@ -5826,6 +5826,12 @@ fn collect_artifact_upload_sources(
                 path.display()
             )
         })?;
+        if file_type.is_symlink() {
+            bail!(
+                "Results Service artifact '{artifact_name}' source {} is a symlink",
+                path.display()
+            );
+        }
         if file_type.is_dir() {
             collect_artifact_upload_sources(
                 artifact_name,
@@ -5837,7 +5843,7 @@ fn collect_artifact_upload_sources(
             )?;
             continue;
         }
-        let metadata = fs::metadata(&path).with_context(|| {
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
             format!(
                 "read metadata for Results Service artifact '{artifact_name}' source {}",
                 path.display()
@@ -18506,6 +18512,39 @@ fi"#
         assert!(message.contains("non-UTF-8 or unsafe relative file name"));
         assert!(message.contains("Results Service artifact 'release'"));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_upload_sources_rejects_symlink_traversal_and_admission() {
+        let source_root = temp_dir();
+        fs::create_dir_all(&source_root).unwrap();
+        let outside = source_root.join("outside.txt");
+        fs::write(&outside, "outside").unwrap();
+        std::os::unix::fs::symlink(&outside, source_root.join("linked.txt")).unwrap();
+        let error = artifact_upload_sources(
+            "release",
+            &source_root,
+            RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error:#}");
+        fs::remove_dir_all(source_root).unwrap();
+
+        let traversal_root = temp_dir();
+        fs::create_dir_all(&traversal_root).unwrap();
+        let nested = traversal_root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("inside.txt"), "inside").unwrap();
+        std::os::unix::fs::symlink(&nested, traversal_root.join("linked-dir")).unwrap();
+        let error = artifact_upload_sources(
+            "release",
+            &traversal_root,
+            RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error:#}");
+        fs::remove_dir_all(traversal_root).unwrap();
     }
 
     #[test]
