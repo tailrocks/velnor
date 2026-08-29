@@ -2,7 +2,7 @@
 //!
 //! Asserted from `cargo metadata` so the law holds no matter how manifests
 //! evolve: `velnor-client` meets the daemon only through versioned model DTOs,
-//! the five new crates form an acyclic graph, and no shared crate depends on
+//! the foundation crates form an acyclic graph, and no shared crate depends on
 //! Clap or Axum. The Axum transport adapter is owned by the CLI composition
 //! crate; it never enters the model, service, client, or renderer crates.
 
@@ -12,8 +12,11 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 7] = [
+const WORKSPACE_PACKAGES: [&str; 10] = [
     "velnor-model",
+    "velnor-action-model",
+    "velnor-cas",
+    "velnor-action-journal",
     "velnor-control",
     "velnor-client",
     "velnor-render",
@@ -113,7 +116,7 @@ fn transitive_closure(metadata: &Value, root: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn workspace_has_exactly_the_seven_expected_packages() {
+fn workspace_has_exactly_the_ten_expected_packages() {
     let metadata = cargo_metadata();
     let mut names: Vec<String> = metadata["packages"]
         .as_array()
