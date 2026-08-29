@@ -9,7 +9,11 @@ use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::{
-    extract::{connect_info::ConnectInfo, Extension, Path as AxumPath, Query, Request, State},
+    extract::{
+        connect_info::ConnectInfo,
+        rejection::{JsonRejection, QueryRejection},
+        DefaultBodyLimit, Extension, Path as AxumPath, Query, Request, State,
+    },
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -43,6 +47,7 @@ pub struct ApiState {
 }
 
 const APPLICATION_BLOCKING_CONCURRENCY: usize = 16;
+const MAX_MUTATION_BODY_BYTES: usize = 64 * 1024;
 
 impl ApiState {
     /// Build transport state bound to one daemon instance.
@@ -108,6 +113,7 @@ pub fn admin_router(state: ApiState) -> Router {
         )
         .layer(Extension(PeerPolicy::for_group(ADMIN_GROUP)))
         .layer(middleware::from_fn(require_peer))
+        .layer(DefaultBodyLimit::max(MAX_MUTATION_BODY_BYTES))
         .with_state(state)
 }
 
@@ -438,8 +444,11 @@ struct QueryParams {
 async fn query_resource(
     State(state): State<ApiState>,
     AxumPath(resource_kind): AxumPath<String>,
-    Query(params): Query<QueryParams>,
+    query: Result<Query<QueryParams>, QueryRejection>,
 ) -> Result<Json<QueryPage>, ApiError> {
+    let Query(params) = query.map_err(|_| {
+        ApiError::bad_request("query", "query parameters are malformed or unsupported")
+    })?;
     let query = Arc::clone(&state.query);
     let page = run_application_call(state.blocking.clone(), move || {
         query.query(QueryRequest {
@@ -474,8 +483,11 @@ struct LogParams {
 async fn logs(
     State(state): State<ApiState>,
     AxumPath(subject): AxumPath<String>,
-    Query(params): Query<LogParams>,
+    query: Result<Query<LogParams>, QueryRejection>,
 ) -> Result<Json<Vec<velnor_control::ports::LogItem>>, ApiError> {
+    let Query(params) = query.map_err(|_| {
+        ApiError::bad_request("query", "query parameters are malformed or unsupported")
+    })?;
     let logs = Arc::clone(&state.logs);
     let records = run_application_call(state.blocking.clone(), move || {
         logs.logs(LogRequest {
@@ -491,8 +503,11 @@ async fn logs(
 
 async fn watch(
     State(state): State<ApiState>,
-    Query(params): Query<WatchParams>,
+    query: Result<Query<WatchParams>, QueryRejection>,
 ) -> Result<Json<Vec<velnor_control::ports::WatchItem>>, ApiError> {
+    let Query(params) = query.map_err(|_| {
+        ApiError::bad_request("query", "query parameters are malformed or unsupported")
+    })?;
     let watch = Arc::clone(&state.watch);
     let events = run_application_call(state.blocking.clone(), move || {
         watch.watch(WatchRequest {
@@ -525,8 +540,14 @@ struct MutationResponse {
 async fn mutate_instance(
     State(state): State<ApiState>,
     AxumPath((instance, operation)): AxumPath<(String, String)>,
-    Json(body): Json<MutationBody>,
+    body: Result<Json<MutationBody>, JsonRejection>,
 ) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
+    let Json(body) = body.map_err(|_| {
+        ApiError::bad_request(
+            "body",
+            "request body must be valid JSON with the documented fields",
+        )
+    })?;
     if instance != state.instance.as_ref() {
         return Err(ApiError::bad_request(
             "mutation.instance",
@@ -566,10 +587,13 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, velnor_control::ports::PortError> + Send + 'static,
 {
+    // Queueing unbounded application work lets a burst of local callers hold
+    // open connections indefinitely and can starve shutdown. Shed excess
+    // work at the transport boundary; the caller can retry with its own
+    // deadline after the current bounded set drains.
     let permit = blocking
-        .acquire_owned()
-        .await
-        .map_err(|_| ApiError::operation_failed())?;
+        .try_acquire_owned()
+        .map_err(|_| ApiError::overloaded())?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         call()
@@ -626,6 +650,18 @@ impl ApiError {
         Self::from(velnor_control::ports::PortError::Operation {
             operation: "application call failed".to_owned(),
         })
+    }
+
+    fn overloaded() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            envelope: MachineErrorEnvelope::new(
+                ExitClass::Transport.as_str(),
+                ExitClass::Transport.code(),
+                "control.overloaded",
+            )
+            .with_remediation("retry after the current control requests drain"),
+        }
     }
 }
 
@@ -803,19 +839,30 @@ mod tests {
         let result = mutate_instance(
             State(state),
             AxumPath(("other".to_owned(), "cordon".to_owned())),
-            Json(MutationBody {
+            Ok(Json(MutationBody {
                 operation: "cordon".to_owned(),
                 reason: "maintenance".to_owned(),
                 idempotency_key: "request-1".to_owned(),
                 expected_version: None,
                 slots: None,
-            }),
+            })),
         )
         .await;
 
         let error = result.expect_err("foreign instance must be rejected");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(mutation.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn application_admission_sheds_when_the_bound_is_full() {
+        let blocking = Arc::new(Semaphore::new(0));
+        let result: Result<(), ApiError> =
+            run_application_call(blocking, || Ok::<(), PortError>(())).await;
+
+        let error = result.expect_err("a full application bound must shed work");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.envelope.reason, "control.overloaded");
     }
 
     #[test]
