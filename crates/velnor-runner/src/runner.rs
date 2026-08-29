@@ -138,7 +138,10 @@ where
     F: FnOnce(Arc<crate::ops::OpsSink>, crate::ops::JobAdmission) -> bool + Send + 'static,
 {
     let permits = operational_admission_permits();
-    let Ok(permit) = permits.acquire_owned().await else {
+    // Admission is a pre-execution gate. Queueing an acquired job behind a
+    // stuck SQLite worker would hold the run-service lease without bounded
+    // progress, so fail closed when the single writer is busy.
+    let Ok(permit) = permits.try_acquire_owned() else {
         return AdmissionPersistenceOutcome::InfrastructureFailure;
     };
     match tokio::task::spawn_blocking(move || {
@@ -12720,6 +12723,28 @@ jobs:
             .message
             .contains("failed closed before execution"));
 
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocking_admission_busy_writer_fails_closed_without_waiting() {
+        let base = unique_temp_dir("blocking-admission-busy");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+        let permit = operational_admission_permits()
+            .try_acquire_owned()
+            .expect("test must own the only admission permit");
+        let started = Instant::now();
+        let outcome = persist_admission_on_blocking_pool(
+            sink,
+            blocking_admission_test_input("job-blocking-busy"),
+        )
+        .await;
+        assert_eq!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(permit);
         fs::remove_dir_all(base).unwrap();
     }
 
