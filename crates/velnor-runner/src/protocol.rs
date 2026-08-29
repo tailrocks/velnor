@@ -45,7 +45,7 @@ const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
 pub struct GitHubApiError {
     pub status: u16,
     pub action: String,
-    pub body: String,
+    pub(crate) body: String,
     pub retry_after_seconds: Option<u64>,
     pub rate_limit_reset_epoch: Option<u64>,
     /// `x-ratelimit-remaining`. Required to tell quota 403 (remaining=0)
@@ -93,6 +93,58 @@ pub(crate) fn classify_runner_delete(status: u16, body: &str) -> Option<RunnerDe
     }
 }
 
+/// Keep provider-controlled response text useful without allowing credentials
+/// or unbounded payloads into errors, forensic logs, or controller output.
+fn sanitize_response_body(raw: &str) -> String {
+    const MAX_RESPONSE_BODY_BYTES: usize = 4096;
+    const SENSITIVE_MARKERS: &[&str] = &[
+        "authorization:",
+        "bearer ",
+        "access_token",
+        "access-token",
+        "client_secret",
+        "client-secret",
+        "password",
+        "private_key",
+        "private-key",
+        "secret",
+        "signature=",
+        "sig=",
+        "token",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "begin private key",
+    ];
+    let lower = raw.to_ascii_lowercase();
+    if SENSITIVE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return "<redacted response body>".to_owned();
+    }
+
+    let mut output = String::with_capacity(raw.len().min(MAX_RESPONSE_BODY_BYTES));
+    let mut truncated = false;
+    for character in raw.chars() {
+        let character = if character.is_control() || character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_RESPONSE_BODY_BYTES {
+            truncated = true;
+            break;
+        }
+        output.push(character);
+    }
+    if truncated {
+        output.push_str("…");
+    }
+    output
+}
+
 fn github_api_error(
     action: impl Into<String>,
     status: u16,
@@ -101,7 +153,7 @@ fn github_api_error(
     GitHubApiError {
         status,
         action: action.into(),
-        body: body.into(),
+        body: sanitize_response_body(&body.into()),
         retry_after_seconds: None,
         rate_limit_reset_epoch: None,
         remaining: None,
@@ -297,7 +349,7 @@ fn github_api_error_with_retry(
     GitHubApiError {
         status,
         action: action.into(),
-        body: body.into(),
+        body: sanitize_response_body(&body.into()),
         retry_after_seconds: hint.retry_after_seconds,
         rate_limit_reset_epoch: hint.rate_limit_reset_epoch,
         remaining: hint.remaining,
@@ -1354,7 +1406,7 @@ impl RegistrationClient {
         match classify_runner_delete(response.status, &response.body) {
             Some(RunnerDeleteOutcome::Gone) => Ok(()),
             Some(RunnerDeleteOutcome::BusyConflict) => {
-                Err(RunnerBusyConflict(response.body.trim().to_string()).into())
+                Err(RunnerBusyConflict("GitHub reported the runner is busy".into()).into())
             }
             None => Err(github_error_from_response(
                 "delete runner request",
@@ -3773,7 +3825,9 @@ impl TwirpResultsClient {
             match github_json_request("POST", &url, &self.token, Some(body_json.clone()), 30).await
             {
                 Ok((status, _)) if (200..300).contains(&status) => return Ok(()),
-                Ok((status, resp)) => last_err = format!("status={status}, body={resp}"),
+                Ok((status, resp)) => {
+                    last_err = format!("status={status}, body={}", sanitize_response_body(&resp))
+                }
                 Err(e) => last_err = e.to_string(),
             }
             if attempt < 2 {
@@ -3945,7 +3999,10 @@ impl TwirpResultsClient {
                 .await
                 .context("GetJobLogsSignedBlobURL request")?;
         if !(200..300).contains(&status) {
-            bail!("GetJobLogsSignedBlobURL failed: status={status}, body={body}");
+            bail!(
+                "GetJobLogsSignedBlobURL failed: status={status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
         let resp: GetUrlResp =
             serde_json::from_str(&body).context("GetJobLogsSignedBlobURL parse")?;
@@ -3968,7 +4025,10 @@ impl TwirpResultsClient {
         let put_status = put_resp.status();
         if !put_status.is_success() {
             let body = put_resp.text().await.unwrap_or_default();
-            bail!("job log PUT failed: status={put_status}, body={body}");
+            bail!(
+                "job log PUT failed: status={put_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
 
         let ts = {
@@ -3989,12 +4049,18 @@ impl TwirpResultsClient {
                 .await
                 .context("CreateJobLogsMetadata request")?;
         if !(200..300).contains(&meta_status) {
-            bail!("CreateJobLogsMetadata failed: status={meta_status}, body={meta_body_resp}");
+            bail!(
+                "CreateJobLogsMetadata failed: status={meta_status}, body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         let meta_resp: MetaResp =
             serde_json::from_str(&meta_body_resp).context("CreateJobLogsMetadata parse")?;
         if !meta_resp.ok {
-            bail!("CreateJobLogsMetadata returned ok=false: body={meta_body_resp}");
+            bail!(
+                "CreateJobLogsMetadata returned ok=false: body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         Ok(())
     }
@@ -4034,7 +4100,10 @@ impl TwirpResultsClient {
                 .await
                 .context("GetStepLogsSignedBlobURL request")?;
         if !(200..300).contains(&status) {
-            bail!("GetStepLogsSignedBlobURL failed: status={status}, body={body}");
+            bail!(
+                "GetStepLogsSignedBlobURL failed: status={status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
         let resp: GetUrlResp =
             serde_json::from_str(&body).context("GetStepLogsSignedBlobURL parse")?;
@@ -4058,7 +4127,10 @@ impl TwirpResultsClient {
         let put_status = put_resp.status();
         if !put_status.is_success() {
             let body = put_resp.text().await.unwrap_or_default();
-            bail!("step log PUT failed: status={put_status}, body={body}");
+            bail!(
+                "step log PUT failed: status={put_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
 
         // 3. Finalize with metadata through the selected GitHub transport.
@@ -4081,12 +4153,18 @@ impl TwirpResultsClient {
                 .await
                 .context("CreateStepLogsMetadata request")?;
         if !(200..300).contains(&meta_status) {
-            bail!("CreateStepLogsMetadata failed: status={meta_status}, body={meta_body_resp}");
+            bail!(
+                "CreateStepLogsMetadata failed: status={meta_status}, body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         let meta_resp: MetaResp =
             serde_json::from_str(&meta_body_resp).context("CreateStepLogsMetadata parse")?;
         if !meta_resp.ok {
-            bail!("CreateStepLogsMetadata returned ok=false: body={meta_body_resp}");
+            bail!(
+                "CreateStepLogsMetadata returned ok=false: body={}",
+                sanitize_response_body(&meta_body_resp)
+            );
         }
         Ok(())
     }
@@ -4156,7 +4234,10 @@ impl TwirpResultsClient {
         let put_status = put_resp.status();
         if !put_status.is_success() {
             let body = put_resp.text().await.unwrap_or_default();
-            bail!("step summary PUT failed: status={put_status}, body={body}");
+            bail!(
+                "step summary PUT failed: status={put_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
 
         // 3. Finalize with metadata.
@@ -4191,7 +4272,10 @@ impl TwirpResultsClient {
         let meta_status = meta_resp.status();
         if !meta_status.is_success() {
             let body = meta_resp.text().await.unwrap_or_default();
-            bail!("CreateStepSummaryMetadata failed: status={meta_status}, body={body}");
+            bail!(
+                "CreateStepSummaryMetadata failed: status={meta_status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
         Ok(())
     }
@@ -4301,7 +4385,10 @@ fn results_service_post(
         .text()
         .with_context(|| format!("read Results Service {operation} response"))?;
     if !status.is_success() {
-        bail!("Results Service {operation}: status={status}, body={response_body}");
+        bail!(
+            "Results Service {operation}: status={status}, body={}",
+            sanitize_response_body(&response_body)
+        );
     }
     Ok(response_body)
 }
@@ -4679,7 +4766,10 @@ fn download_artifacts_blocking_in_temp_dir(
         let status = response.status();
         if status != reqwest::StatusCode::OK {
             let body = response.text().unwrap_or_default();
-            bail!("artifact zip download failed: status={status}, body={body}");
+            bail!(
+                "artifact zip download failed: status={status}, body={}",
+                sanitize_response_body(&body)
+            );
         }
         let content_type = response
             .headers()
@@ -6807,5 +6897,22 @@ mod tests {
         );
         assert_eq!(safe, "https://blob.example.com/blob");
         assert!(!safe.contains("secret"));
+    }
+
+    #[test]
+    fn provider_error_bodies_are_bounded_and_secret_safe() {
+        let error = github_api_error(
+            "test request",
+            500,
+            "authorization: Bearer reflected-secret",
+        );
+        let error = error.downcast_ref::<GitHubApiError>().unwrap();
+        assert_eq!(error.body, "<redacted response body>");
+
+        let long = "x".repeat(5000);
+        let error = github_api_error("test request", 500, long);
+        let error = error.downcast_ref::<GitHubApiError>().unwrap();
+        assert!(error.body.len() <= 4099);
+        assert!(error.body.ends_with('…'));
     }
 }
