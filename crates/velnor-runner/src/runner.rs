@@ -1418,7 +1418,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
                 sink.instance_slug(),
                 Some(format!("daemon_id={daemon_id}")),
             );
-            sink.prune_if_due();
+            run_retention_pass(std::sync::Arc::clone(sink)).await;
         }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
@@ -1449,7 +1449,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             ticker.tick().await;
-            retention_sink.prune_if_due();
+            run_retention_pass(std::sync::Arc::clone(&retention_sink)).await;
         }
     });
     println!(
@@ -1493,6 +1493,15 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         emit_drain_completed_once();
     }
     result
+}
+
+/// Keep synchronous SQLite retention work off Tokio workers. Awaiting the
+/// blocking task preserves one pass at a time in this daemon loop while the
+/// sink's atomic claim gates any other caller.
+async fn run_retention_pass(sink: std::sync::Arc<crate::ops::OpsSink>) {
+    if let Err(error) = tokio::task::spawn_blocking(move || sink.prune_if_due()).await {
+        eprintln!("forensics.ops event=retention-worker-failed reason={error}");
+    }
 }
 
 /// Capped exponential backoff with deterministic jitter for the never-exit

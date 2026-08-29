@@ -30,6 +30,10 @@ pub const STATE_DB_ENV: &str = "VELNOR_STATE_DB";
 
 /// How often the daemon-side retention pass may run.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Keep transient/pre-commit failures retryable without allowing a durable
+/// post-commit/reporting failure to spin the retention path.
+const PRUNE_RETRY_INITIAL: Duration = Duration::from_secs(15);
+const PRUNE_RETRY_MAX: Duration = PRUNE_INTERVAL;
 
 static OPS: OnceLock<Arc<OpsSink>> = OnceLock::new();
 
@@ -184,6 +188,8 @@ pub struct OpsSink {
     masks: Mutex<Vec<String>>,
     degraded: AtomicBool,
     last_prune_unix: AtomicU64,
+    next_prune_attempt_unix: AtomicU64,
+    prune_retry_delay_secs: AtomicU64,
     budget: RetentionBudget,
     #[cfg(test)]
     injected_write_failure: Mutex<Option<(ExitClass, &'static str)>>,
@@ -209,6 +215,8 @@ impl OpsSink {
             masks: Mutex::new(Vec::new()),
             degraded: AtomicBool::new(false),
             last_prune_unix: AtomicU64::new(0),
+            next_prune_attempt_unix: AtomicU64::new(0),
+            prune_retry_delay_secs: AtomicU64::new(0),
             budget: RetentionBudget::default(),
             #[cfg(test)]
             injected_write_failure: Mutex::new(None),
@@ -357,15 +365,26 @@ impl OpsSink {
     }
 
     /// Daemon-side bounded retention pass, time-gated per process; safe to
-    /// call from every slot cycle because concurrent passes serialize on the
-    /// database's write lock.
+    /// call from every slot cycle because the atomic claim permits only one
+    /// pass. Callers with an async runtime must place this synchronous method
+    /// behind a blocking boundary.
     pub fn prune_if_due(&self) {
         let now_unix = Timestamp::now()
             .as_offset_datetime()
             .unix_timestamp()
             .unsigned_abs();
+        self.prune_if_due_at(now_unix);
+    }
+
+    fn prune_if_due_at(&self, now_unix: u64) {
         let last = self.last_prune_unix.load(Ordering::Relaxed);
-        if now_unix.saturating_sub(last) < PRUNE_INTERVAL.as_secs() {
+        let next_attempt = self.next_prune_attempt_unix.load(Ordering::Acquire);
+        let due = if next_attempt > 0 {
+            now_unix >= next_attempt
+        } else {
+            now_unix.saturating_sub(last) >= PRUNE_INTERVAL.as_secs()
+        };
+        if !due {
             return;
         }
         if self
@@ -378,14 +397,14 @@ impl OpsSink {
         let report = match self.store.prune_history(&self.budget) {
             Ok(report) => report,
             Err(error) => {
-                self.restore_prune_marker(now_unix, last);
+                self.schedule_prune_retry(now_unix);
                 self.absorb("store.prune", &error.to_string());
                 return;
             }
         };
         #[cfg(test)]
         if self.injected_prune_failure.swap(false, Ordering::Relaxed) {
-            self.restore_prune_marker(now_unix, last);
+            self.schedule_prune_retry(now_unix);
             self.absorb(
                 "store.accounting",
                 "test-injected post-commit accounting failure",
@@ -413,15 +432,29 @@ impl OpsSink {
             report.total_bytes,
             report.oldest_retained_at.as_deref().unwrap_or("none"),
         );
+        self.clear_prune_retry();
     }
 
-    fn restore_prune_marker(&self, claimed: u64, previous: u64) {
-        let _ = self.last_prune_unix.compare_exchange(
-            claimed,
-            previous,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
+    fn schedule_prune_retry(&self, now_unix: u64) {
+        let previous = self.prune_retry_delay_secs.load(Ordering::Relaxed);
+        let initial = PRUNE_RETRY_INITIAL.as_secs();
+        let maximum = PRUNE_RETRY_MAX.as_secs();
+        let delay = if previous == 0 {
+            initial
+        } else {
+            previous.saturating_mul(2).clamp(initial, maximum)
+        };
+        self.prune_retry_delay_secs
+            .store(delay.min(maximum), Ordering::Relaxed);
+        self.next_prune_attempt_unix.store(
+            now_unix.saturating_add(delay.min(maximum)),
+            Ordering::Release,
         );
+    }
+
+    fn clear_prune_retry(&self) {
+        self.prune_retry_delay_secs.store(0, Ordering::Relaxed);
+        self.next_prune_attempt_unix.store(0, Ordering::Release);
     }
 
     /// Read-only accounting snapshot for diagnostics.
@@ -916,27 +949,69 @@ mod tests {
     #[test]
     fn prune_if_due_is_gated_and_safe_under_concurrency() {
         let (_dir, sink) = temp_sink("prune-due");
-        sink.prune_if_due();
-        sink.prune_if_due();
+        let now = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .unsigned_abs();
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let sink = Arc::clone(&sink);
+                std::thread::spawn(move || sink.prune_if_due_at(now))
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
         assert!(!sink.degraded());
+        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), now);
+        assert_eq!(sink.next_prune_attempt_unix.load(Ordering::Acquire), 0);
     }
 
     #[test]
-    fn prune_if_due_restores_retry_marker_after_post_commit_failure() {
+    fn prune_if_due_backs_off_post_commit_failure_then_retries() {
         let (_dir, sink) = temp_sink("prune-retry");
         sink.fail_next_prune_accounting();
+        let now = 10_000;
 
-        sink.prune_if_due();
+        sink.prune_if_due_at(now);
 
-        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), 0);
+        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), now);
+        let retry_at = sink.next_prune_attempt_unix.load(Ordering::Acquire);
+        assert_eq!(retry_at, now + PRUNE_RETRY_INITIAL.as_secs());
         assert!(sink.degraded());
         assert!(sink
             .forensic_failures()
             .iter()
             .any(|entry| entry.contains("store.accounting")));
 
-        sink.prune_if_due();
-        assert!(sink.last_prune_unix.load(Ordering::Relaxed) > 0);
+        sink.prune_if_due_at(retry_at - 1);
+        assert_eq!(
+            sink.next_prune_attempt_unix.load(Ordering::Acquire),
+            retry_at
+        );
+
+        sink.prune_if_due_at(retry_at);
+        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), retry_at);
+        assert_eq!(sink.next_prune_attempt_unix.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn prune_if_due_retry_backoff_is_bounded() {
+        let (_dir, sink) = temp_sink("prune-retry-bound");
+        let mut now = 20_000;
+
+        for _ in 0..16 {
+            sink.fail_next_prune_accounting();
+            sink.prune_if_due_at(now);
+            let retry_at = sink.next_prune_attempt_unix.load(Ordering::Acquire);
+            assert!(retry_at.saturating_sub(now) <= PRUNE_RETRY_MAX.as_secs());
+            now = retry_at;
+        }
+
+        assert_eq!(
+            sink.prune_retry_delay_secs.load(Ordering::Relaxed),
+            PRUNE_RETRY_MAX.as_secs()
+        );
     }
 
     #[test]
