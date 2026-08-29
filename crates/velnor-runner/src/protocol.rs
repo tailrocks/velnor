@@ -140,7 +140,7 @@ fn sanitize_response_body(raw: &str) -> String {
         output.push(character);
     }
     if truncated {
-        output.push_str("…");
+        output.push('…');
     }
     output
 }
