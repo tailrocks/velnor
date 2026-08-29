@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use velnor_model::{ExitClass, Timestamp};
@@ -157,6 +157,51 @@ impl Store {
         self.conn
             .lock()
             .map_err(|_| StoreError::new(ExitClass::Operation, "store.lock.poisoned"))
+    }
+
+    /// Acquire the primary connection without allowing retention maintenance
+    /// to wait forever behind a normal writer.
+    pub(crate) fn lock_conn_until(
+        &self,
+        deadline: Instant,
+    ) -> StoreResult<std::sync::MutexGuard<'_, Connection>> {
+        loop {
+            match self.conn.try_lock() {
+                Ok(connection) => {
+                    if Instant::now() >= deadline {
+                        drop(connection);
+                        return Err(StoreError::new(
+                            ExitClass::Timeout,
+                            "store.retention.deadline",
+                        )
+                        .with_remediation(
+                            "retention maintenance exceeded its bounded connection wait",
+                        ));
+                    }
+                    return Ok(connection);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(StoreError::new(ExitClass::Operation, "store.lock.poisoned"));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(StoreError::new(
+                            ExitClass::Timeout,
+                            "store.retention.deadline",
+                        )
+                        .with_remediation(
+                            "retention maintenance exceeded its bounded connection wait",
+                        ));
+                    }
+                    std::thread::sleep(
+                        deadline
+                            .saturating_duration_since(now)
+                            .min(Duration::from_millis(1)),
+                    );
+                }
+            }
+        }
     }
 
     /// Open a short-lived connection for post-commit maintenance and

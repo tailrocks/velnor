@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, params_from_iter, OptionalExtension};
 use uuid::Uuid;
@@ -190,6 +190,9 @@ const MAX_RETENTION_WINDOW_ROWS: u64 = 100_000;
 const MIN_RETENTION_LEASE_OWNER_BYTES: usize = 8;
 const MAX_RETENTION_LEASE_OWNER_BYTES: usize = 128;
 const MAX_RETENTION_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
+/// A retention pass is maintenance, never a reason to extend a job or writer
+/// wait indefinitely. Later passes continue safe over-retention.
+const MAX_RETENTION_PASS_DURATION: Duration = Duration::from_secs(2);
 
 fn prune_batch_size(budget: &RetentionBudget) -> u64 {
     budget
@@ -415,6 +418,20 @@ fn validate_budget(budget: &RetentionBudget) -> StoreResult<()> {
         }
     }
     Ok(())
+}
+
+fn retention_deadline_error() -> StoreError {
+    StoreError::new(ExitClass::Timeout, "store.retention.deadline").with_remediation(
+        "retention maintenance exceeded its bounded execution deadline; retry in a later pass",
+    )
+}
+
+fn require_retention_deadline(deadline: Instant) -> StoreResult<()> {
+    if Instant::now() >= deadline {
+        Err(retention_deadline_error())
+    } else {
+        Ok(())
+    }
 }
 
 impl Store {
@@ -666,7 +683,8 @@ impl Store {
         budget: &RetentionMaintenanceBudget,
         lease: &RetentionLease,
     ) -> StoreResult<RetentionMaintenanceReport> {
-        self.maintain_after_prune(budget, lease)
+        let deadline = Instant::now() + MAX_RETENTION_PASS_DURATION;
+        self.maintain_after_prune(budget, lease, deadline)
     }
 
     #[cfg(test)]
@@ -803,15 +821,20 @@ impl Store {
                 error,
             })?;
         let now = Timestamp::now();
+        let deadline = Instant::now() + MAX_RETENTION_PASS_DURATION;
         let mut totals = PruneCounts::default();
         let mut committed = false;
 
         if budget.max_event_age.is_some() {
             for _ in 0..prune_pass_batch_limit(budget) {
-                let batch =
-                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
-                        Self::prune_expired_event_batch(transaction, budget, now, lease)
-                    })?;
+                let batch = self.execute_prune_batch(
+                    lease,
+                    now,
+                    deadline,
+                    committed,
+                    &totals,
+                    |transaction| Self::prune_expired_event_batch(transaction, budget, now, lease),
+                )?;
                 let had_work = batch.deleted_events > 0;
                 totals.add(batch);
                 committed = true;
@@ -822,10 +845,14 @@ impl Store {
         }
         if budget.max_event_rows > 0 {
             for _ in 0..prune_pass_batch_limit(budget) {
-                let batch =
-                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
-                        Self::prune_event_row_batch(transaction, budget, now, lease)
-                    })?;
+                let batch = self.execute_prune_batch(
+                    lease,
+                    now,
+                    deadline,
+                    committed,
+                    &totals,
+                    |transaction| Self::prune_event_row_batch(transaction, budget, now, lease),
+                )?;
                 let had_work = batch.deleted_events > 0;
                 totals.add(batch);
                 committed = true;
@@ -835,9 +862,10 @@ impl Store {
             }
         }
         if !committed {
-            let batch = self.execute_prune_batch(lease, now, false, &totals, |_transaction| {
-                Ok(PruneCounts::default())
-            })?;
+            let batch =
+                self.execute_prune_batch(lease, now, deadline, false, &totals, |_transaction| {
+                    Ok(PruneCounts::default())
+                })?;
             totals.add(batch);
             committed = true;
         }
@@ -847,10 +875,16 @@ impl Store {
 
         if budget.max_terminal_job_age.is_some() {
             for _ in 0..prune_pass_batch_limit(budget) {
-                let batch =
-                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                let batch = self.execute_prune_batch(
+                    lease,
+                    now,
+                    deadline,
+                    committed,
+                    &totals,
+                    |transaction| {
                         Self::prune_terminal_job_age_batch(transaction, budget, now, lease)
-                    })?;
+                    },
+                )?;
                 let had_work = batch.deleted_jobs > 0
                     || batch.deleted_events > 0
                     || batch.deleted_transitions > 0;
@@ -863,10 +897,16 @@ impl Store {
         }
         if budget.max_terminal_job_rows > 0 {
             for _ in 0..prune_pass_batch_limit(budget) {
-                let batch =
-                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                let batch = self.execute_prune_batch(
+                    lease,
+                    now,
+                    deadline,
+                    committed,
+                    &totals,
+                    |transaction| {
                         Self::prune_terminal_job_row_batch(transaction, budget, now, lease)
-                    })?;
+                    },
+                )?;
                 let had_work = batch.deleted_jobs > 0
                     || batch.deleted_events > 0
                     || batch.deleted_transitions > 0;
@@ -879,10 +919,16 @@ impl Store {
         }
         if budget.max_database_bytes > 0 {
             for _ in 0..prune_pass_batch_limit(budget) {
-                let batch =
-                    self.execute_prune_batch(lease, now, committed, &totals, |transaction| {
+                let batch = self.execute_prune_batch(
+                    lease,
+                    now,
+                    deadline,
+                    committed,
+                    &totals,
+                    |transaction| {
                         Self::prune_byte_pressure_batch(transaction, &self.path, budget, now, lease)
-                    })?;
+                    },
+                )?;
                 let had_work = batch.deleted_jobs > 0
                     || batch.deleted_events > 0
                     || batch.deleted_transitions > 0;
@@ -900,7 +946,7 @@ impl Store {
         // Physical maintenance is a separate bounded phase. It still runs in
         // the retention worker, never in the job completion transaction.
         let maintenance = self
-            .maintain_after_prune(&RetentionMaintenanceBudget::from(budget), lease)
+            .maintain_after_prune(&RetentionMaintenanceBudget::from(budget), lease, deadline)
             .map_err(|error| {
                 if error.envelope.reason == "store.retention.lease.lost" {
                     PruneFailure::LeaseLost {
@@ -912,7 +958,7 @@ impl Store {
                 }
             })?;
         let snapshot = self
-            .read_snapshot_for_maintenance()
+            .read_snapshot_for_maintenance(deadline)
             .map_err(PruneFailure::PostCommit)?;
 
         Ok(PruneReport {
@@ -939,6 +985,7 @@ impl Store {
         &self,
         lease: &RetentionLease,
         now: Timestamp,
+        deadline: Instant,
         committed_before: bool,
         totals: &PruneCounts,
         operation: F,
@@ -946,74 +993,36 @@ impl Store {
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> StoreResult<PruneCounts>,
     {
-        self.renew_retention_lease(lease)
-            .map_err(|error| PruneFailure::LeaseLost {
-                committed: committed_before,
-                error,
-            })?;
-        let mut conn = self.lock_conn().map_err(|error| {
+        require_retention_deadline(deadline).map_err(|error| {
             if committed_before {
                 PruneFailure::PostCommit(error)
             } else {
                 PruneFailure::PreCommit(error)
             }
         })?;
-        let transaction = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|error| {
-                let error = StoreError::from(error);
-                if committed_before {
-                    PruneFailure::PostCommit(error)
-                } else {
-                    PruneFailure::PreCommit(error)
-                }
-            })?;
-        Self::require_retention_lease_connection(&transaction, lease).map_err(|error| {
-            PruneFailure::LeaseLost {
+        self.renew_retention_lease(lease)
+            .map_err(|error| PruneFailure::LeaseLost {
                 committed: committed_before,
                 error,
-            }
-        })?;
-        let batch = operation(&transaction).map_err(|error| {
-            if error.envelope.reason == "store.retention.lease.lost" {
-                PruneFailure::LeaseLost {
-                    committed: committed_before,
-                    error,
-                }
-            } else if committed_before {
+            })?;
+        require_retention_deadline(deadline).map_err(|error| {
+            if committed_before {
                 PruneFailure::PostCommit(error)
             } else {
                 PruneFailure::PreCommit(error)
             }
         })?;
-        Self::fence_retention_lease_for_commit(&transaction, lease).map_err(|error| {
-            PruneFailure::LeaseLost {
-                committed: committed_before,
-                error,
+        let mut conn = self.lock_conn_until(deadline).map_err(|error| {
+            if committed_before {
+                PruneFailure::PostCommit(error)
+            } else {
+                PruneFailure::PreCommit(error)
             }
         })?;
-        let cumulative_events = totals.deleted_events.saturating_add(batch.deleted_events);
-        let cumulative_jobs = totals.deleted_jobs.saturating_add(batch.deleted_jobs);
-        transaction
-            .execute(
-                "UPDATE retention_state
-                 SET last_prune_at = ?1, deleted_events = ?2, deleted_jobs = ?3
-                 WHERE singleton = 0",
-                params![
-                    rfc3339(now),
-                    i64::try_from(cumulative_events).unwrap_or(i64::MAX),
-                    i64::try_from(cumulative_jobs).unwrap_or(i64::MAX),
-                ],
-            )
-            .map_err(|error| {
-                let error = StoreError::from(error);
-                if committed_before {
-                    PruneFailure::PostCommit(error)
-                } else {
-                    PruneFailure::PreCommit(error)
-                }
-            })?;
-        transaction.commit().map_err(|error| {
+        // Retention must never restart a multi-second SQLite busy wait for
+        // every statement. Lock contention fails fast; the absolute deadline
+        // still bounds the Rust-side mutex and explicit operation checks.
+        conn.busy_timeout(Duration::ZERO).map_err(|error| {
             let error = StoreError::from(error);
             if committed_before {
                 PruneFailure::PostCommit(error)
@@ -1021,29 +1030,131 @@ impl Store {
                 PruneFailure::PreCommit(error)
             }
         })?;
-        Ok(batch)
+        let transaction_result = (|| {
+            let transaction = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| {
+                    let error = StoreError::from(error);
+                    if committed_before {
+                        PruneFailure::PostCommit(error)
+                    } else {
+                        PruneFailure::PreCommit(error)
+                    }
+                })?;
+            require_retention_deadline(deadline).map_err(|error| {
+                if committed_before {
+                    PruneFailure::PostCommit(error)
+                } else {
+                    PruneFailure::PreCommit(error)
+                }
+            })?;
+            Self::require_retention_lease_connection(&transaction, lease).map_err(|error| {
+                PruneFailure::LeaseLost {
+                    committed: committed_before,
+                    error,
+                }
+            })?;
+            let batch = operation(&transaction).map_err(|error| {
+                if error.envelope.reason == "store.retention.lease.lost" {
+                    PruneFailure::LeaseLost {
+                        committed: committed_before,
+                        error,
+                    }
+                } else if committed_before {
+                    PruneFailure::PostCommit(error)
+                } else {
+                    PruneFailure::PreCommit(error)
+                }
+            })?;
+            require_retention_deadline(deadline).map_err(|error| {
+                if committed_before {
+                    PruneFailure::PostCommit(error)
+                } else {
+                    PruneFailure::PreCommit(error)
+                }
+            })?;
+            Self::fence_retention_lease_for_commit(&transaction, lease).map_err(|error| {
+                PruneFailure::LeaseLost {
+                    committed: committed_before,
+                    error,
+                }
+            })?;
+            let cumulative_events = totals.deleted_events.saturating_add(batch.deleted_events);
+            let cumulative_jobs = totals.deleted_jobs.saturating_add(batch.deleted_jobs);
+            transaction
+                .execute(
+                    "UPDATE retention_state
+                 SET last_prune_at = ?1, deleted_events = ?2, deleted_jobs = ?3
+                 WHERE singleton = 0",
+                    params![
+                        rfc3339(now),
+                        i64::try_from(cumulative_events).unwrap_or(i64::MAX),
+                        i64::try_from(cumulative_jobs).unwrap_or(i64::MAX),
+                    ],
+                )
+                .map_err(|error| {
+                    let error = StoreError::from(error);
+                    if committed_before {
+                        PruneFailure::PostCommit(error)
+                    } else {
+                        PruneFailure::PreCommit(error)
+                    }
+                })?;
+            require_retention_deadline(deadline).map_err(|error| {
+                if committed_before {
+                    PruneFailure::PostCommit(error)
+                } else {
+                    PruneFailure::PreCommit(error)
+                }
+            })?;
+            transaction.commit().map_err(|error| {
+                let error = StoreError::from(error);
+                // SQLite commit errors have an ambiguous outcome. Treat the
+                // batch as post-commit/unknown so callers never repeat a
+                // deletion that may already be durable.
+                PruneFailure::PostCommit(error)
+            })?;
+            Ok(batch)
+        })();
+        let restore = conn.busy_timeout(super::BUSY_TIMEOUT).map_err(|error| {
+            let error = StoreError::from(error);
+            PruneFailure::PostCommit(error)
+        });
+        match (transaction_result, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(batch), Ok(())) => Ok(batch),
+        }
     }
 
-    fn read_snapshot_for_maintenance(&self) -> StoreResult<RetentionSnapshot> {
+    fn read_snapshot_for_maintenance(&self, deadline: Instant) -> StoreResult<RetentionSnapshot> {
+        require_retention_deadline(deadline)?;
         let mut connection = self
             .open_maintenance_connection()
             .map_err(|error| maintenance_error("open accounting connection", error))?;
-        read_retention_snapshot(&mut connection, &self.path)
+        let result = read_retention_snapshot(&mut connection, &self.path);
+        require_retention_deadline(deadline)?;
+        result
     }
 
     fn maintain_after_prune(
         &self,
         budget: &RetentionMaintenanceBudget,
         lease: &RetentionLease,
+        deadline: Instant,
     ) -> StoreResult<RetentionMaintenanceReport> {
+        require_retention_deadline(deadline)?;
         self.renew_retention_lease(lease)?;
+        require_retention_deadline(deadline)?;
         let maintenance = self
             .open_maintenance_connection()
             .map_err(|error| maintenance_error("open", error))?;
+        require_retention_deadline(deadline)?;
         Self::require_retention_lease_connection(&maintenance, lease)?;
         let (database_bytes_before, wal_bytes_before) =
             Self::total_database_bytes(&maintenance, &self.path)
                 .map_err(|error| maintenance_error("database accounting before", error))?;
+        require_retention_deadline(deadline)?;
         let total_bytes_before = database_bytes_before.saturating_add(wal_bytes_before);
         let free_bytes_before = filesystem_free_bytes(&self.path);
         let reserve_violation_before =
@@ -1067,9 +1178,11 @@ impl Store {
         } else {
             let attempts = budget.max_checkpoint_attempts.min(1);
             for _ in 0..attempts {
+                require_retention_deadline(deadline)?;
                 Self::require_retention_lease_connection(&maintenance, lease)?;
                 checkpoint = Self::passive_checkpoint(&maintenance)
                     .map_err(|error| maintenance_error("PASSIVE WAL checkpoint", error))?;
+                require_retention_deadline(deadline)?;
             }
             if !checkpoint.complete() {
                 deferred_reason = Some(format!(
@@ -1088,6 +1201,7 @@ impl Store {
                     && auto_vacuum == 2
                     && vacuum_pages > 0
                 {
+                    require_retention_deadline(deadline)?;
                     Self::require_retention_lease_connection(&maintenance, lease)?;
                     let before: i64 = maintenance
                         .query_row("PRAGMA freelist_count", [], |row| row.get(0))
@@ -1096,6 +1210,7 @@ impl Store {
                     maintenance
                         .execute_batch(&format!("PRAGMA incremental_vacuum({});", vacuum_pages))
                         .map_err(|error| maintenance_error("incremental vacuum", error))?;
+                    require_retention_deadline(deadline)?;
                     let after: i64 = maintenance
                         .query_row("PRAGMA freelist_count", [], |row| row.get(0))
                         .map_err(|error| maintenance_error("read reclaimed pages", error))?;
@@ -1105,6 +1220,7 @@ impl Store {
             }
         }
 
+        require_retention_deadline(deadline)?;
         Self::require_retention_lease_connection(&maintenance, lease)?;
         let (database_bytes_after, wal_bytes_after) =
             Self::total_database_bytes(&maintenance, &self.path)
@@ -1136,6 +1252,7 @@ impl Store {
                 total_bytes_after, budget.max_database_bytes
             ));
         }
+        require_retention_deadline(deadline)?;
         Ok(RetentionMaintenanceReport {
             database_bytes_before,
             wal_bytes_before,
@@ -2151,6 +2268,7 @@ mod tests {
         let result = store.execute_prune_batch(
             &lease,
             Timestamp::now(),
+            Instant::now() + MAX_RETENTION_PASS_DURATION,
             false,
             &PruneCounts::default(),
             |transaction| {
