@@ -28,7 +28,7 @@ pub use records::{
     LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
     SlotRow, StoredEvent, Transition,
 };
-pub use retention::{PrunePhase, PruneReport, RetentionBudget, StoreAccounting};
+pub use retention::{PrunePhase, PruneReport, RetentionBudget, RetentionLease, StoreAccounting};
 
 /// Default operational database location; created only by deployment, never
 /// implicitly by the daemon when its parent directory is absent.
@@ -472,6 +472,14 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM retention_lease", [], |row| row.get(0))
             .unwrap();
         assert_eq!(lease_rows, 1);
+        let generation: i64 = test_connection(&reopened)
+            .query_row(
+                "SELECT generation FROM retention_lease WHERE singleton = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 0);
 
         let mut conn = Connection::open(&temp.path).unwrap();
         conn.busy_timeout(BUSY_TIMEOUT).unwrap();
@@ -487,6 +495,33 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM retention_lease", [], |row| row.get(0))
             .unwrap();
         assert_eq!(lease_rows, 1);
+    }
+
+    #[test]
+    fn retention_lease_generation_migration_is_idempotent_on_replay() {
+        let temp = TempDb::new("retention-lease-generation-replay");
+        let store = Store::open(&temp.path).expect("initial migration");
+        drop(store);
+
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        conn.execute("UPDATE schema_version SET version = 0", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "generation-replay", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "generation-replay", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        let columns: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('retention_lease')
+                 WHERE name = 'generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 1);
+        migrations::release_lock(&conn, "generation-replay").unwrap();
     }
 
     #[test]

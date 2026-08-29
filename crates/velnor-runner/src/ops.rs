@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use velnor_control::store::{
-    EventRow, InstanceRow, RetentionBudget, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
+    EventRow, InstanceRow, RetentionBudget, RetentionLease, Store, StoreError, Transition,
+    DEFAULT_STATE_DB_PATH,
 };
 #[cfg(test)]
 use velnor_model::ExitClass;
@@ -189,6 +190,45 @@ fn sanitize_slug(raw: &str) -> String {
 pub(crate) struct PruneAdmission {
     in_flight: Arc<AtomicBool>,
     now_unix: u64,
+}
+
+/// Finalizes a runtime lease on every exit path, including panic unwinding or
+/// cancellation after acquisition. The SQL release is one owner+generation
+/// qualified zero-wait statement, so finalization cannot wait on a competing
+/// writer for an unbounded interval.
+struct RetentionLeaseGuard<'a> {
+    store: &'a Store,
+    lease: Option<RetentionLease>,
+}
+
+impl<'a> RetentionLeaseGuard<'a> {
+    fn new(store: &'a Store, lease: RetentionLease) -> Self {
+        Self {
+            store,
+            lease: Some(lease),
+        }
+    }
+
+    fn lease(&self) -> &RetentionLease {
+        self.lease
+            .as_ref()
+            .expect("retention lease guard must own a lease")
+    }
+
+    fn release(&mut self) -> Result<bool, StoreError> {
+        let Some(lease) = self.lease.take() else {
+            return Ok(false);
+        };
+        self.store.release_retention_lease(&lease)
+    }
+}
+
+impl Drop for RetentionLeaseGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            let _ = self.store.release_retention_lease(&lease);
+        }
+    }
 }
 
 impl PruneAdmission {
@@ -452,28 +492,33 @@ impl OpsSink {
                     .unsigned_abs()
             })
         };
-        let acquired = match self
+        let lease = match self
             .store
             .try_acquire_retention_lease(&self.retention_owner, PRUNE_LEASE_DURATION)
         {
-            Ok(acquired) => acquired,
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                // Live ownership is expected cross-process contention, not
+                // degraded control state. It remains retryable and visible.
+                self.schedule_prune_retry(completion_now());
+                self.record_forensic_failure(
+                    "store.prune-lease-busy",
+                    "retention lease is held by another daemon",
+                );
+                tracing::debug!(target: "velnor::ops", "retention lease is held by another daemon");
+                return;
+            }
             Err(error) => {
                 self.schedule_prune_retry(completion_now());
-                self.absorb("store.prune-lease", &error.to_string());
+                if error.envelope.reason == "store.locked" {
+                    self.record_forensic_failure("store.prune-lease-busy", &error.to_string());
+                } else {
+                    self.absorb("store.prune-lease", &error.to_string());
+                }
                 return;
             }
         };
-        if !acquired {
-            // A healthy foreign owner is expected contention, not degraded
-            // control state. It remains observable and retries with backoff.
-            self.schedule_prune_retry(completion_now());
-            self.record_forensic_failure(
-                "store.prune-lease-busy",
-                "retention lease is held by another daemon",
-            );
-            tracing::debug!(target: "velnor::ops", "retention lease is held by another daemon");
-            return;
-        }
+        let mut lease_guard = RetentionLeaseGuard::new(&self.store, lease);
 
         let mut committed = false;
         let completion;
@@ -484,11 +529,13 @@ impl OpsSink {
                     error,
                 ))
             } else {
-                self.store.prune_history_outcome(&self.budget)
+                self.store
+                    .prune_history_outcome_with_lease(&self.budget, lease_guard.lease())
             }
             #[cfg(not(test))]
             {
-                self.store.prune_history_outcome(&self.budget)
+                self.store
+                    .prune_history_outcome_with_lease(&self.budget, lease_guard.lease())
             }
         };
         match prune_result {
@@ -502,6 +549,21 @@ impl OpsSink {
                 completion = completion_now();
                 self.clear_prune_retry();
                 self.absorb("store.prune-post-commit", &failure.error().to_string());
+            }
+            Err(failure) if failure.is_lease_lost() => {
+                if failure.is_post_commit() {
+                    committed = true;
+                    completion = completion_now();
+                    self.clear_prune_retry();
+                    self.absorb("store.prune-lease-lost", &failure.error().to_string());
+                } else {
+                    completion = completion_now();
+                    self.schedule_prune_retry(completion);
+                    self.record_forensic_failure(
+                        "store.prune-lease-lost",
+                        &failure.error().to_string(),
+                    );
+                }
             }
             Err(failure) => {
                 completion = completion_now();
@@ -525,7 +587,7 @@ impl OpsSink {
             self.last_prune_unix.store(completion, Ordering::Release);
             self.clear_prune_retry();
         }
-        if let Err(error) = self.store.release_retention_lease(&self.retention_owner) {
+        if let Err(error) = lease_guard.release() {
             self.absorb("store.prune-lease-release", &error.to_string());
         }
     }
@@ -1168,10 +1230,11 @@ mod tests {
             .any(|entry| entry.contains("store.accounting")));
 
         let probe = Store::open(sink.store.path()).unwrap();
-        assert!(probe
+        let lease = probe
             .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
-            .unwrap());
-        probe.release_retention_lease("probe-owner-1").unwrap();
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&lease).unwrap();
     }
 
     #[test]
@@ -1203,10 +1266,11 @@ mod tests {
         first.prune_if_due_at(30_000);
 
         let probe = Store::open(first.store.path()).unwrap();
-        assert!(probe
+        let lease = probe
             .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
-            .unwrap());
-        probe.release_retention_lease("probe-owner-1").unwrap();
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&lease).unwrap();
         assert!(!second.degraded());
     }
 
@@ -1215,10 +1279,11 @@ mod tests {
         let (dir, first) = temp_sink("runtime-lease-competing");
         let second =
             Arc::new(OpsSink::open(dir.join("state.db"), "second-instance".to_owned()).unwrap());
-        assert!(first
+        let lease = first
             .store
             .try_acquire_retention_lease(&first.retention_owner, PRUNE_LEASE_DURATION)
-            .unwrap());
+            .unwrap()
+            .unwrap();
 
         second.prune_if_due_at(40_000);
 
@@ -1227,10 +1292,7 @@ mod tests {
             second.next_prune_attempt_unix.load(Ordering::Acquire),
             40_000 + PRUNE_RETRY_INITIAL.as_secs()
         );
-        first
-            .store
-            .release_retention_lease(&first.retention_owner)
-            .unwrap();
+        first.store.release_retention_lease(&lease).unwrap();
     }
 
     #[test]
@@ -1245,10 +1307,45 @@ mod tests {
             50_000 + 15
         );
         let probe = Store::open(sink.store.path()).unwrap();
-        assert!(probe
+        let lease = probe
             .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
-            .unwrap());
-        probe.release_retention_lease("probe-owner-1").unwrap();
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&lease).unwrap();
+    }
+
+    #[test]
+    fn runtime_lease_guard_releases_on_panic_and_drop() {
+        let (dir, sink) = temp_sink("runtime-lease-guard");
+        let lease = sink
+            .store
+            .try_acquire_retention_lease(&sink.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = RetentionLeaseGuard::new(&sink.store, lease);
+            panic!("test cancellation/panic");
+        }));
+        assert!(panic_result.is_err());
+
+        let probe = Store::open(dir.join("state.db")).unwrap();
+        let replacement = probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&replacement).unwrap();
+
+        let lease = sink
+            .store
+            .try_acquire_retention_lease(&sink.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        drop(RetentionLeaseGuard::new(&sink.store, lease));
+        let replacement = probe
+            .try_acquire_retention_lease("probe-owner-2", PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&replacement).unwrap();
     }
 
     #[test]

@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 10;
+pub const LATEST_SCHEMA_VERSION: u32 = 11;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -314,6 +314,14 @@ CREATE TABLE IF NOT EXISTS retention_lease (
 INSERT OR IGNORE INTO retention_lease (singleton) VALUES (0);
 ";
 
+/// Fencing generation for the durable retention lease. Every successful
+/// takeover (including an explicit renewal by the same owner) advances this
+/// value, invalidating capabilities issued by the prior generation.
+const SCHEMA_V11: &str = "
+ALTER TABLE retention_lease
+    ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -394,6 +402,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 10,
         name: "durable-retention-lease",
         sql: SCHEMA_V10,
+    },
+    Migration {
+        version: 11,
+        name: "fenced-retention-lease-generation",
+        sql: SCHEMA_V11,
     },
 ];
 
@@ -574,8 +587,11 @@ pub(crate) fn apply_pending(
             && has_column(&transaction, "lifecycle_operations", "desired_slots")?;
         let retention_columns_exist =
             migration.version == 9 && has_column(&transaction, "retention_state", "job_rows")?;
+        let retention_generation_exists =
+            migration.version == 11 && has_column(&transaction, "retention_lease", "generation")?;
         if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
             && !slot_column_exists
+            && !retention_generation_exists
         {
             let sql = if lifecycle_columns_exist {
                 SCHEMA_V6_REPLAY

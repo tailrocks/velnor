@@ -16,6 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::{params, params_from_iter, OptionalExtension};
+use uuid::Uuid;
 use velnor_model::{ExitClass, Timestamp};
 
 use super::error::{StoreError, StoreResult};
@@ -40,6 +41,22 @@ pub struct RetentionBudget {
     pub max_database_bytes: u64,
     /// Rows examined/deleted per batch; bounds transaction work per step.
     pub batch_size: u64,
+}
+
+/// Opaque capability authorizing one retention owner and fencing generation.
+/// The generation changes on every successful acquisition, so a capability
+/// retained by a stale process cannot renew, release, or mutate the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionLease {
+    owner: String,
+    generation: u64,
+}
+
+impl RetentionLease {
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 impl Default for RetentionBudget {
@@ -112,24 +129,41 @@ pub enum PruneFailure {
     /// Deletion committed, but reporting/maintenance failed; retrying can
     /// repeat work and is therefore not implied to be safe.
     PostCommit(StoreError),
+    /// The capability expired or was fenced before the next mutation. The
+    /// `committed` flag preserves whether earlier deletion is durable.
+    LeaseLost { committed: bool, error: StoreError },
 }
 
 impl PruneFailure {
     #[must_use]
     pub fn is_post_commit(&self) -> bool {
-        matches!(self, Self::PostCommit(_))
+        matches!(
+            self,
+            Self::PostCommit(_)
+                | Self::LeaseLost {
+                    committed: true,
+                    ..
+                }
+        )
+    }
+
+    #[must_use]
+    pub fn is_lease_lost(&self) -> bool {
+        matches!(self, Self::LeaseLost { .. })
     }
 
     #[must_use]
     pub fn error(&self) -> &StoreError {
         match self {
             Self::PreCommit(error) | Self::PostCommit(error) => error,
+            Self::LeaseLost { error, .. } => error,
         }
     }
 
     fn into_store_error(self) -> StoreError {
         match self {
             Self::PreCommit(error) | Self::PostCommit(error) => error,
+            Self::LeaseLost { error, .. } => error,
         }
     }
 }
@@ -252,15 +286,15 @@ fn validate_budget(budget: &RetentionBudget) -> StoreResult<()> {
 
 impl Store {
     /// Try to own retention maintenance at a supplied clock value. A live
-    /// foreign owner blocks; an empty, missing, or expired lease is replaced
-    /// by an atomic update. The owner token is operational identity only and
-    /// must never contain a secret.
+    /// foreign owner is a normal non-admission result. A successful update
+    /// returns an opaque capability fenced by a monotonically increasing
+    /// generation.
     pub fn try_acquire_retention_lease_at(
         &self,
         owner: &str,
         now_unix: u64,
         lease_duration: Duration,
-    ) -> StoreResult<bool> {
+    ) -> StoreResult<Option<RetentionLease>> {
         validate_retention_lease_owner(owner)?;
         let lease_seconds = validate_retention_lease_duration(lease_duration)?;
         let now = i64::try_from(now_unix).map_err(|_| {
@@ -281,42 +315,127 @@ impl Store {
         let mut conn = self.open_maintenance_connection()?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(Option<String>, Option<i64>, i64)> = transaction
+            .query_row(
+                "SELECT owner, expires_at, generation
+                 FROM retention_lease WHERE singleton = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((held_owner, held_expires_at, generation)) = row else {
+            return Err(StoreError::new(
+                ExitClass::Unavailable,
+                "store.retention.lease.missing",
+            ));
+        };
+        if generation < 0 {
+            return Err(retention_lease_error(
+                "store.retention.lease.generation",
+                "retention lease generation must be a nonnegative SQLite integer",
+            ));
+        }
+        let live_foreign_owner = held_owner.as_deref().is_some_and(|held| {
+            !held.is_empty()
+                && held != owner
+                && held_expires_at.is_some_and(|expires| expires > now)
+        });
+        if live_foreign_owner {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let generation = u64::try_from(generation)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| {
+                retention_lease_error(
+                    "store.retention.lease.generation",
+                    "retention lease generation exhausted; refusing to wrap or saturate",
+                )
+            })?;
         let changed = transaction.execute(
             "UPDATE retention_lease
-             SET owner = ?1, expires_at = ?2
+             SET owner = ?1, expires_at = ?2, generation = ?3
              WHERE singleton = 0
-               AND (owner IS NULL
-                    OR owner = ''
-                    OR expires_at IS NULL
-                    OR expires_at <= ?3
-                    OR owner = ?1)",
-            params![owner, expires_at, now],
+               AND owner IS ?4
+               AND expires_at IS ?5
+               AND generation = ?6",
+            params![
+                owner,
+                expires_at,
+                generation,
+                held_owner,
+                held_expires_at,
+                generation - 1
+            ],
         )?;
-        if changed == 0 {
-            let lease_row_exists: bool = transaction.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM retention_lease WHERE singleton = 0
-                 )",
-                [],
-                |row| row.get(0),
-            )?;
-            if !lease_row_exists {
-                return Err(StoreError::new(
-                    ExitClass::Unavailable,
-                    "store.retention.lease.missing",
-                ));
-            }
+        if changed != 1 {
+            return Err(StoreError::new(
+                ExitClass::Conflict,
+                "store.retention.lease.lost",
+            ));
         }
         transaction.commit()?;
-        Ok(changed == 1)
+        Ok(Some(RetentionLease {
+            owner: owner.to_owned(),
+            generation: u64::try_from(generation).map_err(|_| {
+                retention_lease_error(
+                    "store.retention.lease.generation",
+                    "retention lease generation is outside the capability range",
+                )
+            })?,
+        }))
     }
 
-    /// Release the lease only when its owner still matches. This is
-    /// idempotent and cannot clear a successor that took over after expiry.
-    pub fn release_retention_lease(&self, owner: &str) -> StoreResult<bool> {
-        validate_retention_lease_owner(owner)?;
+    /// Release only the exact owner and generation represented by `lease`.
+    pub fn release_retention_lease(&self, lease: &RetentionLease) -> StoreResult<bool> {
         let mut conn = self.open_maintenance_connection()?;
-        release_retention_lease_connection(&mut conn, owner)
+        release_retention_lease_connection(&mut conn, lease)
+    }
+
+    /// Renew a capability without changing its fencing generation. A stale or
+    /// expired capability returns `false` and cannot extend a successor.
+    pub fn renew_retention_lease_at(
+        &self,
+        lease: &RetentionLease,
+        now_unix: u64,
+        lease_duration: Duration,
+    ) -> StoreResult<bool> {
+        let lease_seconds = validate_retention_lease_duration(lease_duration)?;
+        let now = i64::try_from(now_unix).map_err(|_| {
+            retention_lease_error(
+                "store.retention.lease.clock",
+                "retention lease clock value exceeds SQLite integer range",
+            )
+        })?;
+        let expires_at = now_unix
+            .checked_add(lease_seconds)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| {
+                retention_lease_error(
+                    "store.retention.lease.clock",
+                    "retention lease expiry exceeds SQLite integer range",
+                )
+            })?;
+        let generation = i64::try_from(lease.generation).map_err(|_| {
+            retention_lease_error(
+                "store.retention.lease.generation",
+                "retention lease generation exceeds SQLite integer range",
+            )
+        })?;
+        let mut conn = self.open_maintenance_connection()?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE retention_lease
+             SET expires_at = ?1
+             WHERE singleton = 0 AND owner = ?2 AND generation = ?3
+               AND expires_at > ?4",
+            params![expires_at, lease.owner, generation, now],
+        )?;
+        transaction.commit()?;
+        Ok(changed == 1)
     }
 
     /// Try to own retention maintenance using the current Unix-second clock.
@@ -324,9 +443,15 @@ impl Store {
         &self,
         owner: &str,
         lease_duration: Duration,
-    ) -> StoreResult<bool> {
+    ) -> StoreResult<Option<RetentionLease>> {
         let now = Timestamp::now().as_offset_datetime().unix_timestamp();
-        self.try_acquire_retention_lease_at(owner, u64::try_from(now).unwrap_or(0), lease_duration)
+        let now = u64::try_from(now).map_err(|_| {
+            retention_lease_error(
+                "store.retention.lease.clock",
+                "retention lease clock is before the Unix epoch",
+            )
+        })?;
+        self.try_acquire_retention_lease_at(owner, now, lease_duration)
     }
 
     /// Run one bounded prune pass with the given budget.
@@ -353,7 +478,27 @@ impl Store {
         &self,
         budget: &RetentionBudget,
     ) -> Result<PruneReport, PruneFailure> {
-        self.prune_history_outcome_inner(budget, None)
+        let lease = self
+            .acquire_private_retention_lease()
+            .map_err(PruneFailure::PreCommit)?;
+        let result = self.prune_history_outcome_with_lease(budget, &lease);
+        let release = self.release_retention_lease(&lease);
+        match (result, release) {
+            (Ok(report), Ok(_)) => Ok(report),
+            (Ok(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
+            (Err(failure), _) => Err(failure),
+        }
+    }
+
+    /// Run pruning with an acquired lease capability. The capability is
+    /// checked before the transaction, before each bounded batch, and before
+    /// every maintenance action.
+    pub fn prune_history_outcome_with_lease(
+        &self,
+        budget: &RetentionBudget,
+        lease: &RetentionLease,
+    ) -> Result<PruneReport, PruneFailure> {
+        self.prune_history_outcome_inner(budget, None, lease)
     }
 
     #[cfg(test)]
@@ -362,16 +507,79 @@ impl Store {
         budget: &RetentionBudget,
         hook: Option<&dyn Fn(PrunePhase) -> StoreResult<()>>,
     ) -> StoreResult<PruneReport> {
-        self.prune_history_outcome_inner(budget, hook)
-            .map_err(PruneFailure::into_store_error)
+        let lease = self
+            .acquire_private_retention_lease()
+            .map_err(PruneFailure::PreCommit)
+            .map_err(PruneFailure::into_store_error)?;
+        let result = self.prune_history_outcome_inner(budget, hook, &lease);
+        let release = self.release_retention_lease(&lease);
+        let result = match (result, release) {
+            (Ok(report), Ok(_)) => Ok(report),
+            (Ok(_), Err(error)) => Err(PruneFailure::PostCommit(error)),
+            (Err(failure), _) => Err(failure),
+        };
+        result.map_err(PruneFailure::into_store_error)
+    }
+
+    fn acquire_private_retention_lease(&self) -> StoreResult<RetentionLease> {
+        let owner = format!("velnor-store-{}", Uuid::new_v4().simple());
+        self.try_acquire_retention_lease(&owner, MAX_RETENTION_LEASE_DURATION)?
+            .ok_or_else(|| {
+                retention_lease_error(
+                    "store.retention.lease.busy",
+                    "retention maintenance is owned by another daemon; retry later",
+                )
+            })
+    }
+
+    fn require_retention_lease(&self, lease: &RetentionLease) -> StoreResult<()> {
+        let connection = self.open_maintenance_connection()?;
+        Self::require_retention_lease_connection(&connection, lease)
+    }
+
+    fn require_retention_lease_connection(
+        conn: &rusqlite::Connection,
+        lease: &RetentionLease,
+    ) -> StoreResult<()> {
+        let generation = i64::try_from(lease.generation).map_err(|_| {
+            retention_lease_error(
+                "store.retention.lease.generation",
+                "retention lease generation exceeds SQLite integer range",
+            )
+        })?;
+        let now = Timestamp::now().as_offset_datetime().unix_timestamp();
+        let live: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM retention_lease
+                 WHERE singleton = 0 AND owner = ?1 AND generation = ?2
+                   AND expires_at > ?3
+             )",
+            params![lease.owner, generation, now],
+            |row| row.get(0),
+        )?;
+        if !live {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.retention.lease.lost")
+                    .with_remediation(
+                        "retention ownership expired or was fenced by a newer generation",
+                    ),
+            );
+        }
+        Ok(())
     }
 
     fn prune_history_outcome_inner(
         &self,
         budget: &RetentionBudget,
         hook: Option<&dyn Fn(PrunePhase) -> StoreResult<()>>,
+        lease: &RetentionLease,
     ) -> Result<PruneReport, PruneFailure> {
         validate_budget(budget).map_err(PruneFailure::PreCommit)?;
+        self.require_retention_lease(lease)
+            .map_err(|error| PruneFailure::LeaseLost {
+                committed: false,
+                error,
+            })?;
         let now = Timestamp::now();
 
         let (deleted_events, deleted_jobs, deleted_transitions) = {
@@ -379,16 +587,18 @@ impl Store {
                 let mut conn = self.lock_conn()?;
                 let transaction =
                     conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let deleted_events = Self::prune_expired_events(&transaction, budget, now)?;
+                Self::require_retention_lease_connection(&transaction, lease)?;
+                let deleted_events = Self::prune_expired_events(&transaction, budget, now, lease)?;
                 if let Some(hook) = hook {
                     hook(PrunePhase::AfterEventPrune)?;
                 }
                 let (more_events, deleted_jobs, deleted_transitions) =
-                    Self::prune_terminal_jobs(&transaction, &self.path, budget, now)?;
+                    Self::prune_terminal_jobs(&transaction, &self.path, budget, now, lease)?;
                 let deleted_events = deleted_events.saturating_add(more_events);
                 if let Some(hook) = hook {
                     hook(PrunePhase::AfterJobPrune)?;
                 }
+                Self::require_retention_lease_connection(&transaction, lease)?;
                 transaction.execute(
                     "UPDATE retention_state
                      SET last_prune_at = ?1, deleted_events = ?2, deleted_jobs = ?3
@@ -402,14 +612,30 @@ impl Store {
                 transaction.commit()?;
                 Ok((deleted_events, deleted_jobs, deleted_transitions))
             })();
-            result.map_err(PruneFailure::PreCommit)?
+            result.map_err(|error| {
+                if error.envelope.reason == "store.retention.lease.lost" {
+                    PruneFailure::LeaseLost {
+                        committed: false,
+                        error,
+                    }
+                } else {
+                    PruneFailure::PreCommit(error)
+                }
+            })?
         };
 
         // Maintenance uses a separate zero-wait connection. Checkpointing is
         // intentionally deferred because SQLite cannot bound its frame work.
-        let snapshot = self
-            .maintain_after_prune(budget)
-            .map_err(PruneFailure::PostCommit)?;
+        let snapshot = self.maintain_after_prune(budget, lease).map_err(|error| {
+            if error.envelope.reason == "store.retention.lease.lost" {
+                PruneFailure::LeaseLost {
+                    committed: true,
+                    error,
+                }
+            } else {
+                PruneFailure::PostCommit(error)
+            }
+        })?;
 
         Ok(PruneReport {
             deleted_events,
@@ -425,10 +651,15 @@ impl Store {
         })
     }
 
-    fn maintain_after_prune(&self, budget: &RetentionBudget) -> StoreResult<RetentionSnapshot> {
+    fn maintain_after_prune(
+        &self,
+        budget: &RetentionBudget,
+        lease: &RetentionLease,
+    ) -> StoreResult<RetentionSnapshot> {
         let mut maintenance = self
             .open_maintenance_connection()
             .map_err(|error| maintenance_error("open", error))?;
+        Self::require_retention_lease_connection(&maintenance, lease)?;
         let maintenance_status = MaintenanceStatus {
             deferred: true,
             reason: Some(
@@ -440,10 +671,12 @@ impl Store {
         if budget.max_database_bytes > 0
             && database_bytes.saturating_add(wal_bytes) > budget.max_database_bytes
         {
+            Self::require_retention_lease_connection(&maintenance, lease)?;
             maintenance
                 .execute_batch("PRAGMA incremental_vacuum(500)")
                 .map_err(|error| maintenance_error("incremental vacuum", error))?;
         }
+        Self::require_retention_lease_connection(&maintenance, lease)?;
         read_retention_snapshot(&mut maintenance, &self.path).map(|snapshot| RetentionSnapshot {
             job_rows: snapshot.job_rows,
             event_rows: snapshot.event_rows,
@@ -520,12 +753,14 @@ impl Store {
         conn: &rusqlite::Connection,
         budget: &RetentionBudget,
         now: Timestamp,
+        lease: &RetentionLease,
     ) -> StoreResult<u64> {
         let mut deleted = 0u64;
         if let Some(max_age) = budget.max_event_age {
             let cutoff = minus_age(now, max_age);
             let mut cursor = 0_i64;
             for _ in 0..prune_pass_batch_limit(budget) {
+                Self::require_retention_lease_connection(conn, lease)?;
                 let batch = protected_expired_older_than(
                     conn,
                     "events",
@@ -554,6 +789,7 @@ impl Store {
                 // Bounded batches move toward the cap; repeated passes finish
                 // larger backlogs without one pass monopolizing the store.
                 for _ in 0..prune_pass_batch_limit(budget) {
+                    Self::require_retention_lease_connection(conn, lease)?;
                     let victims = protected_ids_below(
                         conn,
                         "events",
@@ -582,6 +818,7 @@ impl Store {
         path: &Path,
         budget: &RetentionBudget,
         now: Timestamp,
+        lease: &RetentionLease,
     ) -> StoreResult<(u64, u64, u64)> {
         let mut deleted_jobs = 0u64;
         let mut deleted_transitions = 0u64;
@@ -593,6 +830,7 @@ impl Store {
             let cutoff = minus_age(now, max_age);
             let mut cursor = 0_i64;
             for _ in 0..prune_pass_batch_limit(budget) {
+                Self::require_retention_lease_connection(conn, lease)?;
                 let batch = unprotected_expired_batch(
                     conn,
                     &format!(
@@ -606,6 +844,7 @@ impl Store {
                 )?;
 
                 for id in &batch.ids {
+                    Self::require_retention_lease_connection(conn, lease)?;
                     let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id, now)?;
                     deleted_jobs += jobs;
                     deleted_transitions += transitions;
@@ -631,6 +870,7 @@ impl Store {
             )?;
             if let Some(keep_from_id) = keep_from_id.filter(|id| *id > 1) {
                 for _ in 0..prune_pass_batch_limit(budget) {
+                    Self::require_retention_lease_connection(conn, lease)?;
                     let victims: Vec<i64> = {
                         let mut statement = conn.prepare_cached(&format!(
                             "SELECT id FROM jobs
@@ -651,6 +891,7 @@ impl Store {
                         break;
                     }
                     for id in &victims {
+                        Self::require_retention_lease_connection(conn, lease)?;
                         let (jobs, transitions, events) = delete_job_with_ancestry(conn, *id, now)?;
                         deleted_jobs += jobs;
                         deleted_transitions += transitions;
@@ -664,6 +905,7 @@ impl Store {
         // database cannot hold the write lock forever.
         if budget.max_database_bytes > 0 {
             for _ in 0..prune_pass_batch_limit(budget) {
+                Self::require_retention_lease_connection(conn, lease)?;
                 let (database_bytes, wal_bytes) = Self::total_database_bytes(conn, path)?;
                 if database_bytes.saturating_add(wal_bytes) <= budget.max_database_bytes {
                     break;
@@ -684,12 +926,14 @@ impl Store {
                         other => Err(other),
                     })?;
                 let Some(victim) = victim else { break };
+                Self::require_retention_lease_connection(conn, lease)?;
                 let (jobs, transitions, events) = delete_job_with_ancestry(conn, victim, now)?;
                 deleted_jobs += jobs;
                 deleted_transitions += transitions;
                 deleted_events += events;
             }
             for _ in 0..prune_pass_batch_limit(budget) {
+                Self::require_retention_lease_connection(conn, lease)?;
                 let (database_bytes, wal_bytes) = Self::total_database_bytes(conn, path)?;
                 if database_bytes.saturating_add(wal_bytes) <= budget.max_database_bytes {
                     break;
@@ -699,6 +943,7 @@ impl Store {
                 if victims.is_empty() {
                     break;
                 }
+                Self::require_retention_lease_connection(conn, lease)?;
                 deleted_events += delete_events_by_ids(conn, &victims, now)?;
             }
         }
@@ -708,13 +953,19 @@ impl Store {
 
 fn release_retention_lease_connection(
     conn: &mut rusqlite::Connection,
-    owner: &str,
+    lease: &RetentionLease,
 ) -> StoreResult<bool> {
+    let generation = i64::try_from(lease.generation).map_err(|_| {
+        retention_lease_error(
+            "store.retention.lease.generation",
+            "retention lease generation exceeds SQLite integer range",
+        )
+    })?;
     let changed = conn.execute(
         "UPDATE retention_lease
          SET owner = NULL, expires_at = NULL
-         WHERE singleton = 0 AND owner = ?1",
-        [owner],
+         WHERE singleton = 0 AND owner = ?1 AND generation = ?2",
+        params![lease.owner, generation],
     )?;
     Ok(changed == 1)
 }
@@ -1194,10 +1445,12 @@ mod tests {
 
         assert!(first
             .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert!(!second
             .try_acquire_retention_lease_at("owner-b-1", 101, Duration::from_secs(30))
-            .unwrap());
+            .unwrap()
+            .is_some());
 
         let connection = test_connection(&first);
         let lease: (Option<String>, Option<i64>) = connection
@@ -1215,27 +1468,91 @@ mod tests {
         let (_dir, first) = temp_store("lease-takeover");
         let second = Store::open(first.path()).unwrap();
 
-        assert!(first
+        let first_lease = first
             .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(10))
-            .unwrap());
-        assert!(second
+            .unwrap()
+            .unwrap();
+        let second_lease = second
             .try_acquire_retention_lease_at("owner-b-1", 110, Duration::from_secs(20))
-            .unwrap());
+            .unwrap()
+            .unwrap();
+        assert!(second_lease.generation() > first_lease.generation());
         assert!(!first
-            .try_acquire_retention_lease_at("owner-a-1", 111, Duration::from_secs(10))
+            .renew_retention_lease_at(&first_lease, 111, Duration::from_secs(10))
             .unwrap());
+        assert!(!first.release_retention_lease(&first_lease).unwrap());
+        assert!(second.release_retention_lease(&second_lease).unwrap());
+    }
+
+    #[test]
+    fn stale_capability_cannot_authorize_pruning_after_takeover() {
+        let (_dir, first) = temp_store("lease-fenced-prune");
+        let second = Store::open(first.path()).unwrap();
+        let now = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .try_into()
+            .unwrap();
+        let first_lease = first
+            .try_acquire_retention_lease_at("owner-a-1", now, Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let second_lease = second
+            .try_acquire_retention_lease_at("owner-b-1", now + 30, Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let error = first
+            .prune_history_outcome_with_lease(&RetentionBudget::default(), &first_lease)
+            .expect_err("fenced capability must stop before mutation");
+        assert!(error.is_lease_lost());
+        assert!(!error.is_post_commit());
+        assert!(second.release_retention_lease(&second_lease).unwrap());
+    }
+
+    #[test]
+    fn direct_prune_acquires_private_lease_and_respects_contention() {
+        let (_dir, store) = temp_store("direct-prune-lease");
+        seed_expired_events(&store, 2);
+        let now = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .try_into()
+            .unwrap();
+        let owner_lease = store
+            .try_acquire_retention_lease_at("owner-a-1", now, Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+        let error = store
+            .prune_history(&budget)
+            .expect_err("direct pruning must not bypass a live lease");
+        assert_eq!(error.envelope.reason, "store.retention.lease.busy");
+        assert_eq!(store.accounting().unwrap().event_rows, 2);
+        assert!(store.release_retention_lease(&owner_lease).unwrap());
     }
 
     #[test]
     fn retention_lease_rejects_non_owner_release() {
         let (_dir, store) = temp_store("lease-release");
 
-        assert!(store
+        let lease = store
             .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
-            .unwrap());
-        assert!(!store.release_retention_lease("owner-b-1").unwrap());
-        assert!(store.release_retention_lease("owner-a-1").unwrap());
-        assert!(!store.release_retention_lease("owner-a-1").unwrap());
+            .unwrap()
+            .unwrap();
+        let stale = RetentionLease {
+            owner: "owner-b-1".to_owned(),
+            generation: lease.generation,
+        };
+        assert!(!store.release_retention_lease(&stale).unwrap());
+        assert!(store.release_retention_lease(&lease).unwrap());
+        assert!(!store.release_retention_lease(&lease).unwrap());
     }
 
     #[test]
@@ -1259,10 +1576,12 @@ mod tests {
 
         assert!(store
             .try_acquire_retention_lease_at("owner-a-1", 100, Duration::from_secs(30))
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert!(!store
             .try_acquire_retention_lease_at("owner-b-1", 101, Duration::from_secs(30))
-            .unwrap());
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1748,10 +2067,9 @@ mod tests {
         };
         let report = store.prune_history(&budget).unwrap();
         assert_eq!(report.deleted_events, 5);
-        assert_eq!(
-            report.wal_bytes,
-            Store::wal_bytes_for_path(&dir.join("state.db")).unwrap()
-        );
+        assert!(report.wal_bytes > 0);
+        let current_wal_bytes = Store::wal_bytes_for_path(&dir.join("state.db")).unwrap();
+        assert!(current_wal_bytes >= report.wal_bytes);
         assert_eq!(
             report.total_bytes,
             report.database_bytes.saturating_add(report.wal_bytes)
