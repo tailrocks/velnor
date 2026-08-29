@@ -174,9 +174,11 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
 
 ## Maintainer release and Sentry deployment
 
-Sentry has one package-deployment path: the configured signed apt repository.
-This rule covers first install, upgrade, downgrade, rollback, and forward
-recovery.
+Normal Sentry package deployment uses the configured signed apt repository and
+the release workflow below. This rule covers first install, upgrade,
+downgrade, rollback, and forward recovery. The only exception is the tightly
+bounded chicken-egg bootstrap below, allowed only when a failed Velnor lane
+must build Velnor itself and urgent validation is explicitly authorized.
 
 1. Ensure the release commit is signed off, pushed, and green. Create a signed
    `vX.Y.Z` tag on that exact commit and push only that tag.
@@ -228,10 +230,38 @@ recovery.
    the same exact signed-APT procedure to move forward. Never republish an old
    release merely to roll back.
 
-Never deploy a local or downloaded `.deb`, use direct `dpkg -i`, install an apt
-local path, copy a binary, or build/install from a checkout on Sentry. A
-checksummed immutable release-record download is activation metadata only; it
-does not install executable code and cannot replace any apt step.
+### Authorized chicken-egg bootstrap (exception only)
+
+Use this path only for a failed Velnor lane that must build Velnor itself,
+after explicit authorization and before the sole campaign PR can merge. It is
+not a second normal release mechanism:
+
+1. Build exactly one Debian package from the exact pushed campaign SHA. Record
+   the package version, source SHA/provenance, package path, and SHA-256.
+2. Transfer only that Debian package to `sentry` with noninteractive `ssh`.
+   Verify the SHA-256 before transfer and again after transfer; abort on any
+   mismatch. Do not transfer a raw binary, source tree, or checkout.
+3. Through the authorized host/Sentry release path, publish that exact package
+   into the signed `velnor-apt` repository. Verify the resulting repository
+   signature and package checksum, then make the exact version available from
+   the configured HTTPS APT source. Do not install from a local path.
+4. Drain Velnor as above and install the exact version through APT under the
+   current exclusive `/run/velnor/package-transaction.lock` `flock` wrapper;
+   direct `dpkg -i` is forbidden. Verify installed package identity and source
+   SHA/provenance, service health, the signed rollback predecessor, and that
+   rollback to that predecessor succeeds and forward recovery is possible.
+5. Record the authorization, provenance, both transfer hashes, signature,
+   installed identity, health, predecessor, rollback, and recovery evidence.
+   Cancel stale pending/running validation state and validation-owned stale
+   registrations as required, prove both are clear, then retry `velnor`,
+   `github`, and `both`, monitoring only the new runs.
+
+Outside this exception, never deploy a local or downloaded `.deb`, use direct
+`dpkg -i`, install an APT local path, copy a binary, or build/install from a
+checkout on Sentry. A checksummed immutable release-record download is
+activation metadata only; it does not install executable code and cannot
+replace any normal signed-APT step. There is no unpinned package or silent
+GitHub fallback.
 
 Verified 2026-07-18 against both repositories and the live host:
 `tailrocks/velnor-apt` publishes amd64+arm64 with a signed reprepro index

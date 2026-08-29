@@ -41,13 +41,22 @@ authorized safe integration checkpoint, then prove the merged SHA on `main`
 before release. Repeated per-task PRs or repeated PR merges are prohibited by
 the one-branch/one-PR topology.
 
-If urgent Sentry validation is required before that sole PR can merge, an
-explicitly authorized exception may release the exact pushed branch SHA only
-through the signed `velnor-apt` workflow and install it over `ssh sentry`.
-The branch SHA must be bound to the immutable signed release record and exact
-package version. Never copy a checkout or binary, install a local `.deb`, use
-direct `dpkg -i`, or bypass signed APT. Record the exception and merge the
-same campaign branch when the PR becomes mergeable.
+Normal releases use the signed `velnor-apt` workflow. If, and only if, a
+failed Velnor lane must build Velnor itself and urgent Sentry validation is
+required before the sole PR can merge, an explicitly authorized chicken-egg
+bootstrap may build one Debian package from the exact pushed campaign SHA.
+Bind the package version and source provenance to that SHA; record the
+package SHA-256 before and after transfer; transfer only that `.deb` via
+noninteractive `ssh sentry`; and publish it into the signed `velnor-apt`
+repository through the authorized host/Sentry release path. Install the exact
+version through the configured HTTPS APT source using the current exclusive
+`flock` transaction lock, never `dpkg -i`. Verify the repository signature,
+package checksum, installed package/source identity, service health, signed
+rollback predecessor, and rollback ability; record all evidence. Cancel stale
+validation state as required, prove it is clear, then retry `velnor`,
+`github`, and `both`. This exception is not raw binary/source/checkout copy,
+local-path installation, an unpinned package, or silent GitHub fallback.
+Merge the same campaign branch when the PR becomes mergeable.
 
 Every Velnor blocker iteration must verify the deployed source/package
 identity, service health, rollback predecessor, and all three lane modes:
