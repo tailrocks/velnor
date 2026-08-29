@@ -32,6 +32,20 @@ run = "cargo nextest run --workspace --locked --features velnor-runner/test-supp
 description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
 run = "cargo nextest run --locked --features velnor-runner/test-support --color=always"
 
+[tasks.test-production-topology]
+description = "Compile all workspace targets with production default features"
+run = "cargo check --workspace --all-targets --locked"
+
+[tasks.test-release-feature-boundary]
+description = "Prove release-profile builds reject the loopback-only test feature"
+run = """
+set -eu
+if cargo check -p velnor-runner --release --locked --features test-support; then
+  echo "test-support unexpectedly compiled in a release profile" >&2
+  exit 1
+fi
+"""
+
 [tasks.actionlint]
 run = "actionlint"
 
@@ -99,7 +113,7 @@ cat "$digest_output"
 """
 
 [tasks.check]
-depends = ["fmt", "actionlint", "deny", "fleet-generate", "lint", "test"]
+depends = ["fmt", "actionlint", "deny", "fleet-generate", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
 
 [tasks.ci]
 depends = ["actionlint", "deny", "fleet-generate"]

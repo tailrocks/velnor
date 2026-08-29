@@ -235,9 +235,14 @@ struct ConfigureLock {
 
 impl ConfigureLock {
     fn acquire(dir: &Path) -> Result<Self> {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("create runner config directory {}", dir.display()))?;
-        let path = dir.join(".configure.lock");
+        let lock_dir = if dir.file_name().is_some_and(|name| name == "next") {
+            dir.parent().unwrap_or(dir)
+        } else {
+            dir
+        };
+        fs::create_dir_all(lock_dir)
+            .with_context(|| format!("create runner config directory {}", lock_dir.display()))?;
+        let path = lock_dir.join(".configure.lock");
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -247,7 +252,7 @@ impl ConfigureLock {
             .open(&path)
             .with_context(|| format!("open configure lock {}", path.display()))?;
         rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .with_context(|| format!("lock runner config directory {}", dir.display()))?;
+            .with_context(|| format!("lock runner config directory {}", lock_dir.display()))?;
         Ok(Self { _file: file })
     }
 }
@@ -2435,17 +2440,21 @@ async fn recycle_daemon_slot(
     // REST request per cycle and can park every slot behind the shared API
     // rate limit. Failed/unused JIT identities still take the explicit delete
     // path so they do not linger until GitHub's expiry window.
-    remove_completed_daemon_slot_jit_config(&slot_dir)
-        .with_context(|| format!("discard consumed daemon slot-{slot_index} JIT identity"))?;
-    let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
-    if pending_jit_registration_exists(&slot_dir) || pending_jit_registration_exists(&next_dir) {
-        bail!(
-            "cannot promote daemon slot-{slot_index} while a pending JIT registration marker exists"
-        );
-    }
-    if config::promote_prepared(&slot_dir)
-        .with_context(|| format!("promote successor JIT config for daemon slot-{slot_index}"))?
-    {
+    let promoted = {
+        let _configure_lock = ConfigureLock::acquire(&slot_dir)?;
+        remove_completed_daemon_slot_jit_config_locked(&slot_dir)
+            .with_context(|| format!("discard consumed daemon slot-{slot_index} JIT identity"))?;
+        let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
+        if pending_jit_registration_exists(&slot_dir) || pending_jit_registration_exists(&next_dir)
+        {
+            bail!(
+                "cannot promote daemon slot-{slot_index} while a pending JIT registration marker exists"
+            );
+        }
+        config::promote_prepared(&slot_dir)
+            .with_context(|| format!("promote successor JIT config for daemon slot-{slot_index}"))?
+    };
+    if promoted {
         println!(
             "Promoted prewarmed successor JIT config for {} after cycle {cycle}.",
             daemon_slot_name(slot_index)
@@ -2481,7 +2490,13 @@ async fn recycle_daemon_slot(
     Ok(())
 }
 
+#[cfg(test)]
 fn remove_completed_daemon_slot_jit_config(slot_dir: &Path) -> Result<()> {
+    let _configure_lock = ConfigureLock::acquire(slot_dir)?;
+    remove_completed_daemon_slot_jit_config_locked(slot_dir)
+}
+
+fn remove_completed_daemon_slot_jit_config_locked(slot_dir: &Path) -> Result<()> {
     if pending_jit_registration_exists(slot_dir) {
         bail!(
             "cannot discard daemon slot config while pending JIT registration recovery is unresolved"
@@ -2585,7 +2600,8 @@ async fn cleanup_daemon_slot_successor_jit_config(
 ) -> Result<()> {
     let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
     if next_dir.exists() {
-        delete_and_remove_daemon_slot_jit_config(args, &next_dir)
+        let _configure_lock = ConfigureLock::acquire(&next_dir)?;
+        delete_and_remove_daemon_slot_jit_config_locked(args, &next_dir)
             .await
             .with_context(|| {
                 format!(
@@ -2815,6 +2831,7 @@ pub(crate) async fn cleanup_orphaned_jit_one_slot(
         return Ok(());
     };
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slot_count);
+    let _configure_lock = ConfigureLock::acquire(&slot_dir)?;
     if !pending_jit_registration_exists(&slot_dir) {
         return Ok(());
     }
@@ -2914,6 +2931,14 @@ async fn delete_runner_keeping_busy_identity(
 }
 
 async fn delete_and_remove_daemon_slot_jit_config(
+    args: &DaemonArgs,
+    slot_dir: &Path,
+) -> Result<()> {
+    let _configure_lock = ConfigureLock::acquire(slot_dir)?;
+    delete_and_remove_daemon_slot_jit_config_locked(args, slot_dir).await
+}
+
+async fn delete_and_remove_daemon_slot_jit_config_locked(
     args: &DaemonArgs,
     slot_dir: &Path,
 ) -> Result<()> {
@@ -10123,6 +10148,7 @@ fn daemon_slot_config_dirs(config_base: &Path, slots: usize) -> Result<Vec<PathB
 }
 
 async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
+    let _configure_lock = ConfigureLock::acquire(dir)?;
     let stored = load_config_if_present(dir)?;
 
     if let Some(pat) = args.pat.as_ref().filter(|_| !args.local_only) {
