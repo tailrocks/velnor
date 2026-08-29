@@ -6,7 +6,17 @@
 /// Marker service seam; Plan 067 fills in the versioned control API.
 pub const CONTROL_SERVICE: &str = "velnor-control";
 
+pub mod application;
+pub mod config;
+pub mod diagnostics;
+pub mod github;
 pub mod journal;
+pub mod lifecycle;
+pub mod logs;
+pub mod observation;
+pub mod ports;
+pub mod query;
+pub mod storage;
 pub mod store;
 
 #[cfg(test)]

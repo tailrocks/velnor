@@ -264,12 +264,21 @@ fn byte_ceiling_prunes_until_under_budget_or_exhausted() {
     budget.max_event_age = None;
     budget.max_terminal_job_age = None;
     budget.max_database_bytes = 1;
-    let report = store.prune_history(&budget).unwrap();
+    let mut report = store.prune_history(&budget).unwrap();
+    // A pass has a fixed transaction budget. A later pass converges the
+    // remaining backlog without extending one writer lock indefinitely.
+    let mut deleted_jobs = report.deleted_jobs;
+    let mut deleted_events = report.deleted_events;
+    while total_jobs(&store) > 0 || total_events(&store) > 0 {
+        report = store.prune_history(&budget).unwrap();
+        deleted_jobs += report.deleted_jobs;
+        deleted_events += report.deleted_events;
+    }
     // SQLite cannot shrink below one page, so this is deterministic exhaustion
     // behavior: every prunable terminal job is removed, then the byte ceiling
     // remains unsatisfied because no rows remain to delete.
-    assert_eq!(report.deleted_jobs, 40);
-    assert!(report.deleted_events >= 40);
+    assert_eq!(deleted_jobs, 40);
+    assert!(deleted_events >= 40);
     assert_eq!(total_jobs(&store), 0);
     assert!(report.database_bytes > budget.max_database_bytes);
 
@@ -329,6 +338,41 @@ fn age_pruning_skips_protected_events_without_blocking_unprotected_rows() {
     assert_eq!(store.event_count("protected", "expired").unwrap(), 0);
     assert_eq!(store.event_count("protected", "fresh").unwrap(), 1);
     assert!(job_exists(&store, "protected", "active"));
+}
+
+#[test]
+fn open_reconciliation_protects_instance_events_until_closed() {
+    let temp = TempDb::new("reconciliation-protection");
+    let store = Store::open(&temp.path).unwrap();
+    store
+        .append_event(&event("reconcile", "host", "gc.completed", 3600))
+        .unwrap();
+    let reconciliation = store
+        .start_reconciliation("reconcile", "runner-registration", "host", Timestamp::now())
+        .unwrap();
+    let budget = RetentionBudget {
+        max_event_age: Some(Duration::from_secs(60)),
+        max_event_rows: 0,
+        max_terminal_job_age: None,
+        max_terminal_job_rows: 0,
+        max_database_bytes: 0,
+        batch_size: 1,
+    };
+
+    assert_eq!(store.prune_history(&budget).unwrap().deleted_events, 0);
+    assert_eq!(total_events(&store), 1);
+
+    store
+        .finish_reconciliation(
+            "reconcile",
+            reconciliation,
+            "completed",
+            Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(store.prune_history(&budget).unwrap().deleted_events, 1);
+    assert_eq!(total_events(&store), 0);
 }
 
 #[test]

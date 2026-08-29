@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use velnor_control::store::{
-    EventRow, InstanceRow, RetentionBudget, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
+    EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
+    RetentionMaintenanceBudget, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
 #[cfg(test)]
 use velnor_model::ExitClass;
@@ -30,6 +31,18 @@ pub const STATE_DB_ENV: &str = "VELNOR_STATE_DB";
 
 /// How often the daemon-side retention pass may run.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Keep transient/pre-commit failures retryable without allowing a durable
+/// post-commit/reporting failure to spin the retention path.
+const PRUNE_RETRY_INITIAL: Duration = Duration::from_secs(15);
+const PRUNE_RETRY_MAX: Duration = PRUNE_INTERVAL;
+/// The lease is longer than the bounded store pass, but remains finite so an
+/// abandoned process cannot suppress maintenance indefinitely.
+const PRUNE_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
+/// Bound process-resident secret patterns. Exceeding either limit rejects the
+/// admission before execution; truncating patterns would permit unsanitized
+/// projections to reach the operational store.
+const MAX_RETAINED_MASK_COUNT: usize = 256;
+const MAX_RETAINED_MASK_BYTES: usize = 64 * 1024;
 
 static OPS: OnceLock<Arc<OpsSink>> = OnceLock::new();
 
@@ -175,20 +188,109 @@ fn sanitize_slug(raw: &str) -> String {
     }
 }
 
+/// Admission token held by exactly one retention worker.
+///
+/// Dropping the token releases admission even when a blocking task is
+/// cancelled before it starts or unwinds after a panic.
+pub(crate) struct PruneAdmission {
+    in_flight: Arc<AtomicBool>,
+    now_unix: u64,
+}
+
+/// Finalizes a runtime lease on every exit path, including panic unwinding or
+/// cancellation after acquisition. The SQL release is one owner+generation
+/// qualified zero-wait statement, so finalization cannot wait on a competing
+/// writer for an unbounded interval.
+struct RetentionLeaseGuard<'a> {
+    store: &'a Store,
+    lease: Option<RetentionLease>,
+    telemetry: Option<&'a OpsSink>,
+}
+
+impl<'a> RetentionLeaseGuard<'a> {
+    #[cfg(test)]
+    fn new(store: &'a Store, lease: RetentionLease) -> Self {
+        Self {
+            store,
+            lease: Some(lease),
+            telemetry: None,
+        }
+    }
+
+    fn with_sink(sink: &'a OpsSink, lease: RetentionLease) -> Self {
+        Self {
+            store: &sink.store,
+            lease: Some(lease),
+            telemetry: Some(sink),
+        }
+    }
+
+    fn lease(&self) -> &RetentionLease {
+        self.lease
+            .as_ref()
+            .expect("retention lease guard must own a lease")
+    }
+
+    fn release(&mut self) -> Result<bool, StoreError> {
+        let Some(lease) = self.lease.take() else {
+            return Ok(false);
+        };
+        // The store finalizer treats false matches and SQLite errors as
+        // finalization failures and retries only bounded transient contention.
+        self.store
+            .release_retention_lease_final(&lease)
+            .map(|()| true)
+    }
+}
+
+impl Drop for RetentionLeaseGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            if self.store.release_retention_lease_final(&lease).is_err() {
+                if let Some(sink) = self.telemetry {
+                    sink.report_lease_finalization_failure();
+                } else {
+                    eprintln!(
+                        "{}",
+                        forensic_failure_line(
+                            "store.prune-lease-release",
+                            "bounded finalization attempt failed",
+                        )
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PruneAdmission {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
 /// Per-process handle over the shared operational database.
 pub struct OpsSink {
     store: Store,
     instance_slug: String,
+    retention_owner: String,
     // Keep admitted masks for this sink lifetime: a later operational event
     // may repeat an earlier secret, so eviction would re-enable persistence.
     masks: Mutex<Vec<String>>,
     degraded: AtomicBool,
     last_prune_unix: AtomicU64,
+    next_prune_attempt_unix: AtomicU64,
+    prune_retry_delay_secs: AtomicU64,
+    prune_in_flight: Arc<AtomicBool>,
     budget: RetentionBudget,
     #[cfg(test)]
     injected_write_failure: Mutex<Option<(ExitClass, &'static str)>>,
     #[cfg(test)]
     forensic_failures: Mutex<Vec<String>>,
+    #[cfg(test)]
+    injected_prune_failure: AtomicBool,
+    #[cfg(test)]
+    injected_prune_store_failure: Mutex<Option<StoreError>>,
 }
 
 impl OpsSink {
@@ -204,14 +306,26 @@ impl OpsSink {
         Ok(Self {
             store,
             instance_slug,
+            retention_owner: format!(
+                "velnor-retention-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ),
             masks: Mutex::new(Vec::new()),
             degraded: AtomicBool::new(false),
             last_prune_unix: AtomicU64::new(0),
+            next_prune_attempt_unix: AtomicU64::new(0),
+            prune_retry_delay_secs: AtomicU64::new(0),
+            prune_in_flight: Arc::new(AtomicBool::new(false)),
             budget: RetentionBudget::default(),
             #[cfg(test)]
             injected_write_failure: Mutex::new(None),
             #[cfg(test)]
             forensic_failures: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            injected_prune_failure: AtomicBool::new(false),
+            #[cfg(test)]
+            injected_prune_store_failure: Mutex::new(None),
         })
     }
 
@@ -252,12 +366,6 @@ impl OpsSink {
                 "admission instance does not match the installed operational-store sink",
             );
         }
-        if !self.remember_masks(&admission.masks) {
-            return self.required_failure(
-                "store.masks",
-                "event mask registry is unavailable; admission rejected",
-            );
-        }
         let token = format!("t-acquired-{job_uid}");
         let correlation_id = match Slug::validate("correlation_id", &format!("corr-{token}")) {
             Ok(value) => value,
@@ -274,16 +382,37 @@ impl OpsSink {
             conclusion: None,
             infrastructure_category: None,
         };
+        let budget = RetentionMaintenanceBudget::from(&self.budget);
+        // Register masks before the physical gate and store write. Retaining
+        // masks when capacity denies admission is conservative; it prevents
+        // later projections from losing protection and avoids any
+        // post-commit mask-registration failure path.
+        if !self.remember_masks(&admission.masks) {
+            return self.required_failure(
+                "store.masks",
+                "event mask registry is unavailable; admission rejected",
+            );
+        }
         if let Err(error) = self.before_store_write() {
             return self.required_failure("store.admission.persist", &error.to_string());
         }
-        if let Err(error) = self.store.persist_summary_and_transition(
+        match self.store.persist_summary_and_transition_with_budget(
             &summary,
             &self.instance_slug,
             &job_uid,
             &transition,
+            &budget,
         ) {
-            return self.required_failure("store.admission.persist", &error.to_string());
+            Ok(status) if status.admits_job() => {}
+            Ok(status) => {
+                return self.required_failure(
+                    "store.admission.physical-budget",
+                    physical_budget_rejection(status),
+                );
+            }
+            Err(error) => {
+                return self.required_failure("store.admission.persist", &error.to_string());
+            }
         }
         true
     }
@@ -352,49 +481,273 @@ impl OpsSink {
         true
     }
 
-    /// Daemon-side bounded retention pass, time-gated per process; safe to
-    /// call from every slot cycle because concurrent passes serialize on the
-    /// database's write lock.
-    pub fn prune_if_due(&self) {
+    pub(crate) fn try_admit_prune(&self) -> Option<PruneAdmission> {
         let now_unix = Timestamp::now()
             .as_offset_datetime()
             .unix_timestamp()
             .unsigned_abs();
+        self.try_admit_prune_at(now_unix)
+    }
+
+    /// Defer the first retention pass until the normal interval after the
+    /// daemon has announced readiness. Readiness persistence/configuration is
+    /// still settling at that boundary, so an initial `last_prune_unix=0`
+    /// must not make retention immediately compete with supervision startup.
+    pub(crate) fn defer_initial_prune(&self, now_unix: u64) {
+        let _ =
+            self.last_prune_unix
+                .compare_exchange(0, now_unix, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    #[cfg(test)]
+    fn prune_if_due_at(&self, now_unix: u64) {
+        if let Some(admission) = self.try_admit_prune_at(now_unix) {
+            self.prune_once(admission.now_unix, Some(now_unix));
+        }
+    }
+
+    fn try_admit_prune_at(&self, now_unix: u64) -> Option<PruneAdmission> {
         let last = self.last_prune_unix.load(Ordering::Relaxed);
-        if now_unix.saturating_sub(last) < PRUNE_INTERVAL.as_secs() {
-            return;
+        let next_attempt = self.next_prune_attempt_unix.load(Ordering::Acquire);
+        let due = if next_attempt > 0 {
+            now_unix >= next_attempt
+        } else {
+            now_unix.saturating_sub(last) >= PRUNE_INTERVAL.as_secs()
+        };
+        if !due {
+            return None;
         }
         if self
-            .last_prune_unix
-            .compare_exchange(last, now_unix, Ordering::Relaxed, Ordering::Relaxed)
+            .prune_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return;
+            return None;
         }
-        if let Err(error) = self.store.prune_history(&self.budget) {
-            self.absorb("store.prune", &error.to_string());
-            return;
+        Some(PruneAdmission {
+            in_flight: Arc::clone(&self.prune_in_flight),
+            now_unix,
+        })
+    }
+
+    pub(crate) fn run_admitted_prune(&self, admission: PruneAdmission) {
+        self.prune_once(admission.now_unix, None);
+    }
+
+    fn prune_once(&self, _scheduled_now_unix: u64, completion_override: Option<u64>) {
+        let completion_now = || {
+            completion_override.unwrap_or_else(|| {
+                Timestamp::now()
+                    .as_offset_datetime()
+                    .unix_timestamp()
+                    .unsigned_abs()
+            })
+        };
+        let lease = match self
+            .store
+            .try_acquire_retention_lease(&self.retention_owner, PRUNE_LEASE_DURATION)
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                // Live ownership is expected cross-process contention, not
+                // degraded control state. It remains retryable and visible.
+                self.schedule_prune_retry(completion_now());
+                self.record_forensic_failure(
+                    "store.prune-lease-busy",
+                    "retention lease is held by another daemon",
+                );
+                tracing::debug!(target: "velnor::ops", "retention lease is held by another daemon");
+                return;
+            }
+            Err(error) => {
+                self.schedule_prune_retry(completion_now());
+                if error.envelope.reason == "store.locked" {
+                    self.record_forensic_failure("store.prune-lease-busy", &error.envelope.reason);
+                } else {
+                    self.absorb("store.prune-lease", &error.envelope.reason);
+                }
+                return;
+            }
+        };
+        let mut lease_guard = RetentionLeaseGuard::with_sink(self, lease);
+
+        let mut committed = false;
+        let mut maintenance_retry = false;
+        let completion;
+        let prune_result = {
+            #[cfg(test)]
+            if let Some(error) = self.injected_prune_store_failure.lock().unwrap().take() {
+                Err(velnor_control::store::retention::PruneFailure::PreCommit(
+                    error,
+                ))
+            } else {
+                self.store
+                    .prune_history_outcome_with_lease(&self.budget, lease_guard.lease())
+            }
+            #[cfg(not(test))]
+            {
+                self.store
+                    .prune_history_outcome_with_lease(&self.budget, lease_guard.lease())
+            }
+        };
+        match prune_result {
+            Ok(report) => {
+                committed = true;
+                maintenance_retry = report.maintenance_deferred;
+                completion = completion_now();
+                if maintenance_retry {
+                    self.record_forensic_failure(
+                        "store.retention-maintenance-deferred",
+                        report
+                            .maintenance_reason
+                            .as_deref()
+                            .unwrap_or("physical retention maintenance deferred"),
+                    );
+                }
+                self.publish_prune_report(report);
+            }
+            Err(failure) if failure.is_post_commit() => {
+                committed = true;
+                completion = completion_now();
+                self.clear_prune_retry();
+                self.absorb("store.prune-post-commit", &failure.error().envelope.reason);
+            }
+            Err(failure) if failure.is_lease_lost() => {
+                if failure.is_post_commit() {
+                    committed = true;
+                    completion = completion_now();
+                    self.clear_prune_retry();
+                    self.absorb("store.prune-lease-lost", &failure.error().envelope.reason);
+                } else {
+                    completion = completion_now();
+                    self.schedule_prune_retry(completion);
+                    self.record_forensic_failure(
+                        "store.prune-lease-lost",
+                        &failure.error().envelope.reason,
+                    );
+                }
+            }
+            Err(failure) => {
+                completion = completion_now();
+                self.schedule_prune_retry(completion);
+                self.absorb("store.prune", &failure.error().envelope.reason);
+            }
         }
-        // Publish post-prune accounting so retention stays observable from
-        // logs alone (Plan 066 step 5).
-        match self.accounting() {
-            Ok(accounting) => println!(
-                "forensics.ops event=retention jobs={} events={} transitions={} db_bytes={} wal_bytes={} last_prune_at={}",
-                accounting.job_rows,
-                accounting.event_rows,
-                accounting.transition_rows,
-                accounting.database_bytes,
-                accounting.wal_bytes,
-                accounting.last_prune_at.as_deref().unwrap_or("never"),
-            ),
-            Err(error) => self.absorb("store.accounting", &error.to_string()),
+        #[cfg(test)]
+        if committed && self.injected_prune_failure.swap(false, Ordering::Relaxed) {
+            committed = true;
+            self.clear_prune_retry();
+            self.absorb(
+                "store.accounting",
+                "test-injected post-commit accounting failure",
+            );
         }
+
+        if committed {
+            // Completion is recorded before release. A release/reporting
+            // failure must not cause already durable deletions to run again.
+            self.last_prune_unix.store(completion, Ordering::Release);
+            if maintenance_retry {
+                // Deletion is already durable; retry only the bounded
+                // retention/maintenance cycle on its normal backoff. The
+                // explicit status prevents a physical failure from becoming
+                // silent, while never treating committed deletion as rolled
+                // back work.
+                self.schedule_prune_retry(completion);
+            } else {
+                self.clear_prune_retry();
+            }
+        }
+        match lease_guard.release() {
+            Ok(true) => {}
+            Ok(false) | Err(_) => self.report_lease_finalization_failure(),
+        }
+    }
+
+    fn publish_prune_report(&self, report: velnor_control::store::PruneReport) {
+        if report.maintenance_deferred {
+            println!(
+                "forensics.ops event=retention-maintenance-deferred reason={}",
+                report
+                    .maintenance_reason
+                    .as_deref()
+                    .unwrap_or("unspecified")
+            );
+        }
+        // Publish the coherent post-prune report so retention stays
+        // observable from logs without a second full accounting scan.
+        println!(
+            "forensics.ops event=retention deleted_jobs={} deleted_events={} deleted_transitions={} db_bytes={} wal_bytes={} total_bytes={} free_bytes={} reserve_bytes={} reserve_violation={} physical_budget_status={:?} checkpoint_attempted={} checkpoint_busy_frames={} checkpoint_log_frames={} checkpointed_frames={} oldest_retained_at={}",
+            report.deleted_jobs,
+            report.deleted_events,
+            report.deleted_transitions,
+            report.database_bytes,
+            report.wal_bytes,
+            report.total_bytes,
+            report.free_bytes.unwrap_or(0),
+            report.reserve_bytes,
+            report.reserve_violation,
+            report.physical_budget_status,
+            report.checkpoint.attempted,
+            report.checkpoint.busy_frames,
+            report.checkpoint.log_frames,
+            report.checkpoint.checkpointed_frames,
+            report.oldest_retained_at.as_deref().unwrap_or("none"),
+        );
+    }
+
+    pub(crate) fn record_prune_worker_failure(&self, now_unix: u64, detail: &str) {
+        self.schedule_prune_retry(now_unix);
+        self.absorb("store.prune-worker", detail);
+    }
+
+    pub(crate) fn prune_wait_duration(&self) -> Duration {
+        let now_unix = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .unsigned_abs();
+        self.prune_wait_duration_at(now_unix)
+    }
+
+    fn prune_wait_duration_at(&self, now_unix: u64) -> Duration {
+        let next_attempt = self.next_prune_attempt_unix.load(Ordering::Acquire);
+        let due_at = if next_attempt > 0 {
+            next_attempt
+        } else {
+            self.last_prune_unix
+                .load(Ordering::Relaxed)
+                .saturating_add(PRUNE_INTERVAL.as_secs())
+        };
+        Duration::from_secs(due_at.saturating_sub(now_unix))
+    }
+
+    fn schedule_prune_retry(&self, now_unix: u64) {
+        let previous = self.prune_retry_delay_secs.load(Ordering::Relaxed);
+        let initial = PRUNE_RETRY_INITIAL.as_secs();
+        let maximum = PRUNE_RETRY_MAX.as_secs();
+        let delay = if previous == 0 {
+            initial
+        } else {
+            previous.saturating_mul(2).clamp(initial, maximum)
+        };
+        self.prune_retry_delay_secs
+            .store(delay.min(maximum), Ordering::Relaxed);
+        self.next_prune_attempt_unix.store(
+            now_unix.saturating_add(delay.min(maximum)),
+            Ordering::Release,
+        );
+    }
+
+    fn clear_prune_retry(&self) {
+        self.prune_retry_delay_secs.store(0, Ordering::Relaxed);
+        self.next_prune_attempt_unix.store(0, Ordering::Release);
     }
 
     /// Read-only accounting snapshot for diagnostics.
     ///
     /// # Errors
     /// Propagates store read failures.
+    #[allow(dead_code)]
     pub fn accounting(
         &self,
     ) -> Result<velnor_control::store::StoreAccounting, velnor_control::store::StoreError> {
@@ -422,10 +775,11 @@ impl OpsSink {
     }
 
     fn required_failure(&self, code: &str, detail: &str) -> bool {
+        let detail = sanitize_forensic_detail(detail);
         eprintln!("REQUIRED operational-store write failed ({code}): {detail}");
         self.degraded.store(true, Ordering::Relaxed);
-        self.record_forensic_failure(code, detail);
-        eprintln!("{}", forensic_failure_line(code, detail));
+        self.record_forensic_failure(code, &detail);
+        eprintln!("{}", forensic_failure_line(code, &detail));
         false
     }
 
@@ -450,6 +804,19 @@ impl OpsSink {
     }
 
     #[cfg(test)]
+    fn fail_next_prune_accounting(&self) {
+        self.injected_prune_failure.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn fail_next_prune_store(&self, class: ExitClass, reason: &'static str) {
+        self.injected_prune_store_failure
+            .lock()
+            .unwrap()
+            .replace(StoreError::new(class, reason));
+    }
+
+    #[cfg(test)]
     fn forensic_failures(&self) -> Vec<String> {
         self.forensic_failures.lock().unwrap().clone()
     }
@@ -469,11 +836,32 @@ impl OpsSink {
             self.absorb("store.masks", "mask registry lock poisoned");
             return false;
         };
+
+        let retained_bytes = masks.iter().map(String::len).sum::<usize>();
+        let mut additions = Vec::new();
+        let mut addition_bytes = 0usize;
         for value in values.iter().filter(|value| !value.is_empty()) {
-            if !masks.iter().any(|known| known == value) {
-                masks.push(value.clone());
+            if masks.iter().any(|known| known == value)
+                || additions.iter().any(|known| known == value)
+            {
+                continue;
             }
+            if masks.len().saturating_add(additions.len()) >= MAX_RETAINED_MASK_COUNT
+                || retained_bytes
+                    .saturating_add(addition_bytes)
+                    .saturating_add(value.len())
+                    > MAX_RETAINED_MASK_BYTES
+            {
+                self.absorb(
+                    "store.masks",
+                    "secret mask registry limit exceeded; admission rejected",
+                );
+                return false;
+            }
+            addition_bytes = addition_bytes.saturating_add(value.len());
+            additions.push(value.clone());
         }
+        masks.extend(additions);
         true
     }
 
@@ -490,13 +878,104 @@ impl OpsSink {
     fn absorb(&self, code: &str, detail: &str) {
         self.degraded.store(true, Ordering::Relaxed);
         self.record_forensic_failure(code, detail);
-        tracing::error!(target: "velnor::ops", code, "{code}: {detail}");
-        eprintln!("{}", forensic_failure_line(code, detail));
+        let detail = sanitize_forensic_detail(detail);
+        tracing::error!(target: "velnor::ops", code, error = %detail, "operational store failure");
+        eprintln!("{}", forensic_failure_line(code, &detail));
+    }
+
+    fn report_lease_finalization_failure(&self) {
+        self.degraded.store(true, Ordering::Relaxed);
+        const DETAIL: &str = "bounded finalization attempt failed";
+        self.record_forensic_failure("store.prune-lease-release", DETAIL);
+        eprintln!(
+            "{}",
+            forensic_failure_line("store.prune-lease-release", DETAIL)
+        );
+    }
+}
+
+fn physical_budget_rejection(status: PhysicalBudgetStatus) -> &'static str {
+    match status {
+        PhysicalBudgetStatus::Exceeded => {
+            "database plus WAL exceeds max_database_bytes; new job admission rejected"
+        }
+        PhysicalBudgetStatus::ReserveViolation => {
+            "filesystem free space is below min_free_bytes; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Unmeasurable => {
+            "database or filesystem capacity is unmeasurable; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Deferred => {
+            "physical retention maintenance is deferred; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Unconfigured => {
+            "physical storage budget is unconfigured; new job admission rejected"
+        }
+        PhysicalBudgetStatus::Disabled | PhysicalBudgetStatus::WithinBudget => {
+            "physical storage budget did not reject admission"
+        }
     }
 }
 
 fn forensic_failure_line(code: &str, detail: &str) -> String {
-    format!("forensics.ops event=store-write-failed code={code} error={detail}")
+    format!(
+        "forensics.ops event=store-write-failed code={} error={}",
+        sanitize_forensic_code(code),
+        sanitize_forensic_detail(detail)
+    )
+}
+
+fn sanitize_forensic_code(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len().min(128));
+    for character in raw.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+            output.push(character);
+        }
+        if output.len() >= 128 {
+            break;
+        }
+    }
+    if output.is_empty() {
+        "unknown".to_owned()
+    } else {
+        output
+    }
+}
+
+fn sanitize_forensic_detail(raw: &str) -> String {
+    const MAX_FORENSIC_DETAIL_BYTES: usize = 512;
+    let lower = raw.to_ascii_lowercase();
+    if [
+        "authorization:",
+        "bearer ",
+        "password",
+        "secret",
+        "token=",
+        "token:",
+        "fingerprint=",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return "redacted-sensitive-diagnostic".to_owned();
+    }
+    let mut output = String::with_capacity(raw.len().min(MAX_FORENSIC_DETAIL_BYTES));
+    for character in raw.chars() {
+        let character = if character.is_control() || character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_FORENSIC_DETAIL_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    if output.is_empty() {
+        "unknown".to_owned()
+    } else {
+        output
+    }
 }
 
 fn sanitize_event_subject(raw: &str, masks: &[String]) -> String {
@@ -601,6 +1080,128 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn admission_rejects_physical_overage_before_masks_or_store_writes() {
+        let (_dir, mut sink) = temp_sink("admission-physical-overage");
+        Arc::get_mut(&mut sink)
+            .expect("test sink is uniquely owned")
+            .budget
+            .max_database_bytes = 1;
+        let mut admission = admission(112, Some("admission-secret"));
+        admission.job_name = "physical-overage".to_owned();
+
+        assert!(!sink.record_admission(&admission));
+        assert!(sink.degraded());
+        assert!(sink
+            .store
+            .job_summaries("test-instance")
+            .unwrap()
+            .is_empty());
+        assert!(sink
+            .event_masks()
+            .unwrap()
+            .iter()
+            .any(|mask| mask == "admission-secret"));
+    }
+
+    #[test]
+    fn admission_rejects_mask_registry_overflow_before_store_write() {
+        let (_dir, sink) = temp_sink("admission-mask-overflow");
+        let masks = vec!["m".repeat(MAX_RETAINED_MASK_BYTES + 1)];
+
+        assert!(!sink.remember_masks(&masks));
+        assert!(sink.degraded());
+        assert!(sink.event_masks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_physical_rejections_have_no_admission_side_effects() {
+        use std::sync::Barrier;
+
+        let (_dir, mut sink) = temp_sink("admission-physical-concurrent");
+        Arc::get_mut(&mut sink)
+            .expect("test sink is uniquely owned")
+            .budget
+            .max_database_bytes = 1;
+        let barrier = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|run_id| {
+                let sink = Arc::clone(&sink);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    assert!(!sink
+                        .record_admission(&admission(113 + run_id, Some("concurrent-secret"),)));
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("admission worker must not panic");
+        }
+
+        assert!(sink
+            .store
+            .job_summaries("test-instance")
+            .unwrap()
+            .is_empty());
+        assert!(sink
+            .event_masks()
+            .unwrap()
+            .iter()
+            .any(|mask| mask == "concurrent-secret"));
+    }
+
+    #[test]
+    fn running_job_can_complete_after_new_admission_is_denied() {
+        let (_dir, mut sink) = temp_sink("admission-completion-under-pressure");
+        let existing = admission(119, None);
+        assert!(sink.record_admission(&existing));
+        let existing_uid = existing.job_uid().unwrap();
+        Arc::get_mut(&mut sink)
+            .expect("test sink is uniquely owned")
+            .budget
+            .max_database_bytes = 1;
+
+        assert!(!sink.record_admission(&admission(120, None)));
+        assert!(sink.transition(
+            &existing_uid,
+            &format!("t-waiting-{existing_uid}"),
+            EventReason::JobWaiting,
+            None,
+            None,
+            None,
+        ));
+        assert!(sink.transition(
+            &existing_uid,
+            &format!("t-started-{existing_uid}"),
+            EventReason::JobStarted,
+            None,
+            None,
+            None,
+        ));
+        assert!(sink.transition(
+            &existing_uid,
+            &format!("t-completed-{existing_uid}"),
+            EventReason::JobCompleted,
+            Some("done".to_owned()),
+            Some("success".to_owned()),
+            None,
+        ));
+        assert_eq!(
+            sink.store
+                .fetch_summary("test-instance", 119, 1)
+                .unwrap()
+                .unwrap()
+                .phase(),
+            JobPhase::Completed
+        );
+        assert!(sink
+            .store
+            .fetch_summary("test-instance", 120, 1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -877,9 +1478,249 @@ mod tests {
     #[test]
     fn prune_if_due_is_gated_and_safe_under_concurrency() {
         let (_dir, sink) = temp_sink("prune-due");
-        sink.prune_if_due();
-        sink.prune_if_due();
+        let now = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .unsigned_abs();
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let sink = Arc::clone(&sink);
+                std::thread::spawn(move || {
+                    if let Some(admission) = sink.try_admit_prune_at(now) {
+                        sink.run_admitted_prune(admission);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
         assert!(!sink.degraded());
+        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), now);
+        assert_eq!(sink.next_prune_attempt_unix.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn prune_admission_rejects_overlap_and_releases_after_long_pass() {
+        let (_dir, sink) = temp_sink("prune-admission");
+        let first = sink.try_admit_prune_at(10_000).unwrap();
+
+        assert!(sink.try_admit_prune_at(10_000).is_none());
+        assert!(sink.prune_in_flight.load(Ordering::Acquire));
+
+        drop(first);
+
+        assert!(!sink.prune_in_flight.load(Ordering::Acquire));
+        assert!(sink.try_admit_prune_at(10_900).is_some());
+    }
+
+    #[test]
+    fn initial_prune_is_deferred_until_the_normal_interval() {
+        let (_dir, sink) = temp_sink("prune-initial-deferred");
+        let now = 30_000;
+
+        sink.defer_initial_prune(now);
+
+        assert!(sink.try_admit_prune_at(now).is_none());
+        assert!(sink
+            .try_admit_prune_at(now + PRUNE_INTERVAL.as_secs())
+            .is_some());
+    }
+
+    #[test]
+    fn prune_wait_uses_retry_deadline_instead_of_fixed_polling() {
+        let (_dir, sink) = temp_sink("prune-deadline");
+        let first = sink.try_admit_prune_at(20_000).unwrap();
+        drop(first);
+        sink.last_prune_unix.store(20_000, Ordering::Release);
+
+        assert_eq!(sink.prune_wait_duration_at(20_000), PRUNE_INTERVAL);
+
+        sink.schedule_prune_retry(20_000);
+        assert_eq!(sink.prune_wait_duration_at(20_000), PRUNE_RETRY_INITIAL);
+        assert_eq!(sink.prune_wait_duration_at(20_014), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn prune_if_due_does_not_retry_post_commit_reporting_failure() {
+        let (_dir, sink) = temp_sink("prune-retry");
+        sink.fail_next_prune_accounting();
+        let now = 10_000;
+
+        sink.prune_if_due_at(now);
+
+        assert_eq!(sink.last_prune_unix.load(Ordering::Relaxed), now);
+        assert_eq!(sink.next_prune_attempt_unix.load(Ordering::Acquire), 0);
+        assert!(sink.degraded());
+        assert!(sink
+            .forensic_failures()
+            .iter()
+            .any(|entry| entry.contains("store.accounting")));
+
+        let probe = Store::open(sink.store.path()).unwrap();
+        let lease = probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&lease).unwrap();
+    }
+
+    #[test]
+    fn prune_if_due_retry_backoff_is_bounded() {
+        let (_dir, sink) = temp_sink("prune-retry-bound");
+        let mut now = 20_000;
+
+        for _ in 0..16 {
+            sink.fail_next_prune_store(ExitClass::Operation, "test.injected.pre-commit");
+            sink.prune_if_due_at(now);
+            let retry_at = sink.next_prune_attempt_unix.load(Ordering::Acquire);
+            assert!(retry_at.saturating_sub(now) <= PRUNE_RETRY_MAX.as_secs());
+            now = retry_at;
+        }
+
+        assert_eq!(
+            sink.prune_retry_delay_secs.load(Ordering::Relaxed),
+            PRUNE_RETRY_MAX.as_secs()
+        );
+    }
+
+    #[test]
+    fn runtime_prune_lease_is_released_after_success_and_has_unique_owner() {
+        let (dir, first) = temp_sink("runtime-lease-success");
+        let second =
+            Arc::new(OpsSink::open(dir.join("state.db"), "second-instance".to_owned()).unwrap());
+
+        assert_ne!(first.retention_owner, second.retention_owner);
+        first.prune_if_due_at(30_000);
+
+        let probe = Store::open(first.store.path()).unwrap();
+        let lease = probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&lease).unwrap();
+        assert!(!second.degraded());
+    }
+
+    #[test]
+    fn runtime_prune_lease_blocks_competing_sink_with_bounded_retry() {
+        let (dir, first) = temp_sink("runtime-lease-competing");
+        let second =
+            Arc::new(OpsSink::open(dir.join("state.db"), "second-instance".to_owned()).unwrap());
+        let lease = first
+            .store
+            .try_acquire_retention_lease(&first.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+
+        second.prune_if_due_at(40_000);
+
+        assert!(!second.degraded());
+        assert_eq!(
+            second.next_prune_attempt_unix.load(Ordering::Acquire),
+            40_000 + PRUNE_RETRY_INITIAL.as_secs()
+        );
+        first.store.release_retention_lease(&lease).unwrap();
+    }
+
+    #[test]
+    fn runtime_prune_releases_lease_after_pre_commit_error() {
+        let (_dir, sink) = temp_sink("runtime-lease-pre-commit");
+        sink.fail_next_prune_store(ExitClass::Operation, "test.injected.pre-commit");
+
+        sink.prune_if_due_at(50_000);
+
+        assert_eq!(
+            sink.next_prune_attempt_unix.load(Ordering::Acquire),
+            50_000 + 15
+        );
+        let probe = Store::open(sink.store.path()).unwrap();
+        let lease = probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&lease).unwrap();
+    }
+
+    #[test]
+    fn runtime_lease_guard_releases_on_panic_and_drop() {
+        let (dir, sink) = temp_sink("runtime-lease-guard");
+        let lease = sink
+            .store
+            .try_acquire_retention_lease(&sink.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = RetentionLeaseGuard::new(&sink.store, lease);
+            panic!("test cancellation/panic");
+        }));
+        assert!(panic_result.is_err());
+
+        let probe = Store::open(dir.join("state.db")).unwrap();
+        let replacement = probe
+            .try_acquire_retention_lease("probe-owner-1", PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&replacement).unwrap();
+
+        let lease = sink
+            .store
+            .try_acquire_retention_lease(&sink.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        drop(RetentionLeaseGuard::new(&sink.store, lease));
+        let replacement = probe
+            .try_acquire_retention_lease("probe-owner-2", PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        probe.release_retention_lease(&replacement).unwrap();
+    }
+
+    #[test]
+    fn lease_finalization_failure_emits_bounded_sanitized_telemetry() {
+        let (dir, sink) = temp_sink("runtime-lease-finalization-telemetry");
+        let lease = sink
+            .store
+            .try_acquire_retention_lease(&sink.retention_owner, PRUNE_LEASE_DURATION)
+            .unwrap()
+            .unwrap();
+        let guard = RetentionLeaseGuard::with_sink(&sink, lease);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        drop(guard);
+
+        let lines = sink.forensic_failures();
+        assert!(lines.iter().any(|line| {
+            line.contains("store.prune-lease-release")
+                && line.contains("bounded finalization attempt failed")
+                && !line.contains('\n')
+        }));
+    }
+
+    #[test]
+    fn worker_failure_retry_uses_completion_time_and_sanitizes_detail() {
+        let (_dir, sink) = temp_sink("runtime-worker-failure");
+        let completion = 60_000;
+        sink.record_prune_worker_failure(completion, "worker\nfailed\ttoken=secret");
+
+        assert_eq!(
+            sink.next_prune_attempt_unix.load(Ordering::Acquire),
+            completion + PRUNE_RETRY_INITIAL.as_secs()
+        );
+        let lines = sink.forensic_failures();
+        assert!(lines.iter().any(|line| {
+            line.contains("store.prune-worker")
+                && line.contains("redacted-sensitive-diagnostic")
+                && !line.contains('\n')
+        }));
+    }
+
+    #[test]
+    fn forensic_failure_line_rejects_control_and_sensitive_fields() {
+        let line = forensic_failure_line("store.test\ncode", "first\nsecond\ttoken=do-not-log");
+        assert!(!line.contains('\n'));
+        assert!(line.contains("redacted-sensitive-diagnostic"));
+        assert!(!line.contains("do-not-log"));
     }
 
     #[test]

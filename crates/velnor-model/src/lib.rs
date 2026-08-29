@@ -11,8 +11,10 @@
 
 pub mod cli_meta;
 pub mod condition;
+pub mod configuration;
 pub mod error_envelope;
 pub mod execution;
+pub mod github;
 pub mod guest_plan;
 pub mod job_summary;
 pub mod lifecycle;
@@ -24,16 +26,22 @@ pub mod sanitized;
 pub mod scheduler;
 pub mod since;
 pub mod source;
+pub mod storage;
 pub mod time;
 pub mod vsock_protocol;
 
 pub use cli_meta::{CommandMetadata, FlagMetadata, SchemaDocument};
 pub use condition::{Condition, ConditionStatus, Labels, ResourceMeta};
+pub use configuration::{
+    AuthReport, ConfigDrift, ConfigSource, ContextConfig, DesiredConfig, EffectiveConfig,
+    InstanceOperation, PermissionState, Sourced,
+};
 pub use error_envelope::{exit_code_for_class, ExitClass, MachineErrorEnvelope};
 pub use execution::{
     ExecutionBackendKind, ExecutionBackendRejected, ExecutionConfigError, ExecutionFile,
     ExecutionSection, MicroVmPreflightFailure,
 };
+pub use github::{GithubArtifact, GithubJob, GithubRun, GithubStep};
 pub use guest_plan::{
     GuestArtifactOp, GuestCacheOp, GuestEnvVar, GuestJobPlan, GuestOutput, GuestService, GuestStep,
 };
@@ -65,6 +73,7 @@ pub use scheduler::{
 };
 pub use since::{InvalidSince, Since};
 pub use source::Source;
+pub use storage::{GcCandidate, GcPlan, StorageClass, StorageObject, StorageSnapshot};
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};
 pub use vsock_protocol::{
     derive_execution_nonce, VsockCodecError, VsockMessage, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,

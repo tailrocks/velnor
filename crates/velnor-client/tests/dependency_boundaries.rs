@@ -3,7 +3,8 @@
 //! Asserted from `cargo metadata` so the law holds no matter how manifests
 //! evolve: `velnor-client` meets the daemon only through versioned model DTOs,
 //! the five new crates form an acyclic graph, and no shared crate depends on
-//! Clap or Axum.
+//! Clap or Axum. The Axum transport adapter is owned by the CLI composition
+//! crate; it never enters the model, service, client, or renderer crates.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -239,17 +240,6 @@ fn shared_crates_never_depend_on_clap_or_axum() {
                 "{shared} must not depend on {forbidden}"
             );
         }
-    }
-}
-
-#[test]
-fn axum_appears_nowhere_in_the_workspace_yet() {
-    let graph = dependency_graph(&cargo_metadata());
-    for member in WORKSPACE_PACKAGES {
-        assert!(
-            !graph[member].iter().any(|d| d == "axum"),
-            "Axum is isolated to a transport-adapter module by Plan 067; {member} must not depend on it yet"
-        );
     }
 }
 

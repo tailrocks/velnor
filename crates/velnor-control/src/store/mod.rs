@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use velnor_model::{ExitClass, Timestamp};
@@ -24,17 +24,21 @@ pub mod retention;
 pub use error::{StoreError, StoreResult};
 pub use migrations::LATEST_SCHEMA_VERSION;
 pub use records::{
-    EventRow, InstanceRow, JobRow, JobSummary, ReconciliationRow, RunnerRegistrationRow, SlotRow,
-    Transition,
+    EventRow, EventWindow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow,
+    LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
+    SlotRow, StoredEvent, Transition,
 };
-pub use retention::{PrunePhase, PruneReport, RetentionBudget, StoreAccounting};
+pub use retention::{
+    PhysicalBudgetStatus, PrunePhase, PruneReport, RetentionBudget, RetentionLease,
+    RetentionMaintenanceBudget, RetentionMaintenanceReport, StoreAccounting, WalCheckpointStatus,
+    DEFAULT_RETENTION_RESERVE_BYTES,
+};
 
 /// Default operational database location; created only by deployment, never
 /// implicitly by the daemon when its parent directory is absent.
 pub const DEFAULT_STATE_DB_PATH: &str = "/var/lib/velnor/state.db";
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Cold-start contention windows are structurally retried, never ignored:
 /// several daemons opening one fresh database simultaneously race the WAL
 /// journal-mode switch and meta-table seed before any lock coordination
@@ -67,8 +71,10 @@ impl Default for OpenOptions {
 
 /// Handle over the shared operational database.
 ///
-/// The inner connection is mutex-serialized per handle; concurrent daemon
-/// *processes* rely on WAL mode and the busy timeout instead.
+/// The primary connection is mutex-serialized per handle; concurrent daemon
+/// *processes* rely on WAL mode and the busy timeout instead. Retention
+/// maintenance opens a separate, nonblocking connection so checkpointing and
+/// accounting never wait behind this handle's ordinary store work.
 #[derive(Debug)]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -153,6 +159,53 @@ impl Store {
             .map_err(|_| StoreError::new(ExitClass::Operation, "store.lock.poisoned"))
     }
 
+    /// Acquire the primary connection without allowing retention maintenance
+    /// to wait forever behind a normal writer.
+    pub(crate) fn lock_conn_until(
+        &self,
+        deadline: Instant,
+    ) -> StoreResult<std::sync::MutexGuard<'_, Connection>> {
+        match self.conn.try_lock() {
+            Ok(connection) => {
+                if Instant::now() >= deadline {
+                    drop(connection);
+                    return Err(
+                        StoreError::new(ExitClass::Timeout, "store.retention.deadline")
+                            .with_remediation(
+                                "retention maintenance exceeded its bounded connection wait",
+                            ),
+                    );
+                }
+                Ok(connection)
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(StoreError::new(ExitClass::Operation, "store.lock.poisoned"))
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Err(StoreError::new(
+                ExitClass::Timeout,
+                "store.retention.deadline",
+            )
+            .with_remediation(
+                "retention maintenance found the primary connection busy; retry later",
+            )),
+        }
+    }
+
+    /// Open a short-lived connection for post-commit maintenance and
+    /// accounting. It deliberately never waits on a competing database
+    /// writer; callers must surface a busy result instead of delaying job
+    /// execution behind maintenance.
+    pub(crate) fn open_maintenance_connection(&self) -> StoreResult<Connection> {
+        let connection = Connection::open(&self.path).map_err(|error| {
+            StoreError::from(error).with_remediation(format!(
+                "open the nonblocking maintenance connection for {}",
+                self.path.display()
+            ))
+        })?;
+        connection.busy_timeout(Duration::ZERO)?;
+        Ok(connection)
+    }
+
     /// Current schema version of the opened database.
     ///
     /// # Errors
@@ -189,7 +242,9 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
     }
     conn.execute_batch(
         "PRAGMA foreign_keys=ON;
-         PRAGMA synchronous=NORMAL;",
+         PRAGMA synchronous=NORMAL;
+         PRAGMA wal_autocheckpoint=1000;
+         PRAGMA journal_size_limit=67108864;",
     )?;
     Ok(())
 }
@@ -432,6 +487,130 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM retention_state", [], |r| r.get(0))
             .unwrap();
         assert_eq!(retention_state, 1);
+    }
+
+    #[test]
+    fn retention_lease_migration_is_present_after_reopen_and_replay() {
+        let temp = TempDb::new("retention-lease-migration");
+        {
+            let store = Store::open(&temp.path).expect("fresh migration");
+            let lease_rows: u32 = test_connection(&store)
+                .query_row(
+                    "SELECT COUNT(*) FROM retention_lease WHERE singleton = 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(lease_rows, 1);
+        }
+
+        let reopened = Store::open(&temp.path).expect("reopen migration");
+        assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let lease_rows: u32 = test_connection(&reopened)
+            .query_row("SELECT COUNT(*) FROM retention_lease", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(lease_rows, 1);
+        let generation: i64 = test_connection(&reopened)
+            .query_row(
+                "SELECT generation FROM retention_lease WHERE singleton = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 0);
+
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        conn.execute("UPDATE schema_version SET version = 9", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "retention-lease-replay", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "retention-lease-replay", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "retention-lease-replay").unwrap();
+        let lease_rows: u32 = conn
+            .query_row("SELECT COUNT(*) FROM retention_lease", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(lease_rows, 1);
+    }
+
+    #[test]
+    fn retention_lease_generation_migration_is_idempotent_on_replay() {
+        let temp = TempDb::new("retention-lease-generation-replay");
+        let store = Store::open(&temp.path).expect("initial migration");
+        drop(store);
+
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        conn.execute("UPDATE schema_version SET version = 0", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "generation-replay", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "generation-replay", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        let columns: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('retention_lease')
+                 WHERE name = 'generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 1);
+        migrations::release_lock(&conn, "generation-replay").unwrap();
+    }
+
+    #[test]
+    fn retention_lease_migration_rolls_back_ddl_and_version() {
+        let temp = TempDb::new("retention-lease-rollback");
+        let store = Store::open(&temp.path).expect("initial migration");
+        drop(store);
+
+        let mut conn = Connection::open(&temp.path).unwrap();
+        conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+        conn.execute("DROP TABLE retention_lease", []).unwrap();
+        conn.execute("UPDATE schema_version SET version = 9", [])
+            .unwrap();
+        migrations::acquire_lock(&conn, "retention-lease-rollback", Duration::from_secs(1))
+            .unwrap();
+
+        let failure = migrations::apply_pending(
+            &mut conn,
+            "retention-lease-rollback",
+            Some(&|version| {
+                if version == 10 {
+                    Err(StoreError::new(
+                        velnor_model::ExitClass::Operation,
+                        "store.test.retention-lease-rollback",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.envelope.reason,
+            "store.test.retention-lease-rollback"
+        );
+        assert_eq!(migrations::current_version(&conn).unwrap(), 9);
+        let lease_table_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'retention_lease'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lease_table_count, 0);
+
+        assert_eq!(
+            migrations::apply_pending(&mut conn, "retention-lease-rollback", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        migrations::release_lock(&conn, "retention-lease-rollback").unwrap();
     }
 
     #[test]

@@ -7,6 +7,15 @@
 /// Marker transport seam; later plans own the versioned client implementation.
 pub const TRANSPORT_CONTRACT: &str = "velnor-client/v1";
 
+pub mod http;
+pub mod unix;
+
+pub use http::{
+    ClientError, Info, LogItem, MutationResponse, ResourcePage, ResourceQuery, UnixControlClient,
+    WatchItem,
+};
+pub use unix::{EndpointError, SocketKind, UnixEndpoint, API_VERSION};
+
 #[cfg(test)]
 mod tests {
     #[test]

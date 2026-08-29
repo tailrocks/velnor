@@ -21,6 +21,15 @@ graph, with `plans/TASKS.md` as its checkbox mirror. The active surface is
 exactly: the marked unified-CI contract, the tracked goal graph, and the
 `plans/TASKS.md` mirror.
 
+## Campaign delivery topology
+
+All work represented by the active `plans/` tree is one campaign. Implement
+every plan and retained command task on one branch, `codex/plan-066-operational-history`,
+and deliver one pull request from that branch. Do not create, switch to, or
+open per-plan, per-task, or per-item branches or pull requests. Historical
+coordination text that prescribes branch-per-leaf delivery is superseded by
+this operator directive.
+
 No earlier prompt or plan is active.
 
 Direction sources (`docs/mission.md`, `docs/vision.md`, `docs/roadmap.md`)

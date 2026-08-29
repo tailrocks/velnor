@@ -1,15 +1,28 @@
 # Session coordination registry
 
-Binding for every agent session executing `plans/goal-execution/README.md`
-against branch `velnor-estate-standard`. Operator confirmed 2026-08-24 that
-three concurrent OpenCode sessions execute this goal together. These rules
-prevent exclusive-scope collisions.
+## Current operator directive — single campaign branch and PR
+
+All active work from the `plans/` tree is implemented together on exactly one
+branch: `codex/plan-066-operational-history`. It produces exactly one pull
+request. No plan, leaf, task, verifier, or status item may create or switch to
+another branch or open another pull request. Subagents work in the same
+campaign scope and return patches/evidence for primary reconciliation.
+
+The active claims and branch-merge entries below preserve historical audit
+context only. Any per-leaf branch, push, PR, or immediate-commit instruction
+in them is superseded by this directive and is non-executable.
+
+Historical binding for agent sessions executing
+`plans/goal-execution/README.md` against branch `velnor-estate-standard`.
+This is retained only for audit context and is superseded by the single
+campaign branch directive above. It is non-executable.
 
 ## Rules
 
-1. **Claim before write.** Before any writer subagent touches leaf scope, its
-   session appends a row to the Active claims table in a commit on
-   `velnor-estate-standard` and pushes. A claim names exactly one leaf.
+1. **Claim before write (historical).** Before any writer subagent touches
+   leaf scope, its session appends a row to the Active claims table in a
+   commit on the historical campaign branch and pushes. A claim names exactly
+   one leaf. This rule is superseded by the single-branch directive above.
 2. **One writer per leaf.** A leaf with an unexpired claim must not receive a
    second writer. Read-only investigation, verification, and review may run
    concurrently.
@@ -26,11 +39,11 @@ prevent exclusive-scope collisions.
    block.
 6. **Shared external resources.** Fixture dispatches, live mutations, and
    status-index commits remain serialized across sessions regardless of leaf.
-7. **Commit and push everything (operator directive 2026-08-24).** Every
-   session commits and pushes its own outputs immediately: leaf code, plan and
-   index updates, and sanitized `.velnor-compare/` evidence included. Foreign
-   dirty files inside another session's active claim are the sole exception —
-   never staged or committed by anyone but their owning session.
+7. **Commit and push everything (historical operator directive 2026-08-24).**
+   Every session commits and pushes its own outputs immediately: leaf code,
+   plan and index updates, and sanitized `.velnor-compare/` evidence included.
+   This per-session delivery rule is superseded by the single campaign branch
+   and one pull request directive above.
 
 ## Active claims
 
@@ -44,6 +57,11 @@ prevent exclusive-scope collisions.
 | clap-cli-migration | third-peer session (074-078 pool owner) | 2026-08-24 ~15:45Z | YIELDED ~16:05Z per rule 4 — second live writer active on same scope with no registry row (branch-visibility gap); evidence .velnor-compare/2026-08-24-clap-cli-migration-writer-conflict/; this session contributes only read-only verification after quiescence. Original row: CLAIMED — operator directive: rewrite `crates/velnorctl` CLI on idiomatic stable `clap` derive APIs (PR #286 surface, local branch `velnorctl-clap-migration` off merged main); scope = crates/velnorctl/* + workspace Cargo.toml/Cargo.lock clap deps + its tests; deletes handwritten parser/metadata/man generation in favor of clap/clap_complete/clap_mangen; supersedes temporary 065 parser implementation per operator authority; divergence from landed 065/C005 evidence recorded in this row. Other sessions read-only on velnorctl until CLOSED |
 
 ## Decisions
+
+- **2026-08-29 single campaign branch and pull request**: all active plans and
+  retained command work are implemented together on
+  `codex/plan-066-operational-history` and delivered in one pull request. No
+  per-plan, per-task, or per-item branch or pull request is executable.
 
 - **2026-08-24 branch-merge directive executed; campaign work recovered**
   (ox-alpha session C): operator ordered all branches merged to `main` via

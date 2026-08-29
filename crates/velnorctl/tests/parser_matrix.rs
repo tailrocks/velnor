@@ -350,10 +350,13 @@ fn every_completion_shell_choice_parses() {
 }
 
 #[test]
-fn daemon_release_and_run_are_unknown_clap_subcommands() {
-    for name in ["daemon", "release", "run"] {
-        assert!(parse(&[name]).is_err(), "{name} must stay unknown");
-    }
+fn daemon_is_public_and_release_is_removed() {
+    assert!(
+        parse(&["daemon"]).is_ok(),
+        "daemon accepts default arguments"
+    );
+    assert!(parse(&["run"]).is_err(), "run requires its subcommand");
+    assert!(parse(&["release"]).is_err(), "release is removed");
 }
 
 #[test]

@@ -3,7 +3,6 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -13,16 +12,17 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot},
+    sync::{mpsc::UnboundedReceiver, oneshot, Semaphore},
     task::JoinHandle,
 };
 use tracing::Instrument as _;
+use velnor_model::Timestamp;
 
 use crate::{
     action::{
@@ -100,6 +100,61 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
+/// SQLite admission is a single-writer boundary. Keep the Tokio blocking
+/// queue bounded by acquiring the only admission permit before spawning work.
+const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
+static OPERATIONAL_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionPersistenceOutcome {
+    Accepted,
+    Rejected,
+    InfrastructureFailure,
+}
+
+fn operational_admission_permits() -> Arc<Semaphore> {
+    Arc::clone(
+        OPERATIONAL_ADMISSION_PERMITS
+            .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
+    )
+}
+
+async fn persist_admission_on_blocking_pool(
+    sink: Arc<crate::ops::OpsSink>,
+    admission: crate::ops::JobAdmission,
+) -> AdmissionPersistenceOutcome {
+    persist_admission_on_blocking_pool_with(sink, admission, |sink, admission| {
+        sink.record_admission(&admission)
+    })
+    .await
+}
+
+async fn persist_admission_on_blocking_pool_with<F>(
+    sink: Arc<crate::ops::OpsSink>,
+    admission: crate::ops::JobAdmission,
+    persist: F,
+) -> AdmissionPersistenceOutcome
+where
+    F: FnOnce(Arc<crate::ops::OpsSink>, crate::ops::JobAdmission) -> bool + Send + 'static,
+{
+    let permits = operational_admission_permits();
+    // Admission is a pre-execution gate. Queueing an acquired job behind a
+    // stuck SQLite worker would hold the run-service lease without bounded
+    // progress, so fail closed when the single writer is busy.
+    let Ok(permit) = permits.try_acquire_owned() else {
+        return AdmissionPersistenceOutcome::InfrastructureFailure;
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        persist(sink, admission)
+    })
+    .await
+    {
+        Ok(true) => AdmissionPersistenceOutcome::Accepted,
+        Ok(false) => AdmissionPersistenceOutcome::Rejected,
+        Err(_join_error) => AdmissionPersistenceOutcome::InfrastructureFailure,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
@@ -428,12 +483,17 @@ fn persist_and_announce_daemon_readiness(
     total_slots: usize,
 ) -> Result<()> {
     persist_daemon_instance(sink, total_slots)?;
-    notify_daemon_ready(total_slots, total_slots);
+    let now_unix = Timestamp::now()
+        .as_offset_datetime()
+        .unix_timestamp()
+        .unsigned_abs();
+    sink.defer_initial_prune(now_unix);
     sink.emit(
         velnor_model::EventReason::ReadinessReady,
         sink.instance_slug(),
         Some(format!("daemon pass ready pid={}", std::process::id())),
     );
+    notify_daemon_ready(total_slots, total_slots);
     Ok(())
 }
 
@@ -1175,8 +1235,122 @@ fn daemon_forensic_log(config_base: &Path, message: &str) {
         &config_base.join("logs"),
         slot_log::DAEMON_LOG,
         &format!("daemon pid={}", std::process::id()),
-        message,
+        &sanitize_forensic_log_message(message),
     );
+}
+
+fn sanitize_forensic_log_message(raw: &str) -> String {
+    const MAX_FORENSIC_LOG_BYTES: usize = 2048;
+    if [
+        "authorization:",
+        "bearer ",
+        "password",
+        "secret",
+        "token=",
+        "token:",
+        "fingerprint=",
+        "api-key",
+        "api_key",
+        "apikey",
+        "access-token",
+        "access_token",
+        "client-secret",
+        "client_secret",
+        "private-key",
+        "private_key",
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "github_pat_",
+        "begin private key",
+    ]
+    .iter()
+    .any(|marker| contains_ascii_case_insensitive(raw, marker))
+    {
+        return "redacted-sensitive-diagnostic".to_owned();
+    }
+    let mut output = String::with_capacity(raw.len().min(MAX_FORENSIC_LOG_BYTES));
+    for character in raw.chars() {
+        if is_forbidden_log_character(character) {
+            continue;
+        }
+        let character = if character.is_control() || character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_FORENSIC_LOG_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    if output.is_empty() {
+        "unknown".to_owned()
+    } else {
+        output
+    }
+}
+
+fn contains_ascii_case_insensitive(value: &str, marker: &str) -> bool {
+    value.as_bytes().windows(marker.len()).any(|window| {
+        window
+            .iter()
+            .zip(marker.as_bytes())
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn is_forbidden_log_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
+struct BoundedErrorRenderer {
+    output: String,
+    truncated: bool,
+}
+
+impl BoundedErrorRenderer {
+    const LIMIT: usize = 2048;
+
+    fn new() -> Self {
+        Self {
+            output: String::with_capacity(Self::LIMIT),
+            truncated: false,
+        }
+    }
+}
+
+impl std::fmt::Write for BoundedErrorRenderer {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        for character in value.chars() {
+            if self.output.len() + character.len_utf8() > Self::LIMIT {
+                self.truncated = true;
+                return Err(std::fmt::Error);
+            }
+            self.output.push(character);
+        }
+        Ok(())
+    }
+}
+
+fn sanitized_retry_error(error: &dyn std::fmt::Display) -> String {
+    let mut renderer = BoundedErrorRenderer::new();
+    let formatted = std::fmt::write(&mut renderer, format_args!("{error:#}"));
+    if renderer.truncated || formatted.is_err() {
+        return "redacted-sensitive-diagnostic".to_owned();
+    }
+    sanitize_forensic_log_message(&renderer.output)
 }
 
 /// Set on SIGTERM/SIGINT: the daemon drains instead of dying. Idle slots exit
@@ -1186,6 +1360,7 @@ fn daemon_forensic_log(config_base: &Path, message: &str) {
 /// wait for running jobs, with systemd's TimeoutStopSec as the only bound.
 static DRAINING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DAEMON_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RETENTION_READY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
@@ -1215,6 +1390,7 @@ fn notify_daemon_ready(usable_slots: usize, slots: usize) {
     crate::sd_notify::status(&format!(
         "configured: {usable_slots}/{slots} runner slot(s); control READY follows a local cycle"
     ));
+    RETENTION_READY.notify_waiters();
 }
 
 fn gha_cache_root(layout: Option<crate::storage::StorageLayout>) -> Result<PathBuf> {
@@ -1253,7 +1429,10 @@ fn start_drain_listener(config_base: PathBuf) {
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(signal) => signal,
                 Err(error) => {
-                    eprintln!("cannot install SIGTERM drain handler: {error:#}");
+                    eprintln!(
+                        "cannot install SIGTERM drain handler: {}",
+                        sanitized_retry_error(&error)
+                    );
                     return;
                 }
             };
@@ -1338,28 +1517,37 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         return daemon_pass(&args, slots).await;
     }
 
+    // Retention belongs to the daemon lifetime, not an individual retryable
+    // pass. It waits for the first successful readiness announcement and is
+    // explicitly joined on every supervised return path.
+    let mut retention_lifecycle = Some(start_retention_lifecycle());
     let mut attempt: u32 = 0;
     loop {
         if draining() {
+            stop_retention_lifecycle(&mut retention_lifecycle).await;
             println!("drain complete during registration retry: exiting");
             return Ok(());
         }
         match daemon_pass(&args, slots).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                stop_retention_lifecycle(&mut retention_lifecycle).await;
+                return Ok(());
+            }
             Err(error) => {
                 attempt += 1;
                 let delay = supervised_retry_delay(attempt);
+                let error_detail = sanitized_retry_error(&error);
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
                     .unwrap_or_default();
                 if let Ok(config_base) = daemon_config_dir(&args) {
                     daemon_forensic_log(
                         &config_base,
-                        &format!("daemon pass attempt {attempt} failed: {error:#}"),
+                        &format!("daemon pass attempt {attempt} failed: {error_detail}"),
                     );
                 }
                 eprintln!(
-                    "daemon attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s (the daemon never exits; fix the cause and it recovers).",
+                    "daemon attempt {attempt} failed: {error_detail}.{diagnosis} Retrying in {}s (the daemon never exits; fix the cause and it recovers).",
                     delay.as_secs()
                 );
                 crate::sd_notify::status(&format!(
@@ -1368,6 +1556,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                 ));
                 for _ in 0..delay.as_secs().max(1) {
                     if draining() {
+                        stop_retention_lifecycle(&mut retention_lifecycle).await;
                         println!("drain complete during registration backoff: exiting");
                         return Ok(());
                     }
@@ -1418,7 +1607,6 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
                 sink.instance_slug(),
                 Some(format!("daemon_id={daemon_id}")),
             );
-            sink.prune_if_due();
         }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
@@ -1443,15 +1631,9 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // emitting the readiness event. In supervised mode this error returns to
     // the retry loop above; no daemon pass may continue with unrecorded state.
     persist_and_announce_daemon_readiness(sink, total_slots)?;
-    // Time-gated retention passes continue while slots are supervised.
-    let retention_sink = std::sync::Arc::clone(sink);
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
-        loop {
-            ticker.tick().await;
-            retention_sink.prune_if_due();
-        }
-    });
+    // The daemon-level retention lifecycle is started by `daemon` and waits
+    // for this readiness announcement. Keeping ownership outside this retryable
+    // pass prevents detached ticker duplication across retries.
     println!(
         "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
         if total_slots == 1 { "" } else { "es" }
@@ -1493,6 +1675,97 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         emit_drain_completed_once();
     }
     result
+}
+
+struct RetentionLifecycle {
+    stop: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+fn start_retention_lifecycle() -> RetentionLifecycle {
+    let (stop, signal) = oneshot::channel();
+    let task = tokio::spawn(retention_lifecycle(signal));
+    RetentionLifecycle {
+        stop: Some(stop),
+        task,
+    }
+}
+
+async fn stop_retention_lifecycle(lifecycle: &mut Option<RetentionLifecycle>) {
+    let Some(mut lifecycle) = lifecycle.take() else {
+        return;
+    };
+    if let Some(stop) = lifecycle.stop.take() {
+        let _ = stop.send(());
+    }
+    let _ = lifecycle.task.await;
+}
+
+async fn retention_lifecycle(stop: oneshot::Receiver<()>) {
+    retention_lifecycle_with_sink(stop, None).await;
+}
+
+async fn retention_lifecycle_with_sink(
+    mut stop: oneshot::Receiver<()>,
+    injected_sink: Option<std::sync::Arc<crate::ops::OpsSink>>,
+) {
+    if !DAEMON_READY.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::select! {
+            _ = &mut stop => return,
+            _ = RETENTION_READY.notified() => {}
+        }
+    }
+    if draining() {
+        return;
+    }
+    let Some(sink) = injected_sink.or_else(|| crate::ops::global().cloned()) else {
+        eprintln!("forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness");
+        return;
+    };
+    loop {
+        if draining() {
+            return;
+        }
+        let delay = sink.prune_wait_duration();
+        tokio::select! {
+            _ = &mut stop => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        if draining() {
+            return;
+        }
+        if !run_retention_pass(std::sync::Arc::clone(&sink)).await {
+            tokio::select! {
+                _ = &mut stop => return,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    }
+}
+
+/// Admit retention before submitting synchronous SQLite work to Tokio's
+/// blocking pool. The admission token releases on normal completion, task
+/// cancellation, and worker panic.
+async fn run_retention_pass(sink: std::sync::Arc<crate::ops::OpsSink>) -> bool {
+    let Some(admission) = sink.try_admit_prune() else {
+        return false;
+    };
+    let worker_sink = std::sync::Arc::clone(&sink);
+    if let Err(_error) = tokio::task::spawn_blocking(move || {
+        worker_sink.run_admitted_prune(admission);
+    })
+    .await
+    {
+        let completion_unix = Timestamp::now()
+            .as_offset_datetime()
+            .unix_timestamp()
+            .unsigned_abs();
+        sink.record_prune_worker_failure(completion_unix, "retention worker task failed");
+        eprintln!(
+            "forensics.ops event=retention-worker-failed reason=retention-worker-task-failed"
+        );
+    }
+    true
 }
 
 /// Capped exponential backoff with deterministic jitter for the never-exit
@@ -1562,7 +1835,10 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
             if let Err(error) =
                 crate::leftover_disk::reclaim_production_if_hard_pressure_for(backend, percent)
             {
-                eprintln!("leftover-after-Velnor reclaim failed: {error:#}");
+                eprintln!(
+                    "leftover-after-Velnor reclaim failed: {}",
+                    sanitized_retry_error(&error)
+                );
             }
         }
     }
@@ -1609,13 +1885,6 @@ fn free_space_bytes(path: &Path) -> Option<u64> {
 
 /// Classify an operator-supplied GitHub token. `None` means the shape is
 /// plausible; `Some(message)` is a precise, actionable problem description.
-fn token_fingerprint(token: &str) -> String {
-    Sha256::digest(token.as_bytes())[..6]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
     let token = token.unwrap_or("").trim();
     if token.is_empty() {
@@ -1626,13 +1895,11 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
         );
     }
     if token.contains("${") || token.contains("$(") {
-        let fingerprint = token_fingerprint(token);
         return Some(format!(
-            "GITHUB_TOKEN is a literal unexpanded placeholder (class=placeholder, length={}, fingerprint={}). systemd \
+            "GITHUB_TOKEN is a literal unexpanded placeholder (class=placeholder, length={}). systemd \
              EnvironmentFile does NOT expand variables — put the real token value \
              in the file.",
-            token.len(),
-            fingerprint
+            token.len()
         ));
     }
     let plausible = token.starts_with("ghp_")
@@ -1642,13 +1909,11 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
         || token.starts_with("ghr_")
         || token.starts_with("github_pat_");
     if !plausible {
-        let fingerprint = token_fingerprint(token);
         return Some(format!(
-            "GITHUB_TOKEN does not look like a GitHub token (class=unknown, length={}, fingerprint={}; expected a \
+            "GITHUB_TOKEN does not look like a GitHub token (class=unknown, length={}; expected a \
              ghp_/gho_/ghs_/github_pat_ prefix). Verify the value in the \
              EnvironmentFile.",
-            token.len(),
-            fingerprint
+            token.len()
         ));
     }
     None
@@ -1724,7 +1989,8 @@ pub(crate) async fn run_daemon_slot(
         if let Some(prewarm_waiter) = prewarm_waiter {
             if let Err(join_error) = prewarm_waiter.await {
                 eprintln!(
-                    "daemon slot-{slot_index} successor JIT prewarm task failed: {join_error:#}"
+                    "daemon slot-{slot_index} successor JIT prewarm task failed: {}",
+                    sanitized_retry_error(&join_error)
                 );
             }
         }
@@ -1733,16 +1999,17 @@ pub(crate) async fn run_daemon_slot(
                 cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
                 return Err(error);
             }
+            let error_detail = sanitized_retry_error(&error);
             if registration_was_deleted(&error) {
                 local_failure_streak = 0;
                 cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
                 eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} registration disappeared; creating a fresh JIT config: {error:#}"
+                    "daemon slot-{slot_index} cycle {cycle} registration disappeared; creating a fresh JIT config: {error_detail}"
                 );
                 daemon_forensic_log(
                     &config_base,
                     &format!(
-                        "slot-{slot_index} cycle {cycle} registration disappeared; fresh JIT config: {error:#}"
+                        "slot-{slot_index} cycle {cycle} registration disappeared; fresh JIT config: {error_detail}"
                     ),
                 );
                 reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
@@ -1759,12 +2026,12 @@ pub(crate) async fn run_daemon_slot(
             {
                 local_failure_streak = 0;
                 eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error:#}"
+                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error_detail}"
                 );
                 daemon_forensic_log(
                     &config_base,
                     &format!(
-                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error:#}"
+                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error_detail}"
                     ),
                 );
                 reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
@@ -1779,13 +2046,13 @@ pub(crate) async fn run_daemon_slot(
                 local_failure_streak += 1;
                 let delay = slot_retry_delay(local_failure_streak, slot_index);
                 eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} local failure (registration kept, attempt {local_failure_streak}): {error:#}. Retrying in {}s.",
+                    "daemon slot-{slot_index} cycle {cycle} local failure (registration kept, attempt {local_failure_streak}): {error_detail}. Retrying in {}s.",
                     delay.as_secs()
                 );
                 daemon_forensic_log(
                     &config_base,
                     &format!(
-                        "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error:#}"
+                        "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error_detail}"
                     ),
                 );
                 if sleep_slot_retry_or_drain(delay).await {
@@ -1796,11 +2063,11 @@ pub(crate) async fn run_daemon_slot(
             local_failure_streak = 0;
             cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
             eprintln!(
-                "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error:#}"
+                "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error_detail}"
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error:#}"),
+                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
             );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
             cycle += 1;
@@ -1827,12 +2094,13 @@ pub(crate) async fn run_daemon_slot(
         );
         if let Err(error) = recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle).await
         {
+            let error_detail = sanitized_retry_error(&error);
             eprintln!(
-                "daemon slot-{slot_index} cycle {cycle} recycle failed: {error:#}; retrying JIT config until it succeeds"
+                "daemon slot-{slot_index} cycle {cycle} recycle failed: {error_detail}; retrying JIT config until it succeeds"
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} recycle failed: {error:#}"),
+                &format!("slot-{slot_index} cycle {cycle} recycle failed: {error_detail}"),
             );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
         }
@@ -1858,11 +2126,12 @@ async fn reconfigure_daemon_slot_forever(
             Ok(()) => return,
             Err(error) => {
                 let delay = slot_retry_delay_for_error(attempt, slot_index, &error);
+                let error_detail = sanitized_retry_error(&error);
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
                     .unwrap_or_default();
                 eprintln!(
-                    "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s.",
+                    "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error_detail}.{diagnosis} Retrying in {}s.",
                     delay.as_secs()
                 );
                 if sleep_slot_retry_or_drain(delay).await {
@@ -2038,14 +2307,18 @@ async fn cleanup_failed_daemon_slot(
     let slot_cleanup = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await;
     if let Err(error) = &slot_cleanup {
         eprintln!(
-            "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {error:#}",
-            slot_dir.display()
+            "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {}",
+            slot_dir.display(),
+            sanitized_retry_error(error)
         );
     }
     let successor_cleanup =
         cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await;
     if let Err(error) = &successor_cleanup {
-        eprintln!("daemon slot-{slot_index} cycle {cycle} successor cleanup failed: {error:#}");
+        eprintln!(
+            "daemon slot-{slot_index} cycle {cycle} successor cleanup failed: {}",
+            sanitized_retry_error(error)
+        );
     }
     if let Some(sink) = crate::ops::global() {
         let (reason, detail) = daemon_slot_cleanup_event(
@@ -2234,7 +2507,8 @@ async fn configure_daemon_slots(
         // restart once the stale runner ages out.
         if let Err(error) = result {
             eprintln!(
-                "Warning: could not configure daemon slot-{slot_index} (skipping; running on the remaining slots): {error:#}"
+                "Warning: could not configure daemon slot-{slot_index} (skipping; running on the remaining slots): {}",
+                sanitized_retry_error(&error)
             );
             skipped_slots.push(slot_index);
             continue;
@@ -2339,14 +2613,18 @@ async fn cleanup_configured_daemon_slots(
         let slot_dir = daemon_slot_config_dir(config_base, *slot_index, slots);
         if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
             eprintln!(
-                "cleanup failed for configured daemon slot-{slot_index} at {}: {error:#}",
-                slot_dir.display()
+                "cleanup failed for configured daemon slot-{slot_index} at {}: {}",
+                slot_dir.display(),
+                sanitized_retry_error(&error)
             );
         }
         if let Err(error) =
             cleanup_daemon_slot_successor_jit_config(args, config_base, *slot_index, slots).await
         {
-            eprintln!("cleanup failed for successor daemon slot-{slot_index}: {error:#}");
+            eprintln!(
+                "cleanup failed for successor daemon slot-{slot_index}: {}",
+                sanitized_retry_error(&error)
+            );
         }
     }
 }
@@ -2638,7 +2916,10 @@ fn maybe_startup_host_docker_reclaim_with(
     // matched; scoped to THIS daemon id so co-located daemons are
     // untouched. Best-effort — never blocks startup (velnor#311).
     if let Err(error) = reclaim(daemon_id) {
-        eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
+        eprintln!(
+            "Warning: startup orphan job-environment reclaim failed: {}",
+            sanitized_retry_error(&error)
+        );
     }
 }
 
@@ -3161,7 +3442,10 @@ async fn run_v2(
     .await;
 
     if let Err(error) = &run_result {
-        forensics.lifecycle(&format!("run loop ended with error: {error:#}"));
+        forensics.lifecycle(&format!(
+            "run loop ended with error: {}",
+            sanitized_retry_error(error)
+        ));
     }
 
     match broker.delete_session().await {
@@ -3170,13 +3454,17 @@ async fn run_v2(
             forensics.lifecycle("broker session deleted");
         }
         Err(error) if run_result.is_ok() => {
-            forensics.lifecycle(&format!("broker session delete failed: {error:#}"));
+            forensics.lifecycle(&format!(
+                "broker session delete failed: {}",
+                sanitized_retry_error(&error)
+            ));
             return Err(error).context("delete broker runner session");
         }
         Err(error) => {
-            eprintln!("Best-effort broker session delete failed: {error:#}");
+            let detail = sanitized_retry_error(&error);
+            eprintln!("Best-effort broker session delete failed: {detail}");
             forensics.lifecycle(&format!(
-                "best-effort broker session delete failed: {error:#}"
+                "best-effort broker session delete failed: {detail}"
             ));
         }
     }
@@ -3279,8 +3567,9 @@ async fn refresh_idle_credentials(
             forensics.lifecycle(&note);
         }
         Err(error) => {
+            let detail = sanitized_retry_error(&error);
             let note = format!(
-                "proactive credential refresh failed (token age {token_age_minutes}m): {error:#}"
+                "proactive credential refresh failed (token age {token_age_minutes}m): {detail}"
             );
             eprintln!("{note}");
             forensics.lifecycle(&note);
@@ -3322,14 +3611,20 @@ async fn check_runner_registry(
     let client = match RegistrationClient::new() {
         Ok(client) => client,
         Err(error) => {
-            forensics.registry(&format!("lookup skipped: client build failed: {error:#}"));
+            forensics.registry(&format!(
+                "lookup skipped: client build failed: {}",
+                sanitized_retry_error(&error)
+            ));
             return None;
         }
     };
     let lookup = match client.get_runner(scope, pat, agent_id).await {
         Ok(lookup) => lookup,
         Err(error) => {
-            forensics.registry(&format!("lookup error (not counted as strike): {error:#}"));
+            forensics.registry(&format!(
+                "lookup error (not counted as strike): {}",
+                sanitized_retry_error(&error)
+            ));
             return None;
         }
     };
@@ -3436,8 +3731,9 @@ async fn create_broker_session_with_retry(
             Err(error) if attempt < BROKER_SESSION_CREATE_MAX_ATTEMPTS => {
                 let delay = broker_session_create_retry_delay(attempt);
                 eprintln!(
-                    "Broker session create failed on attempt {attempt}/{}: {error:#}. Retrying in {}s.",
+                    "Broker session create failed on attempt {attempt}/{}: {}. Retrying in {}s.",
                     BROKER_SESSION_CREATE_MAX_ATTEMPTS,
+                    sanitized_retry_error(&error),
                     delay.as_secs()
                 );
                 attempt += 1;
@@ -3578,7 +3874,8 @@ async fn poll_broker_message(
             Err(error) => {
                 if draining() {
                     forensics.lifecycle(&format!(
-                        "idle slot exiting after broker poll error during daemon drain: {error:#}"
+                        "idle slot exiting after broker poll error during daemon drain: {}",
+                        sanitized_retry_error(&error)
                     ));
                     return Ok(None);
                 }
@@ -3601,19 +3898,22 @@ async fn poll_broker_message(
                         }
                         Err(refresh_error) => {
                             forensics.lifecycle(&format!(
-                                "broker poll credential refresh failed after auth error: {refresh_error:#}"
+                                "broker poll credential refresh failed after auth error: {}",
+                                sanitized_retry_error(&refresh_error)
                             ));
                         }
                     }
                 }
                 forensics.broker(&format!(
-                    "poll ERROR consecutive={}: {error:#}",
-                    poll_state.consecutive_errors + 1
+                    "poll ERROR consecutive={}: {}",
+                    poll_state.consecutive_errors + 1,
+                    sanitized_retry_error(&error)
                 ));
                 let delay = poll_state.received_error()?;
                 eprintln!(
-                    "Broker message poll failed ({} consecutive error(s)): {error:#}. Retrying in {}s.",
+                    "Broker message poll failed ({} consecutive error(s)): {}. Retrying in {}s.",
                     poll_state.consecutive_errors,
+                    sanitized_retry_error(&error),
                     delay.as_secs()
                 );
                 tokio::time::sleep(delay).await;
@@ -3715,8 +4015,9 @@ async fn handle_v2_message(
             .await
         {
             eprintln!(
-                "Best-effort broker acknowledge failed for request {}: {error:#}",
-                reference.runner_request_id
+                "Best-effort broker acknowledge failed for request {}: {}",
+                reference.runner_request_id,
+                sanitized_retry_error(&error)
             );
         }
     }
@@ -3748,8 +4049,9 @@ async fn handle_v2_message(
         Err(error) => {
             if !is_transient_acquire_error(&error) {
                 forensics.broker(&format!(
-                    "acquire ERROR request={} permanent; closing session: {error:#}",
-                    reference.runner_request_id
+                    "acquire ERROR request={} permanent; closing session: {}",
+                    reference.runner_request_id,
+                    sanitized_retry_error(&error)
                 ));
                 return Err(error).context("permanent run-service acquire failure");
             }
@@ -3759,12 +4061,14 @@ async fn handle_v2_message(
             // recycling the JIT identity here amplifies GitHub outages and
             // can strand the assigned job as runner-lost.
             forensics.broker(&format!(
-                "acquire ERROR request={} session retained: {error:#}",
-                reference.runner_request_id
+                "acquire ERROR request={} session retained: {}",
+                reference.runner_request_id,
+                sanitized_retry_error(&error)
             ));
             eprintln!(
-                "Run-service acquire failed for request {}; retaining broker session and runner registration: {error:#}",
-                reference.runner_request_id
+                "Run-service acquire failed for request {}; retaining broker session and runner registration: {}",
+                reference.runner_request_id,
+                sanitized_retry_error(&error)
             );
             return Ok(V2MessageAction::None);
         }
@@ -3968,24 +4272,32 @@ async fn handle_job_request(
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
         };
-        if !sink.record_admission(&admission) {
-            const REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
-            sink.emit(
-                velnor_model::EventReason::JobRejected,
-                &job.job_id,
-                Some(REASON.to_owned()),
-            );
+        let admission_outcome =
+            persist_admission_on_blocking_pool(Arc::clone(sink), admission).await;
+        if admission_outcome != AdmissionPersistenceOutcome::Accepted {
+            const REJECTED_REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
+            const WORKER_FAILURE_REASON: &str =
+                "operational store admission worker failed; job failed closed before execution";
+            let reason = if admission_outcome == AdmissionPersistenceOutcome::Rejected {
+                REJECTED_REASON
+            } else {
+                WORKER_FAILURE_REASON
+            };
+            // No admission row exists on either failure path. Writing a
+            // JobRejected event would amplify an over-budget store or recurse
+            // into an unavailable store. Completion below is the truthful
+            // run-service diagnostic and is always attempted.
             let completion = complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
                 Some(&job),
                 Some("operational_store".to_string()),
-                REASON,
+                reason,
             )
             .await;
             completion.context("failed to complete the rejected job")?;
             clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
-            bail!("{REASON}");
+            bail!("{reason}");
         }
     } else {
         const REASON: &str = "operational store is unavailable; job failed closed before execution";
@@ -4864,7 +5176,10 @@ async fn start_run_service_lock_renewal(
             );
         }
         Err(error) => {
-            eprintln!("Initial run-service job lock renewal failed: {error:#}");
+            eprintln!(
+                "Initial run-service job lock renewal failed: {}",
+                sanitized_retry_error(&error)
+            );
             if lock_renewal_refresh_is_terminal(&error) {
                 registration_lost.store(true, Ordering::SeqCst);
             } else if is_credential_poll_error(&error) {
@@ -4875,7 +5190,8 @@ async fn start_run_service_lock_renewal(
                     }
                     Err(refresh_error) => {
                         eprintln!(
-                            "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                            "Run-service lock renewal credential refresh failed: {}",
+                            sanitized_retry_error(&refresh_error)
                         );
                         if lock_renewal_refresh_is_terminal(&refresh_error) {
                             registration_lost.store(true, Ordering::SeqCst);
@@ -4905,7 +5221,10 @@ async fn start_run_service_lock_renewal(
                     );
                 }
                 Err(error) => {
-                    eprintln!("Run-service job lock renewal failed: {error:#}");
+                    eprintln!(
+                        "Run-service job lock renewal failed: {}",
+                        sanitized_retry_error(&error)
+                    );
                     if lock_renewal_refresh_is_terminal(&error) {
                         registration_lost.store(true, Ordering::SeqCst);
                         break;
@@ -4918,7 +5237,8 @@ async fn start_run_service_lock_renewal(
                             }
                             Err(refresh_error) => {
                                 eprintln!(
-                                    "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                                    "Run-service lock renewal credential refresh failed: {}",
+                                    sanitized_retry_error(&refresh_error)
                                 );
                                 if lock_renewal_refresh_is_terminal(&refresh_error) {
                                     registration_lost.store(true, Ordering::SeqCst);
@@ -5000,12 +5320,14 @@ fn start_broker_cancellation_poll(
                     // Rate-cap the log line: first few, then once a minute.
                     if error_streak <= 3 || error_streak.is_multiple_of(30) {
                         eprintln!(
-                            "Broker cancellation poll failed ({error_streak} consecutive): {error:#}"
+                            "Broker cancellation poll failed ({error_streak} consecutive): {}",
+                            sanitized_retry_error(&error)
                         );
                     }
                     if active_job_broker_registration_is_gone(&error) {
                         eprintln!(
-                            "Active job runner registration disappeared; cancelling the job because broker control messages can no longer be received: {error:#}"
+                            "Active job runner registration disappeared; cancelling the job because broker control messages can no longer be received: {}",
+                            sanitized_retry_error(&error)
                         );
                         canceled.store(true, Ordering::SeqCst);
                         kill_job_container(&job_container_name);
@@ -5022,12 +5344,14 @@ fn start_broker_cancellation_poll(
                                     );
                                     }
                                     Err(error) => eprintln!(
-                                    "Cancellation poller failed to rebuild broker client: {error:#}"
-                                ),
+                                        "Cancellation poller failed to rebuild broker client: {}",
+                                        sanitized_retry_error(&error)
+                                    ),
                                 }
                             }
                             Err(error) => eprintln!(
-                                "Cancellation poller credential refresh failed: {error:#}"
+                                "Cancellation poller credential refresh failed: {}",
+                                sanitized_retry_error(&error)
                             ),
                         }
                     }
@@ -5055,15 +5379,20 @@ fn start_broker_cancellation_poll(
                                 );
                             }
                             Err(error) => eprintln!(
-                                "Cancellation poller failed to apply broker migration: {error:#}"
+                                "Cancellation poller failed to apply broker migration: {}",
+                                sanitized_retry_error(&error)
                             ),
                         },
                         Err(error) => eprintln!(
-                            "Cancellation poller migration credential refresh failed: {error:#}"
+                            "Cancellation poller migration credential refresh failed: {}",
+                            sanitized_retry_error(&error)
                         ),
                     },
                     Err(error) => {
-                        eprintln!("Cancellation poller received malformed migration: {error:#}")
+                        eprintln!(
+                            "Cancellation poller received malformed migration: {}",
+                            sanitized_retry_error(&error)
+                        )
                     }
                 }
                 continue;
@@ -5126,8 +5455,9 @@ fn start_step_timeline_publisher(
                     .await
                 {
                     eprintln!(
-                        "Best-effort Twirp step start failed for '{}': {e:#}",
-                        event.step_id
+                        "Best-effort Twirp step start failed for '{}': {}",
+                        event.step_id,
+                        sanitized_retry_error(&e)
                     );
                 }
                 change_order += 1;
@@ -5136,8 +5466,9 @@ fn start_step_timeline_publisher(
             // Also update the distributed task timeline (legacy path)
             if let Err(error) = publish_timeline_step_started(&job, &event).await {
                 eprintln!(
-                    "Best-effort timeline step start update failed for '{}': {error:#}",
-                    event.step_id
+                    "Best-effort timeline step start update failed for '{}': {}",
+                    event.step_id,
+                    sanitized_retry_error(&error)
                 );
             }
         }
@@ -5216,7 +5547,10 @@ fn start_step_log_publisher(
                     Some(ws)
                 }
                 Err(e) => {
-                    eprintln!("Best-effort WebSocket feed connect failed: {e:#}");
+                    eprintln!(
+                        "Best-effort WebSocket feed connect failed: {}",
+                        sanitized_retry_error(&e)
+                    );
                     None
                 }
             }
@@ -5240,7 +5574,8 @@ fn start_step_log_publisher(
                     if let Some(ws) = ws_conn.as_mut() {
                         if let Err(e) = crate::protocol::FeedStreamClient::send_ping(ws).await {
                             eprintln!(
-                                "[feed] keepalive ping failed: {e:#}; dropping to reconnect on next send"
+                                "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
+                                sanitized_retry_error(&e)
                             );
                             ws_conn = None;
                         }
@@ -5327,8 +5662,9 @@ fn start_step_log_publisher(
                         .await
                     {
                         eprintln!(
-                            "Best-effort Twirp step completion failed for '{}': {e:#}",
-                            log.step_id
+                            "Best-effort Twirp step completion failed for '{}': {}",
+                            log.step_id,
+                            sanitized_retry_error(&e)
                         );
                     }
                     change_order += 1;
@@ -5345,8 +5681,9 @@ fn start_step_log_publisher(
                             .await
                         {
                             eprintln!(
-                                "Best-effort Results Service log upload failed for '{}': {e:#}",
-                                log.step_id
+                                "Best-effort Results Service log upload failed for '{}': {}",
+                                log.step_id,
+                                sanitized_retry_error(&e)
                             );
                         }
                         // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
@@ -5356,8 +5693,9 @@ fn start_step_log_publisher(
                                 .await
                             {
                                 eprintln!(
-                                    "Best-effort step summary upload failed for '{}': {e:#}",
-                                    log.step_id
+                                    "Best-effort step summary upload failed for '{}': {}",
+                                    log.step_id,
+                                    sanitized_retry_error(&e)
                                 );
                             }
                         }
@@ -5366,8 +5704,9 @@ fn start_step_log_publisher(
 
                 if let Err(error) = publish_timeline_step_log(&job, &log).await {
                     eprintln!(
-                        "Best-effort timeline step log upload failed for '{}': {error:#}",
-                        log.step_id
+                        "Best-effort timeline step log upload failed for '{}': {}",
+                        log.step_id,
+                        sanitized_retry_error(&error)
                     );
                 }
             }
@@ -5595,8 +5934,9 @@ fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: 
         },
         Err(error) => {
             eprintln!(
-                "Treating malformed cancellation message {} as job cancellation: {error:#}",
-                message.message_id
+                "Treating malformed cancellation message {} as job cancellation: {}",
+                message.message_id,
+                sanitized_retry_error(&error)
             );
             true
         }
@@ -10150,6 +10490,36 @@ mod tests {
         assert_eq!(layout.mode, "explicit-config");
     }
 
+    #[tokio::test]
+    async fn retention_lifecycle_joins_and_releases_sink_on_stop() {
+        let base = unique_temp_dir("retention-lifecycle-stop");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+        let weak_sink = Arc::downgrade(&sink);
+        let previous_ready = DAEMON_READY.swap(true, Ordering::SeqCst);
+        let previous_draining = DRAINING.swap(false, Ordering::SeqCst);
+        let (stop, signal) = oneshot::channel();
+        let task = tokio::spawn(retention_lifecycle_with_sink(
+            signal,
+            Some(Arc::clone(&sink)),
+        ));
+
+        tokio::task::yield_now().await;
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        drop(sink);
+        assert!(weak_sink.upgrade().is_none());
+        DAEMON_READY.store(previous_ready, Ordering::SeqCst);
+        DRAINING.store(previous_draining, Ordering::SeqCst);
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn job_claim_excludes_duplicate_slots_until_owner_drops() {
         let root = std::env::temp_dir().join(format!("velnor-job-claim-{}", uuid::Uuid::new_v4()));
@@ -10202,11 +10572,21 @@ mod tests {
         let placeholder = diagnose_github_token(Some("${VELNOR_GITHUB_TOKEN}")).unwrap();
         assert!(placeholder.contains("unexpanded placeholder"));
         assert!(placeholder.contains("class=placeholder"));
+        assert!(!placeholder.contains("fingerprint"));
         assert!(!placeholder.contains("VELNOR_GITHUB_TOKEN"));
         let garbage = diagnose_github_token(Some("hunter2")).unwrap();
         assert!(garbage.contains("does not look like a GitHub token"));
         assert!(garbage.contains("class=unknown"));
         assert!(!garbage.contains("hunter2"));
+    }
+
+    #[test]
+    fn forensic_log_messages_are_single_line_and_token_safe() {
+        let sanitized = sanitize_forensic_log_message("failure\nfield\tfingerprint=secret");
+        assert_eq!(sanitized, "redacted-sensitive-diagnostic");
+
+        let sanitized = sanitize_forensic_log_message("failure\nfield\tvalue");
+        assert_eq!(sanitized, "failure field value");
     }
 
     #[test]
@@ -12257,6 +12637,115 @@ jobs:
             completion.annotations[0].message
         );
         assert!(completion.telemetry.is_empty());
+    }
+
+    fn blocking_admission_test_input(job_id: &str) -> crate::ops::JobAdmission {
+        crate::ops::JobAdmission {
+            instance_slug: "test-instance".to_owned(),
+            job_uid: job_id.to_owned(),
+            repository_full_name: "tailrocks/velnor-actions-fixture".to_owned(),
+            workflow: "control plane".to_owned(),
+            job_name: "hold".to_owned(),
+            run_id: Some(1),
+            attempt: Some(1),
+            head_ref: Some("refs/heads/main".to_owned()),
+            head_sha: Some("deadbeef".to_owned()),
+            trigger_event: Some("workflow_dispatch".to_owned()),
+            queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
+            runner_name: Some("fixture-runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            masks: vec!["worker-test-secret".to_owned()],
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_admission_persists_once_and_maps_rejection() {
+        let base = unique_temp_dir("blocking-admission");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        assert_eq!(
+            persist_admission_on_blocking_pool(
+                Arc::clone(&sink),
+                blocking_admission_test_input("job-blocking-accepted"),
+            )
+            .await,
+            AdmissionPersistenceOutcome::Accepted
+        );
+        assert!(!sink.degraded());
+
+        let mut rejected = blocking_admission_test_input("job-blocking-rejected");
+        rejected.run_id = None;
+        assert_eq!(
+            persist_admission_on_blocking_pool(Arc::clone(&sink), rejected).await,
+            AdmissionPersistenceOutcome::Rejected
+        );
+        assert!(sink.degraded());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocking_admission_maps_worker_join_failure_to_infrastructure_rejection() {
+        let base = unique_temp_dir("blocking-admission-panic");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        let outcome = persist_admission_on_blocking_pool_with(
+            sink,
+            blocking_admission_test_input("job-blocking-panic"),
+            |_sink, _admission| -> bool { panic!("test-only admission worker panic") },
+        )
+        .await;
+
+        assert_eq!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
+        let completion = failed_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan".to_owned(),
+                job_id: "job-blocking-panic".to_owned(),
+            },
+            None,
+            Some("operational_store".to_owned()),
+            "operational store admission worker failed; job failed closed before execution",
+        );
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("operational_store")
+        );
+        assert!(completion.annotations[0]
+            .message
+            .contains("failed closed before execution"));
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocking_admission_busy_writer_fails_closed_without_waiting() {
+        let base = unique_temp_dir("blocking-admission-busy");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+        let permit = operational_admission_permits()
+            .try_acquire_owned()
+            .expect("test must own the only admission permit");
+        let started = Instant::now();
+        let outcome = persist_admission_on_blocking_pool(
+            sink,
+            blocking_admission_test_input("job-blocking-busy"),
+        )
+        .await;
+        assert_eq!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(permit);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]

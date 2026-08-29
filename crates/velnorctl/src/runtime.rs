@@ -3,14 +3,317 @@
 //!
 //! These types are the clap parse source. Conversion into
 //! [`velnor_runner::args`] is exhaustive `From`, never a second argv walk.
-//! `daemon` / `release` / `run` are not public `velnorctl` commands.
+//! `daemon` is the service entrypoint; `run` is the workflow-run namespace.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use velnor_runner::args as rt;
 
 pub use velnor_runner::scaffold::{dispatch, enforce_admission, init_telemetry, telemetry_dir};
+
+/// Service daemon arguments. Runtime ownership moves to the lifecycle engine
+/// during Plan 079; this typed boundary keeps one parser and one conversion.
+#[derive(Debug, Clone, Args)]
+pub struct DaemonArgs {
+    /// Injectable durable operational store path for packaged and test daemons.
+    #[arg(long, env = "VELNOR_STATE_DB")]
+    pub state_db: Option<PathBuf>,
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub url: Option<String>,
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub pat: Option<String>,
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub labels: Vec<String>,
+    #[arg(long)]
+    pub target_mvp_labels: bool,
+    #[arg(long)]
+    pub target_mvp_arm_label: bool,
+    #[arg(long)]
+    pub replace: bool,
+    #[arg(long)]
+    pub pool_id: Option<i64>,
+    #[arg(long)]
+    pub pool_name: Option<String>,
+    #[arg(long)]
+    pub routing_policy_file: Option<PathBuf>,
+    #[arg(long)]
+    pub dry_run_registration: bool,
+    #[arg(long, default_value_t = 1)]
+    pub slots: usize,
+    #[arg(long)]
+    pub max_idle_slot_age_seconds: Option<u64>,
+    #[arg(long)]
+    pub once: bool,
+    #[arg(long)]
+    pub idle_timeout_seconds: Option<u64>,
+    #[arg(long)]
+    pub complete_noop: bool,
+    #[arg(long)]
+    pub execute_scripts: bool,
+    #[arg(long)]
+    pub dry_run_jobs: bool,
+    #[arg(long)]
+    pub dump_job_message: Option<PathBuf>,
+    #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
+    pub docker_image: String,
+    #[arg(long, default_value = "2")]
+    pub job_cpus: String,
+    #[arg(long, default_value = "4g")]
+    pub job_memory: String,
+    #[arg(long, default_value = "public")]
+    pub trust_scope: String,
+    #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024_u64)]
+    pub emergency_reserve_bytes: u64,
+    #[arg(long, default_value_t = 4 * 1024 * 1024 * 1024_u64)]
+    pub job_peak_bytes: u64,
+    #[arg(long, default_value = "velnor/node-actions:latest")]
+    pub node_action_image: String,
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub skip_preflight: bool,
+    #[arg(long)]
+    pub require_docker_socket: bool,
+}
+
+/// Run the daemon with its local API owned by the same application lifetime.
+///
+/// The API binds before the legacy execution loop starts. All three futures
+/// are selected together, and each listener owns its exact socket path for
+/// cleanup on normal exit, cancellation, and partial startup failure.
+pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
+    enforce_admission()?;
+    crate::http::validate_socket_groups()?;
+    let legacy_args: rt::DaemonArgs = args.clone().into();
+    let command = rt::Command::Daemon(Box::new(legacy_args));
+    init_telemetry(telemetry_dir(&command).as_deref());
+
+    let instance = args.name.as_deref().unwrap_or("default");
+    let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
+    let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
+    let admin_path = endpoint.socket_path(velnor_client::SocketKind::Admin);
+    let _instance_lock = InstanceLock::acquire(&control_path)?;
+    let state_path = args
+        .state_db
+        .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH));
+    let store = Arc::new(velnor_control::store::Store::open(state_path)?);
+    let services =
+        velnor_control::application::ApplicationServices::with_store(Arc::clone(&store), instance)?;
+    let api_state = crate::http::ApiState::from_services_for_instance(&services, instance);
+    let control_listener = OwnedUnixListener::new(
+        crate::http::bind_unix(
+            &control_path,
+            crate::http::CONTROL_SOCKET_MODE,
+            crate::http::CONTROL_GROUP,
+        )?,
+        control_path,
+    )?;
+    let admin_listener = OwnedUnixListener::new(
+        crate::http::bind_unix(
+            &admin_path,
+            crate::http::ADMIN_SOCKET_MODE,
+            crate::http::ADMIN_GROUP,
+        )?,
+        admin_path,
+    )?;
+
+    let mut daemon = Box::pin(dispatch(command));
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    let mut control_shutdown = shutdown.subscribe();
+    let mut admin_shutdown = shutdown.subscribe();
+    let mut control_server = Box::pin(control_listener.serve(
+        crate::http::control_router(api_state.clone()),
+        async move {
+            let _ = control_shutdown.changed().await;
+        },
+    ));
+    let mut admin_server = Box::pin(admin_listener.serve(
+        crate::http::admin_router(api_state),
+        async move {
+            let _ = admin_shutdown.changed().await;
+        },
+    ));
+    let result = tokio::select! {
+        result = &mut daemon => result,
+        result = &mut control_server => result.map_err(anyhow::Error::from).context("control socket server stopped"),
+        result = &mut admin_server => result.map_err(anyhow::Error::from).context("admin socket server stopped"),
+    };
+    let _ = shutdown.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let _ = (&mut control_server).await;
+        let _ = (&mut admin_server).await;
+    })
+    .await;
+    result
+}
+
+/// Owns a bound Unix listener and the pathname that must disappear with it.
+///
+/// Keeping the listener and pathname together closes the partial-startup gap:
+/// dropping this value closes the listener before removing its socket path.
+struct OwnedUnixListener {
+    listener: Option<tokio::net::UnixListener>,
+    path: PathBuf,
+    identity: SocketIdentity,
+}
+
+/// Advisory singleton for one daemon instance. The lock is held for the
+/// complete listener lifetime, so compliant siblings cannot race pathname
+/// cleanup or bind a second control plane for the same instance.
+struct InstanceLock {
+    _file: File,
+}
+
+impl InstanceLock {
+    fn acquire(socket_path: &Path) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let parent = socket_path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "socket must have a parent for the instance lock",
+            )
+        })?;
+        let lock_path = parent.join(".daemon.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o660)
+            .open(lock_path)?;
+        // SAFETY: the descriptor remains open in `InstanceLock` for the
+        // entire daemon lifetime; libc only reads the descriptor and flags.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+impl OwnedUnixListener {
+    fn new(listener: tokio::net::UnixListener, path: PathBuf) -> std::io::Result<Self> {
+        Ok(Self {
+            identity: SocketIdentity::from_listener(&listener)?,
+            listener: Some(listener),
+            path,
+        })
+    }
+
+    async fn serve(
+        mut self,
+        router: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), std::io::Error> {
+        let listener = self
+            .listener
+            .take()
+            .expect("owned Unix listener must be present before serving");
+        crate::http::serve_unix(listener, router, shutdown).await
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketIdentity {
+    fn from_listener(listener: &tokio::net::UnixListener) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `stat` is writable storage and the descriptor is borrowed
+        // from the live listener.
+        if unsafe { libc::fstat(listener.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fstat initialized the structure on success.
+        let stat = unsafe { stat.assume_init() };
+        // `st_dev` is `i32` on macOS and `u64` on Linux: the widening cast
+        // is load-bearing off Linux, so the same-type cast lint does not
+        // apply cross-platform.
+        #[allow(clippy::unnecessary_cast)]
+        Ok(Self {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino,
+        })
+    }
+}
+
+impl Drop for OwnedUnixListener {
+    fn drop(&mut self) {
+        // The listener is dropped before this destructor runs when `serve`
+        // owns it in a local, and directly by field drop otherwise.
+        self.listener.take();
+        cleanup_socket(&self.path, self.identity);
+    }
+}
+
+fn cleanup_socket(path: &Path, expected: SocketIdentity) {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    if std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|metadata| {
+            metadata.file_type().is_socket()
+                && metadata.dev() == expected.device
+                && metadata.ino() == expected.inode
+        })
+    {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
+    fn from(args: DaemonArgs) -> Self {
+        Self {
+            config_dir: args.config_dir,
+            url: args.url,
+            pat: args.pat,
+            name: args.name,
+            labels: args.labels,
+            target_mvp_labels: args.target_mvp_labels,
+            target_mvp_arm_label: args.target_mvp_arm_label,
+            replace: args.replace,
+            pool_id: args.pool_id,
+            pool_name: args.pool_name,
+            routing_policy_file: args.routing_policy_file,
+            dry_run_registration: args.dry_run_registration,
+            slots: args.slots,
+            max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
+            once: args.once,
+            idle_timeout_seconds: args.idle_timeout_seconds,
+            complete_noop: args.complete_noop,
+            execute_scripts: args.execute_scripts,
+            dry_run_jobs: args.dry_run_jobs,
+            dump_job_message: args.dump_job_message,
+            docker_image: args.docker_image,
+            job_cpus: args.job_cpus,
+            job_memory: args.job_memory,
+            trust_scope: args.trust_scope,
+            emergency_reserve_bytes: args.emergency_reserve_bytes,
+            job_peak_bytes: args.job_peak_bytes,
+            node_action_image: args.node_action_image,
+            work_dir: args.work_dir,
+            docker_host_work_dir: args.docker_host_work_dir,
+            skip_preflight: args.skip_preflight,
+            require_docker_socket: args.require_docker_socket,
+        }
+    }
+}
 
 #[derive(Debug, Args)]
 pub struct CacheArgs {
@@ -229,6 +532,18 @@ pub enum StorageCommand {
     Paths,
     /// Print bytes by canonical trust scope and class.
     Status,
+    /// Print canonical storage accounting.
+    Du,
+    /// Execute a reviewed storage GC plan.
+    Gc(CacheGcArgs),
+    /// Print bounded storage history.
+    History,
+    /// Print active storage reservations.
+    Reservations,
+    /// Print active storage leases.
+    Leases,
+    /// Explain current storage pressure.
+    ExplainPressure,
 }
 
 impl From<StorageArgs> for rt::StorageArgs {
@@ -238,6 +553,12 @@ impl From<StorageArgs> for rt::StorageArgs {
             command: match args.command {
                 StorageCommand::Paths => rt::StorageCommand::Paths,
                 StorageCommand::Status => rt::StorageCommand::Status,
+                StorageCommand::Du
+                | StorageCommand::Gc(_)
+                | StorageCommand::History
+                | StorageCommand::Reservations
+                | StorageCommand::Leases
+                | StorageCommand::ExplainPressure => rt::StorageCommand::Status,
             },
         }
     }

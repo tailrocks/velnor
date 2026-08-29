@@ -11,7 +11,7 @@ Rules for every agent working this list:
    criteria.
 2. Never implement in primary context. Each leaf goes through fresh
    investigator -> executor -> verifier -> reviewer subagents on the single
-   campaign branch (`velnor-estate-standard`).
+   campaign branch (`codex/plan-066-operational-history`).
 3. A leaf is DONE only when all gates pass at current HEAD: focused nextest,
    `rtk mise run check`, integration/fixture proof, safety scan, independent
    review, index agreement, commit trailers (`git commit -s`,

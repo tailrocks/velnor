@@ -22,6 +22,9 @@ strip = "symbols"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
+aho-corasick = "1.1.3"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+libc = "0.2.189"
 base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.9"
@@ -35,7 +38,7 @@ reqwest = { version = "0.13.0", default-features = false, features = ["json", "n
 zip = { version = "8", default-features = false, features = ["deflate"] }
 rsa = { version = "0.9.8", features = ["pem"] }
 # bundled: compile SQLite from source so cross/deb release legs stay hermetic.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = { package = "noyalib", version = "0.0.27", features = ["compat-serde-yaml"] }
@@ -49,9 +52,10 @@ time = { version = "0.3.41", features = ["formatting", "parsing"] }
 # Strict, non-regex parsing of mise config/lock TOML for the fail-closed mise
 # policy (crates/velnor-runner/src/mise.rs). Never hand-parse lock TOML.
 toml = "0.9"
-tokio = { version = "1.45.1", features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.45.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 url = "2.5.4"
 uuid = { version = "1.18.1", features = ["v4"] }
+unicode-normalization = "0.1.24"
 regex = "1.11.1"
 tokio-tungstenite = { version = "0.30", features = ["native-tls", "native-tls-vendored"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
