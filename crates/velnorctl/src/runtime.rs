@@ -3,7 +3,7 @@
 //!
 //! These types are the clap parse source. Conversion into
 //! [`velnor_runner::args`] is exhaustive `From`, never a second argv walk.
-//! `daemon` / `release` / `run` are not public `velnorctl` commands.
+//! `daemon` is the service entrypoint; `run` is the workflow-run namespace.
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,112 @@ use clap::{Args, Subcommand};
 use velnor_runner::args as rt;
 
 pub use velnor_runner::scaffold::{dispatch, enforce_admission, init_telemetry, telemetry_dir};
+
+/// Service daemon arguments. Runtime ownership moves to the lifecycle engine
+/// during Plan 079; this typed boundary keeps one parser and one conversion.
+#[derive(Debug, Clone, Args)]
+pub struct DaemonArgs {
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub url: Option<String>,
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub pat: Option<String>,
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub labels: Vec<String>,
+    #[arg(long)]
+    pub target_mvp_labels: bool,
+    #[arg(long)]
+    pub target_mvp_arm_label: bool,
+    #[arg(long)]
+    pub replace: bool,
+    #[arg(long)]
+    pub pool_id: Option<i64>,
+    #[arg(long)]
+    pub pool_name: Option<String>,
+    #[arg(long)]
+    pub routing_policy_file: Option<PathBuf>,
+    #[arg(long)]
+    pub dry_run_registration: bool,
+    #[arg(long, default_value_t = 1)]
+    pub slots: usize,
+    #[arg(long)]
+    pub max_idle_slot_age_seconds: Option<u64>,
+    #[arg(long)]
+    pub once: bool,
+    #[arg(long)]
+    pub idle_timeout_seconds: Option<u64>,
+    #[arg(long)]
+    pub complete_noop: bool,
+    #[arg(long)]
+    pub execute_scripts: bool,
+    #[arg(long)]
+    pub dry_run_jobs: bool,
+    #[arg(long)]
+    pub dump_job_message: Option<PathBuf>,
+    #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
+    pub docker_image: String,
+    #[arg(long, default_value = "2")]
+    pub job_cpus: String,
+    #[arg(long, default_value = "4g")]
+    pub job_memory: String,
+    #[arg(long, default_value = "public")]
+    pub trust_scope: String,
+    #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024_u64)]
+    pub emergency_reserve_bytes: u64,
+    #[arg(long, default_value_t = 4 * 1024 * 1024 * 1024_u64)]
+    pub job_peak_bytes: u64,
+    #[arg(long, default_value = "velnor/node-actions:latest")]
+    pub node_action_image: String,
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub skip_preflight: bool,
+    #[arg(long)]
+    pub require_docker_socket: bool,
+}
+
+impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
+    fn from(args: DaemonArgs) -> Self {
+        Self {
+            config_dir: args.config_dir,
+            url: args.url,
+            pat: args.pat,
+            name: args.name,
+            labels: args.labels,
+            target_mvp_labels: args.target_mvp_labels,
+            target_mvp_arm_label: args.target_mvp_arm_label,
+            replace: args.replace,
+            pool_id: args.pool_id,
+            pool_name: args.pool_name,
+            routing_policy_file: args.routing_policy_file,
+            dry_run_registration: args.dry_run_registration,
+            slots: args.slots,
+            max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
+            once: args.once,
+            idle_timeout_seconds: args.idle_timeout_seconds,
+            complete_noop: args.complete_noop,
+            execute_scripts: args.execute_scripts,
+            dry_run_jobs: args.dry_run_jobs,
+            dump_job_message: args.dump_job_message,
+            docker_image: args.docker_image,
+            job_cpus: args.job_cpus,
+            job_memory: args.job_memory,
+            trust_scope: args.trust_scope,
+            emergency_reserve_bytes: args.emergency_reserve_bytes,
+            job_peak_bytes: args.job_peak_bytes,
+            node_action_image: args.node_action_image,
+            work_dir: args.work_dir,
+            docker_host_work_dir: args.docker_host_work_dir,
+            skip_preflight: args.skip_preflight,
+            require_docker_socket: args.require_docker_socket,
+        }
+    }
+}
 
 #[derive(Debug, Args)]
 pub struct CacheArgs {
@@ -229,6 +335,18 @@ pub enum StorageCommand {
     Paths,
     /// Print bytes by canonical trust scope and class.
     Status,
+    /// Print canonical storage accounting.
+    Du,
+    /// Execute a reviewed storage GC plan.
+    Gc(CacheGcArgs),
+    /// Print bounded storage history.
+    History,
+    /// Print active storage reservations.
+    Reservations,
+    /// Print active storage leases.
+    Leases,
+    /// Explain current storage pressure.
+    ExplainPressure,
 }
 
 impl From<StorageArgs> for rt::StorageArgs {
@@ -238,6 +356,12 @@ impl From<StorageArgs> for rt::StorageArgs {
             command: match args.command {
                 StorageCommand::Paths => rt::StorageCommand::Paths,
                 StorageCommand::Status => rt::StorageCommand::Status,
+                StorageCommand::Du
+                | StorageCommand::Gc(_)
+                | StorageCommand::History
+                | StorageCommand::Reservations
+                | StorageCommand::Leases
+                | StorageCommand::ExplainPressure => rt::StorageCommand::Status,
             },
         }
     }

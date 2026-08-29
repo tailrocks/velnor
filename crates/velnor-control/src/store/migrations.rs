@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 5;
+pub const LATEST_SCHEMA_VERSION: u32 = 7;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -130,6 +130,50 @@ const SCHEMA_V5: &str = "
 ALTER TABLE jobs ADD COLUMN slot_name TEXT;
 ";
 
+/// Durable per-instance lifecycle intent and idempotency ledger.
+const SCHEMA_V6: &str = "
+ALTER TABLE instances ADD COLUMN desired_state TEXT NOT NULL DEFAULT 'ready';
+ALTER TABLE instances ADD COLUMN observed_state TEXT NOT NULL DEFAULT 'ready';
+ALTER TABLE instances ADD COLUMN resource_version INTEGER NOT NULL DEFAULT 1;
+CREATE TABLE IF NOT EXISTS lifecycle_operations (
+    instance_slug TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    desired_state TEXT NOT NULL,
+    resource_version INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (instance_slug, idempotency_key),
+    UNIQUE (operation_id)
+);
+";
+
+/// Persist dynamic stable-slot intent alongside lifecycle state.
+const SCHEMA_V7: &str = "
+ALTER TABLE instances ADD COLUMN desired_slots INTEGER;
+ALTER TABLE lifecycle_operations ADD COLUMN desired_slots INTEGER;
+";
+
+const SCHEMA_V6_REPLAY: &str = "
+CREATE TABLE IF NOT EXISTS lifecycle_operations (
+    instance_slug TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    desired_state TEXT NOT NULL,
+    resource_version INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (instance_slug, idempotency_key),
+    UNIQUE (operation_id)
+);
+";
+
 /// Bounded retention state (Plan 066 step 5): the singleton row records the
 /// last completed prune so accounting can publish it without re-deriving.
 const SCHEMA_V3: &str = "
@@ -168,6 +212,16 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "job-slot-identity",
         sql: SCHEMA_V5,
+    },
+    Migration {
+        version: 6,
+        name: "durable-lifecycle-intent",
+        sql: SCHEMA_V6,
+    },
+    Migration {
+        version: 7,
+        name: "durable-scale-intent",
+        sql: SCHEMA_V7,
     },
 ];
 
@@ -341,10 +395,22 @@ pub(crate) fn apply_pending(
         // record v2 without that DDL and let appended v4 perform the safe
         // non-unique repair. No rows are rewritten or discarded.
         let slot_column_exists = migration.version == 5 && has_slot_column(&transaction)?;
+        let lifecycle_columns_exist =
+            migration.version == 6 && has_column(&transaction, "instances", "desired_state")?;
+        let scale_columns_exist = migration.version == 7
+            && has_column(&transaction, "instances", "desired_slots")?
+            && has_column(&transaction, "lifecycle_operations", "desired_slots")?;
         if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
             && !slot_column_exists
         {
-            transaction.execute_batch(migration.sql)?;
+            let sql = if lifecycle_columns_exist {
+                SCHEMA_V6_REPLAY
+            } else if scale_columns_exist {
+                ""
+            } else {
+                migration.sql
+            };
+            transaction.execute_batch(sql)?;
         }
         if let Some(hook) = hook {
             hook(migration.version)?;
@@ -384,6 +450,11 @@ fn has_slot_column(conn: &rusqlite::Transaction<'_>) -> StoreResult<bool> {
         [],
         |row| row.get(0),
     )?)
+}
+
+fn has_column(conn: &rusqlite::Transaction<'_>, table: &str, column: &str) -> StoreResult<bool> {
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)");
+    Ok(conn.query_row(&sql, [column], |row| row.get(0))?)
 }
 
 #[cfg(test)]

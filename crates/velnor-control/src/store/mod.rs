@@ -24,8 +24,8 @@ pub mod retention;
 pub use error::{StoreError, StoreResult};
 pub use migrations::LATEST_SCHEMA_VERSION;
 pub use records::{
-    EventRow, InstanceRow, JobRow, JobSummary, ReconciliationRow, RunnerRegistrationRow, SlotRow,
-    Transition,
+    EventRow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow, LifecycleOperationRequest,
+    LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow, SlotRow, Transition,
 };
 pub use retention::{PrunePhase, PruneReport, RetentionBudget, StoreAccounting};
 

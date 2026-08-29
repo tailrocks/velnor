@@ -15,11 +15,14 @@ name = "velnorctl"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
+libc.workspace = true
 clap = { workspace = true }
 clap_complete = { workspace = true }
 clap_mangen = { workspace = true }
 anyhow.workspace = true
 serde_json = { workspace = true }
+serde.workspace = true
 tokio = { workspace = true }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 velnor-control = { path = "../velnor-control", version = "0.1.0" }

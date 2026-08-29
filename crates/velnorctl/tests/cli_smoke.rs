@@ -98,17 +98,22 @@ fn cli_migrated_legacy_names_are_first_class_subcommands() {
 fn cli_run_worker_is_not_a_public_command() {
     // C075: the single-worker mode folds into `daemon --once` service
     // plumbing; `run` stays reserved for the future workflow-run resource.
-    for name in ["daemon", "release"] {
-        let output = run(&[name, "--help"]);
-        assert_eq!(code(&output), 2, "{name}");
-        assert!(
-            text(&output.stderr).contains("unrecognized subcommand"),
-            "{name}"
-        );
-    }
+    let output = run(&["daemon", "--help"]);
+    assert_eq!(code(&output), 0, "daemon");
+    assert!(text(&output.stderr).is_empty(), "daemon");
+    assert!(text(&output.stdout).contains("Usage:"), "daemon");
+
+    let name = "release";
+    let output = run(&[name, "--help"]);
+    assert_eq!(code(&output), 2, "{name}");
+    assert!(
+        text(&output.stderr).contains("unrecognized subcommand"),
+        "{name}"
+    );
     let output = run(&["run", "--help"]);
-    assert_eq!(code(&output), 2);
-    assert!(text(&output.stderr).contains("unrecognized subcommand"));
+    assert_eq!(code(&output), 0);
+    assert!(text(&output.stderr).is_empty());
+    assert!(text(&output.stdout).contains("Usage: velnorctl"));
 }
 
 #[test]

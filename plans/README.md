@@ -18,6 +18,12 @@ Velnor unified CI contract (2026-08-09):
 
 Current execution follows the marked contract and the tracked active goal graph.
 
+Campaign delivery rule: every active plan and retained command task is
+implemented on the single campaign branch
+`codex/plan-066-operational-history` and delivered in one pull request. No
+per-plan or per-task branch/PR exists; older coordination entries are
+historical.
+
 Operator execution selection is `[execution] backend = "docker" | "microvm"`
 with no fallback. Build L3 (Plans 012 and 017) uses Firecracker as the
 production microVM: Linux KVM, started through its HTTP API and jailer,

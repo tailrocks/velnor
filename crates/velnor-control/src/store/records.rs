@@ -4,7 +4,7 @@
 //! the atomic current-state-plus-event seam. Events are append-only: no
 //! update or delete helper exists for them.
 
-use rusqlite::{params, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction};
 use velnor_model::{
     transition_target, EventReason, ExitClass, InfrastructureCategory, InvalidJobSummaryField,
     JobConclusion, JobPhase, JobState, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
@@ -127,6 +127,47 @@ pub struct ReconciliationRow {
     pub detail: Option<String>,
 }
 
+/// Durable instance desired/observed lifecycle projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleInstanceRow {
+    pub instance_slug: String,
+    pub desired_state: String,
+    pub observed_state: String,
+    pub resource_version: u64,
+    pub desired_slots: Option<u32>,
+}
+
+/// Durable accepted lifecycle intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleOperationRow {
+    pub instance_slug: String,
+    pub idempotency_key: String,
+    pub operation_id: String,
+    pub kind: String,
+    pub target: String,
+    pub reason: String,
+    pub desired_state: String,
+    pub desired_slots: Option<u32>,
+    pub resource_version: u64,
+    pub phase: String,
+    pub created_at: Timestamp,
+}
+
+/// Input for one atomic lifecycle intent write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleOperationRequest {
+    pub instance_slug: String,
+    pub kind: String,
+    pub target: String,
+    pub reason: String,
+    pub idempotency_key: String,
+    pub desired_state: String,
+    pub desired_slots: Option<u32>,
+    pub expected_version: Option<u64>,
+    pub operation_id: String,
+    pub created_at: Timestamp,
+}
+
 /// Read-back projection of one stored job summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSummary {
@@ -177,6 +218,138 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Read the durable lifecycle projection for one instance.
+    pub fn lifecycle_instance(
+        &self,
+        instance_slug: &str,
+    ) -> StoreResult<Option<LifecycleInstanceRow>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT instance_slug, desired_state, observed_state, resource_version, desired_slots
+             FROM instances WHERE instance_slug = ?1",
+            [instance_slug],
+            |row| {
+                let version = row.get::<_, i64>(3)?;
+                Ok(LifecycleInstanceRow {
+                    instance_slug: row.get(0)?,
+                    desired_state: row.get(1)?,
+                    observed_state: row.get(2)?,
+                    resource_version: version
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, version))?,
+                    desired_slots: row
+                        .get::<_, Option<i64>>(4)?
+                        .map(|slots| slots.try_into())
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Atomically persist lifecycle intent, desired state, and idempotency.
+    ///
+    /// Returns the prior operation with `false` for a replay, or the newly
+    /// committed operation with `true` for a fresh request.
+    pub fn record_lifecycle_operation(
+        &self,
+        request: &LifecycleOperationRequest,
+    ) -> StoreResult<(LifecycleOperationRow, bool)> {
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction()?;
+        if let Some(existing) = lifecycle_operation_query(
+            &transaction,
+            &request.instance_slug,
+            &request.idempotency_key,
+        )? {
+            if existing.kind != request.kind
+                || existing.target != request.target
+                || existing.reason != request.reason
+                || existing.desired_state != request.desired_state
+                || existing.desired_slots != request.desired_slots
+            {
+                return Err(StoreError::new(
+                    ExitClass::Conflict,
+                    "store.lifecycle.idempotency_conflict",
+                ));
+            }
+            transaction.commit()?;
+            return Ok((existing, false));
+        }
+        let current_version = transaction
+            .query_row(
+                "SELECT resource_version FROM instances WHERE instance_slug = ?1",
+                [&request.instance_slug],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map_or(1_u64, |version| version.try_into().unwrap_or(0));
+        if request
+            .expected_version
+            .is_some_and(|version| version != current_version)
+        {
+            return Err(StoreError::new(
+                ExitClass::Conflict,
+                "store.lifecycle.version_conflict",
+            ));
+        }
+        let next_version = current_version.saturating_add(1);
+        transaction.execute(
+            "INSERT INTO instances (instance_slug, host, daemon_version, slots_configured, slots_busy,
+                                    updated_at, desired_state, observed_state, resource_version, desired_slots)
+             VALUES (?1, 'unknown', '', 0, 0, ?2, ?3, 'ready', ?4, ?5)
+             ON CONFLICT(instance_slug) DO UPDATE SET
+                 desired_state = excluded.desired_state,
+                 resource_version = excluded.resource_version,
+                 desired_slots = COALESCE(excluded.desired_slots, instances.desired_slots),
+                 updated_at = excluded.updated_at",
+            params![
+                request.instance_slug,
+                rfc3339(request.created_at),
+                request.desired_state,
+                next_version as i64,
+                request.desired_slots.map(i64::from),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO lifecycle_operations
+             (instance_slug, idempotency_key, operation_id, kind, target, reason,
+              desired_state, desired_slots, resource_version, phase, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'accepted', ?10)",
+            params![
+                request.instance_slug,
+                request.idempotency_key,
+                request.operation_id,
+                request.kind,
+                request.target,
+                request.reason,
+                request.desired_state,
+                request.desired_slots.map(i64::from),
+                next_version as i64,
+                rfc3339(request.created_at),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok((
+            LifecycleOperationRow {
+                instance_slug: request.instance_slug.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                operation_id: request.operation_id.clone(),
+                kind: request.kind.clone(),
+                target: request.target.clone(),
+                reason: request.reason.clone(),
+                desired_state: request.desired_state.clone(),
+                desired_slots: request.desired_slots,
+                resource_version: next_version,
+                phase: "accepted".to_owned(),
+                created_at: request.created_at,
+            },
+            true,
+        ))
     }
 
     /// Insert or refresh current slot state.
@@ -567,6 +740,47 @@ impl Store {
         )?;
         Ok(count)
     }
+}
+
+fn lifecycle_operation_query(
+    transaction: &Transaction<'_>,
+    instance_slug: &str,
+    idempotency_key: &str,
+) -> StoreResult<Option<LifecycleOperationRow>> {
+    transaction
+        .query_row(
+            "SELECT instance_slug, idempotency_key, operation_id, kind, target, reason,
+                    desired_state, desired_slots, resource_version, phase, created_at
+             FROM lifecycle_operations
+             WHERE instance_slug = ?1 AND idempotency_key = ?2",
+            params![instance_slug, idempotency_key],
+            |row| {
+                let version = row.get::<_, i64>(8)?;
+                let created_at = Timestamp::parse(&row.get::<_, String>(10)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok(LifecycleOperationRow {
+                    instance_slug: row.get(0)?,
+                    idempotency_key: row.get(1)?,
+                    operation_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    target: row.get(4)?,
+                    reason: row.get(5)?,
+                    desired_state: row.get(6)?,
+                    desired_slots: row
+                        .get::<_, Option<i64>>(7)?
+                        .map(|slots| slots.try_into())
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    resource_version: version
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(8, version))?,
+                    phase: row.get(9)?,
+                    created_at,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> StoreResult<()> {
