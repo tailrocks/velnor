@@ -24,7 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{TelemetryEvent, Timestamp};
+use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
 
 use crate::{
     action::{
@@ -2245,7 +2245,10 @@ pub(crate) async fn run_daemon_slot(
     config_base: PathBuf,
     slot_index: usize,
     slots: usize,
+    slot_id: SlotId,
+    generation: Generation,
 ) -> Result<()> {
+    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation)?;
     let storage_mode = daemon_storage_mode(&args);
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
@@ -2268,7 +2271,15 @@ pub(crate) async fn run_daemon_slot(
             daemon_forensic_log(&config_base, &note);
             // Reuses the failed-slot cleanup: it deletes this slot's GitHub
             // registration by id and clears local state — exactly a drain.
-            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+            cleanup_failed_daemon_slot(
+                &args,
+                &config_base,
+                slot_index,
+                slots,
+                cycle,
+                &durable_slot,
+            )
+            .await;
             return Ok(());
         }
         if let Some(note) = disk_space_problem(&config_base, args.work_dir.as_deref()) {
@@ -2317,13 +2328,29 @@ pub(crate) async fn run_daemon_slot(
         }
         if let Err(error) = run_result {
             if args.once {
-                cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+                cleanup_failed_daemon_slot(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
                 return Err(error);
             }
             let error_detail = sanitized_retry_error(&error);
             if registration_was_deleted(&error) {
                 local_failure_streak = 0;
-                cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+                cleanup_failed_daemon_slot(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
                 eprintln!(
                     "daemon slot-{slot_index} cycle {cycle} registration disappeared; creating a fresh JIT config: {error_detail}"
                 );
@@ -2333,8 +2360,15 @@ pub(crate) async fn run_daemon_slot(
                         "slot-{slot_index} cycle {cycle} registration disappeared; fresh JIT config: {error_detail}"
                     ),
                 );
-                reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
-                    .await;
+                reconfigure_daemon_slot_forever(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
                 cycle += 1;
                 if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
                     continue;
@@ -2355,8 +2389,15 @@ pub(crate) async fn run_daemon_slot(
                         "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error_detail}"
                     ),
                 );
-                reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
-                    .await;
+                reconfigure_daemon_slot_forever(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
                 cycle += 1;
                 continue;
             }
@@ -2382,7 +2423,15 @@ pub(crate) async fn run_daemon_slot(
                 continue;
             }
             local_failure_streak = 0;
-            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+            cleanup_failed_daemon_slot(
+                &args,
+                &config_base,
+                slot_index,
+                slots,
+                cycle,
+                &durable_slot,
+            )
+            .await;
             eprintln!(
                 "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error_detail}"
             );
@@ -2390,7 +2439,15 @@ pub(crate) async fn run_daemon_slot(
                 &config_base,
                 &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
             );
-            reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
+            reconfigure_daemon_slot_forever(
+                &args,
+                &config_base,
+                slot_index,
+                slots,
+                cycle,
+                &durable_slot,
+            )
+            .await;
             cycle += 1;
             if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
                 continue;
@@ -2406,14 +2463,23 @@ pub(crate) async fn run_daemon_slot(
                 format!("slot-{slot_index} cycle {cycle} finished during drain: deregistering");
             println!("{note}");
             daemon_forensic_log(&config_base, &note);
-            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+            cleanup_failed_daemon_slot(
+                &args,
+                &config_base,
+                slot_index,
+                slots,
+                cycle,
+                &durable_slot,
+            )
+            .await;
             return Ok(());
         }
         daemon_forensic_log(
             &config_base,
             &format!("slot-{slot_index} cycle {cycle} completed cleanly; recycling JIT config"),
         );
-        if let Err(error) = recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle).await
+        if let Err(error) =
+            recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle, &durable_slot).await
         {
             let error_detail = sanitized_retry_error(&error);
             eprintln!(
@@ -2423,10 +2489,73 @@ pub(crate) async fn run_daemon_slot(
                 &config_base,
                 &format!("slot-{slot_index} cycle {cycle} recycle failed: {error_detail}"),
             );
-            reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
+            reconfigure_daemon_slot_forever(
+                &args,
+                &config_base,
+                slot_index,
+                slots,
+                cycle,
+                &durable_slot,
+            )
+            .await;
         }
         cycle += 1;
     }
+}
+
+#[derive(Debug, Clone)]
+struct DurableSlotLifecycle {
+    slot_id: SlotId,
+    slot_index: u32,
+    generation: Generation,
+}
+
+impl DurableSlotLifecycle {
+    fn new(slot_id: SlotId, one_based_index: usize, generation: Generation) -> Result<Self> {
+        let zero_based_index = one_based_index.checked_sub(1).ok_or_else(|| {
+            anyhow::anyhow!("durable slot index must be one-based at the runner boundary")
+        })?;
+        let slot_index = u32::try_from(zero_based_index)
+            .context("durable slot index exceeds the operational-store range")?;
+        Ok(Self {
+            slot_id,
+            slot_index,
+            generation,
+        })
+    }
+
+    fn transition(&self, cycle: u64, target: SlotPhase, message: impl Into<String>) -> bool {
+        let Some(sequence) = daemon_slot_transition_sequence(cycle, target) else {
+            eprintln!(
+                "forensics.ops event=slot-transition-rejected reason=invalid-boundary-sequence slot={} generation={} cycle={} phase={}",
+                self.slot_id.0,
+                self.generation.0,
+                cycle,
+                target.as_str()
+            );
+            return false;
+        };
+        crate::ops::global().is_some_and(|sink| {
+            sink.transition_slot(
+                &self.slot_id,
+                self.slot_index,
+                self.generation,
+                sequence,
+                target,
+                Some(message.into()),
+            )
+        })
+    }
+}
+
+fn daemon_slot_transition_sequence(cycle: u64, target: SlotPhase) -> Option<u64> {
+    let offset = match target {
+        SlotPhase::Teardown => 1,
+        SlotPhase::Recycling => 2,
+        SlotPhase::Idle => 3,
+        _ => return None,
+    };
+    cycle.checked_sub(1)?.checked_mul(3)?.checked_add(offset)
 }
 
 /// Re-create this slot's JIT config, retrying forever with capped backoff.
@@ -2439,12 +2568,25 @@ async fn reconfigure_daemon_slot_forever(
     slot_index: usize,
     slots: usize,
     cycle: u64,
+    durable_slot: &DurableSlotLifecycle,
 ) {
+    let _ = durable_slot.transition(
+        cycle,
+        SlotPhase::Recycling,
+        format!("reconfiguring JIT identity after cycle {cycle}"),
+    );
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
         match retry_daemon_slot_jit_config(args, config_base, slot_index, slots, cycle).await {
-            Ok(()) => return,
+            Ok(()) => {
+                let _ = durable_slot.transition(
+                    cycle,
+                    SlotPhase::Idle,
+                    format!("JIT identity ready after cycle {cycle}"),
+                );
+                return;
+            }
             Err(error) => {
                 let delay = slot_retry_delay_for_error(attempt, slot_index, &error);
                 let error_detail = sanitized_retry_error(&error);
@@ -2540,7 +2682,13 @@ async fn recycle_daemon_slot(
     slot_index: usize,
     slots: usize,
     cycle: u64,
+    durable_slot: &DurableSlotLifecycle,
 ) -> Result<()> {
+    let _ = durable_slot.transition(
+        cycle,
+        SlotPhase::Teardown,
+        format!("tearing down consumed JIT identity after cycle {cycle}"),
+    );
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
     // A JIT runner is server-side ephemeral: GitHub automatically
     // deregisters it after its single job. Only discard the consumed local
@@ -2562,18 +2710,21 @@ async fn recycle_daemon_slot(
         config::promote_prepared(&slot_dir)
             .with_context(|| format!("promote successor JIT config for daemon slot-{slot_index}"))?
     };
+    let _ = durable_slot.transition(
+        cycle,
+        SlotPhase::Recycling,
+        format!("recycling JIT identity after cycle {cycle}"),
+    );
     if promoted {
         println!(
             "Promoted prewarmed successor JIT config for {} after cycle {cycle}.",
             daemon_slot_name(slot_index)
         );
-        if let Some(sink) = crate::ops::global() {
-            sink.emit(
-                velnor_model::EventReason::SlotStateChanged,
-                &daemon_slot_name(slot_index),
-                Some(format!("promoted prewarmed JIT config after cycle {cycle}")),
-            );
-        }
+        let _ = durable_slot.transition(
+            cycle,
+            SlotPhase::Idle,
+            format!("promoted prewarmed JIT identity after cycle {cycle}"),
+        );
         return Ok(());
     }
     println!(
@@ -2588,13 +2739,11 @@ async fn recycle_daemon_slot(
         "forensics.lifecycle event=next-jit-ready timestamp={}",
         unix_now_iso8601()
     );
-    if let Some(sink) = crate::ops::global() {
-        sink.emit(
-            velnor_model::EventReason::SlotStateChanged,
-            &daemon_slot_name(slot_index),
-            Some(format!("recycled jit config after cycle {cycle}")),
-        );
-    }
+    let _ = durable_slot.transition(
+        cycle,
+        SlotPhase::Idle,
+        format!("recycled JIT identity after cycle {cycle}"),
+    );
     Ok(())
 }
 
@@ -2644,7 +2793,13 @@ async fn cleanup_failed_daemon_slot(
     slot_index: usize,
     slots: usize,
     cycle: u64,
+    durable_slot: &DurableSlotLifecycle,
 ) {
+    let _ = durable_slot.transition(
+        cycle,
+        SlotPhase::Teardown,
+        format!("cleaning failed JIT identity after cycle {cycle}"),
+    );
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
     let slot_cleanup = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await;
     if let Err(error) = &slot_cleanup {
@@ -2662,28 +2817,30 @@ async fn cleanup_failed_daemon_slot(
             sanitized_retry_error(error)
         );
     }
-    if let Some(sink) = crate::ops::global() {
-        let (reason, detail) = daemon_slot_cleanup_event(
-            slot_index,
-            cycle,
-            slot_cleanup.is_ok(),
-            successor_cleanup.is_ok(),
-        );
-        sink.emit(reason, &daemon_slot_name(slot_index), Some(detail));
+    if let Some(detail) = daemon_slot_cleanup_degradation(
+        slot_index,
+        cycle,
+        slot_cleanup.is_ok(),
+        successor_cleanup.is_ok(),
+    ) {
+        if let Some(sink) = crate::ops::global() {
+            sink.emit(
+                velnor_model::EventReason::ReadinessDegraded,
+                &durable_slot.slot_id.0,
+                Some(detail),
+            );
+        }
     }
 }
 
-fn daemon_slot_cleanup_event(
+fn daemon_slot_cleanup_degradation(
     slot_index: usize,
     cycle: u64,
     slot_succeeded: bool,
     successor_succeeded: bool,
-) -> (velnor_model::EventReason, String) {
+) -> Option<String> {
     if slot_succeeded && successor_succeeded {
-        return (
-            velnor_model::EventReason::SlotStateChanged,
-            format!("cleaned failed slot after cycle {cycle}"),
-        );
+        return None;
     }
 
     let failed_parts = match (slot_succeeded, successor_succeeded) {
@@ -2692,12 +2849,9 @@ fn daemon_slot_cleanup_event(
         (true, false) => "successor cleanup failed",
         (true, true) => unreachable!("successful cleanup handled above"),
     };
-    (
-        velnor_model::EventReason::ReadinessDegraded,
-        format!(
-            "daemon slot-{slot_index} cleanup degraded after cycle {cycle}: {failed_parts}; local recovery files preserved"
-        ),
-    )
+    Some(format!(
+        "daemon slot-{slot_index} cleanup degraded after cycle {cycle}: {failed_parts}; local recovery files preserved"
+    ))
 }
 
 async fn cleanup_daemon_slot_successor_jit_config(
@@ -6581,7 +6735,7 @@ fn execute_microvm_script_job(
         node_action_image,
         "microvm".into(),
         trust_scope,
-    );
+    )?;
     if container.mount_docker_socket {
         return Err(microvm_capability_error(
             "execution.container.mount_docker_socket",
@@ -7040,7 +7194,7 @@ fn execute_script_job_inner(
         node_action_image,
         daemon_id,
         trust_scope,
-    );
+    )?;
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -10613,7 +10767,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let cache_root = layout
         .as_ref()
         .map(|layout| layout.cache_root.clone())
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| run_root.join("cache"));
     let free = free_space_bytes(&cache_root).unwrap_or(0);
     let (reservation_count, reserved_bytes) =
         crate::capacity::reservation_summary(&run_root).unwrap_or((0, 0));
@@ -10622,6 +10776,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .unwrap_or(0);
     let (cache_logical, cache_physical) =
         crate::cache::accounting_summary(&cache_root).unwrap_or((0, 0));
+    probe_compiler_cache(&cache_root, &args.name)?;
     let client = RegistrationClient::new()?;
     let runners = client
         .list_runners(&scope, pat)
@@ -10777,6 +10932,51 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn probe_compiler_cache(cache_root: &Path, owner: &str) -> Result<()> {
+    use velnor_action_model::TrustClass;
+    use velnor_cache_service::{
+        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
+        KACHE_VERSION, SCCACHE_VERSION,
+    };
+
+    println!(
+        "compiler-cache: policy=auto backend=kache version={KACHE_VERSION}; rollback=sccache version={SCCACHE_VERSION}"
+    );
+    let mut failures = Vec::new();
+    for trust_class in [
+        TrustClass::Untrusted,
+        TrustClass::Trusted,
+        TrustClass::Release,
+    ] {
+        let mut config = CompilerCacheConfig::new(cache_root, owner);
+        config.trust_class = trust_class;
+        config.policy = CompilerCachePolicy::Auto;
+        match CompilerCacheService::open_production(config, WrapperDeclaration::default())
+            .and_then(|service| service.probe_restore_path())
+        {
+            Ok(probe) if probe.writable && probe.regular_round_trip => println!(
+                "compiler-cache: trust={trust_class:?} path={} writable=true round_trip=true",
+                probe.path.display()
+            ),
+            Ok(probe) => failures.push(format!(
+                "{trust_class:?}: path={} writable={} round_trip={}",
+                probe.path.display(),
+                probe.writable,
+                probe.regular_round_trip
+            )),
+            Err(error) => failures.push(format!("{trust_class:?}: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "compiler-cache restore probe failed: {}; refusing degraded cache startup",
+            failures.join("; ")
+        )
+    }
 }
 
 pub async fn status(args: StatusArgs) -> Result<()> {
@@ -11393,7 +11593,7 @@ mod tests {
         assert!(text.contains("unsupported capability"), "{text}");
         assert!(text.contains("execution.context_data"), "{text}");
         assert!(text.contains("received '<empty>'"), "{text}");
-        assert!(text.contains("manifest version 9"), "{text}");
+        assert!(text.contains("manifest version 10"), "{text}");
     }
 
     #[test]
@@ -12650,16 +12850,31 @@ jobs:
 
     #[test]
     fn failed_daemon_slot_cleanup_selects_degraded_event() {
-        let (reason, detail) = daemon_slot_cleanup_event(1, 7, true, false);
+        let detail = daemon_slot_cleanup_degradation(1, 7, true, false).unwrap();
 
-        assert_eq!(reason, velnor_model::EventReason::ReadinessDegraded);
         assert!(detail.contains("successor cleanup failed"));
         assert!(detail.contains("local recovery files preserved"));
         assert!(!detail.contains("cleaned failed slot"));
 
-        let (reason, detail) = daemon_slot_cleanup_event(1, 7, true, true);
-        assert_eq!(reason, velnor_model::EventReason::SlotStateChanged);
-        assert_eq!(detail, "cleaned failed slot after cycle 7");
+        assert!(daemon_slot_cleanup_degradation(1, 7, true, true).is_none());
+    }
+
+    #[test]
+    fn daemon_slot_boundary_sequences_are_monotonic_and_typed() {
+        assert_eq!(
+            daemon_slot_transition_sequence(1, SlotPhase::Teardown),
+            Some(1)
+        );
+        assert_eq!(
+            daemon_slot_transition_sequence(1, SlotPhase::Recycling),
+            Some(2)
+        );
+        assert_eq!(daemon_slot_transition_sequence(1, SlotPhase::Idle), Some(3));
+        assert_eq!(
+            daemon_slot_transition_sequence(2, SlotPhase::Teardown),
+            Some(4)
+        );
+        assert_eq!(daemon_slot_transition_sequence(1, SlotPhase::Running), None);
     }
 
     #[test]
@@ -16435,7 +16650,7 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Off,
+            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
         }
     }
 

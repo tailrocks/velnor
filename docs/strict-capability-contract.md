@@ -166,7 +166,7 @@ steps:
   - name: Set up local Kache
     uses: kunobi-ninja/kache-action@49398d37113c616fdb61be434cb497e3c2c8f3e6 # v1
     with:
-      version: v0.10.0
+      version: v0.14.2
       github-cache: "false"
       cache-executables: "false"
       pr-comment: "false"
@@ -200,8 +200,9 @@ revocation. Neither the private key nor token is written to logs.
 
 ## Standard estate use
 
-Production workflows select one backend and contain one setup action. Sccache
-remains the initial default because it is proven. A comparison fixture and small
+Production workflows select one backend and contain one setup action. The
+daemon policy resolves `auto` to Kache; sccache remains available only as the
+explicit comparison/rollback backend. A comparison fixture and small
 representative canary use literal `off`, `sccache`, and `kache` jobs with two
 separately pinned conditional action steps; both never run in one job. Fixture
 backend-selection jobs and dual-lane proof land through plan 041.

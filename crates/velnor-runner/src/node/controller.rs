@@ -1176,7 +1176,7 @@ fn spawn_ready_waiters(
             jobs,
             &format!("wait-{}", slot.slot_id.0),
             slot.generation.0,
-            Some(&slot.slot_id.0),
+            Some(&slot.slot_id),
         )?;
     }
     Ok(())
@@ -1498,24 +1498,29 @@ fn maybe_spawn_job(
     jobs: &mut HashMap<String, Child>,
     job_id: &str,
     generation: u64,
-    slot_key: Option<&str>,
+    slot_id: Option<&SlotId>,
 ) -> anyhow::Result<()> {
-    let key = slot_key
-        .map(ToOwned::to_owned)
+    let generation = Generation(generation);
+    let slot_id = slot_id
+        .cloned()
         .or_else(|| {
             journal.materialized_state().ok().and_then(|state| {
                 state
                     .jobs
                     .into_iter()
-                    .find(|job| job.job_id.0 == job_id)
-                    .map(|job| job.slot_id.0)
+                    .find(|job| job.job_id.0 == job_id && job.generation == generation)
+                    .map(|job| job.slot_id)
             })
         })
-        .unwrap_or_else(|| job_id.to_owned());
+        .ok_or_else(|| {
+            anyhow::anyhow!("cannot spawn worker {job_id} without generation-owned slot identity")
+        })?;
+    let key = slot_id.0.clone();
     if jobs.contains_key(&key) {
         return Ok(());
     }
-    if cleanup::read_owned_pid(&args.state_dir, job_id, generation).is_some_and(prove::pid_is_alive)
+    if cleanup::read_owned_pid(&args.state_dir, job_id, generation.0)
+        .is_some_and(prove::pid_is_alive)
     {
         return Ok(());
     }
@@ -1528,17 +1533,20 @@ fn maybe_spawn_job(
         .arg("--job-id")
         .arg(job_id)
         .arg("--generation")
-        .arg(generation.to_string())
+        .arg(generation.0.to_string())
         .arg("--slot-index")
         .arg(slot_index.to_string())
+        .arg("--slot-id")
+        .arg(&slot_id.0)
         .arg("--scope")
         .arg(&args.scope)
         .spawn()?;
-    if let Err(error) = cleanup::write_owned_pid(&args.state_dir, job_id, generation, child.id()) {
+    if let Err(error) = cleanup::write_owned_pid(&args.state_dir, job_id, generation.0, child.id())
+    {
         let mut child = child;
         let kill_result = child.kill();
         let wait_result = child.wait();
-        let cleanup_result = cleanup::remove_owned(&args.state_dir, job_id, generation);
+        let cleanup_result = cleanup::remove_owned(&args.state_dir, job_id, generation.0);
         return Err(error.context(format!(
             "failed to publish ownership marker for job {job_id}; child cleanup: kill={kill_result:?}, wait={wait_result:?}, marker={cleanup_result:?}"
         )));
