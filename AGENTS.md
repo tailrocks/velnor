@@ -23,9 +23,9 @@ Velnor unified CI contract (2026-08-09):
 - **velnor-actions-fixture is ground truth**: never modify it to work around Velnor gaps; implement the missing feature in Velnor; strengthen coverage, never weaken.
 - **Strict capabilities**: support only what the Rust capability manifest and [docs/strict-capability-contract.md](docs/strict-capability-contract.md) declare; validate the whole job before side effects; fail unsupported config immediately with exact field/value and manifest version; no silent fallbacks — every approved `uses:` has a pinned native Rust adapter; new capabilities need explicit operator approval.
 - **Subagent workflow**: use ≥1 subagent for every task—including analysis, implementation, verification, and review—parallelize independent work, integrate results, independently verify them, and if none is available, prove and report the limitation.
-- **Velnor blocker loop**: fix failed Velnor execution in Velnor on the single campaign branch, commit and push every iteration, and merge the sole campaign PR to `main` at the authorized safe integration checkpoint. If urgent Sentry validation is authorized before merge, use only an immutable signed-APT release bound to the exact branch SHA over `ssh sentry`; never copy raw binaries or bypass package/signature verification. Verify exact identity, health, rollback, and `velnor`, `github`, and `both` lanes; fresh security, performance, goal, verifier, and reviewer subagents audit each pushed iteration.
-- **Chicken-egg Sentry exception**: when fresh evidence shows the Velnor lane is failed or unavailable and that failure prevents building Velnor itself, an explicitly authorized operator may build one Debian package on this host only from the exact pushed campaign SHA after verifying that the remote campaign branch tip equals that SHA, sign it with the authorized release key, verify its SHA-256 before and after transfer, transfer only that package using `ssh -o BatchMode=yes sentry` (noninteractive fail-closed) with pinned and verified Sentry host identity and no fallback authentication, and manually publish it into the signed Sentry APT repository. Verify the source SHA, package/version/architecture, artifact digest, signing-key fingerprint, APT `Release` signature, and Sentry host fingerprint on both sides. Use the authorized staging, publication, package-transaction lock, and apt-based installation paths; never install unsigned or unrelated local packages, expose secrets, copy raw binaries, use direct `dpkg -i`, bypass lane protections, or silently fail over. Snapshot the current state first; prove installed identity, signature/checksum, health/readiness, runner registration/lease, the original reproducer, `velnor`/`github`/`both` lanes, and rollback. Record authorization, commands, identities, digests, checks, and rollback in the incident ledger, and retire this temporary exception once Velnor self-build works again.
-- **Branch freshness and merge closure**: before each new fix/change, fetch `origin/main`; for a new campaign, fast-forward clean local `main` with `git pull --ff-only origin main`, verify SHA equality, and branch from it; for the active campaign, retain its sole branch/PR and integrate latest `origin/main`. Before merging any PR, inspect all conversation/comments, reviews, inline threads, and checks; classify each item, answer/fix or mark obsolete with a reason, re-check the final exact head SHA, and merge only with no unanswered questions, unresolved requests, or failing required checks.
+- **Velnor blocker loop**: fix failed Velnor execution in Velnor on the operator-assigned focused branch `velnor1` through `velnor10`, with the exact assignment in external `../COORDINATION.md`; commit and push every iteration, and merge that branch's focused PR directly to `main` at the authorized safe integration checkpoint. Use no shared integration branch and never commit directly to `main`. If urgent Sentry validation is authorized before merge, use only an immutable signed-APT release bound to the exact branch SHA over `ssh sentry`; never copy raw binaries or bypass package/signature verification. Verify exact identity, health, rollback, and `velnor`, `github`, and `both` lanes; fresh security, performance, goal, verifier, and reviewer subagents audit each pushed iteration.
+- **Chicken-egg Sentry exception**: when fresh evidence shows the Velnor lane is failed or unavailable and that failure prevents building Velnor itself, an explicitly authorized operator may build one Debian package on this host only from the exact pushed assigned-branch SHA after verifying that the remote assigned-branch tip equals that SHA, sign it with the authorized release key, verify its SHA-256 before and after transfer, transfer only that package using `ssh -o BatchMode=yes sentry` (noninteractive fail-closed) with pinned and verified Sentry host identity and no fallback authentication, and manually publish it into the signed Sentry APT repository. Verify the source SHA, package/version/architecture, artifact digest, signing-key fingerprint, APT `Release` signature, and Sentry host fingerprint on both sides. Use the authorized staging, publication, package-transaction lock, and apt-based installation paths; never install unsigned or unrelated local packages, expose secrets, copy raw binaries, use direct `dpkg -i`, bypass lane protections, or silently fail over. Snapshot the current state first; prove installed identity, signature/checksum, health/readiness, runner registration/lease, the original reproducer, `velnor`/`github`/`both` lanes, and rollback. Record authorization, commands, identities, digests, checks, and rollback in the incident ledger, and retire this temporary exception once Velnor self-build works again.
+- **Branch freshness and merge closure**: before each new fix/change, fetch `origin/main`; for a new campaign, fast-forward clean local `main` with `git pull --ff-only origin main`, verify SHA equality, and branch from it; for each operator-assigned focused branch `velnor1` through `velnor10`, verify the exact assignment in external `../COORDINATION.md` and integrate latest `origin/main`; use no shared integration branch and make no direct commits to `main`. Before merging any PR, inspect all conversation/comments, reviews, inline threads, and checks; classify each item, answer/fix or mark obsolete with a reason, re-check the final exact head SHA, and merge only with no unanswered questions, unresolved requests, or failing required checks.
 
 ## Decision and bug-fix discipline
 
@@ -51,14 +51,10 @@ Normative direction: [docs/mission.md](docs/mission.md), docs/vision.md, docs/ro
 
 Active decisions: two explicit backends `[execution] backend = "docker" | "microvm"` per daemon/pool, no fallback; Firecracker production microVM; Node Architecture v2 supervised processes; Build L3 final isolation target · velnorctl is the final CLI/package after Plan 079, zero aliases, Sentry apt-only from signed `velnor-apt` · sequential runs fully warm; persistent cargo targets job-local materializations; artifact fan-in Results Service authoritative · trust scopes runtime-enforced; warm-runner jobs get daemon resource caps · local-only compiler caches (sccache v0.16.0 / Kache v0.14.2, mutually exclusive, 20 GiB); storage budgets + disk-pressure controller P0 · log format contract is law ([docs/log-format-contract.md](docs/log-format-contract.md)); stability-first standing rules (dual health signals, forensic logs, tracing spans) · Parallax native Apple packaging is the sole measured macOS exception · correctness over ROI; root-cause fixes over symptom patches (docs/mission.md).
 
-2026-08-29 decision: the one campaign branch/one PR topology remains; Velnor
-blockers are fixed and pushed there, the sole PR merges to `main` at its safe
-authorized integration point, and urgent pre-merge Sentry validation is
-signed-APT-only from the exact branch SHA over `ssh sentry`, including the
-permitted chicken-egg bootstrap: build one exact-SHA Debian package on this
-host, transfer and publish only that package into the signed Sentry APT
-repository, install through APT, and retain identity, dual-lane, health, and
-rollback proof.
+2026-08-29 decision: historical evidence only; the one campaign branch/one PR
+topology is superseded by the explicit 2026-08-31 assigned-branch decision
+below. Its Velnor blocker, signed-APT, exact-SHA, identity, health, dual-lane,
+and rollback requirements remain preserved in the active rules.
 
 2026-08-30 decision: during a proven Velnor chicken-egg incident, manual
 host-side build, signed publication, and `ssh sentry` deployment of the exact
@@ -66,10 +62,18 @@ source-SHA Debian artifact is permitted under the exception above. It is
 temporary incident recovery, not a normal release or cutover path; identity,
 signature, lock, health, lane, rollback, and ledger proofs remain mandatory.
 
-2026-08-30 decision: the active goal and plan use the static generic campaign
-branch `codex/velnor-project-goal` and one pull request. Do not use the former
-plan-named branch or create per-task branches. A future topology change needs
-an explicit operator decision recorded in the governing prompt and plan before
-any branch is created.
+2026-08-30 decision: historical topology evidence only; the static generic
+campaign branch and one-PR rule are superseded by the explicit 2026-08-31
+operator decision below.
+
+2026-08-31 decision: supersedes the earlier dated one-branch/one-PR topology
+decisions above. Active work uses operator-assigned focused branches `velnor1`
+through `velnor10`, each with one focused PR directly to `main`; the exact
+branch-to-work assignment is external and recorded in `../COORDINATION.md`. Do
+not use a shared integration branch or commit directly to `main`. Blockers are
+fixed and pushed on their assigned branch, then merge through that branch's
+focused PR at the authorized safe integration checkpoint. Existing strict
+capability, fixture, subagent, signed-APT, exact-SHA, identity, health,
+rollback, lane, retry, and required-check gates remain mandatory.
 
 Full history: `git log -p -- AGENTS.md`; entries predating the marked contract that conflict with it are historical and non-executable.
