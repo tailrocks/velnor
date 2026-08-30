@@ -86,6 +86,9 @@ const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
 /// Keep lifecycle duration fields bounded to the same one-day policy used by
 /// the existing tool-preparation telemetry.
 const MAX_TELEMETRY_DURATION_MS: u64 = 24 * 60 * 60 * 1000;
+/// Keep plan cardinalities bounded even if a malformed broker message or
+/// backend result contains an unexpectedly large number of entries.
+const MAX_TELEMETRY_PLAN_ITEMS: u64 = 100_000;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct PendingJitRegistration {
@@ -518,6 +521,51 @@ fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTree
             Value::from(queue_time_present),
         ),
     ])
+}
+
+fn bounded_telemetry_count(count: usize) -> u64 {
+    u64::try_from(count)
+        .unwrap_or(u64::MAX)
+        .min(MAX_TELEMETRY_PLAN_ITEMS)
+}
+
+fn plan_summary_telemetry_fields_from_counts(
+    logical_tasks: usize,
+    physical_actions: usize,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "logical_tasks".to_owned(),
+            Value::from(bounded_telemetry_count(logical_tasks)),
+        ),
+        (
+            "physical_actions".to_owned(),
+            Value::from(bounded_telemetry_count(physical_actions)),
+        ),
+    ])
+}
+
+fn plan_summary_telemetry_fields(
+    job: &AgentJobRequestMessage,
+    step_logs: &[StepLog],
+) -> BTreeMap<String, Value> {
+    plan_summary_telemetry_fields_from_counts(
+        job.steps.iter().filter(|step| step.enabled).count(),
+        step_logs.iter().filter(|log| !log.skipped).count(),
+    )
+}
+
+fn emit_plan_summary_telemetry(
+    sink: &crate::ops::OpsSink,
+    admission: &crate::ops::JobAdmission,
+    job: &AgentJobRequestMessage,
+    step_logs: &[StepLog],
+) {
+    let _ = sink.emit_telemetry_for_admission(
+        admission,
+        TelemetryEvent::PlanSummary,
+        plan_summary_telemetry_fields(job, step_logs),
+    );
 }
 
 /// Instance slug naming this daemon in the shared operational store:
@@ -5066,6 +5114,11 @@ async fn handle_job_request(
             .unwrap_or_else(|| "default".to_string());
         let job_to_execute = job.clone();
         let script_steps = script_steps.clone();
+        // The executor needs an owned admission snapshot across the blocking
+        // thread boundary for tool telemetry. Retain a second explicit clone
+        // here so this async control path can emit its one post-execution
+        // PlanSummary before sending run-service completion.
+        let execution_telemetry_admission = telemetry_admission.clone();
         let job_result = tokio::task::spawn_blocking(move || {
             execute_script_job(
                 &config_dir,
@@ -5084,7 +5137,7 @@ async fn handle_job_request(
                 Some(step_log_sender),
                 daemon_id,
                 reserved_bytes,
-                telemetry_admission,
+                execution_telemetry_admission,
             )
         })
         .await;
@@ -5152,6 +5205,12 @@ async fn handle_job_request(
                 }
             }
         };
+        if let (Some(sink), Some(admission)) = (crate::ops::global(), telemetry_admission.as_ref())
+        {
+            // This is deliberately adjacent to the returned ScriptJobResult
+            // and precedes run-service completion for both execution backends.
+            emit_plan_summary_telemetry(sink, admission, &job, &job_result.step_logs);
+        }
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
         let teardown = job_result.teardown;
@@ -13118,6 +13177,121 @@ jobs:
             assert_eq!(job_queue_time_present(&job), present, "raw={raw:?}");
             assert_eq!(job_queued_for(&job, SystemTime::now()), Duration::ZERO);
         }
+    }
+
+    #[test]
+    fn plan_summary_telemetry_counts_are_bounded_and_secret_free() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "logical-secret-marker",
+            "jobDisplayName": "job",
+            "requestId": 1,
+            "steps": [
+                { "id": "enabled-secret-marker", "enabled": true },
+                { "id": "disabled", "enabled": false },
+                { "id": "enabled-two", "enabled": true }
+            ]
+        }))
+        .unwrap();
+        let step_log = |step_id: &str, skipped: bool| StepLog {
+            step_id: step_id.to_owned(),
+            display_name: "step".to_owned(),
+            order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: vec!["secret-marker".to_owned()],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+        let fields = plan_summary_telemetry_fields(
+            &job,
+            &[
+                step_log("physical-secret-marker", false),
+                step_log("skipped", true),
+            ],
+        );
+
+        assert_eq!(fields["logical_tasks"], Value::from(2_u64));
+        assert_eq!(fields["physical_actions"], Value::from(1_u64));
+        assert!(!serde_json::to_string(&fields)
+            .unwrap()
+            .contains("secret-marker"));
+        assert!(!fields.contains_key("duplicates_prevented"));
+        assert!(!fields.contains_key("selection_reasons"));
+
+        let bounded = plan_summary_telemetry_fields_from_counts(usize::MAX, usize::MAX);
+        assert_eq!(
+            bounded["logical_tasks"],
+            Value::from(MAX_TELEMETRY_PLAN_ITEMS)
+        );
+        assert_eq!(
+            bounded["physical_actions"],
+            Value::from(MAX_TELEMETRY_PLAN_ITEMS)
+        );
+    }
+
+    #[test]
+    fn plan_summary_telemetry_is_ordered_after_admission_before_completion() {
+        let base = unique_temp_dir("plan-summary-telemetry");
+        fs::create_dir_all(&base).unwrap();
+        let sink =
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap();
+        let admission = blocking_admission_test_input("job-plan-summary");
+        assert!(sink.record_admission(&admission));
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job-plan-summary",
+            "jobDisplayName": "job",
+            "requestId": 1,
+            "steps": [{ "id": "step", "enabled": true }]
+        }))
+        .unwrap();
+        let logs = vec![StepLog {
+            step_id: "step".to_owned(),
+            display_name: "step".to_owned(),
+            order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: Vec::new(),
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        }];
+
+        emit_plan_summary_telemetry(&sink, &admission, &job, &logs);
+
+        let telemetry =
+            fs::read_to_string(base.join("state.test-instance.telemetry.jsonl")).unwrap();
+        let records: Vec<serde_json::Value> = telemetry
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["event"], "run_admitted");
+        assert_eq!(records[1]["event"], "plan_summary");
+        assert_eq!(records[1]["fields"]["logical_tasks"], 1);
+        assert_eq!(records[1]["fields"]["physical_actions"], 1);
+        assert!(!telemetry.contains("worker-test-secret"));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
