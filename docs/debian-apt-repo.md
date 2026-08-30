@@ -179,7 +179,8 @@ upgrade, downgrade, rollback, and forward recovery. The only exception is the
 tightly bounded chicken-egg bootstrap below, allowed only when fresh evidence
 proves the Velnor lane failed or is unavailable, that failure blocks building
 Velnor itself, an operator explicitly authorizes incident recovery, and exactly
-one Debian package is built on this host from the exact pushed campaign SHA.
+one Debian package is built on this host from the exact pushed assigned-branch
+SHA.
 
 1. Ensure the release commit is signed off, pushed, and green. Create a signed
    `vX.Y.Z` tag on that exact commit and push only that tag.
@@ -238,12 +239,13 @@ one Debian package is built on this host from the exact pushed campaign SHA.
 When fresh evidence proves the Velnor lane is failed or unavailable and that
 failure prevents building Velnor itself, an explicitly authorized operator may
 temporarily build exactly one Debian package on this host from the exact pushed
-campaign SHA only after verifying that the remote campaign branch tip equals that
-SHA. This is incident recovery, not a second normal release mechanism:
+assigned-branch SHA only after verifying that the remote assigned-branch tip
+equals that SHA. This is incident recovery, not a second normal release
+mechanism:
 
-1. Before building, verify that the remote campaign branch tip equals the exact
-   pushed campaign SHA; abort if the remote ref is unavailable or the SHA does
-   not match. Then build from a clean checkout at that exact SHA. Before
+1. Before building, verify that the remote assigned-branch tip equals the exact
+   pushed assigned-branch SHA; abort if the remote ref is unavailable or the SHA
+   does not match. Then build from a clean checkout at that exact SHA. Before
    transfer, publication, or installation, create an immutable signed source
    record binding the exact source SHA, package name, package version,
    architecture, package SHA-256, and exact `velnor-apt` repository coordinate
