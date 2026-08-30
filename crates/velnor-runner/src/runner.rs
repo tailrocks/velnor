@@ -83,6 +83,9 @@ const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_JIT_REGISTRATION_FILE: &str = ".jit-registration-pending.json";
 const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
+/// Keep lifecycle duration fields bounded to the same one-day policy used by
+/// the existing tool-preparation telemetry.
+const MAX_TELEMETRY_DURATION_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct PendingJitRegistration {
@@ -377,13 +380,23 @@ fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
     now.duration_since(start).unwrap_or(Duration::ZERO)
 }
 
+fn job_queue_time(job: &AgentJobRequestMessage) -> Option<&str> {
+    job.queue_time
+        .as_deref()
+        .or_else(|| {
+            job.variables
+                .get("system.queueTime")
+                .and_then(|value| value.value.as_deref())
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn job_queue_time_present(job: &AgentJobRequestMessage) -> bool {
+    job_queue_time(job).is_some()
+}
+
 fn job_queued_for(job: &AgentJobRequestMessage, now: SystemTime) -> Duration {
-    let raw = job.queue_time.as_deref().or_else(|| {
-        job.variables
-            .get("system.queueTime")
-            .and_then(|value| value.value.as_deref())
-    });
-    queued_for_from_rfc3339(raw, now)
+    queued_for_from_rfc3339(job_queue_time(job), now)
 }
 
 fn select_unassigned_trusted_jobs(
@@ -492,6 +505,19 @@ struct ExecutionTimings {
 
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "queued_for_ms".to_owned(),
+            Value::from(queue_ms.min(MAX_TELEMETRY_DURATION_MS)),
+        ),
+        (
+            "queue_time_present".to_owned(),
+            Value::from(queue_time_present),
+        ),
+    ])
 }
 
 /// Instance slug naming this daemon in the shared operational store:
@@ -4495,6 +4521,7 @@ async fn handle_job_request(
     let early_context = job_context_data(&job);
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
+    let queue_time_present = job_queue_time_present(&job);
     let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
     if let Err(persist_error) = persist_in_flight_job(config_dir, &run_service_job, &job) {
         return fail_closed_after_in_flight_persist_error(
@@ -4560,6 +4587,11 @@ async fn handle_job_request(
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
         };
+        let _ = sink.emit_telemetry_for_admission(
+            &admission,
+            TelemetryEvent::RunQueued,
+            run_queued_telemetry_fields(queue_ms, queue_time_present),
+        );
         let telemetry_admission = admission.clone();
         let admission_outcome =
             persist_admission_on_blocking_pool(Arc::clone(sink), admission).await;
@@ -13023,6 +13055,69 @@ jobs:
                 "${{ steps.deployment.outputs.page_url }}"
             ))
         );
+    }
+
+    #[test]
+    fn run_queued_telemetry_fields_are_bounded_and_secret_free() {
+        let fields = run_queued_telemetry_fields(u64::MAX, true);
+
+        assert_eq!(
+            fields["queued_for_ms"],
+            Value::from(MAX_TELEMETRY_DURATION_MS)
+        );
+        assert_eq!(fields["queue_time_present"], Value::from(true));
+        assert!(!serde_json::to_string(&fields)
+            .unwrap()
+            .contains("timestamp"));
+    }
+
+    #[test]
+    fn queue_time_presence_uses_explicit_and_system_fallbacks() {
+        let explicit: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "explicit",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "QueueTime": "2026-08-30T00:00:00Z"
+        }))
+        .unwrap();
+        assert!(job_queue_time_present(&explicit));
+
+        let fallback: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "fallback",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "Variables": {
+                "system.queueTime": { "Value": "2026-08-30T00:00:00Z" }
+            }
+        }))
+        .unwrap();
+        assert!(job_queue_time_present(&fallback));
+
+        for (raw, present) in [
+            ("", false),
+            ("  ", false),
+            ("not-a-timestamp", true),
+            ("2999-01-01T00:00:00Z", true),
+        ] {
+            let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+                "MessageType": "PipelineAgentJobRequest",
+                "Plan": { "PlanId": "plan" },
+                "Timeline": { "Id": "timeline" },
+                "JobId": "edge",
+                "JobDisplayName": "job",
+                "RequestId": 1,
+                "QueueTime": raw
+            }))
+            .unwrap();
+            assert_eq!(job_queue_time_present(&job), present, "raw={raw:?}");
+            assert_eq!(job_queued_for(&job, SystemTime::now()), Duration::ZERO);
+        }
     }
 
     #[test]
