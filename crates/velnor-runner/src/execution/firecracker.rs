@@ -983,6 +983,22 @@ fn drive_vsock(
                     )
                     .into());
                 }
+                if conclusion == JobConclusion::Success {
+                    let missing_step_ids = expected_step_ids
+                        .difference(&completed_step_ids)
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    if !missing_step_ids.is_empty() {
+                        return Err(MicroVmPreflightFailure::new(
+                            "vsock.job_completed",
+                            format!(
+                                "successful completion missing StepCompleted for delivered plan step(s): {}",
+                                missing_step_ids.join(", ")
+                            ),
+                        )
+                        .into());
+                    }
+                }
                 completed = true;
                 events.push(ExecutionEvent::JobCompleted {
                     conclusion,

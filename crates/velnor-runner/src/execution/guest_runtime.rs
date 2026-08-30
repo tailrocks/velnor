@@ -90,7 +90,7 @@ impl VsockChannel for UnixVsockChannel {
 pub struct LoopbackVsock {
     pub sent: Vec<VsockMessage>,
     pending: Vec<VsockMessage>,
-    step_completions: Vec<(String, bool)>,
+    step_completions_override: Option<Vec<(String, bool)>>,
     post_completion_frames: Vec<VsockMessage>,
     ready: Option<VsockMessage>,
     rebootstrap_ready: Option<VsockMessage>,
@@ -160,14 +160,15 @@ impl LoopbackVsock {
         self
     }
 
-    /// Configure result-bridge step completions for the in-process vsock
-    /// contract double. The bool records whether the step was skipped.
+    /// Override result-bridge step completions for the in-process vsock
+    /// contract double. The bool records whether the step was skipped. When
+    /// omitted, the default emits a completion for every delivered plan step.
     #[must_use]
     pub fn with_step_completions(
         mut self,
         completions: impl IntoIterator<Item = (String, bool)>,
     ) -> Self {
-        self.step_completions = completions.into_iter().collect();
+        self.step_completions_override = Some(completions.into_iter().collect());
         self
     }
 
@@ -253,7 +254,13 @@ impl VsockChannel for LoopbackVsock {
                 return Err("loopback rejected plan identity mismatch".into());
             }
             validate_guest_plan(&plan)?;
-            for (step_id, skipped) in self.step_completions.drain(..) {
+            let completions = self.step_completions_override.take().unwrap_or_else(|| {
+                plan.steps
+                    .iter()
+                    .map(|step| (step.id.clone(), false))
+                    .collect()
+            });
+            for (step_id, skipped) in completions {
                 self.pending.push(VsockMessage::StepStarted {
                     step_id: step_id.clone(),
                 });
@@ -1950,6 +1957,18 @@ mod tests {
                 plan_bytes,
             })
             .unwrap();
+        assert!(matches!(
+            vsock.recv().unwrap(),
+            VsockMessage::StepStarted { step_id } if step_id == "run"
+        ));
+        assert!(matches!(
+            vsock.recv().unwrap(),
+            VsockMessage::StepCompleted {
+                step_id,
+                exit_code: 0,
+                skipped: false,
+            } if step_id == "run"
+        ));
         loop {
             match vsock.recv().unwrap() {
                 VsockMessage::CommandFile { .. }
