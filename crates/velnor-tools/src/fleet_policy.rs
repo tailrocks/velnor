@@ -22,7 +22,7 @@ use std::{
 use std::{
     ffi::CString,
     fs::File,
-    io::{self, Write},
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
@@ -1002,6 +1002,7 @@ fn plan_policy_actions(
 /// outside `out_dir`. A matched entry that cannot be inspected or read also
 /// aborts generation instead of being skipped; that fail-closed choice is
 /// intentional (review G4): partial mutation is worse than a refused run.
+#[cfg(not(unix))]
 fn read_existing_policy_files(out_dir: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut existing = BTreeMap::new();
     for entry in fs::read_dir(out_dir).with_context(|| format!("reading {}", out_dir.display()))? {
@@ -1083,7 +1084,7 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
     let file_name_c = CString::new(file_name)
         .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
 
-    let mut existing_mode = 0o644;
+    let mut existing_mode = None;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     let stat_result = unsafe {
         libc::fstatat(
@@ -1109,7 +1110,7 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
                 file_name
             );
         }
-        existing_mode = stat.st_mode & 0o7777;
+        existing_mode = Some(stat.st_mode & 0o7777);
     } else if io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
         return Err(io::Error::last_os_error()).with_context(|| {
             format!(
@@ -1133,7 +1134,7 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
                 directory.file.as_raw_fd(),
                 temp_name_c.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                existing_mode as libc::c_uint,
+                existing_mode.unwrap_or(0o644) as libc::c_uint,
             )
         };
         if temp_fd < 0 {
@@ -1145,16 +1146,18 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
                 .with_context(|| format!("creating fleet policy temporary file {temp_name}"));
         }
         let mut temp_file = unsafe { std::fs::File::from_raw_fd(temp_fd) };
-        let chmod_result =
-            unsafe { libc::fchmod(temp_file.as_raw_fd(), existing_mode as libc::mode_t) };
-        if chmod_result < 0 {
-            let error = io::Error::last_os_error();
-            unsafe {
-                libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
+        if let Some(existing_mode) = existing_mode {
+            let chmod_result =
+                unsafe { libc::fchmod(temp_file.as_raw_fd(), existing_mode as libc::mode_t) };
+            if chmod_result < 0 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
+                }
+                return Err(error).with_context(|| {
+                    format!("setting mode on fleet policy temporary file {temp_name}")
+                });
             }
-            return Err(error).with_context(|| {
-                format!("setting mode on fleet policy temporary file {temp_name}")
-            });
         }
         let mut renamed = false;
         let result = (|| -> io::Result<()> {
@@ -1217,6 +1220,71 @@ fn remove_policy_file_at(directory: &PolicyDirectory, file_name: &str) -> Result
     Ok(())
 }
 
+#[cfg(unix)]
+fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut existing = BTreeMap::new();
+    for entry in fs::read_dir(&directory.path)
+        .with_context(|| format!("reading {}", directory.path.display()))?
+    {
+        let path = entry
+            .with_context(|| format!("reading entry under {}", directory.path.display()))?
+            .path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let Some(stem) = name.strip_suffix("-desired-policy.json") else {
+            continue;
+        };
+        if stem.is_empty() {
+            continue;
+        }
+
+        let name_c = CString::new(name)
+            .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+        let fd = unsafe {
+            libc::openat(
+                directory.file.as_raw_fd(),
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                continue;
+            }
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                bail!(
+                    "refusing symlinked fleet policy entry {}/{}; expected a regular file inside {}",
+                    directory.path.display(),
+                    name,
+                    directory.path.display()
+                );
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "opening fleet policy entry {}/{}",
+                    directory.path.display(),
+                    name
+                )
+            });
+        }
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("inspecting {}/{}", directory.path.display(), name))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("reading {}/{}", directory.path.display(), name))?;
+        existing.insert(stem.to_owned(), bytes);
+    }
+    Ok(existing)
+}
+
 #[cfg(not(unix))]
 fn write_policy_file(directory: &Path, file_name: &str, _bytes: &[u8]) -> Result<()> {
     bail!(
@@ -1232,6 +1300,9 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
         .with_context(|| format!("creating {}", args.out_dir.display()))?;
     #[cfg(unix)]
     let policy_directory = PolicyDirectory::open(&args.out_dir)?;
+    #[cfg(unix)]
+    let existing = read_existing_policy_files(&policy_directory)?;
+    #[cfg(not(unix))]
     let existing = read_existing_policy_files(&args.out_dir)?;
     let plan = plan_policy_actions(&policies, &existing)?;
     let by_org: BTreeMap<&str, &OrgPolicy> = policies
@@ -2405,6 +2476,21 @@ mod tests {
         assert!(
             !dir.path.join("alias.json").exists(),
             "parent symlink must not redirect the write"
+        );
+
+        let new_file = dir.path.join("new.json");
+        {
+            let _umask = UmaskGuard::new(0o0077);
+            write_policy_file(&dir.path, "new.json", b"new\n").expect("write new policy file");
+        }
+        assert_eq!(
+            fs::metadata(&new_file)
+                .expect("new policy metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "new policy files must honor the process umask"
         );
 
         let regular = dir.path.join("regular.json");
