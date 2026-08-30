@@ -1483,18 +1483,18 @@ struct GeneratedOwnerLaneContract {
 const GENERATED_OWNER_LANE_CONTRACTS: [GeneratedOwnerLaneContract; 3] = [
     GeneratedOwnerLaneContract {
         owner: "jackin-project",
-        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
     },
     GeneratedOwnerLaneContract {
         owner: "tailrocks",
-        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
     },
     GeneratedOwnerLaneContract {
         owner: "ChainArgos",
-        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
     },
 ];
-const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name != 'workflow_dispatch' && github.repository_owner == 'jackin-project')) && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
+const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
 
 fn audit_generated_caller(
     file: &str,
@@ -2469,18 +2469,18 @@ jobs:
   jackin-project:
     uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}
   tailrocks:
     uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}
   ChainArgos:
     uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}
   ci-required:
     timeout-minutes: 10
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name != 'workflow_dispatch' && github.repository_owner == 'jackin-project')) && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     steps:
       - run: |
           if [ "${sel_result}" != "success" ]; then
@@ -2551,13 +2551,13 @@ jobs:
         let github_default = GENERATED_CALLER.replacen("default: velnor", "default: github", 1);
         assert!(has_rule(&audit(&github_default), "generated-caller"));
 
-        let obsolete_all_pushes_on_github = GENERATED_CALLER.replacen(
+        let push_missing_from_lane_route = GENERATED_CALLER.replacen(
             GENERATED_OWNER_LANE_CONTRACTS[1].lane_expression,
-            "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}",
+            "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}",
             1,
         );
         assert!(has_rule(
-            &audit(&obsolete_all_pushes_on_github),
+            &audit(&push_missing_from_lane_route),
             "generated-caller"
         ));
 
@@ -2587,11 +2587,14 @@ jobs:
             "generated-caller"
         ));
 
-        let manual_lane_override = GENERATED_CALLER.replace(
-            "(github.event_name != 'workflow_dispatch' && github.repository_owner == 'jackin-project')",
-            "github.repository_owner == 'jackin-project'",
+        let aggregator_push_missing = GENERATED_CALLER.replace(
+            "|| github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04'",
+            "|| github.event_name == 'merge_group') && 'ubuntu-26.04'",
         );
-        assert!(has_rule(&audit(&manual_lane_override), "generated-caller"));
+        assert!(has_rule(
+            &audit(&aggregator_push_missing),
+            "generated-caller"
+        ));
     }
 
     #[test]
