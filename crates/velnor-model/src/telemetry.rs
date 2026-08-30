@@ -64,6 +64,11 @@ pub enum TelemetryEvent {
     LeaseReleased,
     LeaseAbandoned,
     LeaseExpired,
+    SupersessionAdopted,
+    ConsumerDetached,
+    RetainedThenReaped,
+    RetentionKillSkipped,
+    TrustRevoked,
 }
 
 /// Execution lane that produced an observation.

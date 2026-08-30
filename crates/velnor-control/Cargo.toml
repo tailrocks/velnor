@@ -16,4 +16,5 @@ toml.workspace = true
 time.workspace = true
 uuid.workspace = true
 unicode-normalization.workspace = true
+velnor-action-journal = { path = "../velnor-action-journal", version = "0.1.0" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }

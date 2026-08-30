@@ -3592,6 +3592,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "velnor-action-model",
  "velnor-model",
 ]
@@ -3645,6 +3646,7 @@ dependencies = [
  "toml",
  "unicode-normalization",
  "uuid",
+ "velnor-action-journal",
  "velnor-model",
 ]
 

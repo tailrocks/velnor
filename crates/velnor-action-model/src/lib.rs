@@ -146,6 +146,16 @@ pub struct ExecutionPolicy {
     pub network: bool,
     pub privileged: bool,
     pub timeout_ms: u64,
+    /// Whether a completed or running action may be adopted by a successor.
+    ///
+    /// This is part of the action identity: changing it must never make an
+    /// unsafe action look equivalent to an adoptable one.
+    #[serde(default = "default_adoptable")]
+    pub adoptable: bool,
+}
+
+const fn default_adoptable() -> bool {
+    true
 }
 
 impl Default for ExecutionPolicy {
@@ -155,6 +165,7 @@ impl Default for ExecutionPolicy {
             network: false,
             privileged: false,
             timeout_ms: 0,
+            adoptable: true,
         }
     }
 }

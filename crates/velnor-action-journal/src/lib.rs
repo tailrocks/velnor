@@ -25,6 +25,8 @@ use velnor_model::{
     TelemetryLane, Timestamp,
 };
 
+pub mod supersession;
+
 pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
 
 /// Production clock for durable lease deadlines.
@@ -292,6 +294,21 @@ impl ActionJournal {
                  run_id TEXT NOT NULL,
                  PRIMARY KEY(action_key_digest, run_id)
              );
+             CREATE TABLE IF NOT EXISTS action_retention (
+                 action_key_digest TEXT PRIMARY KEY NOT NULL,
+                 retained_until_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS action_termination_claims (
+                 action_key_digest TEXT PRIMARY KEY NOT NULL,
+                 reason TEXT NOT NULL,
+                 claimed_at_ms INTEGER NOT NULL,
+                 completed INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS action_trust_revocations (
+                 action_key_digest TEXT PRIMARY KEY NOT NULL,
+                 reason TEXT NOT NULL,
+                 revoked_at_ms INTEGER NOT NULL
+             );
              INSERT OR IGNORE INTO action_journal_meta(key, value)
                  VALUES ('schema_version', '2');
              UPDATE action_journal_meta SET value = '2'
@@ -432,6 +449,17 @@ impl<C: Clock> LeaseManager<C> {
     #[must_use]
     pub fn journal(&self) -> &ActionJournal {
         &self.journal
+    }
+
+    /// Append an action lifecycle record through the manager-owned journal.
+    pub fn append_action(&mut self, record: &ActionRecord) -> Result<i64, JournalError> {
+        self.journal.append(record)
+    }
+
+    /// Read the latest lifecycle record for one action key.
+    pub fn latest_action(&self, action: &ActionKey) -> Result<Option<ActionRecord>, JournalError> {
+        let digest = action.digest()?;
+        Ok(self.journal.latest()?.remove(&digest))
     }
 
     /// Return the injected clock.
