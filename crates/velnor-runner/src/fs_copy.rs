@@ -862,7 +862,14 @@ impl NoFollowDestinationDir {
 
             let write_result = (|| -> Result<u64> {
                 let bytes = if used_reflink {
-                    metadata.len()
+                    let actual = destination_file
+                        .metadata()
+                        .context("inspect reflink artifact destination")?
+                        .len();
+                    if actual != metadata.len() {
+                        bail!("reflink artifact source size changed while copying");
+                    }
+                    actual
                 } else {
                     destination_file
                         .set_len(0)
@@ -876,9 +883,16 @@ impl NoFollowDestinationDir {
                     source
                         .seek(SeekFrom::Start(0))
                         .context("rewind source file for copy")?;
-                    std::io::copy(&mut source, &mut destination_file).with_context(|| {
-                        format!("copy opened source to {}", destination_path.display())
-                    })?
+                    let expected_size = metadata.len();
+                    let mut bounded_source = source.take(expected_size.saturating_add(1));
+                    let copied = std::io::copy(&mut bounded_source, &mut destination_file)
+                        .with_context(|| {
+                            format!("copy opened source to {}", destination_path.display())
+                        })?;
+                    if copied != expected_size {
+                        bail!("artifact source size changed while copying");
+                    }
+                    copied
                 };
                 destination_file.flush().with_context(|| {
                     format!(
@@ -1412,18 +1426,6 @@ impl NoFollowDestinationDir {
     }
 
     pub fn publish_staged_directory_from(
-        &self,
-        _staging_parent: &Self,
-        _staging_name: &OsStr,
-        destination_name: &OsStr,
-    ) -> Result<()> {
-        bail!(
-            "secure artifact destination publishing is unsupported on this platform for {}",
-            destination_name.to_string_lossy()
-        )
-    }
-
-    pub fn publish_staged_directory_noreplace_from(
         &self,
         _staging_parent: &Self,
         _staging_name: &OsStr,

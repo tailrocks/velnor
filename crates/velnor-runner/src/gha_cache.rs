@@ -11,16 +11,19 @@
 //!   `ACTIONS_CACHE_SERVICE_V2=True`): `CreateCacheEntryUpload`,
 //!   `FinalizeCacheEntryUpload`, `GetCacheEntryDownloadURL`
 //!
-//! Storage is content-addressed under the durable cache root:
-//! `blobs/<sha256>` plus tiny JSON entry records keyed by
-//! `sha256(key \0 version)`. Key matching follows GitHub semantics: exact
-//! `(key, version)` first, then restore-keys prefix order, newest wins.
+//! Storage is content-addressed under a bearer-token tenant beneath the
+//! durable cache root: `tenants/<token-sha256>/blobs/<sha256>` plus tiny JSON
+//! entry records keyed by `sha256(key \0 version)`. Key matching follows
+//! GitHub semantics: exact `(key, version)` first, then restore-keys prefix
+//! order, newest wins. The token is never persisted; its hash is only a
+//! storage namespace, so one job cannot address another job's entries by key.
 //! Insertion enforces an LRU byte budget by deleting oldest-hit entries.
 //!
-//! The service is OFF unless the operator exports
-//! `VELNOR_ACTIONS_CACHE_URL`/`VELNOR_ACTIONS_RUNTIME_TOKEN` into the runner
-//! environment (strict capability contract: no behavior change without
-//! explicit enablement).
+//! The service is OFF unless the operator exports `VELNOR_ACTIONS_CACHE_URL`
+//! into the runner environment (strict capability contract: no behavior
+//! change without explicit enablement). Requests must carry the job-scoped
+//! `ACTIONS_RUNTIME_TOKEN`; the operator's enablement variable is never used
+//! as a job credential.
 
 use anyhow::{Context, Result};
 use http_body_util::combinators::UnsyncBoxBody;
@@ -60,59 +63,81 @@ fn hex(bytes: &[u8]) -> String {
 
 #[derive(Debug, Clone)]
 pub struct CacheService {
-    /// Durable storage root; `blobs/` and `entries/` live beneath it.
+    /// Durable storage root; tenant directories live beneath it.
     pub root: PathBuf,
-    /// Shared bearer token jobs must present.
-    pub token: String,
-    /// LRU byte budget across the whole store.
+    /// LRU byte budget per bearer-token tenant.
     pub budget_bytes: u64,
 }
 
 impl CacheService {
     pub fn open(root: PathBuf) -> Result<Self> {
-        std::fs::create_dir_all(root.join("blobs")).context("create gha-cache blobs dir")?;
-        std::fs::create_dir_all(root.join("entries")).context("create gha-cache entries dir")?;
-        let token = std::env::var("VELNOR_ACTIONS_RUNTIME_TOKEN").unwrap_or_default();
+        std::fs::create_dir_all(root.join("tenants")).context("create gha-cache tenants dir")?;
         let budget = std::env::var("VELNOR_GHA_CACHE_BUDGET_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_BUDGET_BYTES);
         Ok(Self {
             root,
-            token,
             budget_bytes: budget,
         })
     }
 
-    fn entry_path(&self, hash: &str) -> PathBuf {
-        self.root.join("entries").join(format!("{hash}.json"))
+    fn tenant_root(&self, namespace: Option<&str>) -> PathBuf {
+        namespace.map_or_else(
+            || self.root.clone(),
+            |namespace| self.root.join("tenants").join(namespace),
+        )
     }
 
-    fn read_entry(&self, hash: &str) -> Option<Value> {
-        let raw = std::fs::read(self.entry_path(hash)).ok()?;
+    fn ensure_tenant(&self, namespace: &str) -> Result<()> {
+        let root = self.tenant_root(Some(namespace));
+        std::fs::create_dir_all(root.join("blobs")).context("create gha-cache tenant blobs dir")?;
+        std::fs::create_dir_all(root.join("entries"))
+            .context("create gha-cache tenant entries dir")?;
+        Ok(())
+    }
+
+    fn entry_path(&self, hash: &str, namespace: Option<&str>) -> PathBuf {
+        self.tenant_root(namespace)
+            .join("entries")
+            .join(format!("{hash}.json"))
+    }
+
+    fn read_entry(&self, hash: &str, namespace: Option<&str>) -> Option<Value> {
+        let raw = std::fs::read(self.entry_path(hash, namespace)).ok()?;
         serde_json::from_slice(&raw).ok()
     }
 
     /// Exact match first, then each restore key as a newest-wins prefix scan.
-    fn lookup(&self, keys: &[&str], version: &str) -> Option<(String, u64)> {
+    fn lookup(
+        &self,
+        keys: &[&str],
+        version: &str,
+        namespace: Option<&str>,
+    ) -> Option<(String, u64)> {
         for (index, key) in keys.iter().enumerate() {
             let hash = entry_hash(key, version);
-            if let Some(entry) = self.read_entry(&hash) {
+            if let Some(entry) = self.read_entry(&hash, namespace) {
                 return Some((hash, entry["size"].as_u64().unwrap_or(0)));
             }
             if index == 0 {
                 continue; // only the primary key participates in prefix scans
             }
-            if let Some((hash, size)) = self.prefix_scan(key, version) {
+            if let Some((hash, size)) = self.prefix_scan(key, version, namespace) {
                 return Some((hash, size));
             }
         }
         None
     }
 
-    fn prefix_scan(&self, key: &str, version: &str) -> Option<(String, u64)> {
+    fn prefix_scan(
+        &self,
+        key: &str,
+        version: &str,
+        namespace: Option<&str>,
+    ) -> Option<(String, u64)> {
         let mut hits: BTreeMap<String, (String, u64)> = BTreeMap::new();
-        let entries = std::fs::read_dir(self.root.join("entries")).ok()?;
+        let entries = std::fs::read_dir(self.tenant_root(namespace).join("entries")).ok()?;
         for file in entries.flatten() {
             let path = file.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -145,10 +170,10 @@ impl CacheService {
         hits.into_values().next_back()
     }
 
-    fn enforce_budget(&self) -> Result<()> {
+    fn enforce_budget(&self, namespace: Option<&str>) -> Result<()> {
         let mut entries: Vec<(std::time::SystemTime, u64, PathBuf, PathBuf)> = Vec::new();
         let mut total = 0u64;
-        for file in std::fs::read_dir(self.root.join("entries"))
+        for file in std::fs::read_dir(self.tenant_root(namespace).join("entries"))
             .context("scan entries")?
             .flatten()
         {
@@ -165,7 +190,7 @@ impl CacheService {
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             total += size;
-            entries.push((modified, size, path, self.blob_path_for(&entry)));
+            entries.push((modified, size, path, self.blob_path_for(&entry, namespace)));
         }
         if total <= self.budget_bytes {
             return Ok(());
@@ -182,8 +207,8 @@ impl CacheService {
         Ok(())
     }
 
-    fn blob_path_for(&self, entry: &Value) -> PathBuf {
-        self.root
+    fn blob_path_for(&self, entry: &Value, namespace: Option<&str>) -> PathBuf {
+        self.tenant_root(namespace)
             .join("blobs")
             .join(entry["blob"].as_str().unwrap_or_default())
     }
@@ -192,6 +217,13 @@ impl CacheService {
 struct Ctx {
     service: Arc<CacheService>,
     public_base: String,
+}
+
+fn cache_namespace(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"velnor-actions-cache-tenant\0");
+    hasher.update(token.as_bytes());
+    hex(&hasher.finalize())
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, service: CacheService) -> Result<()> {
@@ -233,13 +265,27 @@ async fn route(
     req: Request<Incoming>,
     ctx: &mut Ctx,
 ) -> Result<Response<ResponseBody>, hyper::Error> {
-    // Auth: every route requires the bearer token. Constant-enough compare for
-    // a LAN-scoped service; secrets never appear in responses.
-    let authorized = req
+    // Auth: every route requires a non-empty job-scoped bearer capability.
+    // The credential is never persisted or surfaced in errors; its hash is
+    // the only namespace input used by the storage layer.
+    let token = req
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == format!("Bearer {}", ctx.service.token));
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty());
+    let Some(token) = token else {
+        return Ok(respond_unauthorized());
+    };
+    let namespace = cache_namespace(token);
+    if let Err(error) = ctx.service.ensure_tenant(&namespace) {
+        eprintln!("Warning: gha cache tenant initialization: {error:#}");
+        return Ok(Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("content-type", "application/json")
+            .body(full_body(json!({"message": "internal error"}).to_string()))
+            .unwrap());
+    }
     let path = req.uri().path().to_owned();
     let method = req.method().clone();
 
@@ -257,36 +303,31 @@ async fn route(
         )
     };
 
-    if !authorized {
-        return Ok(respond(
-            StatusCode::UNAUTHORIZED,
-            json!({"message": "bad token"}),
-        ));
-    }
-
     let result = match (method, path.as_str()) {
-        (hyper::Method::POST, p) if p.ends_with("/cache/reserve") => {
-            reserve(req, ctx).await.map(|v| respond(StatusCode::OK, v))
-        }
+        (hyper::Method::POST, p) if p.ends_with("/cache/reserve") => reserve(req, ctx, &namespace)
+            .await
+            .map(|v| respond(StatusCode::OK, v)),
         (hyper::Method::PUT, p) => {
             let id = p.rsplit('/').next().unwrap_or_default().to_owned();
-            upload(req, ctx, &id)
+            upload(req, ctx, &id, &namespace)
                 .await
                 .map(|_| respond(StatusCode::OK, json!({"ok": true})))
         }
         (hyper::Method::GET, p) if p.ends_with("/cache") => {
-            lookup_v1(&req, ctx).map(|v| respond(StatusCode::OK, v))
+            lookup_v1(&req, ctx, &namespace).map(|v| respond(StatusCode::OK, v))
         }
         (hyper::Method::GET, p) => {
             if let Some(id) = p.rsplit('/').next() {
-                download(&ctx.service, id).await.map(|(body, size)| {
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header("content-type", "application/octet-stream")
-                        .header(CONTENT_LENGTH, size)
-                        .body(body)
-                        .unwrap()
-                })
+                download(&ctx.service, id, Some(&namespace))
+                    .await
+                    .map(|(body, size)| {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/octet-stream")
+                            .header(CONTENT_LENGTH, size)
+                            .body(body)
+                            .unwrap()
+                    })
             } else {
                 Ok(respond(
                     StatusCode::NOT_FOUND,
@@ -294,15 +335,21 @@ async fn route(
                 ))
             }
         }
-        (hyper::Method::POST, p) if p.contains("CreateCacheEntryUpload") => reserve_v2(req, ctx)
-            .await
-            .map(|v| respond(StatusCode::OK, v)),
-        (hyper::Method::POST, p) if p.contains("FinalizeCacheEntryUpload") => finalize_v2(req, ctx)
-            .await
-            .map(|v| respond(StatusCode::OK, v)),
-        (hyper::Method::POST, p) if p.contains("GetCacheEntryDownloadURL") => lookup_v2(req, ctx)
-            .await
-            .map(|v| respond(StatusCode::OK, v)),
+        (hyper::Method::POST, p) if p.contains("CreateCacheEntryUpload") => {
+            reserve_v2(req, ctx, &namespace)
+                .await
+                .map(|v| respond(StatusCode::OK, v))
+        }
+        (hyper::Method::POST, p) if p.contains("FinalizeCacheEntryUpload") => {
+            finalize_v2(req, ctx, &namespace)
+                .await
+                .map(|v| respond(StatusCode::OK, v))
+        }
+        (hyper::Method::POST, p) if p.contains("GetCacheEntryDownloadURL") => {
+            lookup_v2(req, ctx, &namespace)
+                .await
+                .map(|v| respond(StatusCode::OK, v))
+        }
         _ => Ok(respond(
             StatusCode::NOT_FOUND,
             json!({"message": "not found"}),
@@ -315,6 +362,14 @@ async fn route(
             Ok(internal_error())
         }
     }
+}
+
+fn respond_unauthorized() -> Response<ResponseBody> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("content-type", "application/json")
+        .body(full_body(json!({"message": "bad token"}).to_string()))
+        .unwrap()
 }
 
 fn full_body(body: impl Into<Bytes>) -> ResponseBody {
@@ -354,7 +409,7 @@ fn keys_from_query(req: &Request<Incoming>) -> Vec<String> {
         .collect()
 }
 
-async fn reserve(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
+async fn reserve(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
@@ -363,18 +418,18 @@ async fn reserve(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
         return Ok(json!({"__typename": "BadRequestError"}));
     }
     let hash = entry_hash(key, version);
-    if ctx.service.entry_path(&hash).exists() {
+    if ctx.service.entry_path(&hash, Some(namespace)).exists() {
         return Ok(json!({"__typename": "ConflictError", "message": "already exists"}));
     }
     Ok(json!({"cacheId": hash}))
 }
 
-async fn reserve_v2(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
+async fn reserve_v2(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
     let hash = entry_hash(key, version);
-    if ctx.service.entry_path(&hash).exists() {
+    if ctx.service.entry_path(&hash, Some(namespace)).exists() {
         return Ok(json!({"ok": false}));
     }
     Ok(json!({
@@ -383,9 +438,17 @@ async fn reserve_v2(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     }))
 }
 
-async fn upload(req: Request<Incoming>, ctx: &Ctx, id: &str) -> Result<()> {
+async fn upload(req: Request<Incoming>, ctx: &Ctx, id: &str, namespace: &str) -> Result<()> {
     let declared_size = request_content_length(&req)?;
-    store_upload(req.into_body(), &ctx.service, id, declared_size, MAX_BODY).await?;
+    store_upload(
+        req.into_body(),
+        &ctx.service,
+        id,
+        declared_size,
+        MAX_BODY,
+        Some(namespace),
+    )
+    .await?;
     Ok(())
 }
 
@@ -408,6 +471,7 @@ async fn store_upload<B>(
     id: &str,
     declared_size: Option<u64>,
     max_bytes: u64,
+    namespace: Option<&str>,
 ) -> Result<u64>
 where
     B: Body<Data = Bytes> + Unpin,
@@ -418,10 +482,9 @@ where
         anyhow::bail!("declared cache upload size exceeds {max_bytes} bytes");
     }
 
-    let tmp = service
-        .root
-        .join("blobs")
-        .join(format!(".{id}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let blob_dir = service.tenant_root(namespace).join("blobs");
+    std::fs::create_dir_all(&blob_dir).context("create cache blob directory")?;
+    let tmp = blob_dir.join(format!(".{id}.{}.tmp", uuid::Uuid::new_v4().simple()));
     let cleanup = TemporaryUpload::new(tmp.clone());
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -461,7 +524,7 @@ where
     file.flush().await?;
     drop(file);
 
-    let dst = service.root.join("blobs").join(id);
+    let dst = blob_dir.join(id);
     tokio::fs::rename(&tmp, &dst)
         .await
         .context("publish completed cache upload")?;
@@ -492,12 +555,12 @@ fn validate_cache_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn finalize_v2(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
+async fn finalize_v2(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
     let size = declared_cache_size(&body)?;
-    commit_entry(&ctx.service, key, version, size)?;
+    commit_entry(&ctx.service, key, version, size, Some(namespace))?;
     Ok(json!({"ok": true, "state": "succeeded"}))
 }
 
@@ -517,9 +580,15 @@ fn declared_cache_size(body: &Value) -> Result<u64> {
     anyhow::bail!("missing cache upload size")
 }
 
-fn commit_entry(ctx: &CacheService, key: &str, version: &str, size: u64) -> Result<()> {
+fn commit_entry(
+    ctx: &CacheService,
+    key: &str,
+    version: &str,
+    size: u64,
+    namespace: Option<&str>,
+) -> Result<()> {
     let hash = entry_hash(key, version);
-    let blob = ctx.root.join("blobs").join(&hash);
+    let blob = ctx.tenant_root(namespace).join("blobs").join(&hash);
     let metadata = std::fs::metadata(&blob).context("stat uploaded cache blob")?;
     if !metadata.is_file() {
         anyhow::bail!("uploaded cache blob is not a regular file");
@@ -541,17 +610,19 @@ fn commit_entry(ctx: &CacheService, key: &str, version: &str, size: u64) -> Resu
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
     });
-    std::fs::write(ctx.entry_path(&hash), entry.to_string())?;
-    ctx.enforce_budget()?;
+    std::fs::create_dir_all(ctx.tenant_root(namespace).join("entries"))?;
+    std::fs::write(ctx.entry_path(&hash, namespace), entry.to_string())?;
+    ctx.enforce_budget(namespace)?;
     Ok(())
 }
 
-fn lookup_v1(req: &Request<Incoming>, ctx: &Ctx) -> Result<Value> {
+fn lookup_v1(req: &Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
     let keys = keys_from_query(req);
     let version = query_param(req, "version").unwrap_or_default();
     match ctx.service.lookup(
         &keys.iter().map(String::as_str).collect::<Vec<_>>(),
         &version,
+        Some(namespace),
     ) {
         Some((hash, size)) => Ok(json!({
             "cacheDownloadUrl": format!("{}/_results/download/{hash}", ctx.public_base),
@@ -562,7 +633,7 @@ fn lookup_v1(req: &Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     }
 }
 
-async fn lookup_v2(req: Request<Incoming>, ctx: &mut Ctx) -> Result<Value> {
+async fn lookup_v2(req: Request<Incoming>, ctx: &mut Ctx, namespace: &str) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
@@ -578,6 +649,7 @@ async fn lookup_v2(req: Request<Incoming>, ctx: &mut Ctx) -> Result<Value> {
     match ctx.service.lookup(
         &keys.iter().map(String::as_str).collect::<Vec<_>>(),
         version,
+        Some(namespace),
     ) {
         Some((hash, _)) => Ok(json!({
             "ok": true,
@@ -600,17 +672,21 @@ fn required_str<'a>(body: &'a Value, field: &str) -> Result<&'a str> {
     body[field].as_str().context(format!("missing {field}"))
 }
 
-async fn download(service: &CacheService, id: &str) -> Result<(ResponseBody, u64)> {
+async fn download(
+    service: &CacheService,
+    id: &str,
+    namespace: Option<&str>,
+) -> Result<(ResponseBody, u64)> {
     validate_cache_id(id)?;
     let entry = service
-        .read_entry(id)
+        .read_entry(id, namespace)
         .context("download before finalize (no entry)")?;
     let expected_size = entry["size"].as_u64().context("cache entry has no size")?;
     if expected_size > MAX_BODY {
         anyhow::bail!("cache entry size exceeds {MAX_BODY} bytes");
     }
 
-    let blob_path = service.blob_path_for(&entry);
+    let blob_path = service.blob_path_for(&entry, namespace);
     let file = tokio::fs::File::open(&blob_path)
         .await
         .context("open cached blob")?;
@@ -693,17 +769,16 @@ async fn stream_download(
     }
 }
 
-/// Operator enablement contract: both variables must be present and
-/// non-empty. Shared by the daemon bootstrap (service spawn) and the
-/// runtime-env injection so the two can never drift.
+/// Operator enablement contract: the cache URL must be present and non-empty.
+/// Job-scoped `ACTIONS_RUNTIME_TOKEN` credentials authenticate requests; the
+/// operator environment never supplies a shared job credential.
 #[must_use]
-pub fn enabled_from_env() -> Option<(String, String)> {
+pub fn enabled_from_env() -> Option<String> {
     let url = std::env::var("VELNOR_ACTIONS_CACHE_URL").ok()?;
-    let token = std::env::var("VELNOR_ACTIONS_RUNTIME_TOKEN").ok()?;
-    if url.is_empty() || token.is_empty() {
+    if url.is_empty() {
         return None;
     }
-    Some((url, token))
+    Some(url)
 }
 
 /// Default listen address. Operators override with `VELNOR_ACTIONS_CACHE_BIND`
@@ -737,14 +812,15 @@ mod tests {
 
     fn test_service(dir: &Path) -> CacheService {
         let mut service = CacheService::open(dir.to_path_buf()).expect("open");
-        service.token = "t".into();
         service.budget_bytes = 1024;
         service
     }
 
     fn write_blob(service: &CacheService, key: &str, version: &str, contents: &[u8]) {
         let hash = entry_hash(key, version);
-        std::fs::write(service.root.join("blobs").join(hash), contents).expect("write blob");
+        let blobs = service.root.join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs");
+        std::fs::write(blobs.join(hash), contents).expect("write blob");
     }
 
     fn commit_blob(service: &CacheService, key: &str, version: &str, contents: &[u8]) {
@@ -754,6 +830,7 @@ mod tests {
             key,
             version,
             u64::try_from(contents.len()).expect("blob length fits u64"),
+            None,
         )
         .expect("commit blob");
     }
@@ -766,6 +843,38 @@ mod tests {
     }
 
     #[test]
+    fn cache_namespace_is_deterministic_token_specific_and_redacted() {
+        let first = cache_namespace("job-token-a");
+        assert_eq!(first, cache_namespace("job-token-a"));
+        assert_ne!(first, cache_namespace("job-token-b"));
+        assert_eq!(first.len(), 64);
+        assert!(!first.contains("job-token-a"));
+    }
+
+    #[test]
+    fn tenant_lookup_does_not_cross_token_namespaces() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        for namespace in ["tenant-a", "tenant-b"] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let hash = entry_hash("shared-key", "v1");
+        let tenant_a_blob = service
+            .tenant_root(Some("tenant-a"))
+            .join("blobs")
+            .join(&hash);
+        std::fs::write(&tenant_a_blob, b"private").unwrap();
+        commit_entry(&service, "shared-key", "v1", 7, Some("tenant-a")).unwrap();
+
+        assert!(service
+            .lookup(&["shared-key"], "v1", Some("tenant-a"))
+            .is_some());
+        assert!(service
+            .lookup(&["shared-key"], "v1", Some("tenant-b"))
+            .is_none());
+    }
+
+    #[test]
     fn lookup_prefers_exact_over_prefix_and_newest_wins() {
         let dir = tempfile_dir();
         let svc = test_service(dir.path());
@@ -774,16 +883,18 @@ mod tests {
         commit_blob(&svc, "linux-rust", "v1", b"newer");
 
         // Exact beats newer prefix hit.
-        let (hash, size) = svc.lookup(&["linux-rust-2026", "linux"], "v1").unwrap();
+        let (hash, size) = svc
+            .lookup(&["linux-rust-2026", "linux"], "v1", None)
+            .unwrap();
         assert_eq!(size, 3);
         assert_eq!(hash, entry_hash("linux-rust-2026", "v1"));
 
         // Prefix falls back to newest.
-        let (_, size) = svc.lookup(&["linux-other", "linux"], "v1").unwrap();
+        let (_, size) = svc.lookup(&["linux-other", "linux"], "v1", None).unwrap();
         assert_eq!(size, 5);
 
         // Version mismatch misses.
-        assert!(svc.lookup(&["linux-rust"], "v9").is_none());
+        assert!(svc.lookup(&["linux-rust"], "v9", None).is_none());
     }
 
     #[test]
@@ -794,9 +905,9 @@ mod tests {
         commit_blob(&svc, "old", "v", b"123456");
         std::thread::sleep(std::time::Duration::from_millis(5));
         commit_blob(&svc, "new", "v", b"123456");
-        svc.enforce_budget().unwrap();
-        assert!(svc.lookup(&["old"], "v").is_none(), "oldest evicted");
-        assert!(svc.lookup(&["new"], "v").is_some(), "newest retained");
+        svc.enforce_budget(None).unwrap();
+        assert!(svc.lookup(&["old"], "v", None).is_none(), "oldest evicted");
+        assert!(svc.lookup(&["new"], "v", None).is_some(), "newest retained");
     }
 
     #[tokio::test]
@@ -811,6 +922,7 @@ mod tests {
             &id,
             None,
             4,
+            None,
         )
         .await
         .unwrap_err();
@@ -842,6 +954,7 @@ mod tests {
             &id,
             None,
             MAX_BODY,
+            None,
         )
         .await
         .unwrap_err();
@@ -867,6 +980,7 @@ mod tests {
             &id,
             Some(4),
             MAX_BODY,
+            None,
         )
         .await
         .unwrap_err();
@@ -885,7 +999,7 @@ mod tests {
         let dir = tempfile_dir();
         let service = test_service(dir.path());
 
-        let error = commit_entry(&service, "missing", "v", 0).unwrap_err();
+        let error = commit_entry(&service, "missing", "v", 0, None).unwrap_err();
 
         assert!(error.to_string().contains("stat uploaded cache blob"));
     }
@@ -896,10 +1010,12 @@ mod tests {
         let service = test_service(dir.path());
         write_blob(&service, "mismatch", "v", b"12345");
 
-        let error = commit_entry(&service, "mismatch", "v", 4).unwrap_err();
+        let error = commit_entry(&service, "mismatch", "v", 4, None).unwrap_err();
 
         assert!(error.to_string().contains("declared 4, received 5"));
-        assert!(!service.entry_path(&entry_hash("mismatch", "v")).exists());
+        assert!(!service
+            .entry_path(&entry_hash("mismatch", "v"), None)
+            .exists());
     }
 
     #[test]
@@ -918,7 +1034,7 @@ mod tests {
         commit_blob(&service, "download", "v", &contents);
         let hash = entry_hash("download", "v");
 
-        let (mut body, size) = download(&service, &hash).await.unwrap();
+        let (mut body, size) = download(&service, &hash, None).await.unwrap();
         let mut received = 0usize;
         while let Some(frame) = body.frame().await {
             let bytes = frame.unwrap().into_data().unwrap();
