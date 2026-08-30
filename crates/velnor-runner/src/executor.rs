@@ -61,6 +61,7 @@ const PREPARED_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 5 * 1024 * 1024 * 1024
 const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_TEST_END_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_COMPILE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const PREPARED_ARTIFACT_SHA256_PREFIX: &str = "sha256:";
 const CACHE_GLOB_MAX_MATCHES: usize = 100_000;
 const CACHE_GLOB_MAX_VISITED_ENTRIES: usize = 1_000_000;
@@ -100,6 +101,33 @@ fn test_command_kind(script: &str) -> Option<&'static str> {
                 ("yarn", Some("test"), _) => Some("yarn_test"),
                 ("gradle", Some("test"), _) => Some("gradle_test"),
                 ("./gradlew", Some("test"), _) => Some("gradle_test"),
+                _ => None,
+            }
+        })
+        .next()
+}
+
+/// Return a stable compiler label only when a shell segment starts with an
+/// explicit compile command. Test commands are intentionally excluded: their
+/// compilation and test phases are not separately observable at this layer.
+fn compile_command_kind(script: &str) -> Option<&'static str> {
+    script
+        .lines()
+        .flat_map(|line| line.split([';', '|', '&']))
+        .filter_map(|line| {
+            let mut tokens = line.split_whitespace().peekable();
+            while let Some(token) = tokens.peek().copied() {
+                if matches!(token, "env" | "sudo") || token.contains('=') {
+                    tokens.next();
+                } else {
+                    break;
+                }
+            }
+            let first = tokens.next()?;
+            let second = tokens.next()?;
+            match (first, second) {
+                ("cargo", "build" | "check" | "clippy" | "rustc") => Some("cargo"),
+                ("go", "build") => Some("go"),
                 _ => None,
             }
         })
@@ -1070,6 +1098,46 @@ impl LifecycleTelemetry {
             fields,
         );
     }
+
+    fn emit_compile_start(&self, compiler: &'static str) {
+        let fields = BTreeMap::from([
+            ("compiler".to_owned(), Value::from(compiler)),
+            // The executor has no compiler wrapper/cache counters yet. Keep
+            // the contract's typed fields while making their availability
+            // explicit so consumers cannot mistake zero for an observation.
+            ("metrics_known".to_owned(), Value::from(false)),
+            ("unit_count".to_owned(), Value::from(0_u64)),
+            ("wrapper_calls".to_owned(), Value::from(0_u64)),
+            ("hits".to_owned(), Value::from(0_u64)),
+            ("misses".to_owned(), Value::from(0_u64)),
+        ]);
+        let _ = self.sink.emit_telemetry_for_admission(
+            &self.admission,
+            velnor_model::TelemetryEvent::CompileStart,
+            fields,
+        );
+    }
+
+    fn emit_compile_end(&self, compiler: &'static str, exit_code: i32, elapsed: Duration) {
+        let elapsed_ms = u64::try_from(elapsed.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_COMPILE_TELEMETRY_MS);
+        let fields = BTreeMap::from([
+            ("compiler".to_owned(), Value::from(compiler)),
+            ("exit_code".to_owned(), Value::from(exit_code)),
+            ("metrics_known".to_owned(), Value::from(false)),
+            ("ms".to_owned(), Value::from(elapsed_ms)),
+            ("unit_count".to_owned(), Value::from(0_u64)),
+            ("wrapper_calls".to_owned(), Value::from(0_u64)),
+            ("hits".to_owned(), Value::from(0_u64)),
+            ("misses".to_owned(), Value::from(0_u64)),
+        ]);
+        let _ = self.sink.emit_telemetry_for_admission(
+            &self.admission,
+            velnor_model::TelemetryEvent::CompileEnd,
+            fields,
+        );
+    }
 }
 
 /// Host-Docker step engine owned by the docker backend.
@@ -1709,6 +1777,7 @@ where
                     let step = step_state.resolve_script_step(step);
                     let test_runner = test_command_kind(&step.script);
                     let test_started = test_runner.map(|_| Instant::now());
+                    let compiler = compile_command_kind(&step.script);
                     let plan =
                         ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
                     let mut env = step_state.step_env(&[]);
@@ -1736,6 +1805,13 @@ where
                             &live_masks,
                         );
                     };
+                    let compile_started = match (compiler, self.lifecycle_telemetry.as_ref()) {
+                        (Some(compiler), Some(telemetry)) => {
+                            telemetry.emit_compile_start(compiler);
+                            Some(Instant::now())
+                        }
+                        _ => None,
+                    };
                     let step_result = self.runner.run_streaming_timeout_with_env(
                         "docker",
                         exec_args.args(),
@@ -1743,6 +1819,15 @@ where
                         effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
                         &mut on_output,
                     )?;
+                    if let (Some(compiler), Some(compile_started), Some(telemetry)) =
+                        (compiler, compile_started, self.lifecycle_telemetry.as_ref())
+                    {
+                        telemetry.emit_compile_end(
+                            compiler,
+                            step_result.code,
+                            compile_started.elapsed(),
+                        );
+                    }
                     if let (Some(test_runner), Some(test_started), Some(telemetry)) =
                         (test_runner, test_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -13955,6 +14040,99 @@ esac
         assert!(fields["ms"]
             .as_u64()
             .is_some_and(|value| { value <= MAX_TEST_END_TELEMETRY_MS }));
+        assert!(!telemetry.contains("private"));
+        assert!(!telemetry.contains("secret-marker"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn compile_command_kind_requires_an_explicit_compile_segment() {
+        assert_eq!(
+            compile_command_kind("cargo build -p private"),
+            Some("cargo")
+        );
+        assert_eq!(
+            compile_command_kind("env RUSTFLAGS=-Dwarnings cargo check"),
+            Some("cargo")
+        );
+        assert_eq!(compile_command_kind("go build ./..."), Some("go"));
+        assert_eq!(compile_command_kind("echo cargo build"), None);
+        assert_eq!(compile_command_kind("cargo test -p private"), None);
+    }
+
+    #[test]
+    fn explicit_compile_command_emits_bounded_start_and_end_telemetry() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(temp.join("state.db"), "test-instance".to_owned()).unwrap(),
+        );
+        let admission = crate::ops::JobAdmission {
+            instance_slug: "test-instance".to_owned(),
+            job_uid: "job-compile-boundary".to_owned(),
+            repository_full_name: "tailrocks/velnor".to_owned(),
+            workflow: "control-plane".to_owned(),
+            job_name: "compile-boundary".to_owned(),
+            run_id: Some(46),
+            attempt: Some(1),
+            head_ref: Some("refs/heads/main".to_owned()),
+            head_sha: Some("deadbeef".to_owned()),
+            trigger_event: Some("workflow_dispatch".to_owned()),
+            queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
+            runner_name: Some("runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            masks: vec!["secret-marker".to_owned()],
+        };
+        assert!(sink.record_admission(&admission));
+        let step = ScriptStep {
+            id: "compile".into(),
+            display_name: "Compile".into(),
+            script: "cargo build -p private --token secret-marker".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let result = DockerJobEngine::new(RecordingRunner::default())
+            .with_tool_prep_telemetry(Arc::clone(&sink), admission)
+            .execute_step(&container(&temp), &step, &temp)
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let telemetry = fs::read_to_string(temp.join("state.test-instance.telemetry.jsonl"))
+            .expect("compile telemetry");
+        let records: Vec<_> = telemetry
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|record| {
+                matches!(
+                    record["event"].as_str(),
+                    Some("compile_start" | "compile_end")
+                )
+            })
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["event"], "compile_start");
+        assert_eq!(records[1]["event"], "compile_end");
+        for record in &records {
+            let fields = record["fields"].as_object().expect("compile fields");
+            assert_eq!(fields["compiler"], "cargo");
+            assert_eq!(fields["metrics_known"], false);
+            assert_eq!(fields["unit_count"], 0);
+            assert_eq!(fields["wrapper_calls"], 0);
+            assert_eq!(fields["hits"], 0);
+            assert_eq!(fields["misses"], 0);
+        }
+        let end_fields = records[1]["fields"].as_object().unwrap();
+        assert_eq!(end_fields["exit_code"], 0);
+        assert!(end_fields["ms"]
+            .as_u64()
+            .is_some_and(|value| value <= MAX_COMPILE_TELEMETRY_MS));
         assert!(!telemetry.contains("private"));
         assert!(!telemetry.contains("secret-marker"));
         fs::remove_dir_all(temp).unwrap();
