@@ -17,14 +17,16 @@ use std::time::Duration;
 
 use velnor_control::store::{
     EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
-    RetentionMaintenanceBudget, Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
+    RetentionMaintenanceBudget, SlotIdentity, SlotTransition, Store, StoreError, Transition,
+    DEFAULT_STATE_DB_PATH,
 };
 #[cfg(test)]
 use velnor_model::ExitClass;
 use velnor_model::{
-    EventReason, JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, Slug,
-    TelemetryEmission, TelemetryEnvelope, TelemetryEnvelopeInput, TelemetryEvent, TelemetryFields,
-    TelemetryLane, TelemetrySink, Timestamp, TriggerEvent,
+    EventReason, Generation, JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
+    SlotId, SlotKind, SlotPhase, Slug, TelemetryEmission, TelemetryEnvelope,
+    TelemetryEnvelopeInput, TelemetryEvent, TelemetryFields, TelemetryLane, TelemetrySink,
+    Timestamp, TriggerEvent,
 };
 
 /// Environment override for the operational database location; tests and
@@ -477,6 +479,13 @@ impl OpsSink {
 
     /// Best-effort normalized event; failures degrade, never propagate.
     pub fn emit(&self, reason: EventReason, subject: &str, detail: Option<String>) {
+        if reason == EventReason::SlotStateChanged {
+            self.absorb(
+                "store.slot.event.requires-transition",
+                "slot state events require the typed atomic transition boundary",
+            );
+            return;
+        }
         let Some(masks) = self.event_masks() else {
             return;
         };
@@ -497,6 +506,54 @@ impl OpsSink {
         }) {
             self.absorb("store.event", &error.to_string());
         }
+    }
+
+    /// Best-effort typed slot transition. Current state and the correlated
+    /// `slot.state_changed` event commit atomically; stale generations and
+    /// impossible edges degrade control state instead of changing job outcome.
+    #[must_use]
+    pub fn transition_slot(
+        &self,
+        slot_id: &SlotId,
+        slot_index: u32,
+        generation: Generation,
+        sequence: u64,
+        target: SlotPhase,
+        message: Option<String>,
+    ) -> bool {
+        let Some(masks) = self.event_masks() else {
+            return false;
+        };
+        let token = format!("slot-g{}-s{}-{}", generation.0, sequence, target.as_str());
+        let Ok(correlation_id) = Slug::validate("correlation_id", &format!("corr-{token}")) else {
+            return false;
+        };
+        let identity = SlotIdentity {
+            instance_slug: self.instance_slug.clone(),
+            slot_id: slot_id.clone(),
+            host: self.instance_slug.clone(),
+            slot_index,
+            slot_kind: SlotKind::Stable,
+        };
+        let transition = SlotTransition {
+            token,
+            correlation_id,
+            generation,
+            sequence,
+            target,
+            job_name: None,
+            message: message.map(|value| sanitize_event_detail(&value, &masks)),
+            transition_time: Timestamp::now(),
+        };
+        if let Err(error) = self.before_store_write() {
+            self.absorb("store.slot.transition", &error.to_string());
+            return false;
+        }
+        if let Err(error) = self.store.record_slot_transition(&identity, &transition) {
+            self.absorb("store.slot.transition", &error.to_string());
+            return false;
+        }
+        true
     }
 
     /// Best-effort idempotent job transition; replaying `(job, token)` is a

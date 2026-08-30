@@ -3,13 +3,13 @@
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
-use velnor_model::{ExitClass, Timestamp};
+use velnor_model::{ExitClass, SlotKind, SlotPhase, Timestamp};
 
 use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 15;
+pub const LATEST_SCHEMA_VERSION: u32 = 16;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -463,6 +463,26 @@ END;
 DROP INDEX IF EXISTS idx_job_storage_reservations_job;
 ";
 
+/// Durable slot ownership and bounded idempotency. The actor generation
+/// fences stale writers; the monotonic sequence makes every older retry a
+/// no-op without retaining an unbounded second transition history.
+const SCHEMA_V16: &str = "
+ALTER TABLE slots
+    ADD COLUMN generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0);
+ALTER TABLE slots
+    ADD COLUMN transition_sequence INTEGER NOT NULL DEFAULT 0 CHECK (transition_sequence >= 0);
+ALTER TABLE slots ADD COLUMN last_transition_token TEXT;
+ALTER TABLE slots ADD COLUMN last_correlation_id TEXT;
+ALTER TABLE slots ADD COLUMN last_transition_detail TEXT;
+";
+
+/// `ready` meant an available slot and therefore has the exact `idle` meaning
+/// in the typed model. The legacy aggregate `busy` has no safe mapping because
+/// it collapsed acquiring, running, and finalizing into one token.
+const SCHEMA_V16_NORMALIZE_LEGACY_SLOTS: &str = "
+UPDATE slots SET phase = 'idle' WHERE phase = 'ready';
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -569,6 +589,11 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "constant-time-storage-reservation-accounting",
         sql: SCHEMA_V15,
     },
+    Migration {
+        version: 16,
+        name: "typed-fenced-slot-lifecycle",
+        sql: SCHEMA_V16,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -608,13 +633,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
         [],
         |row| row.get(0),
     )?;
-    if version >= LATEST_SCHEMA_VERSION && !v15_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v16_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 15 is recorded but its exact lifecycle-event identity or constant-time storage-reservation schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 16 is recorded but its exact lifecycle-event identity, storage-reservation accounting, or fenced slot-lifecycle schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -769,6 +794,35 @@ pub(crate) fn apply_pending(
                 "storage_reservation_state",
                 "reservation_count",
             )?;
+        let slot_generation_exists =
+            migration.version == 16 && has_column(&transaction, "slots", "generation")?;
+        let slot_sequence_exists =
+            migration.version == 16 && has_column(&transaction, "slots", "transition_sequence")?;
+        let slot_token_exists =
+            migration.version == 16 && has_column(&transaction, "slots", "last_transition_token")?;
+        let slot_correlation_exists =
+            migration.version == 16 && has_column(&transaction, "slots", "last_correlation_id")?;
+        let slot_detail_exists =
+            migration.version == 16 && has_column(&transaction, "slots", "last_transition_detail")?;
+        let slot_lifecycle_columns = [
+            slot_generation_exists,
+            slot_sequence_exists,
+            slot_token_exists,
+            slot_correlation_exists,
+            slot_detail_exists,
+        ];
+        if migration.version == 16
+            && slot_lifecycle_columns.iter().any(|exists| *exists)
+            && !slot_lifecycle_columns.iter().all(|exists| *exists)
+        {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v16 fenced slot lifecycle is partial; generation, transition_sequence, last_transition_token, last_correlation_id, and last_transition_detail must all be present before the schema version can advance",
+            ));
+        }
         if migration.version == 12
             && event_transition_column_exists != event_reconciliation_column_exists
         {
@@ -780,9 +834,13 @@ pub(crate) fn apply_pending(
                 "v12 exact lifecycle-event identity is partial; both transition_id and reconciliation_id must be present before the schema version can advance",
             ));
         }
+        if migration.version == 16 {
+            transaction.execute_batch(SCHEMA_V16_NORMALIZE_LEGACY_SLOTS)?;
+        }
         if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
             && !slot_column_exists
             && !retention_generation_exists
+            && !slot_lifecycle_columns.iter().all(|exists| *exists)
         {
             let sql = if lifecycle_columns_exist {
                 SCHEMA_V6_REPLAY
@@ -833,6 +891,15 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v15 constant-time storage-reservation accounting did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 16 && !v16_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v16 fenced slot lifecycle columns did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1091,6 +1158,108 @@ fn v15_schema_complete(conn: &Connection) -> StoreResult<bool> {
         && trigger_sql_contains(conn, "storage_reservations_immutable", "RAISE(ABORT")?)
 }
 
+fn v16_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v15_schema_complete(conn)?
+        || !slot_column_definition_matches(conn, "generation", "INTEGER", true, Some("0"))?
+        || !slot_column_definition_matches(conn, "transition_sequence", "INTEGER", true, Some("0"))?
+        || !slot_column_definition_matches(conn, "last_transition_token", "TEXT", false, None)?
+        || !slot_column_definition_matches(conn, "last_correlation_id", "TEXT", false, None)?
+        || !slot_column_definition_matches(conn, "last_transition_detail", "TEXT", false, None)?
+        || !table_sql_contains(conn, "slots", "CHECK (generation >= 0)")?
+        || !table_sql_contains(conn, "slots", "CHECK (transition_sequence >= 0)")?
+        || !v16_slot_rows_complete(conn)?
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn slot_column_definition_matches(
+    conn: &Connection,
+    column: &str,
+    expected_type: &str,
+    expected_not_null: bool,
+    expected_default: Option<&str>,
+) -> StoreResult<bool> {
+    let definition: Option<(String, bool, Option<String>, i64)> = conn
+        .query_row(
+            "SELECT type, \"notnull\", dflt_value, pk
+             FROM pragma_table_info('slots') WHERE name = ?1",
+            [column],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    Ok(
+        definition.is_some_and(|(declared_type, not_null, default, primary_key)| {
+            declared_type.eq_ignore_ascii_case(expected_type)
+                && not_null == expected_not_null
+                && default.as_deref() == expected_default
+                && primary_key == 0
+        }),
+    )
+}
+
+fn v16_slot_rows_complete(conn: &Connection) -> StoreResult<bool> {
+    let mut statement = conn.prepare(
+        "SELECT typeof(slot_kind), typeof(phase),
+                CAST(slot_kind AS TEXT), CAST(phase AS TEXT)
+         FROM slots",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (kind_type, phase_type, kind, phase) = row?;
+        if kind_type != "text"
+            || phase_type != "text"
+            || kind
+                .as_deref()
+                .is_none_or(|value| SlotKind::try_from(value).is_err())
+            || phase
+                .as_deref()
+                .is_none_or(|value| SlotPhase::try_from(value).is_err())
+        {
+            return Ok(false);
+        }
+    }
+    drop(statement);
+
+    Ok(!conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM slots
+             WHERE typeof(slot_index) != 'integer'
+                OR slot_index < 0 OR slot_index > 4294967295
+                OR typeof(generation) != 'integer' OR generation < 0
+                OR typeof(transition_sequence) != 'integer' OR transition_sequence < 0
+                OR (generation = 0 AND (
+                    transition_sequence != 0
+                    OR last_transition_token IS NOT NULL
+                    OR last_correlation_id IS NOT NULL
+                    OR last_transition_detail IS NOT NULL
+                ))
+                OR (generation > 0 AND (
+                    transition_sequence = 0
+                    OR typeof(last_transition_token) != 'text'
+                    OR last_transition_token = ''
+                    OR typeof(last_correlation_id) != 'text'
+                    OR last_correlation_id != ('corr-' || last_transition_token)
+                    OR typeof(last_transition_detail) != 'text'
+                    OR (
+                        last_transition_detail != ('phase=' || phase)
+                        AND last_transition_detail NOT LIKE ('phase=' || phase || '; %')
+                    )
+                ))
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?)
+}
+
 fn table_sql_contains(conn: &Connection, table: &str, fragment: &str) -> StoreResult<bool> {
     Ok(conn
         .query_row(
@@ -1116,7 +1285,7 @@ mod tests {
     use std::path::PathBuf;
 
     use rusqlite::Connection;
-    use velnor_model::Timestamp;
+    use velnor_model::{SlotId, SlotKind, SlotPhase, Timestamp};
 
     use crate::store::Store;
 
@@ -1183,6 +1352,160 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 11);
         assert!(!has_column_connection(&conn, "events", "reconciliation_id").unwrap());
         release_lock(&conn, "partial-v12-test").unwrap();
+    }
+
+    #[test]
+    fn partial_v16_slot_lifecycle_fails_closed_before_version_bump() {
+        let temp = TempDb::new("partial-v16");
+        let mut conn = Connection::open(&temp.path).expect("open database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(15) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "ALTER TABLE slots ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "partial-v16-test", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(&mut conn, "partial-v16-test", None).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+        assert_eq!(current_version(&conn).unwrap(), 15);
+        assert!(!has_column_connection(&conn, "slots", "transition_sequence").unwrap());
+        release_lock(&conn, "partial-v16-test").unwrap();
+    }
+
+    #[test]
+    fn populated_v15_slots_upgrade_to_readable_v16_rows() {
+        let temp = TempDb::new("populated-v16");
+        let mut conn = Connection::open(&temp.path).expect("open database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(15) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO slots
+                (instance_slug, name, host, slot_index, slot_kind, phase, job_name, updated_at)
+             VALUES
+                ('legacy', 'ready-slot', 'sentry', 0, 'stable', 'ready', NULL,
+                 '1970-01-01T00:00:00Z'),
+                ('legacy', 'running-slot', 'sentry', 1, 'ephemeral', 'running', 'job-1',
+                 '1970-01-01T00:00:00Z');",
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "populated-v16-test", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "populated-v16-test", None).unwrap(),
+            16
+        );
+        release_lock(&conn, "populated-v16-test").unwrap();
+        drop(conn);
+
+        let store = Store::open(&temp.path).expect("reopen migrated store");
+        let ready = store
+            .slot("legacy", &SlotId("ready-slot".to_owned()))
+            .unwrap()
+            .expect("ready slot survives");
+        assert_eq!(ready.identity.slot_kind, SlotKind::Stable);
+        assert_eq!(ready.phase, SlotPhase::Idle);
+        assert_eq!(ready.generation.0, 0);
+        assert_eq!(ready.transition_sequence, 0);
+        let running = store
+            .slot("legacy", &SlotId("running-slot".to_owned()))
+            .unwrap()
+            .expect("running slot survives");
+        assert_eq!(running.identity.slot_kind, SlotKind::Ephemeral);
+        assert_eq!(running.phase, SlotPhase::Running);
+    }
+
+    #[test]
+    fn unknown_v15_slot_values_fail_closed_and_roll_back_normalization() {
+        for (label, slot_kind, phase) in [
+            ("unknown-kind", "mystery", "idle"),
+            ("ambiguous-phase", "stable", "busy"),
+        ] {
+            let temp = TempDb::new(label);
+            let mut conn = Connection::open(&temp.path).expect("open database");
+            conn.busy_timeout(Duration::from_secs(5)).unwrap();
+            ensure_meta_tables(&conn).unwrap();
+            for migration in MIGRATIONS.iter().take(15) {
+                conn.execute_batch(migration.sql).unwrap();
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                    rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO slots
+                    (instance_slug, name, host, slot_index, slot_kind, phase, updated_at)
+                 VALUES ('legacy', 'mapped', 'sentry', 0, 'stable', 'ready',
+                         '1970-01-01T00:00:00Z'),
+                        ('legacy', 'invalid', 'sentry', 1, ?1, ?2,
+                         '1970-01-01T00:00:00Z')",
+                rusqlite::params![slot_kind, phase],
+            )
+            .unwrap();
+
+            acquire_lock(&conn, label, Duration::from_secs(1)).unwrap();
+            let error = apply_pending(&mut conn, label, None).unwrap_err();
+            assert_eq!(error.envelope.reason, "store.schema.incomplete");
+            assert_eq!(current_version(&conn).unwrap(), 15);
+            assert!(!has_column_connection(&conn, "slots", "generation").unwrap());
+            let mapped_phase: String = conn
+                .query_row(
+                    "SELECT phase FROM slots WHERE instance_slug = 'legacy' AND name = 'mapped'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(mapped_phase, "ready", "normalization must roll back");
+            release_lock(&conn, label).unwrap();
+        }
+    }
+
+    #[test]
+    fn complete_but_malformed_v16_columns_fail_closed_before_version_bump() {
+        let temp = TempDb::new("malformed-v16");
+        let mut conn = Connection::open(&temp.path).expect("open database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(15) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "ALTER TABLE slots ADD COLUMN generation TEXT NOT NULL DEFAULT '0';
+             ALTER TABLE slots ADD COLUMN transition_sequence INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE slots ADD COLUMN last_transition_token TEXT;
+             ALTER TABLE slots ADD COLUMN last_correlation_id TEXT;
+             ALTER TABLE slots ADD COLUMN last_transition_detail TEXT;",
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "malformed-v16-test", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(&mut conn, "malformed-v16-test", None).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+        assert_eq!(current_version(&conn).unwrap(), 15);
+        release_lock(&conn, "malformed-v16-test").unwrap();
     }
 
     #[test]

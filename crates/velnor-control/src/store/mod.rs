@@ -26,7 +26,7 @@ pub use migrations::LATEST_SCHEMA_VERSION;
 pub use records::{
     EventRow, EventWindow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow,
     LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
-    SlotRow, StoredEvent, Transition,
+    SlotIdentity, SlotRow, SlotTransition, StoredEvent, Transition,
 };
 pub use retention::{
     PhysicalBudgetStatus, PrunePhase, PruneReport, RetentionBudget, RetentionLease,
@@ -278,12 +278,14 @@ mod tests {
     use std::thread;
 
     use rusqlite::{params, Connection};
-    use velnor_model::{EventReason, Slug, Timestamp};
+    use velnor_model::{EventReason, Generation, SlotId, SlotKind, SlotPhase, Slug, Timestamp};
 
     use super::migrations;
     use super::records::test_connection;
     use super::*;
-    use crate::store::records::{EventRow, InstanceRow, JobRow, SlotRow, Transition};
+    use crate::store::records::{
+        EventRow, InstanceRow, JobRow, SlotIdentity, SlotTransition, Transition,
+    };
 
     struct TempDb {
         dir: PathBuf,
@@ -1068,17 +1070,27 @@ mod tests {
         let store = Store::open(&temp.path).unwrap();
         store.upsert_instance(&instance("alpha")).unwrap();
         store.upsert_instance(&instance("beta")).unwrap();
+        let correlation_id = Slug::validate("correlation_id", "corr-slot-alpha-1").unwrap();
         store
-            .upsert_slot(&SlotRow {
-                instance_slug: "alpha".to_owned(),
-                name: "slot-0".to_owned(),
-                host: "sentry".to_owned(),
-                slot_index: 0,
-                slot_kind: "stable".to_owned(),
-                phase: "ready".to_owned(),
-                job_name: None,
-                updated_at: Timestamp::now(),
-            })
+            .record_slot_transition(
+                &SlotIdentity {
+                    instance_slug: "alpha".to_owned(),
+                    slot_id: SlotId("slot-0".to_owned()),
+                    host: "sentry".to_owned(),
+                    slot_index: 0,
+                    slot_kind: SlotKind::Stable,
+                },
+                &SlotTransition {
+                    token: "slot-alpha-1".to_owned(),
+                    correlation_id,
+                    generation: Generation::INITIAL,
+                    sequence: 1,
+                    target: SlotPhase::Idle,
+                    job_name: None,
+                    message: None,
+                    transition_time: Timestamp::now(),
+                },
+            )
             .unwrap();
         store
             .record_job(&job("alpha", "shared-uid", "org/alpha-repo"))
