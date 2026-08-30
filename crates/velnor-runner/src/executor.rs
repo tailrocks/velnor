@@ -6385,10 +6385,10 @@ fn create_pages_archive_from_canonical_source(
     active_directories.insert(canonical_source.to_path_buf());
     append_pages_archive_dir(
         &mut builder,
-        &canonical_source,
+        canonical_source,
         &source_directory,
         &source_directory,
-        &canonical_source,
+        canonical_source,
         Path::new(""),
         &mut active_directories,
     )?;

@@ -708,6 +708,7 @@ impl NoFollowDestinationDir {
                         destination_path.display()
                     )
                 })?;
+                #[allow(clippy::useless_conversion)]
                 let raw_mode: rustix::fs::RawMode = metadata
                     .permissions()
                     .mode()
