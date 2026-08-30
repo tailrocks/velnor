@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(test)]
+use rusqlite::Connection;
 use velnor_control::store::{
     EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
     RetentionMaintenanceBudget, SlotIdentity, SlotTransitionRequest, SlotTransitionRequestKey,
@@ -48,6 +50,10 @@ const PRUNE_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
 const MAX_RETAINED_MASK_COUNT: usize = 256;
 const MAX_RETAINED_MASK_BYTES: usize = 64 * 1024;
 const TELEMETRY_RING_CAPACITY: usize = 4096;
+#[cfg(test)]
+const TEST_STORE_FAILURE_TRIGGER_EVENTS: &str = "velnor_test_store_failure_events";
+#[cfg(test)]
+const TEST_STORE_FAILURE_TRIGGER_TRANSITIONS: &str = "velnor_test_store_failure_transitions";
 
 static OPS: OnceLock<Arc<OpsSink>> = OnceLock::new();
 
@@ -291,8 +297,8 @@ pub struct OpsSink {
     telemetry: TelemetrySink,
     telemetry_logical: AtomicU64,
     #[cfg(test)]
-    injected_write_failure: Mutex<Option<(ExitClass, &'static str)>>,
-    #[cfg(test)]
+    test_store_failure_trigger_armed: Mutex<bool>,
+    #[cfg(any(test, feature = "test-support"))]
     forensic_failures: Mutex<Vec<String>>,
     #[cfg(test)]
     injected_prune_failure: AtomicBool,
@@ -330,8 +336,8 @@ impl OpsSink {
                 .expect("fixed telemetry sink configuration is valid"),
             telemetry_logical: AtomicU64::new(1),
             #[cfg(test)]
-            injected_write_failure: Mutex::new(None),
-            #[cfg(test)]
+            test_store_failure_trigger_armed: Mutex::new(false),
+            #[cfg(any(test, feature = "test-support"))]
             forensic_failures: Mutex::new(Vec::new()),
             #[cfg(test)]
             injected_prune_failure: AtomicBool::new(false),
@@ -404,16 +410,15 @@ impl OpsSink {
                 "event mask registry is unavailable; admission rejected",
             );
         }
-        if let Err(error) = self.before_store_write() {
-            return self.required_failure("store.admission.persist", &error.to_string());
-        }
-        match self.store.persist_summary_and_transition_with_budget(
-            &summary,
-            &self.instance_slug,
-            &job_uid,
-            &transition,
-            &budget,
-        ) {
+        match self.store_write(|store| {
+            store.persist_summary_and_transition_with_budget(
+                &summary,
+                &self.instance_slug,
+                &job_uid,
+                &transition,
+                &budget,
+            )
+        }) {
             Ok(status) if status.admits_job() => {}
             Ok(status) => {
                 return self.required_failure(
@@ -469,6 +474,20 @@ impl OpsSink {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn telemetry_probe_snapshot(
+        &self,
+    ) -> (velnor_model::TelemetrySinkStats, Vec<TelemetryEnvelope>) {
+        let page = self.telemetry.read(None, TELEMETRY_RING_CAPACITY);
+        (
+            self.telemetry.stats(),
+            page.records()
+                .iter()
+                .map(|record| record.envelope().clone())
+                .collect(),
+        )
+    }
+
     /// Release a durable claim after stale in-flight recovery completed the
     /// remote job. Cleanup remains allowed while admission is blocked.
     pub(crate) fn release_storage_reservation(&self, job_uid: &str) -> Result<(), StoreError> {
@@ -492,17 +511,15 @@ impl OpsSink {
         let subject = sanitize_event_subject(subject, &masks);
         let detail = detail.map(|value| sanitize_event_detail(&value, &masks));
         let correlation = Slug::validate("correlation_id", &subject).ok();
-        if let Err(error) = self.before_store_write() {
-            self.absorb("store.event", &error.to_string());
-            return;
-        }
-        if let Err(error) = self.store.append_event(&EventRow {
-            instance_slug: self.instance_slug.clone(),
-            event_kind: reason.as_str().to_owned(),
-            subject,
-            correlation_id: correlation.map(|slug| slug.as_str().to_owned()),
-            occurred_at: Timestamp::now(),
-            detail,
+        if let Err(error) = self.store_write(|store| {
+            store.append_event(&EventRow {
+                instance_slug: self.instance_slug.clone(),
+                event_kind: reason.as_str().to_owned(),
+                subject,
+                correlation_id: correlation.map(|slug| slug.as_str().to_owned()),
+                occurred_at: Timestamp::now(),
+                detail,
+            })
         }) {
             self.absorb("store.event", &error.to_string());
         }
@@ -531,10 +548,6 @@ impl OpsSink {
             slot_index,
             slot_kind: SlotKind::Stable,
         };
-        if let Err(error) = self.before_store_write() {
-            self.absorb("store.slot.transition", &error.to_string());
-            return false;
-        }
         let request = SlotTransitionRequest {
             request_key: request_key.to_owned(),
             generation,
@@ -543,7 +556,7 @@ impl OpsSink {
             message: message.map(|value| sanitize_event_detail(&value, &masks)),
             transition_time: Timestamp::now(),
         };
-        match self.store.record_next_slot_transition(&identity, &request) {
+        match self.store_write(|store| store.record_next_slot_transition(&identity, &request)) {
             Ok(committed) => committed,
             Err(error) => {
                 self.absorb("store.slot.transition", &error.to_string());
@@ -596,14 +609,9 @@ impl OpsSink {
             conclusion,
             infrastructure_category,
         };
-        if let Err(error) = self.before_store_write() {
-            self.absorb("store.transition", &error.to_string());
-            return false;
-        }
-        if let Err(error) =
-            self.store
-                .record_job_transition(&self.instance_slug, job_uid, &transition)
-        {
+        if let Err(error) = self.store_write(|store| {
+            store.record_job_transition(&self.instance_slug, job_uid, &transition)
+        }) {
             self.absorb("store.transition", &error.to_string());
             return false;
         }
@@ -912,24 +920,75 @@ impl OpsSink {
         false
     }
 
-    fn before_store_write(&self) -> Result<(), StoreError> {
+    /// Run one durable store operation.
+    fn store_write<T>(
+        &self,
+        write: impl FnOnce(&Store) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         #[cfg(test)]
-        if let Ok(mut injected) = self.injected_write_failure.lock() {
-            if let Some((class, reason)) = injected.take() {
-                return Err(
-                    StoreError::new(class, reason).with_remediation("test-injected write failure")
-                );
-            }
+        let mut test_failure = self
+            .test_store_failure_trigger_armed
+            .lock()
+            .expect("test store failure trigger lock is not poisoned");
+        let result = write(&self.store);
+        #[cfg(test)]
+        if *test_failure {
+            self.clear_test_store_failure_trigger();
+            *test_failure = false;
         }
-        Ok(())
+        result
     }
 
     #[cfg(test)]
-    fn fail_next_store_write(&self, class: ExitClass, reason: &'static str) {
-        self.injected_write_failure
-            .lock()
-            .unwrap()
-            .replace((class, reason));
+    /// Arrange a SQLite abort inside the next real durable store transaction.
+    pub(crate) fn fail_next_durable_store_write(&self, _class: ExitClass, reason: &'static str) {
+        let mut armed = self.test_store_failure_trigger_armed.lock().unwrap();
+        self.clear_test_store_failure_trigger();
+
+        let reason = Self::sqlite_string_literal(&format!(
+            "test-injected durable store write failure: {reason}"
+        ));
+        let connection =
+            Connection::open(self.store.path()).expect("open store failure trigger connection");
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .expect("configure store failure trigger timeout");
+        connection
+            .execute_batch(&format!(
+                "CREATE TRIGGER {events}
+                 AFTER INSERT ON events
+                 BEGIN
+                     SELECT RAISE(ABORT, '{reason}');
+                 END;
+                 CREATE TRIGGER {transitions}
+                 AFTER INSERT ON job_transitions
+                 BEGIN
+                     SELECT RAISE(ABORT, '{reason}');
+                 END;",
+                events = TEST_STORE_FAILURE_TRIGGER_EVENTS,
+                transitions = TEST_STORE_FAILURE_TRIGGER_TRANSITIONS,
+            ))
+            .expect("install store failure triggers");
+        *armed = true;
+    }
+
+    #[cfg(test)]
+    fn clear_test_store_failure_trigger(&self) {
+        let connection =
+            Connection::open(self.store.path()).expect("open store trigger cleanup connection");
+        connection
+            .execute_batch(&format!(
+                "DROP TRIGGER IF EXISTS {events};
+                 DROP TRIGGER IF EXISTS {transitions};",
+                events = TEST_STORE_FAILURE_TRIGGER_EVENTS,
+                transitions = TEST_STORE_FAILURE_TRIGGER_TRANSITIONS,
+            ))
+            .expect("remove store failure triggers");
+    }
+
+    #[cfg(test)]
+    fn sqlite_string_literal(value: &str) -> String {
+        value.replace('\'', "''")
     }
 
     #[cfg(test)]
@@ -949,15 +1008,15 @@ impl OpsSink {
         self.absorb("store.slot.transition.lookup", &error.to_string());
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn forensic_failures(&self) -> Vec<String> {
         self.forensic_failures.lock().unwrap().clone()
     }
 
     fn record_forensic_failure(&self, code: &str, detail: &str) {
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let _ = (code, detail);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.forensic_failures
             .lock()
             .unwrap()
@@ -1420,7 +1479,7 @@ mod tests {
     #[test]
     fn injected_admission_write_failure_rejects_without_partial_summary() {
         let (_dir, sink) = temp_sink("injected-admission-failure");
-        sink.fail_next_store_write(ExitClass::Operation, "store.test.disk-full");
+        sink.fail_next_durable_store_write(ExitClass::Operation, "store.test.disk-full");
 
         assert!(!sink.record_admission(&admission(122, None)));
         assert!(sink.degraded());
@@ -1441,7 +1500,7 @@ mod tests {
         let (_dir, sink) = temp_sink("injected-event-failure");
         let adm = admission(123, None);
         assert!(sink.record_admission(&adm));
-        sink.fail_next_store_write(ExitClass::Operation, "store.test.disk-full");
+        sink.fail_next_durable_store_write(ExitClass::Operation, "store.test.disk-full");
 
         sink.emit(
             EventReason::ReadinessDegraded,
@@ -1476,7 +1535,7 @@ mod tests {
         let adm = admission(124, None);
         assert!(sink.record_admission(&adm));
         let uid = adm.job_uid().unwrap();
-        sink.fail_next_store_write(ExitClass::Timeout, "store.test.locked");
+        sink.fail_next_durable_store_write(ExitClass::Timeout, "store.test.locked");
 
         assert!(!sink.transition(
             &uid,
@@ -1545,7 +1604,7 @@ mod tests {
     #[test]
     fn concurrent_event_writes_consume_one_injected_failure_deterministically() {
         let (_dir, sink) = temp_sink("concurrent-injected-failure");
-        sink.fail_next_store_write(ExitClass::Operation, "store.test.disk-full");
+        sink.fail_next_durable_store_write(ExitClass::Operation, "store.test.disk-full");
 
         let workers: Vec<_> = (0..8)
             .map(|sequence| {
