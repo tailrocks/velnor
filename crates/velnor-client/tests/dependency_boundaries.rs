@@ -12,7 +12,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 10] = [
+const WORKSPACE_PACKAGES: [&str; 11] = [
     "velnor-model",
     "velnor-action-model",
     "velnor-cas",
@@ -23,6 +23,7 @@ const WORKSPACE_PACKAGES: [&str; 10] = [
     "velnorctl",
     "velnor-runner",
     "velnor-tools",
+    "unit-collector",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -116,7 +117,7 @@ fn transitive_closure(metadata: &Value, root: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn workspace_has_exactly_the_ten_expected_packages() {
+fn workspace_has_exactly_the_eleven_expected_packages() {
     let metadata = cargo_metadata();
     let mut names: Vec<String> = metadata["packages"]
         .as_array()
