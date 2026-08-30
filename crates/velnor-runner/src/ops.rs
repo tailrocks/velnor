@@ -1122,6 +1122,40 @@ mod tests {
     }
 
     #[test]
+    fn queued_telemetry_precedes_admitted_and_is_secret_safe() {
+        let (dir, sink) = temp_sink("queued");
+        let marker_secret = "super-secret-marker-value-42";
+        let mut adm = admission(103, Some(marker_secret));
+        adm.queued_at_rfc3339 = Some("2026-08-30T00:00:00Z".to_owned());
+        let fields = BTreeMap::from([
+            (
+                "queued_for_ms".to_owned(),
+                serde_json::json!(86_400_000_u64),
+            ),
+            ("queue_time_present".to_owned(), serde_json::json!(true)),
+        ]);
+
+        assert!(sink
+            .emit_telemetry_for_admission(&adm, TelemetryEvent::RunQueued, fields)
+            .is_some());
+        assert!(sink.record_admission(&adm));
+
+        let telemetry = std::fs::read_to_string(dir.join("state.test-instance.telemetry.jsonl"))
+            .expect("telemetry records");
+        let records: Vec<serde_json::Value> = telemetry
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid record"))
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["event"], "run_queued");
+        assert_eq!(records[0]["fields"]["queued_for_ms"], 86_400_000);
+        assert_eq!(records[0]["fields"]["queue_time_present"], true);
+        assert_eq!(records[1]["event"], "run_admitted");
+        assert!(!telemetry.contains(marker_secret));
+        assert!(!telemetry.contains("2026-08-30T00:00:00Z"));
+    }
+
+    #[test]
     fn passive_wait_telemetry_is_bounded_and_secret_free() {
         let (dir, sink) = temp_sink("passive-wait");
         let marker_secret = "super-secret-marker-value-42";
