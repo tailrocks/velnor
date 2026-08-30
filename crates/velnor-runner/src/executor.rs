@@ -70,8 +70,41 @@ const PAGES_ARCHIVE_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
- const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+ const MAX_TEST_END_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Return a stable test-runner label only when a shell segment starts with a
+/// recognized test command. Matching the command position avoids treating
+/// arbitrary output such as `echo cargo test` as a completed test boundary.
+fn test_command_kind(script: &str) -> Option<&'static str> {
+    script
+        .lines()
+        .flat_map(|line| line.split([';', '|', '&']))
+        .filter_map(|line| {
+            let mut tokens = line.split_whitespace().peekable();
+            while matches!(tokens.peek().copied(), Some("env" | "sudo")) {
+                tokens.next();
+            }
+            let first = tokens.next()?;
+            let second = tokens.next();
+            let third = tokens.next();
+            match (first, second, third) {
+                ("cargo", Some("test"), _) => Some("cargo_test"),
+                ("cargo", Some("nextest"), Some("run")) => Some("cargo_nextest"),
+                ("go", Some("test"), _) => Some("go_test"),
+                ("pytest", _, _) => Some("pytest"),
+                ("python" | "python3", Some("-m"), Some("pytest")) => Some("pytest"),
+                ("npm", Some("test"), _) => Some("npm_test"),
+                ("pnpm", Some("test"), _) => Some("pnpm_test"),
+                ("yarn", Some("test"), _) => Some("yarn_test"),
+                ("gradle", Some("test"), _) => Some("gradle_test"),
+                ("./gradlew", Some("test"), _) => Some("gradle_test"),
+                _ => None,
+            }
+        })
+        .next()
+}
 
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
     let run_root = crate::storage::StorageLayout::resolve()
@@ -1016,6 +1049,23 @@ impl LifecycleTelemetry {
             fields,
         );
     }
+
+    fn emit_test_end(&self, runner: &'static str, exit_code: i32, elapsed: Duration) {
+        let elapsed_ms = u64::try_from(elapsed.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_TEST_END_TELEMETRY_MS);
+        let fields = BTreeMap::from([
+            ("exit_code".to_owned(), Value::from(exit_code)),
+            ("ms".to_owned(), Value::from(elapsed_ms)),
+            ("passed".to_owned(), Value::from(exit_code == 0)),
+            ("runner".to_owned(), Value::from(runner)),
+        ]);
+        let _ = self.sink.emit_telemetry_for_admission(
+            &self.admission,
+            velnor_model::TelemetryEvent::TestEnd,
+            fields,
+        );
+    }
 }
 
 /// Host-Docker step engine owned by the docker backend.
@@ -1651,6 +1701,8 @@ where
                 }
                 ExecutableStep::Script(step) => {
                     let step = step_state.resolve_script_step(step);
+                    let test_runner = test_command_kind(&step.script);
+                    let test_started = test_runner.map(|_| Instant::now());
                     let plan =
                         ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
                     let mut env = step_state.step_env(&[]);
@@ -1685,6 +1737,15 @@ where
                         effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
                         &mut on_output,
                     )?;
+                    if let (Some(test_runner), Some(test_started), Some(telemetry)) =
+                        (test_runner, test_started, self.lifecycle_telemetry.as_ref())
+                    {
+                        telemetry.emit_test_end(
+                            test_runner,
+                            step_result.code,
+                            test_started.elapsed(),
+                        );
+                    }
                     let mut command_state = plan.collect_state()?;
                     command_state.merge(parse_workflow_commands_from_output(
                         &step_result.stdout,
@@ -13893,6 +13954,69 @@ esac
             .contains(&"GITHUB_OUTPUT=/__t/step1_output".into()));
         assert_cleanup_reclaims_job_docker(calls, 3, &temp);
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn recognized_test_command_emits_bounded_completion_telemetry() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(temp.join("state.db"), "test-instance".to_owned()).unwrap(),
+        );
+        let admission = crate::ops::JobAdmission {
+            instance_slug: "test-instance".to_owned(),
+            job_uid: "job-test-end".to_owned(),
+            repository_full_name: "tailrocks/velnor".to_owned(),
+            workflow: "control-plane".to_owned(),
+            job_name: "test-end".to_owned(),
+            run_id: Some(45),
+            attempt: Some(1),
+            head_ref: Some("refs/heads/main".to_owned()),
+            head_sha: Some("deadbeef".to_owned()),
+            trigger_event: Some("workflow_dispatch".to_owned()),
+            queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
+            runner_name: Some("runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            masks: vec!["secret-marker".to_owned()],
+        };
+        assert!(sink.record_admission(&admission));
+        let step = ScriptStep {
+            id: "tests".into(),
+            display_name: "Tests".into(),
+            script: "cargo nextest run -p private --token secret-marker".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let result = DockerJobEngine::new(RecordingRunner::default())
+            .with_tool_prep_telemetry(Arc::clone(&sink), admission)
+            .execute_step(&container(&temp), &step, &temp)
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let telemetry = fs::read_to_string(temp.join("state.test-instance.telemetry.jsonl"))
+            .expect("test completion telemetry");
+        let record = telemetry
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|record| record["event"] == "test_end")
+            .expect("test_end event");
+        let fields = record["fields"].as_object().expect("test fields");
+        assert_eq!(fields["exit_code"], 0);
+        assert_eq!(fields["passed"], true);
+        assert_eq!(fields["runner"], "cargo_nextest");
+        assert!(fields["ms"]
+            .as_u64()
+            .is_some_and(|value| { value <= MAX_TEST_END_TELEMETRY_MS }));
+        assert!(!telemetry.contains("private"));
+        assert!(!telemetry.contains("secret-marker"));
         fs::remove_dir_all(temp).unwrap();
     }
 
