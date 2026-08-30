@@ -22488,11 +22488,6 @@ fi"#
             ("GITHUB_API_URL".into(), "https://api.github.com".into()),
             ("GITHUB_RETENTION_DAYS".into(), "90".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
-            ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
-            (
-                "ACTIONS_RESULTS_URL".into(),
-                "https://results.actions".into(),
-            ),
             (
                 "ACTIONS_ID_TOKEN_REQUEST_URL".into(),
                 "https://oidc.actions/token".into(),
