@@ -30,6 +30,7 @@ fn unit_id(name: &str) -> UnitId {
         UnitKind::Compilation,
         BuildMode::Check,
         "unknown",
+        &[],
     )
 }
 

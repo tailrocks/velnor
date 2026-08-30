@@ -400,6 +400,7 @@ fn parse_compiler_artifact(
         .or_else(|| package_name(object.get("package_id")))?;
 
     let kind = artifact_kind(object, target);
+    let features = string_values(object.get("features"));
     let target_triple = target_name(object, options);
     let freshness = classify_freshness(object.get("fresh").and_then(Value::as_bool));
     Some(UnitRecord {
@@ -409,6 +410,7 @@ fn parse_compiler_artifact(
             kind,
             options.mode,
             &target_triple,
+            &features,
         ),
         unit_name,
         kind,
@@ -424,7 +426,7 @@ fn parse_compiler_artifact(
             freshness,
         ),
         rwd_flags: string_values(object.get("rwd_flags")),
-        features: string_values(object.get("features")),
+        features,
         target: target_triple,
         fanout: FanoutMetrics::default(),
     })
@@ -435,6 +437,7 @@ fn parse_build_script(
     options: &CollectOptions,
 ) -> Option<UnitRecord> {
     let unit_name = package_name(object.get("package_id"))?;
+    let features = string_values(object.get("features"));
     let target_triple = target_name(object, options);
     let freshness = classify_freshness(object.get("fresh").and_then(Value::as_bool));
     Some(UnitRecord {
@@ -444,6 +447,7 @@ fn parse_build_script(
             UnitKind::BuildScript,
             options.mode,
             &target_triple,
+            &features,
         ),
         unit_name,
         kind: UnitKind::BuildScript,
@@ -459,7 +463,7 @@ fn parse_build_script(
             freshness,
         ),
         rwd_flags: string_values(object.get("rwd_flags")),
-        features: string_values(object.get("features")),
+        features,
         target: target_triple,
         fanout: FanoutMetrics::default(),
     })

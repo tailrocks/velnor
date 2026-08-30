@@ -29,6 +29,7 @@ impl UnitId {
         kind: UnitKind,
         mode: BuildMode,
         target: &str,
+        features: &[String],
     ) -> Self {
         let fields = [
             package_identity(package_id),
@@ -36,6 +37,7 @@ impl UnitId {
             kind.to_string(),
             mode.to_string(),
             crate::redact_absolute_paths(target),
+            features.join("\u{1f}"),
         ];
         let mut canonical = String::new();
         for field in fields {
@@ -414,6 +416,7 @@ mod tests {
             UnitKind::Compilation,
             BuildMode::Check,
             "x86_64-unknown-linux-gnu",
+            &[],
         );
         let right = UnitId::from_parts(
             Some("demo 0.1.0 (path+file:///Users/bob/demo)"),
@@ -421,9 +424,33 @@ mod tests {
             UnitKind::Compilation,
             BuildMode::Check,
             "x86_64-unknown-linux-gnu",
+            &[],
         );
         assert_eq!(left, right);
         assert!(!left.as_str().contains("Users"));
         assert!(UnitId::parse(left.as_str()).is_ok());
+    }
+
+    #[test]
+    fn feature_variants_have_distinct_identities() {
+        let default_features = vec!["default".to_owned()];
+        let serde_features = vec!["serde".to_owned()];
+        let left = UnitId::from_parts(
+            Some("demo 0.1.0 (path+file:///workspace/demo)"),
+            "demo",
+            UnitKind::Compilation,
+            BuildMode::Check,
+            "unknown",
+            &default_features,
+        );
+        let right = UnitId::from_parts(
+            Some("demo 0.1.0 (path+file:///workspace/demo)"),
+            "demo",
+            UnitKind::Compilation,
+            BuildMode::Check,
+            "unknown",
+            &serde_features,
+        );
+        assert_ne!(left, right);
     }
 }
