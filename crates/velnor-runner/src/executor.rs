@@ -49,6 +49,7 @@ const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
 const RESULTS_ARTIFACT_MAX_UPLOAD_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_UPLOAD_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_TOOL_PREP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
@@ -920,13 +921,13 @@ impl ExecutableStep {
 }
 
 #[derive(Clone)]
-struct ToolPrepTelemetry {
+struct LifecycleTelemetry {
     sink: Arc<crate::ops::OpsSink>,
     admission: crate::ops::JobAdmission,
 }
 
-impl ToolPrepTelemetry {
-    fn emit(&self, elapsed: Duration) {
+impl LifecycleTelemetry {
+    fn emit_tool_prep(&self, elapsed: Duration) {
         let elapsed_ms = u64::try_from(elapsed.as_millis())
             .unwrap_or(u64::MAX)
             .min(MAX_TOOL_PREP_TELEMETRY_MS);
@@ -937,6 +938,41 @@ impl ToolPrepTelemetry {
         let _ = self.sink.emit_telemetry_for_admission(
             &self.admission,
             velnor_model::TelemetryEvent::ToolPrep,
+            fields,
+        );
+    }
+
+    fn emit_cache_lookup(
+        &self,
+        store: &'static str,
+        result: Option<&StepExecutionResult>,
+        lookup_error: bool,
+        elapsed: Duration,
+    ) {
+        let lookup_ms = u64::try_from(elapsed.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_CACHE_LOOKUP_TELEMETRY_MS);
+        let hit = result
+            .and_then(|result| result.state.outputs.get("cache-hit"))
+            .is_some_and(|value| value == "true");
+        let mut fields = BTreeMap::from([
+            ("hit".to_owned(), Value::from(hit)),
+            ("lookup_ms".to_owned(), Value::from(lookup_ms)),
+            ("store".to_owned(), Value::from(store)),
+        ]);
+        if !hit {
+            fields.insert(
+                "miss_reason".to_owned(),
+                Value::from(if lookup_error {
+                    "lookup_error"
+                } else {
+                    "key_absent"
+                }),
+            );
+        }
+        let _ = self.sink.emit_telemetry_for_admission(
+            &self.admission,
+            velnor_model::TelemetryEvent::CacheLookup,
             fields,
         );
     }
@@ -968,7 +1004,7 @@ pub(crate) struct DockerJobEngine<R> {
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
     docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
-    tool_prep_telemetry: Option<ToolPrepTelemetry>,
+    lifecycle_telemetry: Option<LifecycleTelemetry>,
 }
 
 #[derive(Debug, Clone)]
@@ -997,7 +1033,7 @@ where
             live_step: None,
             job_environment_started: false,
             docker_lease: None,
-            tool_prep_telemetry: None,
+            lifecycle_telemetry: None,
         }
     }
 
@@ -1051,7 +1087,7 @@ where
         sink: Arc<crate::ops::OpsSink>,
         admission: crate::ops::JobAdmission,
     ) -> Self {
-        self.tool_prep_telemetry = Some(ToolPrepTelemetry { sink, admission });
+        self.lifecycle_telemetry = Some(LifecycleTelemetry { sink, admission });
         self
     }
 
@@ -2194,7 +2230,17 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        match action.adapter {
+        let cache_store = match action.adapter {
+            NativeActionAdapter::Cache
+                if !matches!(action.cache_kind, Some(CacheActionKind::Save)) =>
+            {
+                Some("actions_cache")
+            }
+            NativeActionAdapter::RustCache => Some("rust_cache"),
+            _ => None,
+        };
+        let lookup_started = cache_store.map(|_| Instant::now());
+        let result = match action.adapter {
             NativeActionAdapter::Cache => native_cache(action, state),
             NativeActionAdapter::UploadArtifact => native_upload_artifact(action, state),
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
@@ -2252,7 +2298,20 @@ where
                     step_id
                 )
             }
+        };
+        if let (Some(store), Some(started), Some(telemetry)) = (
+            cache_store,
+            lookup_started,
+            self.lifecycle_telemetry.as_ref(),
+        ) {
+            telemetry.emit_cache_lookup(
+                store,
+                result.as_ref().ok(),
+                result.is_err(),
+                started.elapsed(),
+            );
         }
+        result
     }
 
     fn execute_native_post_action(
@@ -2342,8 +2401,8 @@ where
     ) -> Result<StepExecutionResult> {
         let prep_started = Instant::now();
         let result = self.native_mise_inner(container, action, state, timeout);
-        if let Some(telemetry) = &self.tool_prep_telemetry {
-            telemetry.emit(prep_started.elapsed());
+        if let Some(telemetry) = &self.lifecycle_telemetry {
+            telemetry.emit_tool_prep(prep_started.elapsed());
         }
         result
     }
@@ -10409,6 +10468,131 @@ mod tests {
             .as_u64()
             .is_some_and(|value| value <= MAX_TOOL_PREP_TELEMETRY_MS));
         assert!(!telemetry.contains("secret-marker"));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_lookup_emits_normalized_telemetry_on_success_and_error() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(temp.join("state.db"), "test-instance".to_owned()).unwrap(),
+        );
+        let admission = crate::ops::JobAdmission {
+            instance_slug: "test-instance".to_owned(),
+            job_uid: "job-cache-lookup".to_owned(),
+            repository_full_name: "tailrocks/velnor".to_owned(),
+            workflow: "control-plane".to_owned(),
+            job_name: "cache-lookup".to_owned(),
+            run_id: Some(42),
+            attempt: Some(1),
+            head_ref: Some("refs/heads/main".to_owned()),
+            head_sha: Some("deadbeef".to_owned()),
+            trigger_event: Some("workflow_dispatch".to_owned()),
+            queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
+            runner_name: Some("runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            masks: vec!["secret-marker".to_owned()],
+        };
+        assert!(sink.record_admission(&admission));
+
+        let action = |adapter, cache_kind, inputs: &[(&str, &str)]| NativeActionInvocation {
+            git_ref: "cache-action".to_owned(),
+            adapter,
+            cache_kind,
+            source_path: None,
+            inputs: inputs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            env: Vec::new(),
+        };
+        let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
+        let job_container = container(&temp);
+        let mut executor = DockerJobEngine::new(RecordingRunner::default())
+            .with_tool_prep_telemetry(Arc::clone(&sink), admission);
+
+        let root_result = executor
+            .execute_native_action_in_started_container(
+                &job_container,
+                "cache-root",
+                &action(
+                    NativeActionAdapter::Cache,
+                    Some(CacheActionKind::Root),
+                    &[("path", "/__w/cache"), ("key", "super-secret-key")],
+                ),
+                &state,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(root_result.state.outputs["cache-hit"], "false");
+
+        let restore_error = executor.execute_native_action_in_started_container(
+            &job_container,
+            "cache-restore",
+            &action(
+                NativeActionAdapter::Cache,
+                Some(CacheActionKind::Restore),
+                &[("path", "/__w/[invalid"), ("key", "restore-secret-key")],
+            ),
+            &state,
+            Duration::from_secs(1),
+        );
+        assert!(restore_error.is_err());
+
+        let rust_result = executor
+            .execute_native_action_in_started_container(
+                &job_container,
+                "rust-cache",
+                &action(
+                    NativeActionAdapter::RustCache,
+                    None,
+                    &[
+                        ("cache-directories", "/__w/rust-cache"),
+                        ("shared-key", "rust-secret-key"),
+                    ],
+                ),
+                &state,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(rust_result.state.outputs["cache-hit"], "false");
+
+        let telemetry = fs::read_to_string(temp.join("state.test-instance.telemetry.jsonl"))
+            .expect("cache lookup telemetry");
+        let records: Vec<_> = telemetry
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|record| record["event"] == "cache_lookup")
+            .collect();
+        assert_eq!(records.len(), 3);
+
+        let root_fields = records[0]["fields"].as_object().unwrap();
+        assert_eq!(root_fields["store"], "actions_cache");
+        assert_eq!(root_fields["hit"], false);
+        assert_eq!(root_fields["miss_reason"], "key_absent");
+        assert!(root_fields["lookup_ms"]
+            .as_u64()
+            .is_some_and(|value| value <= MAX_CACHE_LOOKUP_TELEMETRY_MS));
+
+        let error_fields = records[1]["fields"].as_object().unwrap();
+        assert_eq!(error_fields["store"], "actions_cache");
+        assert_eq!(error_fields["hit"], false);
+        assert_eq!(error_fields["miss_reason"], "lookup_error");
+
+        let rust_fields = records[2]["fields"].as_object().unwrap();
+        assert_eq!(rust_fields["store"], "rust_cache");
+        assert_eq!(rust_fields["hit"], false);
+        assert_eq!(rust_fields["miss_reason"], "key_absent");
+        assert!(!telemetry.contains("super-secret-key"));
+        assert!(!telemetry.contains("restore-secret-key"));
+        assert!(!telemetry.contains("rust-secret-key"));
+        assert!(!telemetry.contains("/__w"));
+        assert!(!telemetry.contains("invalid"));
 
         fs::remove_dir_all(temp).unwrap();
     }
