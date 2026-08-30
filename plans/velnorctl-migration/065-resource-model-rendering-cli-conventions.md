@@ -169,7 +169,7 @@ but no token, endpoint authorization, or raw secret variable.
   - Scoped gates green at `8734b4b`: fmt/clippy exit 0; model+render 64/64;
     velnorctl 23/23.
   - Workspace `mise run check` temporarily RED solely from foreign velnor-tools
-    WIP per COORDINATION.md; rerun when fleet WIP lands.
+    WIP; rerun when fleet WIP lands.
   - Accepted review notes deferred to C002+: `condition.rs` schema_version wire
     validation, `metadata.rs` stale doc link `crate::globals::Cli`, undocumented
     public tuple fields on `DurationMs`/`RepositoryRef`/`SecretRef`/`IdentityRef`.

@@ -2166,6 +2166,16 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     for root in roots {
         if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
+                let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
+                let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
+                if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
+                    eprintln!(
+                            "disk-pressure cache reclaim freed {} bytes across {} entries ({} failures)",
+                            cache_report.freed_bytes,
+                            cache_report.deleted.len(),
+                            cache_report.failures.len()
+                        );
+                }
                 let backend = crate::execution::load_execution_file(config_base, None)
                     .ok()
                     .map(|file| file.backend())
@@ -3627,12 +3637,20 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}",
+                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
                 id,
             ])
             .filter(|output| output.status.success())
             .is_some_and(|output| {
-                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut parts = text.trim().split('\t');
+                let owner = parts.next().unwrap_or("");
+                // Unknown endpoint count stays conservative: never removed.
+                let endpoints = parts
+                    .next()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(1);
+                stale_network_prunable(owner, endpoints, daemon_id)
             })
         })
         .collect::<Vec<_>>();
@@ -3649,6 +3667,19 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
     crate::docker_lease::daemon_owns_label(owner, daemon_id)
+}
+
+/// True when a `velnor-net-*` network is safe to remove at startup. Networks
+/// carrying THIS daemon's ownership label are stale by definition (a daemon
+/// restart orphans any in-flight job). Networks with no ownership label at
+/// all predate the guest-plan ownership labels; the `velnor-net-` prefix is
+/// Velnor-owned, so an endpoint-less one is dead weight and is reclaimed as a
+/// backstop. A foreign daemon's labeled network is never touched.
+fn stale_network_prunable(owner: &str, connected_endpoints: usize, daemon_id: &str) -> bool {
+    if daemon_owns_resource(owner, daemon_id) {
+        return true;
+    }
+    owner.is_empty() && connected_endpoints == 0
 }
 
 fn daemon_slot_configure_args(
@@ -12449,6 +12480,28 @@ jobs:
         );
         assert_eq!(pruned.as_deref(), Some("daemon-x"));
         assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn stale_network_prunable_removes_owned_and_unlabeled_endpointless() {
+        // This daemon's own label (or a direct slot child) is stale at startup.
+        assert!(stale_network_prunable("/daemon/work", 3, "/daemon/work"));
+        assert!(stale_network_prunable(
+            "/daemon/work/slot-2",
+            1,
+            "/daemon/work"
+        ));
+        // Unlabeled guest-plan leak with no endpoints is reclaimed as a backstop.
+        assert!(stale_network_prunable("", 0, "/daemon/work"));
+        // Unlabeled but still connected: left alone.
+        assert!(!stale_network_prunable("", 2, "/daemon/work"));
+        // A foreign daemon's labeled network is never touched, even endpoint-less.
+        assert!(!stale_network_prunable("/other/work", 0, "/daemon/work"));
+        assert!(!stale_network_prunable(
+            "/other/work/slot-1",
+            0,
+            "/daemon/work"
+        ));
     }
 
     #[test]
