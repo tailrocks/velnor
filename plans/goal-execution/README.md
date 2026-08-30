@@ -74,7 +74,7 @@ before any gate runs. Rust tests use nextest, never `cargo test`.
 
 Submit this entire block once per OpenCode session. Three concurrent OpenCode
 sessions execute this goal together as peers; ownership between them is
-arbitrated by [`COORDINATION.md`](COORDINATION.md), not by goal state. The
+governed by the repository's current `AGENTS.md` campaign-branch rules, not by goal state. The
 `/goal` parser rejects objectives over 4000 characters and treats dash-prefixed
 words (`--check`, a bare argument separator, `-s`) as unknown flags, so the
 objective below stays under the limit and contains none; do not re-add them.
@@ -86,7 +86,7 @@ Supported flags (`--max-turns`, `--max-minutes`, `--max-duration-ms`,
 ```text
 /goal Complete the entire Velnor plan graph at current HEAD: Plan 039, Plans 063-080, commands C001-C075 DONE; every done criterion machine-verifiably evidenced; all focused, repository, integration, fixture, safety, package, fleet, and acceptance gates green; indexes consistent; no unresolved review finding. plans/goal-execution/README.md binds: read-first inventory, controller loop, tooling law, execution graph, validation layers, reconciliation, recovery rules.
 
-Three OpenCode sessions run this goal together as peers. Binding channel: plans/goal-execution/COORDINATION.md. Claim a leaf there and push before any writer acts; one writer per leaf; claims expire after 60 idle minutes or RELEASED. On collision the later session stops writing, saves evidence under .velnor-compare/, then reconciles forward from the coherent on-disk design; the leaf file wins over any peer design. Fixture dispatches, live mutations, and status-index commits stay serialized across sessions.
+Multiple sessions run this goal together as peers. Follow the repository's current `AGENTS.md` campaign-branch and shared-worktree rules; do not create a coordination registry or per-task branch. Fixture dispatches, live mutations, and status-index commits stay serialized across sessions.
 
 Each session's primary agent orchestrates only: dependencies, dispatch, conflict prevention, operator-approval boundaries, evidence reconciliation, ledger consistency, verdict. Never implement, edit, test, or review a leaf directly. Per leaf dispatch fresh subagents for investigation (drift and dependency validation), implementation (owned file scope), verification (commands, fixture runs, artifacts, done criteria), independent diff review, plus specialists for security, protocol, packaging, fleet, storage, migration, or documentation surfaces. Subagents get the full leaf file, this contract, dependency evidence, applicable AGENTS.md, exact scope, STOP conditions, and return schema. Subagents are mandatory for every plan item; if no slot is free use bounded wait and retry cycles while checking state, never pulling a leaf into primary context. A separate verifier confirms claims against repository state; self-asserted success never counts; an implementer never provides the only review or verdict.
 
