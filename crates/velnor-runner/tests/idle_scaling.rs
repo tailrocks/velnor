@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-const METRICS_WAIT: Duration = Duration::from_secs(10);
+// The controller's bounded remote budget is 15s and its watchdog reserves an
+// equal local margin. Keep the observation deadline within that same 30s
+// liveness contract; normal runs still finish after four 2s cycles.
+const METRICS_WAIT: Duration = Duration::from_secs(30);
 const METRICS_POLL: Duration = Duration::from_millis(20);
 const OUTPUT_TAIL_CAP_BYTES: usize = 64 * 1024;
 const OUTPUT_READ_CHUNK_BYTES: usize = 8 * 1024;
@@ -435,10 +438,11 @@ fn wait_for_steady_cycles(
             if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
                 let populated = number(&value, &["slot_processes"]) == u64::from(slots);
                 let previous_sequence = number(&previous, &["sequence"]);
-                let consecutive = previous_sequence
-                    .checked_add(1)
-                    .is_some_and(|expected| number(&value, &["sequence"]) == expected);
-                if consecutive {
+                // The producer publishes by atomic rename. A polling reader
+                // may legitimately miss one or more snapshots under load; a
+                // missed sequence is still controller progress, not a stall.
+                let advanced = number(&value, &["sequence"]) > previous_sequence;
+                if advanced {
                     if populated {
                         steady_cycles += 1;
                     } else {
