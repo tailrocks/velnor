@@ -1196,10 +1196,15 @@ fn microvm_execute_sends_deliver_plan_over_vsock() {
         let mut session =
             open_session(&file, IsolationIdentity::new("job-vsock", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
-        let plan = ValidatedPlan::example_success("job-vsock");
+        let mut plan = ValidatedPlan::example_success("job-vsock");
+        let mut second_step = plan.steps[0].clone();
+        second_step.id = "second".into();
+        plan.steps.push(second_step);
         session.prepare(&plan, &mut world).unwrap();
         session.start(&mut world).unwrap();
         session.execute(&plan, &mut world).unwrap();
+        let outcome = session.collect().unwrap();
+        assert_eq!(outcome.executed_physical_actions, Some(2));
         assert!(!session.used_host_docker());
         assert!(session.used_firecracker());
     }
@@ -1296,6 +1301,51 @@ fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
         .log_lines
         .iter()
         .any(|line| line.contains("result-bridge")));
+}
+
+#[test]
+fn microvm_rejects_success_before_every_plan_step_completes() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-missing-step-completion", 1)
+        .with_step_completions([("run".into(), false)]);
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    world.allow_inline_guest_plan = false;
+    world.vsock = Some(&mut vsock);
+    let mut session = open_session(
+        &file,
+        IsolationIdentity::new("job-missing-step-completion", 1),
+        &mut world,
+    )
+    .unwrap();
+    session.reserve(&mut world).unwrap();
+    let mut plan = ValidatedPlan::example_success("job-missing-step-completion");
+    let mut missing_step = plan.steps[0].clone();
+    missing_step.id = "missing".into();
+    plan.steps.push(missing_step);
+    session.prepare(&plan, &mut world).unwrap();
+    session.start(&mut world).unwrap();
+    let error = session.execute(&plan, &mut world).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing StepCompleted for delivered plan step(s): missing"),
+        "{error}"
+    );
 }
 
 #[test]
