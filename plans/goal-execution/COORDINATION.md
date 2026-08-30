@@ -49,6 +49,7 @@ campaign branch directive above. It is non-executable.
 
 | Leaf | Session | Claimed at (UTC) | Status |
 |---|---|---|---|
+| compiler-cache-lease-takeover | Fresh continuation (subagent surface unavailable) | 2026-08-30 21:14Z | ACTIVE — exact scope: `crates/velnor-action-journal/src/lib.rs`, `crates/velnor-cache-service/src/lib.rs`, and focused tests only; structural compiler-cache lease takeover; PR #476/#477 files and branches excluded |
 | 039 | ox-alpha session C (takeover) | 2026-08-24 ~12:00Z | ACTIVE — prior `parallel opencode actor` claim EXPIRED per rule 3 (last leaf-scoped commit eea87eb 10:39Z, >60 min idle; no uncommitted fleet files, no unpushed commits at takeover) |
 | 065 | Session B | 2026-08-24 ~10:40Z | DONE @8734b4b — reconciling-executor convergence complete (gates 943/943 at landing); verification chain closed 2026-08-24 |
 | 066 | ox-alpha session C (takeover) | 2026-08-24 ~16:20Z | ACTIVE — validator session claim EXPIRED per rule 3 (~13:30Z claim, zero leaf-scoped commits since, >60 min idle at takeover). Track B next-ready leaf; deps 065 DONE |
