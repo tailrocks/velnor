@@ -283,65 +283,30 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-28T00:24:44Z
+### Current baseline — 2026-08-30T20:35:23Z
 
-- Repository: former watchdog-registration checkpoint branch, HEAD
-  `3b9eabc9fb813653e6e2a5aa6e01e23c224fa9ce`, clean worktree, remote
-  `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
-  of `origin/main` and equal to its pushed branch tip.
-- Open Velnor PR: #411 at this HEAD. Current-SHA CI run `33129071766` and
-  Guest image run `33129071359` stalled in hosted validation and were
-  cancelled; neither is green-main proof. No validation is active.
-- Plan 066 authority is now synchronized as `IN PROGRESS` in its task file,
-  migration README, and `plans/TASKS.md`; its six atomic criteria remain
-  unchecked because current-SHA fixture proof and independent sign-off are
-  absent. Root campaign progress remains 4/94 done; 039 remains in progress.
-- Branch integration: all six current remote branch tips with unique commits
-  are ancestors of this branch; immutable recovery refs for all local and
-  remote tips remain under `refs/backup/branch-sync/`. The local-only
-  Firecracker safety fork was not merged wholesale because its four commits
-  conflict with and are superseded by the active guest/runtime architecture.
-  The remaining local branch audit classified package/cache, PAT pacing,
-  lease, heartbeat, worker-recovery, and performance commits as already
-  present or safely superseded; obsolete release/docs-only commits were not
-  cherry-picked. `dcf9bfe` waiter ownership is covered by the current
-  controller path, with its stale-job/live-waiter edge case fixed at
-  `ee7ecca`. Current remote #408 behavior `eaf772d` was ported as bounded
-  kernel-download retry/timeout hardening at `8f660ad`; its forced HTTP/1.1
-  downgrade was intentionally omitted under the modern-protocol rule.
-- Follow-up inventory found 42 additional non-ancestor local/recovery tips.
-  Recovery refs exist for every tip. Semantic audit classified most as
-  equivalent/evolved or release-only; unresolved unique behavior remains in
-  Firecracker safety, early JIT/warm-copy, release `v0.1.199`, journal/lease
-  performance, and package-guardian branches. No conflicting code was merged
-  blindly; Plan079 and current trust/storage contracts remain authoritative.
-- Current-SHA local evidence: `rtk mise run check` passed, exit 0, with
-  actionlint, cargo deny, cargo fmt, fleet generation, clippy `-D warnings`,
-  and workspace nextest `1508/1508` (nextest run ID
-  `4efdab5b-65d8-46e4-8839-50a7fda8674f`). Focused retention tests passed
-  `7/7`. Code commits `a7ca6bb` and `80d1b63` add persisted slot identity,
-  bounded retention convergence, complete deletion accounting, resource policy,
-  legal no-op lifecycle transitions, and raw-row sanitization.
-- GitHub read-only group snapshot: `tailrocks/velnor-trusted` id 3,
-  `ChainArgos/velnor-trusted` id 4, and `jackin-project/velnor-trusted` id 3
-  are all `visibility=selected`, `allows_public_repositories=true`,
-  `restricted_to_workflows=false`; Tailrocks currently selects 21 repositories
-  including `cloudflare-tofu` and `github-terraform`.
-- Current GitHub repository readback shows the 28 canonical repositories are
-  present, but live default branches are not uniform: `master`, `develop`,
-  `staging`, and `port/cross-agent-dry` occur alongside `main`. This conflicts
-  with the 039 release-ref assumption that all 28 resolve to `refs/heads/main`;
-  the ref-shape stop remains active and no policy was changed.
-- Sentry read-only snapshot last captured at `2026-08-27T16:07:53Z` (not a
-  current-state proof): Docker 29.7.2 active; `velnor-runner 0.1.242` and
-  `/usr/bin/velnorctl` present; `/usr/bin/velnor-tools` absent; exact unit
-  states were not regenerated in this pass; the health vector was degraded with
-  `github_reachable=false`,
-  `routing_valid=false`, `runner_group_valid=false`, and zero ready slots.
-- Blockers: the Plan 039 digest/closure and workflow-ref admission ruling are
-  not approved for public-code policy mutation; stale validation-run cleanup,
-  runner deletion, drain, dispatch, package publication, Sentry install, and
-  rollback require explicit authorization; Sentry lacks the packaged
-  `velnor-tools` prerequisite; PID start-identity binding remains a separate
-  lifecycle hardening leaf; Plan 079 and final signed-APT/independent-audit
-  gates are not complete. No external mutation was performed.
+- Repository: under the pasted operator decision, `velnor10` is the assigned
+  review branch. HEAD `352c018344e8567d85d324ad1b08cbabaf3d9774`; `origin/main`
+  `a3722521d63ef84dbfeda11da421fb26b952e032`; behind `origin/main` by 3.
+  Worktree is dirty in six Plan-066 files: `migrations.rs`, `store/mod.rs`,
+  `store/records.rs`, `store_integration.rs`, `runner/ops.rs`, and
+  `runner/runner.rs`.
+- Historical/unverified, not current proof: old PR #411; CI run
+  `33129071766`; Guest image run `33129071359`; and old fleet-group/default-ref
+  and Sentry snapshots, including the Sentry snapshot dated
+  `2026-08-27T16:07:53Z`.
+- Plan 066 is `IN PROGRESS` with all six criteria unchecked. Root campaign is
+  4/94 done; Plan 039 is in progress. Plan 079 and the final gates remain
+  incomplete.
+- Dirty-worktree evidence only, not current-HEAD proof: direct
+  `rtk cargo nextest run --locked -p velnor-control --test store_integration`
+  passed `16`; `rtk mise run test-focused -- -p velnor-runner` passed `1224`;
+  fmt, clippy, and diff-check passed. The scoped mise velnor-control test task
+  failed because it injects `velnor-runner/test-support` into velnor-control.
+- Current external state: open PR/checks — `UNKNOWN` (not queried in this pass);
+  live fleet groups/default refs — `UNKNOWN` (not queried in this pass); Sentry
+  package/health — `UNKNOWN` (not queried in this pass); external authorization —
+  `UNKNOWN` (not queried in this pass).
+- Blockers: current-HEAD fixture proof and independent sign-off for Plan 066,
+  Plan 039 closure and workflow-ref admission, Plan 079 completion, and final
+  signed-APT/independent-audit gates remain unresolved.
