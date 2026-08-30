@@ -365,7 +365,7 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         14 => {
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
-            let restored = read_u8(&mut cur)? != 0;
+            let restored = read_bool(&mut cur)?;
             VsockMessage::GuestIdentity {
                 isolation_id,
                 generation,
@@ -375,8 +375,8 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         1 => {
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
-            let docker_healthy = read_u8(&mut cur)? != 0;
-            let job_credentials_absent = read_u8(&mut cur)? != 0;
+            let docker_healthy = read_bool(&mut cur)?;
+            let job_credentials_absent = read_bool(&mut cur)?;
             let session_challenge = read_string(&mut cur)?;
             VsockMessage::GuestReady {
                 isolation_id,
@@ -416,7 +416,7 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         5 => {
             let step_id = read_string(&mut cur)?;
             let exit_code = read_i32(&mut cur)?;
-            let skipped = read_u8(&mut cur)? != 0;
+            let skipped = read_bool(&mut cur)?;
             VsockMessage::StepCompleted {
                 step_id,
                 exit_code,
@@ -522,6 +522,14 @@ fn read_u8(cur: &mut &[u8]) -> Result<u8, VsockCodecError> {
     Ok(value)
 }
 
+fn read_bool(cur: &mut &[u8]) -> Result<bool, VsockCodecError> {
+    match read_u8(cur)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(VsockCodecError::InvalidBoolean { value }),
+    }
+}
+
 fn read_u32(cur: &mut &[u8]) -> Result<u32, VsockCodecError> {
     if cur.len() < 4 {
         return Err(VsockCodecError::Truncated { len: cur.len() });
@@ -574,6 +582,7 @@ pub enum VsockCodecError {
     Io { detail: String },
     InvalidConclusion { value: String },
     InvalidStream { value: u8 },
+    InvalidBoolean { value: u8 },
 }
 
 impl std::fmt::Display for VsockCodecError {
@@ -599,6 +608,9 @@ impl std::fmt::Display for VsockCodecError {
                     f,
                     "vsock unknown stdio stream {value}; expected {STDOUT_STREAM} or {STDERR_STREAM}"
                 )
+            }
+            Self::InvalidBoolean { value } => {
+                write!(f, "vsock invalid boolean value {value}; expected 0 or 1")
             }
         }
     }
@@ -671,6 +683,10 @@ mod tests {
         assert_eq!(
             VsockMessage::decode(&bad),
             Err(VsockCodecError::ChecksumMismatch)
+        );
+        assert_eq!(
+            decode_payload(5, &[0, 0, 0, 0, 0, 0, 0, 0, 2]),
+            Err(VsockCodecError::InvalidBoolean { value: 2 })
         );
     }
 

@@ -543,8 +543,13 @@ fn plan_summary_telemetry_fields_from_counts(
             "planner_dimensions_scope".to_owned(),
             Value::from("unavailable_at_runner_execution_boundary"),
         ),
-        ("duplicates_prevented".to_owned(), Value::Null),
-        ("selection_reasons".to_owned(), Value::Null),
+        ("planner_dimensions_known".to_owned(), Value::from(false)),
+        // These are typed zero/empty observations at this boundary, not
+        // fabricated planner claims. Consumers must ignore them while
+        // planner_dimensions_known is false. TASK-021 must replace them
+        // when its planner provenance reaches the runner.
+        ("duplicates_prevented".to_owned(), Value::from(0_u64)),
+        ("selection_reasons".to_owned(), Value::Array(Vec::new())),
         ("logical_tasks".to_owned(), Value::from(logical_tasks)),
         ("physical_actions".to_owned(), Value::from(physical_actions)),
         (
@@ -559,7 +564,8 @@ fn plan_summary_telemetry_fields(
     physical_actions: Option<usize>,
 ) -> Option<BTreeMap<String, Value>> {
     // TASK-021/planner does not yet expose duplicate suppression or selection
-    // reasons. Emit explicit unknowns instead of fabricating values.
+    // reasons. Keep the contract's typed fields, scoped as runner observations,
+    // until planner provenance reaches this boundary.
     physical_actions.map(|physical_actions| {
         plan_summary_telemetry_fields_from_counts(
             job.steps.iter().filter(|step| step.enabled).count(),
@@ -13228,12 +13234,13 @@ jobs:
         assert!(!serde_json::to_string(&fields)
             .unwrap()
             .contains("secret-marker"));
-        assert_eq!(fields["duplicates_prevented"], Value::Null);
-        assert_eq!(fields["selection_reasons"], Value::Null);
+        assert_eq!(fields["duplicates_prevented"], Value::from(0_u64));
+        assert_eq!(fields["selection_reasons"], Value::Array(Vec::new()));
         assert_eq!(
             fields["planner_dimensions_scope"],
             Value::from("unavailable_at_runner_execution_boundary")
         );
+        assert_eq!(fields["planner_dimensions_known"], Value::from(false));
         assert_eq!(fields["counts_capped"], Value::from(false));
 
         let bounded = plan_summary_telemetry_fields_from_counts(usize::MAX, usize::MAX);
