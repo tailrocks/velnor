@@ -31,8 +31,11 @@ impl UnitId {
         target: &str,
         features: &[String],
     ) -> Self {
+        let Some(package_id) = package_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Self::default();
+        };
         let fields = [
-            package_identity(package_id),
+            package_identity(Some(package_id)),
             crate::redact_absolute_paths(target_name),
             kind.to_string(),
             mode.to_string(),
@@ -452,5 +455,18 @@ mod tests {
             &serde_features,
         );
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn missing_package_identity_stays_unknown() {
+        let identity = UnitId::from_parts(
+            None,
+            "demo",
+            UnitKind::Compilation,
+            BuildMode::Check,
+            "unknown",
+            &[],
+        );
+        assert!(identity.is_unknown());
     }
 }
