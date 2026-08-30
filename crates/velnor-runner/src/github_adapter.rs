@@ -48,6 +48,7 @@ pub fn github_job_container_spec(
             )
         })
         .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
+    let compiler_cache_declaration = crate::manifest::compiler_cache_declaration(job);
     Ok(JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -71,7 +72,18 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        compiler_cache_backend: crate::manifest::compiler_cache_backend(job)?,
+        compiler_cache_backend: match paths.execution_backend {
+            velnor_model::ExecutionBackendKind::Docker => {
+                crate::manifest::compiler_cache_backend(job)?
+            }
+            velnor_model::ExecutionBackendKind::MicroVm => {
+                if compiler_cache_declaration.sccache || compiler_cache_declaration.kache {
+                    crate::manifest::compiler_cache_backend(job)?
+                } else {
+                    velnor_cache_service::CompilerCacheBackend::Off
+                }
+            }
+        },
         compiler_cache_trust_class: compiler_cache_trust_class(trust_scope),
     })
 }
@@ -1132,6 +1144,59 @@ mod tests {
         )
         .unwrap();
         assert!(!spec.mount_docker_socket);
+        assert_eq!(
+            spec.compiler_cache_backend,
+            velnor_cache_service::CompilerCacheBackend::Off
+        );
+        assert!(spec
+            .compiler_cache_runtime()
+            .environment()
+            .variables
+            .is_empty());
+    }
+
+    #[test]
+    fn microvm_backend_preserves_explicit_compiler_cache_wrapper() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Trusted with sccache",
+            "requestId": 1,
+            "steps": [{
+                "type": "Action",
+                "reference": {
+                    "type": "Repository",
+                    "name": "mozilla-actions/sccache-action",
+                    "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
+                }
+            }]
+        }))
+        .unwrap();
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.compiler_cache_backend,
+            velnor_cache_service::CompilerCacheBackend::Sccache
+        );
     }
 
     #[test]
