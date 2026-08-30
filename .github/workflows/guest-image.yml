@@ -91,6 +91,21 @@ jobs:
         with:
           version: v0.16.0
 
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.arch }}
+          restore-keys: |
+            cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.arch }}
+            cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+            cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-
+
       - name: Cache Cargo target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -129,11 +144,16 @@ jobs:
             build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
-          sha256sum dist/microvm/vmlinux dist/microvm/rootfs.ext4 | tee dist/microvm/SHA256SUMS
+          (
+            cd dist/microvm
+            sha256sum vmlinux rootfs.ext4 | tee SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: guest-image-${{ matrix.arch }}
+          compression-level: 1
           path: |
             dist/microvm/vmlinux
             dist/microvm/rootfs.ext4

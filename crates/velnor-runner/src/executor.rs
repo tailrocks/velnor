@@ -13563,6 +13563,8 @@ esac
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
+            compiler_cache_trust_class:
+                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         }
     }
 
