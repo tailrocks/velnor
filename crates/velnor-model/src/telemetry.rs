@@ -42,33 +42,343 @@ const SECRET_MARKERS: [&str; 10] = [
     "github_pat_",
 ];
 
-/// Lifecycle or measurement boundary represented by a telemetry record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TelemetryEvent {
-    RunQueued,
-    RunAdmitted,
-    ToolPrep,
-    CacheLookup,
-    CompileStart,
-    CompileEnd,
-    LinkEnd,
-    TestEnd,
-    ArtifactMaterialize,
-    PassiveWait,
-    CriticalPath,
-    PlanSummary,
-    NoProgress,
-    LeaseAcquired,
-    LeaseRenewed,
-    LeaseReleased,
-    LeaseAbandoned,
-    LeaseExpired,
-    SupersessionAdopted,
-    ConsumerDetached,
-    RetainedThenReaped,
-    RetentionKillSkipped,
-    TrustRevoked,
+macro_rules! telemetry_field_contracts {
+    (
+        [$( $required_name:literal => $required_kind:ident ),* $(,)?],
+        [$( $optional_name:literal => $optional_kind:ident ),* $(,)?]
+    ) => {
+        &[
+            $(
+                TelemetryFieldContract {
+                    name: $required_name,
+                    kind: TelemetryFieldKind::$required_kind,
+                    required: true,
+                },
+            )*
+            $(
+                TelemetryFieldContract {
+                    name: $optional_name,
+                    kind: TelemetryFieldKind::$optional_kind,
+                    required: false,
+                },
+            )*
+        ]
+    };
+}
+
+macro_rules! define_telemetry_contracts {
+    (
+        $(
+            $variant:ident => $event_name:literal {
+                lane: $lane:expr,
+                requires_action_key_digest: $requires_action_key_digest:expr,
+                required: [
+                    $( $required_name:literal => $required_kind:ident ),* $(,)?
+                ],
+                optional: [
+                    $( $optional_name:literal => $optional_kind:ident ),* $(,)?
+                ]
+            }
+        ),+ $(,)?
+    ) => {
+        /// Lifecycle or measurement boundary represented by a telemetry record.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum TelemetryEvent {
+            $( $variant ),+
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum TelemetryFieldKind {
+            Boolean,
+            Integer,
+            NonNegativeInteger,
+            String,
+            StringArray,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct TelemetryFieldContract {
+            name: &'static str,
+            kind: TelemetryFieldKind,
+            required: bool,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct TelemetryEventContract {
+            name: &'static str,
+            event: TelemetryEvent,
+            lane: Option<TelemetryLane>,
+            requires_action_key_digest: bool,
+            fields: &'static [TelemetryFieldContract],
+        }
+
+        static TELEMETRY_EVENT_CONTRACTS: &[TelemetryEventContract] = &[
+            $(
+                TelemetryEventContract {
+                    name: $event_name,
+                    event: TelemetryEvent::$variant,
+                    lane: $lane,
+                    requires_action_key_digest: $requires_action_key_digest,
+                    fields: telemetry_field_contracts!(
+                        [$($required_name => $required_kind),*],
+                        [$($optional_name => $optional_kind),*]
+                    ),
+                }
+            ),+
+        ];
+
+        impl TelemetryEvent {
+            fn contract(self) -> Option<&'static TelemetryEventContract> {
+                TELEMETRY_EVENT_CONTRACTS
+                    .iter()
+                    .find(|contract| contract.event == self)
+            }
+
+            #[cfg(test)]
+            fn contracts() -> &'static [TelemetryEventContract] {
+                TELEMETRY_EVENT_CONTRACTS
+            }
+        }
+    };
+}
+
+define_telemetry_contracts! {
+    RunQueued => "run_queued" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "queued_for_ms" => NonNegativeInteger,
+            "queue_time_present" => Boolean,
+        ],
+        optional: []
+    },
+    RunAdmitted => "run_admitted" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [],
+        optional: []
+    },
+    ToolPrep => "tool_prep" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "ms" => NonNegativeInteger,
+            "tool" => String,
+        ],
+        optional: []
+    },
+    CacheLookup => "cache_lookup" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "hit" => Boolean,
+            "lookup_ms" => NonNegativeInteger,
+            "store" => String,
+        ],
+        optional: [
+            "miss_reason" => String,
+        ]
+    },
+    CompileStart => "compile_start" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "compiler" => String,
+            "metrics_known" => Boolean,
+            "unit_count" => NonNegativeInteger,
+            "wrapper_calls" => NonNegativeInteger,
+            "hits" => NonNegativeInteger,
+            "misses" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    CompileEnd => "compile_end" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "compiler" => String,
+            "exit_code" => Integer,
+            "metrics_known" => Boolean,
+            "ms" => NonNegativeInteger,
+            "unit_count" => NonNegativeInteger,
+            "wrapper_calls" => NonNegativeInteger,
+            "hits" => NonNegativeInteger,
+            "misses" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    LinkEnd => "link_end" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "elapsed_ms" => NonNegativeInteger,
+            "exit_code" => Integer,
+            "runner_kind" => String,
+            "success" => Boolean,
+        ],
+        optional: []
+    },
+    TestEnd => "test_end" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "exit_code" => Integer,
+            "ms" => NonNegativeInteger,
+            "passed" => Boolean,
+            "runner" => String,
+        ],
+        optional: []
+    },
+    ArtifactMaterialize => "artifact_materialize" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "digest" => String,
+            "ms" => NonNegativeInteger,
+            "subset" => String,
+        ],
+        optional: []
+    },
+    PassiveWait => "passive_wait" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "cause" => String,
+            "ms" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    CriticalPath => "critical_path" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [],
+        optional: []
+    },
+    PlanSummary => "plan_summary" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "counts_scope" => String,
+            "planner_dimensions_scope" => String,
+            "planner_dimensions_known" => Boolean,
+            "duplicates_prevented" => NonNegativeInteger,
+            "selection_reasons" => StringArray,
+            "logical_tasks" => NonNegativeInteger,
+            "physical_actions" => NonNegativeInteger,
+            "counts_capped" => Boolean,
+        ],
+        optional: []
+    },
+    NoProgress => "no_progress" {
+        lane: None,
+        requires_action_key_digest: false,
+        required: [
+            "window_ms" => NonNegativeInteger,
+            "last_event" => String,
+        ],
+        optional: []
+    },
+    LeaseAcquired => "lease_acquired" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "generation" => NonNegativeInteger,
+            "logical_ms" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    LeaseRenewed => "lease_renewed" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "generation" => NonNegativeInteger,
+            "logical_ms" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    LeaseReleased => "lease_released" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "generation" => NonNegativeInteger,
+            "logical_ms" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    LeaseAbandoned => "lease_abandoned" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "generation" => NonNegativeInteger,
+            "logical_ms" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    LeaseExpired => "lease_expired" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "generation" => NonNegativeInteger,
+            "logical_ms" => NonNegativeInteger,
+        ],
+        optional: []
+    },
+    SupersessionAdopted => "supersession_adopted" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "live_consumers" => NonNegativeInteger,
+        ],
+        optional: [
+            "reason" => String,
+            "retained_until_ms" => NonNegativeInteger,
+        ]
+    },
+    ConsumerDetached => "consumer_detached" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "live_consumers" => NonNegativeInteger,
+        ],
+        optional: [
+            "reason" => String,
+            "retained_until_ms" => NonNegativeInteger,
+        ]
+    },
+    RetainedThenReaped => "retained_then_reaped" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "live_consumers" => NonNegativeInteger,
+        ],
+        optional: [
+            "reason" => String,
+            "retained_until_ms" => NonNegativeInteger,
+        ]
+    },
+    RetentionKillSkipped => "retention_kill_skipped" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "live_consumers" => NonNegativeInteger,
+        ],
+        optional: [
+            "reason" => String,
+            "retained_until_ms" => NonNegativeInteger,
+        ]
+    },
+    TrustRevoked => "trust_revoked" {
+        lane: Some(TelemetryLane::Velnor),
+        requires_action_key_digest: true,
+        required: [
+            "live_consumers" => NonNegativeInteger,
+        ],
+        optional: [
+            "reason" => String,
+            "retained_until_ms" => NonNegativeInteger,
+        ]
+    }
 }
 
 /// Execution lane that produced an observation.
@@ -162,6 +472,12 @@ impl TelemetryEnvelope {
         let repo = validate_text("repo", input.repo)?;
         let trust_domain = validate_text("trust_domain", input.trust_domain)?;
         let action_key_digest = input.action_key_digest.map(validate_digest).transpose()?;
+        validate_event_contract(
+            input.event,
+            input.lane,
+            action_key_digest.is_some(),
+            &input.fields,
+        )?;
 
         Ok(Self {
             schema_version: TELEMETRY_SCHEMA,
@@ -219,6 +535,9 @@ impl TelemetryEnvelope {
 struct TelemetryEnvelopeWire {
     schema_version: String,
     run_id: String,
+    // Keep missing and explicit `null` distinct: the schema allows omission,
+    // but does not allow a JSON null value.
+    #[serde(default, deserialize_with = "deserialize_optional_action_key_digest")]
     action_key_digest: Option<String>,
     lane: TelemetryLane,
     repo: String,
@@ -229,6 +548,22 @@ struct TelemetryEnvelopeWire {
     fields: TelemetryFields,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+fn deserialize_optional_action_key_digest<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| {
+            D::Error::custom(InvalidTelemetry::rule(
+                "action_key_digest",
+                "must be omitted instead of null",
+            ))
+        })
 }
 
 impl<'de> Deserialize<'de> for TelemetryEnvelope {
@@ -1079,6 +1414,69 @@ fn contains_secret_marker(value: &str) -> bool {
     SECRET_MARKERS.iter().any(|marker| lowered.contains(marker))
 }
 
+fn validate_event_contract(
+    event: TelemetryEvent,
+    lane: TelemetryLane,
+    has_action_key_digest: bool,
+    fields: &TelemetryFields,
+) -> Result<(), InvalidTelemetry> {
+    let Some(contract) = event.contract() else {
+        return Err(InvalidTelemetry::rule(
+            "event",
+            "has no production field contract",
+        ));
+    };
+    if contract.requires_action_key_digest && !has_action_key_digest {
+        return Err(InvalidTelemetry::rule(
+            "action_key_digest",
+            "is required for this event",
+        ));
+    }
+    if contract.lane.is_some_and(|expected| expected != lane) {
+        return Err(InvalidTelemetry::rule(
+            "lane",
+            "is not valid for this event",
+        ));
+    }
+    for field in contract.fields {
+        let Some(value) = fields.as_map().get(field.name) else {
+            if field.required {
+                return Err(InvalidTelemetry::rule(
+                    "fields",
+                    "is missing a required event field",
+                ));
+            }
+            continue;
+        };
+        if !matches_field_kind(field.kind, value) {
+            return Err(InvalidTelemetry::rule(
+                "fields",
+                "contains an event field with the wrong type",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn matches_field_kind(kind: TelemetryFieldKind, value: &Value) -> bool {
+    match kind {
+        TelemetryFieldKind::Boolean => value.is_boolean(),
+        TelemetryFieldKind::Integer => matches!(
+            value,
+            Value::Number(number) if number.is_i64() || number.is_u64()
+        ),
+        TelemetryFieldKind::NonNegativeInteger => matches!(
+            value,
+            Value::Number(number)
+                if number.is_u64() || number.as_i64().is_some_and(|value| value >= 0)
+        ),
+        TelemetryFieldKind::String => value.is_string(),
+        TelemetryFieldKind::StringArray => value
+            .as_array()
+            .is_some_and(|values| values.iter().all(Value::is_string)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,8 +1484,17 @@ mod tests {
     use std::{fs, thread};
 
     fn fields() -> TelemetryFields {
-        TelemetryFields::new(BTreeMap::from([(String::from("wall_ms"), json!(42))]))
-            .expect("valid telemetry fields")
+        TelemetryFields::new(BTreeMap::from([
+            (String::from("compiler"), json!("cargo")),
+            (String::from("exit_code"), json!(0)),
+            (String::from("hits"), json!(0)),
+            (String::from("metrics_known"), json!(false)),
+            (String::from("misses"), json!(0)),
+            (String::from("ms"), json!(42)),
+            (String::from("unit_count"), json!(0)),
+            (String::from("wrapper_calls"), json!(0)),
+        ]))
+        .expect("valid telemetry fields")
     }
 
     fn envelope() -> TelemetryEnvelope {
@@ -1112,7 +1519,182 @@ mod tests {
         let value = serde_json::to_value(envelope()).expect("serialize envelope");
         assert_eq!(value["schema_version"], TELEMETRY_SCHEMA);
         assert_eq!(value["event"], "compile_end");
-        assert_eq!(value["fields"]["wall_ms"], 42);
+        assert_eq!(value["fields"]["ms"], 42);
+    }
+
+    #[test]
+    fn schema_matches_authoritative_telemetry_contracts() {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../schemas/velnor.telemetry.v1.json"))
+                .expect("telemetry schema is valid JSON");
+        let schema_events = schema
+            .pointer("/properties/event/enum")
+            .and_then(Value::as_array)
+            .expect("telemetry schema declares event enum")
+            .iter()
+            .map(|event| event.as_str().expect("event enum value is a string"))
+            .collect::<Vec<_>>();
+        let contracts = TelemetryEvent::contracts();
+        let expected_events = contracts
+            .iter()
+            .map(|contract| contract.name)
+            .collect::<Vec<_>>();
+        assert_eq!(schema_events, expected_events);
+
+        let clauses = schema
+            .get("allOf")
+            .and_then(Value::as_array)
+            .expect("telemetry event contracts are declared");
+        assert_eq!(clauses.len(), contracts.len());
+
+        for contract in contracts {
+            let clause = clauses
+                .iter()
+                .find(|clause| {
+                    clause.pointer("/if/properties/event/const")
+                        == Some(&Value::String(contract.name.to_owned()))
+                })
+                .expect("every production event has a schema contract");
+            let fields_reference = format!("#/$defs/{}_fields", contract.name);
+            assert_eq!(
+                clause.pointer("/then/properties/fields/$ref"),
+                Some(&Value::String(fields_reference))
+            );
+
+            let then = clause
+                .get("then")
+                .expect("event contract has a then clause");
+            if contract.requires_action_key_digest {
+                assert_eq!(
+                    then.get("required"),
+                    Some(&serde_json::json!(["action_key_digest"]))
+                );
+            } else {
+                assert!(then.get("required").is_none());
+            }
+            match contract.lane {
+                Some(TelemetryLane::Github) => assert_eq!(
+                    then.pointer("/properties/lane/const"),
+                    Some(&json!("github"))
+                ),
+                Some(TelemetryLane::Velnor) => assert_eq!(
+                    then.pointer("/properties/lane/const"),
+                    Some(&json!("velnor"))
+                ),
+                None => assert!(then.pointer("/properties/lane").is_none()),
+            }
+
+            let fields = schema
+                .pointer(&format!("/$defs/{}_fields", contract.name))
+                .expect("event fields definition exists");
+            assert_eq!(fields.get("additionalProperties"), Some(&json!(true)));
+            let required = contract
+                .fields
+                .iter()
+                .filter(|field| field.required)
+                .map(|field| field.name)
+                .collect::<Vec<_>>();
+            assert_eq!(fields.get("required"), Some(&json!(required)));
+            for field in contract.fields {
+                let property = fields
+                    .pointer(&format!("/properties/{}", field.name))
+                    .expect("event field property exists");
+                match field.kind {
+                    TelemetryFieldKind::Boolean => {
+                        assert_eq!(property.get("type"), Some(&json!("boolean")))
+                    }
+                    TelemetryFieldKind::Integer => {
+                        assert_eq!(property.get("type"), Some(&json!("integer")))
+                    }
+                    TelemetryFieldKind::NonNegativeInteger => {
+                        assert_eq!(property.get("type"), Some(&json!("integer")));
+                        assert_eq!(property.get("minimum"), Some(&json!(0)));
+                    }
+                    TelemetryFieldKind::String => {
+                        assert_eq!(property.get("type"), Some(&json!("string")))
+                    }
+                    TelemetryFieldKind::StringArray => {
+                        assert_eq!(property.get("type"), Some(&json!("array")));
+                        assert_eq!(property.pointer("/items/type"), Some(&json!("string")));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn envelope_rejects_missing_and_mistyped_event_fields() {
+        let mut fields = envelope().fields.as_map().clone();
+        fields.insert("ms".to_owned(), json!("not-an-integer"));
+        let invalid_fields = TelemetryFields::new(fields).expect("generic fields are secret-safe");
+        let error = TelemetryEnvelope::new(TelemetryEnvelopeInput {
+            run_id: "run-123",
+            action_key_digest: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            lane: TelemetryLane::Velnor,
+            repo: "tailrocks/velnor",
+            trust_domain: "trusted",
+            event: TelemetryEvent::CompileEnd,
+            ts_logical: 7,
+            ts_wall: Timestamp::UNIX_EPOCH,
+            fields: invalid_fields,
+        })
+        .expect_err("event field type must be enforced by the envelope");
+        assert!(error.to_string().contains("wrong type"));
+
+        let mut value = serde_json::to_value(envelope()).expect("serialize envelope");
+        value["fields"]
+            .as_object_mut()
+            .expect("fields object")
+            .remove("ms");
+        let error = serde_json::from_value::<TelemetryEnvelope>(value)
+            .expect_err("required event field must be enforced while parsing");
+        assert!(error.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn ordinary_event_rejects_explicit_null_action_digest() {
+        let mut value = serde_json::to_value(envelope()).expect("serialize envelope");
+        value["event"] = json!("run_admitted");
+        value["lane"] = json!("github");
+        value["fields"] = json!({});
+        value
+            .as_object_mut()
+            .expect("telemetry envelope object")
+            .remove("action_key_digest");
+        serde_json::from_value::<TelemetryEnvelope>(value.clone())
+            .expect("ordinary events may omit the action digest");
+        value["action_key_digest"] = Value::Null;
+        let error = serde_json::from_value::<TelemetryEnvelope>(value)
+            .expect_err("ordinary events must omit a null action digest");
+        assert!(error.to_string().contains("must be omitted"));
+    }
+
+    #[test]
+    fn journal_event_contract_rejects_missing_action_digest() {
+        let mut value = serde_json::to_value(envelope()).expect("serialize envelope");
+        value["event"] = json!("lease_acquired");
+        value["fields"] = json!({"generation": 1, "logical_ms": 2});
+        value["lane"] = json!("velnor");
+        value
+            .as_object_mut()
+            .expect("telemetry envelope object")
+            .remove("action_key_digest");
+        let error = serde_json::from_value::<TelemetryEnvelope>(value)
+            .expect_err("journal event must require its action digest");
+        assert!(error.to_string().contains("action_key_digest"));
+    }
+
+    #[test]
+    fn journal_event_contract_rejects_github_lane_with_valid_digest() {
+        let mut value = serde_json::to_value(envelope()).expect("serialize envelope");
+        value["event"] = json!("lease_acquired");
+        value["fields"] = json!({"generation": 1, "logical_ms": 2});
+        value["lane"] = json!("github");
+        let error = serde_json::from_value::<TelemetryEnvelope>(value)
+            .expect_err("journal event must require the Velnor lane");
+        assert!(error.to_string().contains("lane"));
     }
 
     #[test]
