@@ -321,9 +321,14 @@ fn write_result_bridge<S: Write>(
             ExecutionEvent::StepStarted { step_id } => VsockMessage::StepStarted {
                 step_id: step_id.clone(),
             },
-            ExecutionEvent::StepCompleted { step_id, exit_code } => VsockMessage::StepCompleted {
+            ExecutionEvent::StepCompleted {
+                step_id,
+                exit_code,
+                skipped,
+            } => VsockMessage::StepCompleted {
                 step_id: step_id.clone(),
                 exit_code: *exit_code,
+                skipped: *skipped,
             },
             ExecutionEvent::CommandFile { path, bytes } => VsockMessage::CommandFile {
                 path: path.clone(),
@@ -558,7 +563,42 @@ pub fn accept_af_vsock(
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
-    use velnor_model::GuestJobPlan;
+    use velnor_model::{GuestJobPlan, VsockMessage};
+
+    #[test]
+    fn result_bridge_preserves_skipped_step_state() {
+        let events = [
+            crate::execution::ExecutionEvent::StepCompleted {
+                step_id: "skipped".into(),
+                exit_code: 0,
+                skipped: true,
+            },
+            crate::execution::ExecutionEvent::StepCompleted {
+                step_id: "executed".into(),
+                exit_code: 0,
+                skipped: false,
+            },
+        ];
+        let mut bytes = Vec::new();
+        write_result_bridge(&mut bytes, &events).unwrap();
+        let mut cursor = std::io::Cursor::new(bytes);
+        assert_eq!(
+            VsockMessage::read_from(&mut cursor).unwrap(),
+            VsockMessage::StepCompleted {
+                step_id: "skipped".into(),
+                exit_code: 0,
+                skipped: true,
+            }
+        );
+        assert_eq!(
+            VsockMessage::read_from(&mut cursor).unwrap(),
+            VsockMessage::StepCompleted {
+                step_id: "executed".into(),
+                exit_code: 0,
+                skipped: false,
+            }
+        );
+    }
 
     #[test]
     fn guest_docker_health_retries_until_ready_within_deadline() {

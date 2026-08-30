@@ -576,6 +576,7 @@ pub enum ExecutionEvent {
     StepCompleted {
         step_id: String,
         exit_code: i32,
+        skipped: bool,
     },
     CommandFile {
         path: String,
@@ -879,7 +880,7 @@ impl BackendSession {
         let executed_physical_actions = self
             .events
             .iter()
-            .filter(|event| matches!(event, ExecutionEvent::StepCompleted { .. }))
+            .filter(|event| matches!(event, ExecutionEvent::StepCompleted { skipped: false, .. }))
             .count();
         let logs: Vec<String> = self
             .events

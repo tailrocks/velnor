@@ -1250,7 +1250,8 @@ fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
-    let mut vsock = LoopbackVsock::with_ready("job-bridge", 1);
+    let mut vsock = LoopbackVsock::with_ready("job-bridge", 1)
+        .with_step_completions([("skipped".into(), true), ("executed".into(), false)]);
     let outcome = {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         world.allow_inline_guest_plan = false;
@@ -1271,6 +1272,7 @@ fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
         session.collect().unwrap()
     };
     assert_eq!(outcome.conclusion, "success");
+    assert_eq!(outcome.executed_physical_actions, Some(1));
     assert!(
         outcome
             .command_file_bytes

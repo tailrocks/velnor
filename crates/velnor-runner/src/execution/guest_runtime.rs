@@ -90,6 +90,7 @@ impl VsockChannel for UnixVsockChannel {
 pub struct LoopbackVsock {
     pub sent: Vec<VsockMessage>,
     pending: Vec<VsockMessage>,
+    step_completions: Vec<(String, bool)>,
     ready: Option<VsockMessage>,
     rebootstrap_ready: Option<VsockMessage>,
     guest_challenge: Option<String>,
@@ -155,6 +156,17 @@ impl LoopbackVsock {
         plan_sha256: impl Into<String>,
     ) -> Self {
         self.teardown_proof = Some((execution_nonce.into(), plan_sha256.into()));
+        self
+    }
+
+    /// Configure result-bridge step completions for the in-process vsock
+    /// contract double. The bool records whether the step was skipped.
+    #[must_use]
+    pub fn with_step_completions(
+        mut self,
+        completions: impl IntoIterator<Item = (String, bool)>,
+    ) -> Self {
+        self.step_completions = completions.into_iter().collect();
         self
     }
 }
@@ -228,6 +240,16 @@ impl VsockChannel for LoopbackVsock {
                 return Err("loopback rejected plan identity mismatch".into());
             }
             validate_guest_plan(&plan)?;
+            for (step_id, skipped) in self.step_completions.drain(..) {
+                self.pending.push(VsockMessage::StepStarted {
+                    step_id: step_id.clone(),
+                });
+                self.pending.push(VsockMessage::StepCompleted {
+                    step_id,
+                    exit_code: 0,
+                    skipped,
+                });
+            }
             for path in &plan.command_files {
                 self.pending.push(VsockMessage::CommandFile {
                     path: path.clone(),
@@ -417,6 +439,7 @@ pub fn execute_guest_plan(
             events.push(ExecutionEvent::StepCompleted {
                 step_id: step.id.clone(),
                 exit_code: 0,
+                skipped: true,
             });
             continue;
         }
@@ -538,6 +561,7 @@ pub fn execute_guest_plan(
         events.push(ExecutionEvent::StepCompleted {
             step_id: step.id.clone(),
             exit_code: result.code,
+            skipped: false,
         });
         if failed && !failure_ignored {
             code = result.code;
@@ -1637,7 +1661,24 @@ mod tests {
             codes: vec![0, 0, 0, 1, 0],
             ..RecordingCommands::default()
         };
-        execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
+        let mut events = Vec::new();
+        execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::StepCompleted {
+                step_id,
+                skipped: true,
+                exit_code: 0,
+            } if step_id == "skipped"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::StepCompleted {
+                step_id,
+                skipped: false,
+                exit_code: 0,
+            } if step_id == "after"
+        )));
         assert!(!runner
             .calls
             .iter()

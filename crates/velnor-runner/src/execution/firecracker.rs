@@ -983,8 +983,16 @@ fn drive_vsock(
             VsockMessage::StepStarted { step_id } => {
                 events.push(ExecutionEvent::StepStarted { step_id });
             }
-            VsockMessage::StepCompleted { step_id, exit_code } => {
-                events.push(ExecutionEvent::StepCompleted { step_id, exit_code });
+            VsockMessage::StepCompleted {
+                step_id,
+                exit_code,
+                skipped,
+            } => {
+                events.push(ExecutionEvent::StepCompleted {
+                    step_id,
+                    exit_code,
+                    skipped,
+                });
             }
             VsockMessage::ResultExport {
                 digest_sha256,

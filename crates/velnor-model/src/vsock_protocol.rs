@@ -10,7 +10,9 @@ use sha2::{Digest, Sha256};
 use crate::job_summary::JobConclusion;
 
 /// Protocol version. Mismatch fails closed.
-pub const PROTOCOL_VERSION: u16 = 4;
+///
+/// Version 5 adds the required `skipped` bit to `StepCompleted` frames.
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
 /// stdout stream tag in [`VsockMessage::Stdio`].
@@ -83,6 +85,7 @@ pub enum VsockMessage {
     StepCompleted {
         step_id: String,
         exit_code: i32,
+        skipped: bool,
     },
     Stdio {
         stream: u8,
@@ -298,9 +301,14 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             write_bytes(&mut payload, bytes)?;
         }
         VsockMessage::StepStarted { step_id } => write_string(&mut payload, step_id)?,
-        VsockMessage::StepCompleted { step_id, exit_code } => {
+        VsockMessage::StepCompleted {
+            step_id,
+            exit_code,
+            skipped,
+        } => {
             write_string(&mut payload, step_id)?;
             payload.extend_from_slice(&exit_code.to_be_bytes());
+            payload.push(u8::from(*skipped));
         }
         VsockMessage::Stdio { stream, bytes } => {
             payload.push(*stream);
@@ -408,7 +416,12 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         5 => {
             let step_id = read_string(&mut cur)?;
             let exit_code = read_i32(&mut cur)?;
-            VsockMessage::StepCompleted { step_id, exit_code }
+            let skipped = read_u8(&mut cur)? != 0;
+            VsockMessage::StepCompleted {
+                step_id,
+                exit_code,
+                skipped,
+            }
         }
         6 => {
             let stream = read_u8(&mut cur)?;
@@ -628,6 +641,15 @@ mod tests {
         };
         let bytes = completed.encode().unwrap();
         assert_eq!(VsockMessage::decode(&bytes).unwrap(), completed);
+        for skipped in [false, true] {
+            let step_completed = VsockMessage::StepCompleted {
+                step_id: "step-1".into(),
+                exit_code: 0,
+                skipped,
+            };
+            let bytes = step_completed.encode().unwrap();
+            assert_eq!(VsockMessage::decode(&bytes).unwrap(), step_completed);
+        }
     }
 
     #[test]

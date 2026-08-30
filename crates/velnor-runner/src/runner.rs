@@ -523,25 +523,33 @@ fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTree
     ])
 }
 
-fn bounded_telemetry_count(count: usize) -> u64 {
-    u64::try_from(count)
-        .unwrap_or(u64::MAX)
-        .min(MAX_TELEMETRY_PLAN_ITEMS)
+fn bounded_telemetry_count(count: usize) -> (u64, bool) {
+    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    (
+        count.min(MAX_TELEMETRY_PLAN_ITEMS),
+        count > MAX_TELEMETRY_PLAN_ITEMS,
+    )
 }
 
 fn plan_summary_telemetry_fields_from_counts(
     logical_tasks: usize,
     physical_actions: usize,
 ) -> BTreeMap<String, Value> {
+    let (logical_tasks, logical_tasks_capped) = bounded_telemetry_count(logical_tasks);
+    let (physical_actions, physical_actions_capped) = bounded_telemetry_count(physical_actions);
     BTreeMap::from([
         ("counts_scope".to_owned(), Value::from("runner_execution")),
         (
-            "logical_tasks".to_owned(),
-            Value::from(bounded_telemetry_count(logical_tasks)),
+            "planner_dimensions_scope".to_owned(),
+            Value::from("unavailable_at_runner_execution_boundary"),
         ),
+        ("duplicates_prevented".to_owned(), Value::Null),
+        ("selection_reasons".to_owned(), Value::Null),
+        ("logical_tasks".to_owned(), Value::from(logical_tasks)),
+        ("physical_actions".to_owned(), Value::from(physical_actions)),
         (
-            "physical_actions".to_owned(),
-            Value::from(bounded_telemetry_count(physical_actions)),
+            "counts_capped".to_owned(),
+            Value::from(logical_tasks_capped || physical_actions_capped),
         ),
     ])
 }
@@ -551,7 +559,7 @@ fn plan_summary_telemetry_fields(
     physical_actions: Option<usize>,
 ) -> Option<BTreeMap<String, Value>> {
     // TASK-021/planner does not yet expose duplicate suppression or selection
-    // reasons. Keep those fields absent until a truthful source exists.
+    // reasons. Emit explicit unknowns instead of fabricating values.
     physical_actions.map(|physical_actions| {
         plan_summary_telemetry_fields_from_counts(
             job.steps.iter().filter(|step| step.enabled).count(),
@@ -13220,8 +13228,13 @@ jobs:
         assert!(!serde_json::to_string(&fields)
             .unwrap()
             .contains("secret-marker"));
-        assert!(!fields.contains_key("duplicates_prevented"));
-        assert!(!fields.contains_key("selection_reasons"));
+        assert_eq!(fields["duplicates_prevented"], Value::Null);
+        assert_eq!(fields["selection_reasons"], Value::Null);
+        assert_eq!(
+            fields["planner_dimensions_scope"],
+            Value::from("unavailable_at_runner_execution_boundary")
+        );
+        assert_eq!(fields["counts_capped"], Value::from(false));
 
         let bounded = plan_summary_telemetry_fields_from_counts(usize::MAX, usize::MAX);
         assert_eq!(
@@ -13232,6 +13245,7 @@ jobs:
             bounded["physical_actions"],
             Value::from(MAX_TELEMETRY_PLAN_ITEMS)
         );
+        assert_eq!(bounded["counts_capped"], Value::from(true));
     }
 
     #[test]
