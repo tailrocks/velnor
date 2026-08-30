@@ -91,6 +91,7 @@ pub struct LoopbackVsock {
     pub sent: Vec<VsockMessage>,
     pending: Vec<VsockMessage>,
     step_completions: Vec<(String, bool)>,
+    post_completion_frames: Vec<VsockMessage>,
     ready: Option<VsockMessage>,
     rebootstrap_ready: Option<VsockMessage>,
     guest_challenge: Option<String>,
@@ -167,6 +168,18 @@ impl LoopbackVsock {
         completions: impl IntoIterator<Item = (String, bool)>,
     ) -> Self {
         self.step_completions = completions.into_iter().collect();
+        self
+    }
+
+    /// Configure frames that arrive after the guest's terminal completion.
+    /// Used to prove the host rejects post-terminal replay traffic.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_post_completion_frames(
+        mut self,
+        frames: impl IntoIterator<Item = VsockMessage>,
+    ) -> Self {
+        self.post_completion_frames = frames.into_iter().collect();
         self
     }
 }
@@ -272,6 +285,7 @@ impl VsockChannel for LoopbackVsock {
                 conclusion,
                 exit_code,
             });
+            self.pending.append(&mut self.post_completion_frames);
             let (job_id, isolation_id, generation) = self
                 .teardown_ack
                 .take()

@@ -1339,6 +1339,48 @@ fn microvm_rejects_replayed_step_frames() {
 }
 
 #[test]
+fn microvm_rejects_frames_after_job_completion() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-terminal-replay", 1)
+        .with_post_completion_frames([velnor_model::VsockMessage::StepStarted {
+            step_id: "run".into(),
+        }]);
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    world.allow_inline_guest_plan = false;
+    world.vsock = Some(&mut vsock);
+    let mut session = open_session(
+        &file,
+        IsolationIdentity::new("job-terminal-replay", 1),
+        &mut world,
+    )
+    .unwrap();
+    session.reserve(&mut world).unwrap();
+    let plan = ValidatedPlan::example_success("job-terminal-replay");
+    session.prepare(&plan, &mut world).unwrap();
+    session.start(&mut world).unwrap();
+    let error = session.execute(&plan, &mut world).unwrap_err();
+    assert!(
+        error.to_string().contains("after terminal completion"),
+        "{error}"
+    );
+}
+
+#[test]
 fn microvm_execute_without_vsock_fails_closed() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
     let mut fs = MemoryFs::default();

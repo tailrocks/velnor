@@ -933,6 +933,13 @@ fn drive_vsock(
                 return Err(MicroVmPreflightFailure::new("vsock", detail).into());
             }
         };
+        if completed && !matches!(received, VsockMessage::TeardownAck { .. }) {
+            return Err(MicroVmPreflightFailure::new(
+                "vsock.job_completed",
+                "frame arrived after terminal completion (replay)",
+            )
+            .into());
+        }
         match received {
             VsockMessage::TeardownAck {
                 job_id,
