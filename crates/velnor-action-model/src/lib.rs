@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, fmt, str::FromStr};
+use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, str::FromStr};
 use thiserror::Error;
 
 const DIGEST_HEX_LENGTH: usize = 64;
@@ -206,6 +206,64 @@ impl ActionKey {
     pub fn digest(&self) -> Result<Digest, CanonicalizationError> {
         Ok(Digest::from_bytes(&self.canonical_bytes()?))
     }
+}
+
+/// Process-independent logical time used for persisted lease deadlines.
+///
+/// The value is milliseconds from the clock's chosen epoch. Persisting this
+/// value instead of a process-local monotonic instant lets a restarted daemon
+/// reconstruct expiry without relying on an in-memory timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct LogicalInstant(u64);
+
+impl LogicalInstant {
+    /// Construct a logical instant from milliseconds.
+    #[must_use]
+    pub const fn from_millis(millis: u64) -> Self {
+        Self(millis)
+    }
+
+    /// Return the millisecond representation.
+    #[must_use]
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
+
+    /// Add milliseconds without wrapping at `u64::MAX`.
+    #[must_use]
+    pub const fn saturating_add(self, millis: u64) -> Self {
+        Self(self.0.saturating_add(millis))
+    }
+}
+
+/// Clock abstraction shared by lease and scheduler state machines.
+///
+/// Implementations persist deadlines as [`LogicalInstant`] values and may
+/// provide virtual time in tests. `sleep_until` is event-driven: callers wait
+/// for the next persisted deadline instead of polling broad state.
+pub trait Clock: Send + Sync {
+    /// Return the current logical instant.
+    fn now(&self) -> LogicalInstant;
+
+    /// Wait until a logical deadline is reached.
+    fn sleep_until(&self, deadline: LogicalInstant) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+}
+
+/// A producer lease fencing one owner of an action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProducerLease {
+    /// Immutable physical action identity.
+    pub action: ActionKey,
+    /// Monotonically increasing fencing token.
+    pub generation: u64,
+    /// Worker identity holding the lease.
+    pub owner: String,
+    /// Persisted logical expiry deadline.
+    pub expires_at: LogicalInstant,
+    /// Requested heartbeat cadence.
+    pub heartbeat_every: u64,
+    /// Duration renewed from the clock's current time.
+    pub lease_duration: u64,
 }
 
 /// Immutable provenance attached to an action result.

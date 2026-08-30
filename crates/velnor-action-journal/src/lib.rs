@@ -7,18 +7,19 @@
 //! SQLite and uses it for its existing durable control journal.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
 };
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use velnor_action_model::{
-    canonical_json_bytes, ActionKey, ActionState, ActionTiming, Digest, TrustClass,
+    canonical_json_bytes, ActionKey, ActionState, ActionTiming, Clock, Digest, LogicalInstant,
+    ProducerLease, TrustClass,
 };
 
-pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
 
 /// One durable action record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +61,8 @@ pub enum JournalError {
     Json(#[from] serde_json::Error),
     #[error("journal model canonicalization failure: {0}")]
     Canonical(#[from] velnor_action_model::CanonicalizationError),
+    #[error("journal digest failure: {0}")]
+    Digest(#[from] velnor_action_model::DigestError),
     #[error("journal state is invalid: {0}")]
     InvalidState(String),
     #[error("journal checksum mismatch at sequence {sequence}")]
@@ -70,7 +73,54 @@ pub enum JournalError {
     StateMismatch { sequence: i64 },
     #[error("journal trust class disagrees with its action policy")]
     TrustClassMismatch,
+    #[error("lease is already held for action {action_key_digest}")]
+    LeaseBusy { action_key_digest: Digest },
+    #[error(
+        "lease is abandonable for action {action_key_digest}; takeover belongs to the coordinator"
+    )]
+    LeaseAbandonable { action_key_digest: Digest },
+    #[error("lease was already released for action {action_key_digest}")]
+    LeaseReleased { action_key_digest: Digest },
+    #[error("lease was not found for action {action_key_digest}")]
+    LeaseNotFound { action_key_digest: Digest },
+    #[error("lease owner or fencing generation does not match")]
+    LeaseFenced,
+    #[error("lease expired before the requested transition")]
+    LeaseExpired,
+    #[error("lease duration must be positive and heartbeat must not exceed it")]
+    InvalidLeaseDuration,
+    #[error("lease owner must not be empty")]
+    InvalidLeaseOwner,
 }
+
+/// Durable producer lease state visible to recovery and coordinator layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseStatus {
+    Active,
+    Abandoned,
+    Released,
+}
+
+/// Secret-safe lease transition kind for the TASK-003 envelope adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseTransitionKind {
+    Acquired,
+    Renewed,
+    Released,
+    Abandoned,
+    Expired,
+}
+
+/// Secret-safe observation emitted after a lease transition commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseTelemetryEvent {
+    pub action_key_digest: Digest,
+    pub generation: u64,
+    pub at: LogicalInstant,
+    pub kind: LeaseTransitionKind,
+}
+
+type TelemetrySink = Box<dyn FnMut(&LeaseTelemetryEvent) + Send>;
 
 /// Append-only, checksum-verified action journal.
 pub struct ActionJournal {
@@ -93,6 +143,7 @@ impl ActionJournal {
             }
         }
         let connection = Connection::open(&path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -110,8 +161,27 @@ impl ActionJournal {
              );
              CREATE INDEX IF NOT EXISTS action_events_key_sequence
                  ON action_events(action_key_digest, sequence);
+             CREATE TABLE IF NOT EXISTS producer_leases (
+                 action_key_digest TEXT PRIMARY KEY NOT NULL,
+                 action_key_json TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 owner TEXT NOT NULL,
+                 expires_at_ms INTEGER NOT NULL,
+                 heartbeat_every_ms INTEGER NOT NULL,
+                 lease_duration_ms INTEGER NOT NULL,
+                 state TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS producer_leases_expiry
+                 ON producer_leases(state, expires_at_ms);
+             CREATE TABLE IF NOT EXISTS action_consumers (
+                 action_key_digest TEXT NOT NULL,
+                 run_id TEXT NOT NULL,
+                 PRIMARY KEY(action_key_digest, run_id)
+             );
              INSERT OR IGNORE INTO action_journal_meta(key, value)
-                 VALUES ('schema_version', '1');",
+                 VALUES ('schema_version', '2');
+             UPDATE action_journal_meta SET value = '2'
+                 WHERE key = 'schema_version' AND value = '1';",
         )?;
         Ok(Self { path, connection })
     }
@@ -207,6 +277,593 @@ impl ActionJournal {
     }
 }
 
+/// Durable lease coordinator backed by an [`ActionJournal`].
+///
+/// Lease deadlines are persisted as logical milliseconds. Expiry waiting is
+/// delegated to the injected clock, so production callers can use an
+/// event-driven timer and tests can advance time without wall-clock sleeps.
+pub struct LeaseManager<C: Clock> {
+    journal: ActionJournal,
+    clock: C,
+    telemetry_sink: Option<TelemetrySink>,
+    pending_telemetry: VecDeque<LeaseTelemetryEvent>,
+}
+
+impl<C: Clock> LeaseManager<C> {
+    /// Open a lease manager with the supplied journal path and clock.
+    pub fn open(path: impl AsRef<Path>, clock: C) -> Result<Self, JournalError> {
+        let mut manager = Self {
+            journal: ActionJournal::open(path)?,
+            clock,
+            telemetry_sink: None,
+            pending_telemetry: VecDeque::new(),
+        };
+        manager.expire_due_at(manager.clock.now())?;
+        Ok(manager)
+    }
+
+    /// Wrap an already-open journal with a clock.
+    pub fn from_journal(journal: ActionJournal, clock: C) -> Result<Self, JournalError> {
+        let mut manager = Self {
+            journal,
+            clock,
+            telemetry_sink: None,
+            pending_telemetry: VecDeque::new(),
+        };
+        manager.expire_due_at(manager.clock.now())?;
+        Ok(manager)
+    }
+
+    /// Borrow the underlying journal for action-record operations.
+    #[must_use]
+    pub fn journal(&self) -> &ActionJournal {
+        &self.journal
+    }
+
+    /// Return the injected clock.
+    #[must_use]
+    pub fn clock(&self) -> &C {
+        &self.clock
+    }
+
+    /// Install a TASK-003 adapter. Events recovered during open are flushed in
+    /// commit order before newly emitted transitions.
+    pub fn set_telemetry_sink(&mut self, sink: impl FnMut(&LeaseTelemetryEvent) + Send + 'static) {
+        self.telemetry_sink = Some(Box::new(sink));
+        let pending = self.pending_telemetry.drain(..).collect::<Vec<_>>();
+        for event in pending {
+            self.emit_telemetry(event);
+        }
+    }
+
+    /// Drain events when the caller owns a polling adapter instead of a sink.
+    pub fn drain_telemetry(&mut self) -> Vec<LeaseTelemetryEvent> {
+        self.pending_telemetry.drain(..).collect()
+    }
+
+    /// Return the recovered status for one action, if a lease exists.
+    pub fn lease_status(&self, action: &ActionKey) -> Result<Option<LeaseStatus>, JournalError> {
+        let digest = action.digest()?;
+        self.journal
+            .connection
+            .query_row(
+                "SELECT state FROM producer_leases WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|state| parse_lease_status(&state))
+            .transpose()
+    }
+
+    /// Acquire the single producer lease for an action.
+    pub fn acquire(
+        &mut self,
+        action: &ActionKey,
+        owner: impl Into<String>,
+        lease_duration_ms: u64,
+        heartbeat_every_ms: u64,
+    ) -> Result<ProducerLease, JournalError> {
+        let owner = owner.into();
+        validate_lease_inputs(&owner, lease_duration_ms, heartbeat_every_ms)?;
+        let now = self.clock.now();
+        self.expire_due_at(now)?;
+        let action_key_digest = action.digest()?;
+        let action_key_json =
+            String::from_utf8(canonical_json_bytes(action).expect("JSON is UTF-8"))
+                .expect("serde_json emits UTF-8");
+        let now_ms = sqlite_integer(now.as_millis())?;
+        let expires_at = now.saturating_add(lease_duration_ms);
+        let expires_at_ms = sqlite_integer(expires_at.as_millis())?;
+        let generation = {
+            let transaction = self
+                .journal
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let row = transaction
+                .query_row(
+                    "SELECT generation, owner, expires_at_ms, heartbeat_every_ms,
+                            lease_duration_ms, state, action_key_json
+                     FROM producer_leases WHERE action_key_digest = ?1",
+                    [action_key_digest.to_string()],
+                    lease_row_from_query,
+                )
+                .optional()?;
+            let generation = match row {
+                None => 1,
+                Some(row) => {
+                    verify_stored_action_key(&row.action_key_json, &action_key_digest)?;
+                    if row.state != LeaseState::Active {
+                        match row.state {
+                            LeaseState::Abandoned => {
+                                return Err(JournalError::LeaseAbandonable { action_key_digest });
+                            }
+                            LeaseState::Released => {
+                                return Err(JournalError::LeaseReleased { action_key_digest });
+                            }
+                            LeaseState::Active => {
+                                return Err(JournalError::InvalidState(
+                                    "active lease state classification failed".into(),
+                                ));
+                            }
+                        }
+                    } else if row.expires_at_ms > now_ms {
+                        return Err(JournalError::LeaseBusy { action_key_digest });
+                    } else {
+                        return Err(JournalError::LeaseExpired);
+                    }
+                }
+            };
+            transaction.execute(
+                "INSERT INTO producer_leases(
+                     action_key_digest, action_key_json, generation, owner,
+                     expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active')",
+                rusqlite::params![
+                    action_key_digest.to_string(),
+                    action_key_json,
+                    sqlite_integer(generation)?,
+                    owner,
+                    expires_at_ms,
+                    sqlite_integer(heartbeat_every_ms)?,
+                    sqlite_integer(lease_duration_ms)?,
+                ],
+            )?;
+            transaction.commit()?;
+            generation
+        };
+        let lease = ProducerLease {
+            action: action.clone(),
+            generation,
+            owner,
+            expires_at,
+            heartbeat_every: heartbeat_every_ms,
+            lease_duration: lease_duration_ms,
+        };
+        self.emit_telemetry(LeaseTelemetryEvent {
+            action_key_digest,
+            generation,
+            at: now,
+            kind: LeaseTransitionKind::Acquired,
+        });
+        Ok(lease)
+    }
+
+    /// Renew a live lease using its fencing token.
+    pub fn renew(&mut self, lease: &mut ProducerLease) -> Result<(), JournalError> {
+        let now = self.clock.now();
+        self.expire_due_at(now)?;
+        let digest = lease.action.digest()?;
+        let transaction = self
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row(
+                "SELECT generation, owner, expires_at_ms, heartbeat_every_ms,
+                        lease_duration_ms, state, action_key_json
+                 FROM producer_leases WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                lease_row_from_query,
+            )
+            .optional()?
+            .ok_or(JournalError::LeaseNotFound {
+                action_key_digest: digest.clone(),
+            })?;
+        verify_stored_action_key(&row.action_key_json, &digest)?;
+        if row.state != LeaseState::Active
+            || row.generation != lease.generation
+            || row.owner != lease.owner
+        {
+            return Err(JournalError::LeaseFenced);
+        }
+        let now_ms = sqlite_integer(now.as_millis())?;
+        if row.expires_at_ms <= now_ms {
+            return Err(JournalError::LeaseExpired);
+        }
+        let expires_at = now.saturating_add(row.lease_duration_ms);
+        let changed = transaction.execute(
+            "UPDATE producer_leases
+             SET expires_at_ms = ?1
+             WHERE action_key_digest = ?2 AND generation = ?3 AND owner = ?4
+               AND state = 'active' AND expires_at_ms > ?5",
+            rusqlite::params![
+                sqlite_integer(expires_at.as_millis())?,
+                digest.to_string(),
+                sqlite_integer(lease.generation)?,
+                lease.owner,
+                now_ms,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::LeaseFenced);
+        }
+        transaction.commit()?;
+        lease.expires_at = expires_at;
+        lease.heartbeat_every = row.heartbeat_every_ms;
+        lease.lease_duration = row.lease_duration_ms;
+        self.emit_telemetry(LeaseTelemetryEvent {
+            action_key_digest: digest,
+            generation: lease.generation,
+            at: now,
+            kind: LeaseTransitionKind::Renewed,
+        });
+        Ok(())
+    }
+
+    /// Mark a live lease complete or failed, fencing its owner from reuse.
+    pub fn release(&mut self, lease: &ProducerLease) -> Result<(), JournalError> {
+        self.transition_lease(lease, LeaseState::Released)
+    }
+
+    /// Mark a live lease abandoned and increment its fencing generation.
+    pub fn abandon(&mut self, lease: &ProducerLease) -> Result<(), JournalError> {
+        self.transition_lease(lease, LeaseState::Abandoned)
+    }
+
+    /// Mark all expired active leases abandoned and increment each token once.
+    pub fn expire_due(&mut self) -> Result<usize, JournalError> {
+        self.expire_due_at(self.clock.now())
+    }
+
+    /// Wait for the next persisted deadline, then expire due leases.
+    pub async fn expire_next(&mut self) -> Result<usize, JournalError> {
+        loop {
+            let Some(deadline) = self.next_expiry()? else {
+                return Ok(0);
+            };
+            self.clock.sleep_until(deadline).await;
+            let expired = self.expire_due()?;
+            if expired > 0 {
+                return Ok(expired);
+            }
+        }
+    }
+
+    /// Return the earliest active persisted expiry deadline.
+    ///
+    /// The indexed SQLite `MIN` query is the durable deadline heap: recovery
+    /// reconstructs the next wake-up from committed state instead of trusting
+    /// a process-local heap that could disappear with the daemon.
+    pub fn next_expiry(&self) -> Result<Option<LogicalInstant>, JournalError> {
+        let value: Option<i64> = self.journal.connection.query_row(
+            "SELECT MIN(expires_at_ms) FROM producer_leases WHERE state = 'active'",
+            [],
+            |row| row.get(0),
+        )?;
+        value.map(logical_instant_from_sql).transpose()
+    }
+
+    /// Attach a run to an action's durable consumer set.
+    pub fn attach_consumer(
+        &mut self,
+        action: &ActionKey,
+        run_id: &str,
+    ) -> Result<bool, JournalError> {
+        validate_run_id(run_id)?;
+        let digest = action.digest()?;
+        let transaction = self
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "INSERT OR IGNORE INTO action_consumers(action_key_digest, run_id)
+             VALUES (?1, ?2)",
+            rusqlite::params![digest.to_string(), run_id],
+        )?;
+        transaction.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Detach a run from an action's durable consumer set.
+    pub fn detach_consumer(
+        &mut self,
+        action: &ActionKey,
+        run_id: &str,
+    ) -> Result<bool, JournalError> {
+        validate_run_id(run_id)?;
+        let digest = action.digest()?;
+        let transaction = self
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "DELETE FROM action_consumers WHERE action_key_digest = ?1 AND run_id = ?2",
+            rusqlite::params![digest.to_string(), run_id],
+        )?;
+        transaction.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Count live consumers attached to an action.
+    pub fn live_consumer_count(&self, action: &ActionKey) -> Result<u64, JournalError> {
+        let digest = action.digest()?;
+        let count: i64 = self.journal.connection.query_row(
+            "SELECT COUNT(*) FROM action_consumers WHERE action_key_digest = ?1",
+            [digest.to_string()],
+            |row| row.get(0),
+        )?;
+        u64::try_from(count)
+            .map_err(|_| JournalError::InvalidState("consumer count is negative".into()))
+    }
+
+    fn transition_lease(
+        &mut self,
+        lease: &ProducerLease,
+        state: LeaseState,
+    ) -> Result<(), JournalError> {
+        let now = self.clock.now();
+        self.expire_due_at(now)?;
+        let digest = lease.action.digest()?;
+        let transaction = self
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let kind = match state {
+            LeaseState::Abandoned => LeaseTransitionKind::Abandoned,
+            LeaseState::Released => LeaseTransitionKind::Released,
+            LeaseState::Active => {
+                return Err(JournalError::InvalidState(
+                    "invalid lease transition".into(),
+                ));
+            }
+        };
+        let generation = match state {
+            LeaseState::Abandoned => lease
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| JournalError::InvalidState("lease generation overflow".into()))?,
+            LeaseState::Released => lease.generation,
+            LeaseState::Active => {
+                return Err(JournalError::InvalidState(
+                    "invalid lease transition".into(),
+                ));
+            }
+        };
+        let changed = transaction.execute(
+            "UPDATE producer_leases SET generation = ?1, state = ?2
+             WHERE action_key_digest = ?3 AND generation = ?4 AND owner = ?5
+               AND state = 'active'",
+            rusqlite::params![
+                sqlite_integer(generation)?,
+                state.as_str(),
+                digest.to_string(),
+                sqlite_integer(lease.generation)?,
+                lease.owner,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::LeaseFenced);
+        }
+        transaction.commit()?;
+        self.emit_telemetry(LeaseTelemetryEvent {
+            action_key_digest: digest,
+            generation,
+            at: now,
+            kind,
+        });
+        Ok(())
+    }
+
+    fn expire_due_at(&mut self, now: LogicalInstant) -> Result<usize, JournalError> {
+        let now_ms = sqlite_integer(now.as_millis())?;
+        let transaction = self
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = transaction.prepare(
+            "SELECT action_key_digest, generation FROM producer_leases
+             WHERE state = 'active' AND expires_at_ms <= ?1",
+        )?;
+        let rows = statement
+            .query_map([now_ms], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut expired = 0;
+        let mut events = Vec::with_capacity(rows.len());
+        for (digest, generation) in rows {
+            let generation = u64::try_from(generation)
+                .map_err(|_| JournalError::InvalidState("lease generation is negative".into()))?;
+            let next_generation = generation
+                .checked_add(1)
+                .ok_or_else(|| JournalError::InvalidState("lease generation overflow".into()))?;
+            let changed = transaction.execute(
+                "UPDATE producer_leases SET generation = ?1, state = 'abandoned'
+                 WHERE action_key_digest = ?2 AND generation = ?3
+                   AND state = 'active' AND expires_at_ms <= ?4",
+                rusqlite::params![
+                    sqlite_integer(next_generation)?,
+                    digest,
+                    sqlite_integer(generation)?,
+                    now_ms,
+                ],
+            )?;
+            if changed == 1 {
+                expired += 1;
+                events.push(LeaseTelemetryEvent {
+                    action_key_digest: Digest::parse(&digest)?,
+                    generation: next_generation,
+                    at: now,
+                    kind: LeaseTransitionKind::Expired,
+                });
+            }
+        }
+        transaction.commit()?;
+        for event in events {
+            self.emit_telemetry(event);
+        }
+        Ok(expired)
+    }
+
+    fn emit_telemetry(&mut self, event: LeaseTelemetryEvent) {
+        if let Some(sink) = self.telemetry_sink.as_mut() {
+            sink(&event);
+        } else {
+            self.pending_telemetry.push_back(event);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseState {
+    Active,
+    Abandoned,
+    Released,
+}
+
+impl LeaseState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Abandoned => "abandoned",
+            Self::Released => "released",
+        }
+    }
+}
+
+struct LeaseRow {
+    generation: u64,
+    owner: String,
+    expires_at_ms: i64,
+    heartbeat_every_ms: u64,
+    lease_duration_ms: u64,
+    state: LeaseState,
+    action_key_json: String,
+}
+
+fn lease_row_from_query(row: &rusqlite::Row<'_>) -> rusqlite::Result<LeaseRow> {
+    let state = match row.get::<_, String>(5)?.as_str() {
+        "active" => LeaseState::Active,
+        "abandoned" => LeaseState::Abandoned,
+        "released" => LeaseState::Released,
+        value => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown lease state {value}"),
+                )),
+            ));
+        }
+    };
+    Ok(LeaseRow {
+        generation: u64::try_from(row.get::<_, i64>(0)?).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Integer,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "negative lease generation",
+                )),
+            )
+        })?,
+        owner: row.get(1)?,
+        expires_at_ms: row.get(2)?,
+        heartbeat_every_ms: u64::try_from(row.get::<_, i64>(3)?).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Integer,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "negative heartbeat interval",
+                )),
+            )
+        })?,
+        lease_duration_ms: u64::try_from(row.get::<_, i64>(4)?).map_err(|_| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Integer,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "negative lease duration",
+                )),
+            )
+        })?,
+        state,
+        action_key_json: row.get(6)?,
+    })
+}
+
+fn parse_lease_status(value: &str) -> Result<LeaseStatus, JournalError> {
+    match value {
+        "active" => Ok(LeaseStatus::Active),
+        "abandoned" => Ok(LeaseStatus::Abandoned),
+        "released" => Ok(LeaseStatus::Released),
+        value => Err(JournalError::InvalidState(format!(
+            "unknown lease state {value}"
+        ))),
+    }
+}
+
+fn validate_lease_inputs(
+    owner: &str,
+    lease_duration_ms: u64,
+    heartbeat_every_ms: u64,
+) -> Result<(), JournalError> {
+    if owner.is_empty() {
+        return Err(JournalError::InvalidLeaseOwner);
+    }
+    if lease_duration_ms == 0 || heartbeat_every_ms == 0 || heartbeat_every_ms > lease_duration_ms {
+        return Err(JournalError::InvalidLeaseDuration);
+    }
+    Ok(())
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), JournalError> {
+    if run_id.is_empty() {
+        Err(JournalError::InvalidState(
+            "consumer run ID must not be empty".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn sqlite_integer(value: u64) -> Result<i64, JournalError> {
+    i64::try_from(value).map_err(|_| {
+        JournalError::InvalidState("logical lease value exceeds SQLite integer range".into())
+    })
+}
+
+fn logical_instant_from_sql(value: i64) -> Result<LogicalInstant, JournalError> {
+    u64::try_from(value)
+        .map(LogicalInstant::from_millis)
+        .map_err(|_| JournalError::InvalidState("lease deadline is negative".into()))
+}
+
+fn verify_stored_action_key(json: &str, expected: &Digest) -> Result<(), JournalError> {
+    let stored: ActionKey = serde_json::from_str(json)?;
+    if stored.digest()?.to_string() != expected.to_string() {
+        return Err(JournalError::InvalidState(
+            "stored lease action key digest mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn state_name(state: ActionState) -> &'static str {
     match state {
         ActionState::Planned => "planned",
@@ -265,7 +922,50 @@ fn crash_test_if_requested(stage: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Barrier, Mutex},
+        thread,
+    };
     use tempfile::TempDir;
+
+    #[derive(Clone, Default)]
+    struct TestClock {
+        now_ms: Arc<Mutex<u64>>,
+        wake: Arc<tokio::sync::Notify>,
+    }
+
+    impl TestClock {
+        fn advance(&self, millis: u64) {
+            let mut now = self.now_ms.lock().unwrap();
+            *now = now.saturating_add(millis);
+            drop(now);
+            self.wake.notify_waiters();
+        }
+    }
+
+    impl Clock for TestClock {
+        fn now(&self) -> LogicalInstant {
+            LogicalInstant::from_millis(*self.now_ms.lock().unwrap())
+        }
+
+        fn sleep_until(
+            &self,
+            deadline: LogicalInstant,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            let clock = self.clone();
+            Box::pin(async move {
+                loop {
+                    let notified = clock.wake.notified();
+                    if clock.now() >= deadline {
+                        return;
+                    }
+                    notified.await;
+                }
+            })
+        }
+    }
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes(&[seed])
@@ -300,6 +1000,223 @@ mod tests {
         }
     }
 
+    fn action(seed: u8) -> ActionKey {
+        record(seed, ActionState::Planned).action_key
+    }
+
+    #[test]
+    fn acquire_contention_has_one_atomic_winner() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("leases.sqlite");
+        let action = action(40);
+        let clock = TestClock::default();
+        let barrier = Arc::new(Barrier::new(2));
+        let managers = [
+            LeaseManager::open(&path, clock.clone()).unwrap(),
+            LeaseManager::open(&path, clock.clone()).unwrap(),
+        ];
+        let handles = managers
+            .into_iter()
+            .zip(["worker-a", "worker-b"])
+            .map(|(mut manager, owner)| {
+                let action = action.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    manager.acquire(&action, owner, 100, 25)
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(JournalError::LeaseBusy { .. })))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn heartbeat_renews_with_fencing_token() {
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
+        let mut lease = manager.acquire(&action(41), "worker-a", 100, 25).unwrap();
+        clock.advance(40);
+        lease.lease_duration = 10_000;
+        manager.renew(&mut lease).unwrap();
+        assert_eq!(lease.expires_at, LogicalInstant::from_millis(140));
+        assert_eq!(lease.lease_duration, 100);
+        clock.advance(100);
+        assert!(matches!(
+            manager.renew(&mut lease),
+            Err(JournalError::LeaseFenced)
+        ));
+    }
+
+    #[test]
+    fn expiry_increments_generation_and_defers_takeover() {
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
+        let lease = manager.acquire(&action(42), "worker-a", 100, 25).unwrap();
+        clock.advance(100);
+        assert_eq!(manager.expire_due().unwrap(), 1);
+        assert_eq!(manager.expire_due().unwrap(), 0);
+        assert_eq!(
+            manager.lease_status(&lease.action).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert!(matches!(
+            manager.acquire(&lease.action, "worker-b", 100, 25),
+            Err(JournalError::LeaseAbandonable { .. })
+        ));
+        let events = manager.drain_telemetry();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].generation, lease.generation + 1);
+        assert_eq!(events[1].kind, LeaseTransitionKind::Expired);
+    }
+
+    #[test]
+    fn restart_reloads_deadline_without_resurrecting_owner() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("restart.sqlite");
+        let clock = TestClock::default();
+        let action = action(43);
+        let mut lease = {
+            let mut manager = LeaseManager::open(&path, clock.clone()).unwrap();
+            manager.acquire(&action, "worker-a", 100, 25).unwrap()
+        };
+        clock.advance(99);
+        let restarted = LeaseManager::open(&path, clock.clone()).unwrap();
+        assert_eq!(
+            restarted.next_expiry().unwrap(),
+            Some(LogicalInstant::from_millis(100))
+        );
+        assert_eq!(
+            restarted.lease_status(&action).unwrap(),
+            Some(LeaseStatus::Active)
+        );
+        drop(restarted);
+        clock.advance(1);
+        let mut recovered = LeaseManager::open(&path, clock.clone()).unwrap();
+        assert_eq!(recovered.next_expiry().unwrap(), None);
+        assert_eq!(
+            recovered.lease_status(&action).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert!(matches!(
+            recovered.renew(&mut lease),
+            Err(JournalError::LeaseFenced)
+        ));
+    }
+
+    #[test]
+    fn consumer_set_is_durable_and_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("consumers.sqlite");
+        let action = action(44);
+        let mut manager = LeaseManager::open(&path, TestClock::default()).unwrap();
+        assert!(manager.attach_consumer(&action, "run-a").unwrap());
+        assert!(!manager.attach_consumer(&action, "run-a").unwrap());
+        assert!(manager.attach_consumer(&action, "run-b").unwrap());
+        assert_eq!(manager.live_consumer_count(&action).unwrap(), 2);
+        assert!(!manager.detach_consumer(&action, "run-c").unwrap());
+        assert!(manager.detach_consumer(&action, "run-a").unwrap());
+        drop(manager);
+        let restarted = LeaseManager::open(&path, TestClock::default()).unwrap();
+        assert_eq!(restarted.live_consumer_count(&action).unwrap(), 1);
+    }
+
+    #[test]
+    fn schema_upgrade_preserves_existing_journal() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("schema.sqlite");
+        let mut journal = ActionJournal::open(&path).unwrap();
+        journal.append(&record(48, ActionState::Complete)).unwrap();
+        journal
+            .connection
+            .execute(
+                "UPDATE action_journal_meta SET value = '1' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(journal);
+        let upgraded = ActionJournal::open(&path).unwrap();
+        assert_eq!(upgraded.schema_version().unwrap(), JOURNAL_SCHEMA_VERSION);
+        assert_eq!(upgraded.entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn telemetry_sink_receives_only_committed_transitions() {
+        let clock = TestClock::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
+        manager.set_telemetry_sink(move |event| sink_seen.lock().unwrap().push(event.clone()));
+        let mut lease = manager.acquire(&action(49), "worker-a", 100, 25).unwrap();
+        clock.advance(40);
+        manager.renew(&mut lease).unwrap();
+        manager.release(&lease).unwrap();
+        let events = seen.lock().unwrap();
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                LeaseTransitionKind::Acquired,
+                LeaseTransitionKind::Renewed,
+                LeaseTransitionKind::Released,
+            ]
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.action_key_digest == lease.action.digest().unwrap()));
+    }
+
+    #[cfg(feature = "virtual-time")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn expiry_wait_is_event_driven_and_uses_virtual_time() {
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
+        manager.acquire(&action(45), "worker-a", 100, 25).unwrap();
+        let task = tokio::spawn(async move { manager.expire_next().await });
+        tokio::task::yield_now().await;
+        clock.advance(99);
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        clock.advance(1);
+        assert_eq!(task.await.unwrap().unwrap(), 1);
+    }
+
+    #[test]
+    fn release_and_abandon_fence_previous_generation() {
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
+        let lease = manager.acquire(&action(46), "worker-a", 100, 25).unwrap();
+        manager.release(&lease).unwrap();
+        assert_eq!(
+            manager.lease_status(&lease.action).unwrap(),
+            Some(LeaseStatus::Released)
+        );
+        assert!(matches!(
+            manager.release(&lease),
+            Err(JournalError::LeaseFenced)
+        ));
+
+        let lease = manager.acquire(&action(47), "worker-a", 100, 25).unwrap();
+        manager.abandon(&lease).unwrap();
+        assert_eq!(
+            manager.lease_status(&lease.action).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert!(matches!(
+            manager.renew(&mut lease.clone()),
+            Err(JournalError::LeaseFenced)
+        ));
+    }
+
     #[test]
     fn append_replay_and_latest_are_durable() {
         let temp = TempDir::new().unwrap();
@@ -318,6 +1235,7 @@ mod tests {
         assert_eq!(reopened.entries().unwrap().len(), 2);
     }
 
+    #[cfg(not(feature = "virtual-time"))]
     #[test]
     fn crash_recovery_reopen_fuzz_has_no_torn_records() {
         let temp = TempDir::new().unwrap();
@@ -335,7 +1253,7 @@ mod tests {
         assert_eq!(journal.entries().unwrap().len(), 1_000);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(feature = "virtual-time")))]
     #[test]
     fn sigkill_recovery_fuzz_1000_iterations() {
         let temp = TempDir::new().unwrap();
