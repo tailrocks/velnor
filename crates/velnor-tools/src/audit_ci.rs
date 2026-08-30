@@ -1487,11 +1487,11 @@ const GENERATED_OWNER_LANE_CONTRACTS: [GeneratedOwnerLaneContract; 3] = [
     },
     GeneratedOwnerLaneContract {
         owner: "tailrocks",
-        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
     },
     GeneratedOwnerLaneContract {
         owner: "ChainArgos",
-        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
     },
 ];
 const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.repository_owner == 'jackin-project' && github.event_name != 'workflow_dispatch')) && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
@@ -2473,11 +2473,11 @@ jobs:
   tailrocks:
     uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}
   ChainArgos:
     uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}
   ci-required:
     timeout-minutes: 10
     runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.repository_owner == 'jackin-project' && github.event_name != 'workflow_dispatch')) && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
