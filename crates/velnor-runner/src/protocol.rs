@@ -6690,12 +6690,12 @@ mod tests {
 
     #[test]
     fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
-        use std::io::{ErrorKind, Read, Write};
-        use std::net::TcpListener;
-        use std::time::{Duration, Instant};
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpListener, TcpStream};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let probe_addr = listener.local_addr().unwrap();
+        let base = format!("http://{probe_addr}");
         let server_base = base.clone();
         let server = std::thread::spawn(move || {
             let mut requests = Vec::new();
@@ -6749,28 +6749,26 @@ mod tests {
                 )
                 .unwrap();
             }
-            // Keep the listener alive briefly after FinalizeArtifact. A
-            // regression that restores the old reconciliation path will make
-            // a fourth ListArtifacts request; record it and fail below rather
-            // than letting the client hide it behind a timeout.
-            listener.set_nonblocking(true).unwrap();
-            let deadline = Instant::now() + Duration::from_millis(250);
-            while Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_millis(100)))
-                            .unwrap();
-                        let mut probe = [0_u8; 1];
-                        let _ = stream.read(&mut probe);
-                        requests.push(Vec::new());
-                        break;
-                    }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("artifact test listener failed: {error}"),
+            // Wait for the caller to finish. If a regression restores the old
+            // reconciliation path, the client blocks on a fourth request and
+            // this server answers it, allowing the assertion below to fail.
+            // Otherwise the caller releases this accept with a sentinel after
+            // the upload function returns.
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let count = stream.read(&mut request).unwrap_or(0);
+                if request[..count].starts_with(b"PROBE") {
+                    break;
                 }
+                requests.push(request[..count].to_vec());
+                let body = "unexpected request";
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
             }
             requests
         });
@@ -6785,6 +6783,9 @@ mod tests {
             ArtifactUploadOptions::default(),
         )
         .unwrap_err();
+        let mut probe = TcpStream::connect(probe_addr).unwrap();
+        probe.write_all(b"PROBE").unwrap();
+        probe.shutdown(Shutdown::Both).unwrap();
         assert!(
             error
                 .chain()
