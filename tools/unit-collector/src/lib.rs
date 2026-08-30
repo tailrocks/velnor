@@ -7,10 +7,15 @@
 //! produce zero durations, which is explicit in the generated summary.
 
 pub mod evidence;
+pub mod fanout;
 
 pub use evidence::{
     CargoVersion, DeclaredOutputEvidence, OutputChange, OutputEvidence, OutputEvidenceManifest,
     OutputSnapshot,
+};
+pub use fanout::{
+    attribute_downstream_fanout, DependencyEdge, DependencyGraphInput, FanoutInput, FanoutMetrics,
+    InvalidUnitId, InvalidationContext, UnitId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -124,6 +129,7 @@ pub struct CollectOptions {
     target: Option<String>,
     cargo_version: CargoVersion,
     output_evidence: OutputEvidenceManifest,
+    fanout: Option<FanoutInput>,
 }
 
 impl CollectOptions {
@@ -137,6 +143,7 @@ impl CollectOptions {
             target: target.map(redact_absolute_paths),
             cargo_version: CargoVersion::Unknown,
             output_evidence: OutputEvidenceManifest::default(),
+            fanout: None,
         }
     }
 
@@ -155,6 +162,15 @@ impl CollectOptions {
         self
     }
 
+    /// Supply explicit graph and invalidation context for fan-out metrics.
+    ///
+    /// Missing or contradictory context is retained as unknown metrics rather
+    /// than replaced with a guessed graph.
+    pub fn with_fanout(mut self, fanout: FanoutInput) -> Self {
+        self.fanout = Some(fanout);
+        self
+    }
+
     /// Return the selected Cargo profile.
     pub fn mode(&self) -> BuildMode {
         self.mode
@@ -169,6 +185,11 @@ impl CollectOptions {
     pub fn cargo_version(&self) -> &CargoVersion {
         &self.cargo_version
     }
+
+    /// Return the explicit fan-out context, if supplied.
+    pub fn fanout(&self) -> Option<&FanoutInput> {
+        self.fanout.as_ref()
+    }
 }
 
 impl Default for CollectOptions {
@@ -180,6 +201,9 @@ impl Default for CollectOptions {
 /// One structured Cargo unit observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitRecord {
+    /// Stable path-free identity for this compilation unit.
+    #[serde(default, skip_serializing_if = "UnitId::is_unknown")]
+    pub unit_id: UnitId,
     /// Cargo target or package name, never an absolute source path.
     pub unit_name: String,
     /// Inferred unit category.
@@ -202,6 +226,9 @@ pub struct UnitRecord {
     pub features: Vec<String>,
     /// Target triple supplied by the caller or structured input.
     pub target: String,
+    /// Explicit graph-backed downstream fan-out metrics.
+    #[serde(default, skip_serializing_if = "FanoutMetrics::is_unknown")]
+    pub fanout: FanoutMetrics,
 }
 
 /// Input and output errors with line context for the stdin protocol.
@@ -267,6 +294,9 @@ pub fn collect_messages<R: BufRead>(
         }
     }
 
+    if let Some(fanout) = options.fanout() {
+        attribute_downstream_fanout(&mut records, fanout);
+    }
     Ok(records)
 }
 
@@ -318,24 +348,29 @@ pub fn render_summary(records: &[UnitRecord]) -> String {
     let _ = writeln!(summary);
     let _ = writeln!(
         summary,
-        "| Rank | Unit | Kind | Mode | Wall ms | CPU ms | Freshness | Target |"
+        "| Rank | Unit | Unit ID | Kind | Mode | Wall ms | CPU ms | Freshness | Direct downstream | Reachable downstream | Observed downstream | Invalidation root | Target |"
     );
     let _ = writeln!(
         summary,
-        "| ---: | --- | --- | --- | ---: | ---: | --- | --- |"
+        "| ---: | --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |"
     );
 
     for (index, record) in ranked.into_iter().take(10).enumerate() {
         let _ = writeln!(
             summary,
-            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             index + 1,
             markdown_cell(&record.unit_name),
+            markdown_cell(record.unit_id.as_str()),
             record.kind,
             record.mode,
             record.wall_ms,
             record.cpu_ms,
             record.freshness,
+            metric(record.fanout.direct_downstream_count),
+            metric(record.fanout.reachable_downstream_count),
+            metric(record.fanout.observed_downstream_count),
+            boolean_metric(record.fanout.invalidation_root),
             markdown_cell(&record.target),
         );
     }
@@ -364,10 +399,21 @@ fn parse_compiler_artifact(
         .filter(|name| !name.is_empty())
         .or_else(|| package_name(object.get("package_id")))?;
 
+    let kind = artifact_kind(object, target);
+    let features = string_values(object.get("features"));
+    let target_triple = target_name(object, options);
     let freshness = classify_freshness(object.get("fresh").and_then(Value::as_bool));
     Some(UnitRecord {
+        unit_id: UnitId::from_parts(
+            object.get("package_id").and_then(Value::as_str),
+            &unit_name,
+            kind,
+            options.mode,
+            &target_triple,
+            &features,
+        ),
         unit_name,
-        kind: artifact_kind(object, target),
+        kind,
         mode: options.mode,
         wall_ms: timing_ms(object, "wall_ms"),
         cpu_ms: timing_ms(object, "cpu_ms"),
@@ -380,8 +426,9 @@ fn parse_compiler_artifact(
             freshness,
         ),
         rwd_flags: string_values(object.get("rwd_flags")),
-        features: string_values(object.get("features")),
-        target: target_name(object, options),
+        features,
+        target: target_triple,
+        fanout: FanoutMetrics::default(),
     })
 }
 
@@ -389,9 +436,20 @@ fn parse_build_script(
     object: &serde_json::Map<String, Value>,
     options: &CollectOptions,
 ) -> Option<UnitRecord> {
+    let unit_name = package_name(object.get("package_id"))?;
+    let features = string_values(object.get("features"));
+    let target_triple = target_name(object, options);
     let freshness = classify_freshness(object.get("fresh").and_then(Value::as_bool));
     Some(UnitRecord {
-        unit_name: package_name(object.get("package_id"))?,
+        unit_id: UnitId::from_parts(
+            object.get("package_id").and_then(Value::as_str),
+            &unit_name,
+            UnitKind::BuildScript,
+            options.mode,
+            &target_triple,
+            &features,
+        ),
+        unit_name,
         kind: UnitKind::BuildScript,
         mode: options.mode,
         wall_ms: timing_ms(object, "wall_ms"),
@@ -405,8 +463,9 @@ fn parse_build_script(
             freshness,
         ),
         rwd_flags: string_values(object.get("rwd_flags")),
-        features: string_values(object.get("features")),
-        target: target_name(object, options),
+        features,
+        target: target_triple,
+        fanout: FanoutMetrics::default(),
     })
 }
 
@@ -507,6 +566,18 @@ fn string_values(value: Option<&Value>) -> Vec<String> {
 
 fn markdown_cell(value: &str) -> String {
     value.replace('|', "\\|").replace(['\n', '\r'], " ")
+}
+
+fn metric(value: Option<usize>) -> String {
+    value.map_or_else(|| UNKNOWN.to_owned(), |value| value.to_string())
+}
+
+fn boolean_metric(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => UNKNOWN,
+    }
 }
 
 fn redact_token(token: &str) -> String {
@@ -695,6 +766,7 @@ mod tests {
     fn summary_ranks_only_top_ten_by_wall_time() {
         let records: Vec<UnitRecord> = (0_u64..12)
             .map(|index| UnitRecord {
+                unit_id: UnitId::default(),
                 unit_name: format!("unit-{index:02}"),
                 kind: UnitKind::Compilation,
                 mode: BuildMode::Check,
@@ -709,6 +781,7 @@ mod tests {
                 rwd_flags: Vec::new(),
                 features: Vec::new(),
                 target: UNKNOWN.to_owned(),
+                fanout: FanoutMetrics::default(),
             })
             .collect();
 
@@ -718,5 +791,6 @@ mod tests {
         assert!(summary.contains("| 10 | unit-02 |"));
         assert!(!summary.contains("| unit-01 |"));
         assert!(summary.contains("| Kind |"));
+        assert!(summary.contains("| Direct downstream |"));
     }
 }
