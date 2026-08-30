@@ -40,6 +40,9 @@ const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
 const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
 const FENCED_SLOT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROLLER_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// A slot must publish fresh, generation-bound progress within this startup
+/// bound before it can prove session liveness or readiness.
+const SLOT_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -253,6 +256,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut slots: HashMap<String, Child> = HashMap::new();
     let mut jobs: HashMap<String, Child> = HashMap::new();
     let mut heartbeats: HashMap<String, (u32, u64)> = HashMap::new();
+    let mut startup_deadlines: HashMap<String, Instant> = HashMap::new();
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
     let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
@@ -271,6 +275,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut slots,
             &mut jobs,
             &mut heartbeats,
+            &mut startup_deadlines,
             &mut last_registration_reconcile,
             &mut pacing,
         )
@@ -429,6 +434,7 @@ async fn reconcile_once(
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
     heartbeats: &mut HashMap<String, (u32, u64)>,
+    startup_deadlines: &mut HashMap<String, Instant>,
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
 ) -> anyhow::Result<LocalCycle> {
@@ -448,20 +454,35 @@ async fn reconcile_once(
             .map(|slot| slot.generation)
             .unwrap_or(Generation::INITIAL);
         let fenced = slot.is_some_and(|slot| slot.phase == ActorPhase::Fenced);
+        let admission_blocked = slot_has_admission_block(&state, &id, generation);
+        let heartbeat_fresh = prove::slot_heartbeat_is_fresh(
+            &args.state_dir,
+            &id,
+            generation,
+            SLOT_HEARTBEAT_MAX_AGE,
+        );
+        if heartbeat_fresh {
+            startup_deadlines.remove(&id.0);
+        } else if args.spawn_slots
+            && !fenced
+            && !admission_blocked
+            && stale_slot_deadline_reached(args, slot, &id, startup_deadlines, Instant::now())
+        {
+            fence_stale_slot_actor(args, journal, slots, &id, generation).await?;
+            startup_deadlines.remove(&id.0);
+            continue;
+        }
         if fenced && args.spawn_slots {
             terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
         }
         let fenced_generation = fenced_slot_recovery_generation(slot, &state, jobs);
         let generation = fenced_generation.unwrap_or(generation);
-        let process_alive = slots.contains_key(&id.0)
-            || slot.and_then(|slot| slot.pid).is_some_and(|pid| {
-                prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
-            });
+        let process_alive = heartbeat_fresh;
         if fenced && fenced_generation.is_none() {
             continue;
         }
         if fenced_generation.is_none()
-            && (slot_has_admission_block(&state, &id, generation)
+            && (admission_blocked
                 || child_owns_slot(&state, jobs, &id)
                 || !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive))
         {
@@ -482,6 +503,7 @@ async fn reconcile_once(
             journal,
             slots,
             jobs,
+            startup_deadlines,
             &mut *pacing,
             remote_deadline,
             command,
@@ -528,18 +550,8 @@ async fn reconcile_once(
                     .commands,
             );
         }
-        let journal_pid = snapshot
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == id)
-            .and_then(|slot| slot.pid);
-        if prove::observe_slot_session(
-            slots.get_mut(&id.0),
-            journal_pid,
-            &args.state_dir,
-            &id,
-            generation,
-        ) {
+        if prove::slot_heartbeat_is_fresh(&args.state_dir, &id, generation, SLOT_HEARTBEAT_MAX_AGE)
+        {
             proof_effects.extend(
                 journal
                     .apply(Event::SessionLive {
@@ -577,6 +589,7 @@ async fn reconcile_once(
                     journal,
                     slots,
                     jobs,
+                    startup_deadlines,
                     &mut *pacing,
                     remote_deadline,
                     command,
@@ -645,11 +658,13 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_effect(
     args: &ControllerArgs,
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
+    startup_deadlines: &mut HashMap<String, Instant>,
     pacing: &mut GithubPacing,
     remote_deadline: tokio::time::Instant,
     command: SideEffect,
@@ -658,7 +673,14 @@ async fn execute_effect(
         SideEffect::SpawnSlot {
             slot_id,
             generation,
-        } => maybe_spawn_slot(args, journal, slots, &slot_id, generation),
+        } => maybe_spawn_slot(
+            args,
+            journal,
+            slots,
+            startup_deadlines,
+            &slot_id,
+            generation,
+        ),
         SideEffect::RegisterRunner {
             slot_id,
             generation,
@@ -1391,6 +1413,56 @@ fn send_pid_signal(pid: u32, signal: libc::c_int) -> anyhow::Result<()> {
 fn send_pid_signal(_pid: u32, _signal: i32) -> anyhow::Result<()> {
     anyhow::bail!("fenced slot recovery requires Unix process signaling")
 }
+
+fn stale_slot_deadline_reached(
+    _args: &ControllerArgs,
+    slot: Option<&SlotRecord>,
+    id: &SlotId,
+    deadlines: &mut HashMap<String, Instant>,
+    now: Instant,
+) -> bool {
+    let Some(slot) = slot else {
+        return false;
+    };
+    if prove::slot_heartbeat_is_fresh(
+        &_args.state_dir,
+        id,
+        slot.generation,
+        SLOT_HEARTBEAT_MAX_AGE,
+    ) {
+        return false;
+    }
+    let deadline = deadlines
+        .entry(id.0.clone())
+        .or_insert(now + SLOT_HEARTBEAT_MAX_AGE);
+    *deadline <= now
+}
+
+async fn fence_stale_slot_actor(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    slots: &mut HashMap<String, Child>,
+    id: &SlotId,
+    generation: Generation,
+) -> anyhow::Result<()> {
+    let outcome = journal.apply(Event::SlotStale {
+        slot_id: id.clone(),
+        generation,
+    })?;
+    if outcome.rejected {
+        return Ok(());
+    }
+    let slot = journal
+        .materialized_state()?
+        .slots
+        .into_iter()
+        .find(|slot| {
+            slot.slot_id == *id && slot.generation == generation && slot.phase == ActorPhase::Fenced
+        })
+        .ok_or_else(|| anyhow::anyhow!("stale slot {id:?} was not fenced"))?;
+    terminate_fenced_slot_actor(args, slots, id, &slot).await
+}
+
 fn permit_needs_reconciliation(
     slot: Option<&SlotRecord>,
     generation: Generation,
@@ -1417,19 +1489,19 @@ fn ingest_slot_heartbeats(
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let Ok(heartbeat) = serde_json::from_slice::<SlotHeartbeat>(&bytes) else {
-            continue;
-        };
         let id = slot_id(&args.scope, index);
         let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) else {
             continue;
         };
+        let Ok(heartbeat) = serde_json::from_slice::<SlotHeartbeat>(&bytes) else {
+            continue;
+        };
         if slot.generation.0 != heartbeat.generation
-            || !prove::slot_process_is_alive(
-                heartbeat.pid,
+            || !prove::slot_heartbeat_is_fresh(
                 &args.state_dir,
                 &id,
-                Generation(heartbeat.generation),
+                slot.generation,
+                SLOT_HEARTBEAT_MAX_AGE,
             )
             || seen.get(&id.0).is_some_and(|(pid, sequence)| {
                 *pid == heartbeat.pid && *sequence >= heartbeat.sequence
@@ -1457,6 +1529,7 @@ fn maybe_spawn_slot(
     args: &ControllerArgs,
     journal: &Journal,
     children: &mut HashMap<String, Child>,
+    startup_deadlines: &mut HashMap<String, Instant>,
     slot_id: &SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
@@ -1489,6 +1562,7 @@ fn maybe_spawn_slot(
         .arg(generation.0.to_string())
         .spawn()?;
     children.insert(slot_id.0.clone(), child);
+    startup_deadlines.insert(slot_id.0.clone(), Instant::now() + SLOT_HEARTBEAT_MAX_AGE);
     Ok(())
 }
 
