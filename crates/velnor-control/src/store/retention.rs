@@ -1593,7 +1593,7 @@ impl Store {
             return Ok(PruneCounts::default());
         };
         let cutoff = minus_age(now, max_age);
-        let ids = select_expired_terminal_job_ids(conn, cutoff)?;
+        let ids = select_expired_terminal_job_ids(conn, cutoff, prune_batch_size(budget))?;
         let Some(id) = ids.first().copied() else {
             return Ok(PruneCounts::default());
         };
@@ -1948,30 +1948,30 @@ fn read_retention_snapshot(
     })
 }
 
-/// Find the oldest retained event/transition using Rust's parsed timestamps.
-/// RFC 3339 text is not ordered safely, and SQLite accepts timestamp spellings
-/// that are not canonical `Timestamp` values. Malformed or noncanonical rows
-/// produce an explicit incomplete result; accounting never labels a partial
-/// result as complete and never turns post-commit reporting into a retry
-/// signal.
+/// Find the oldest retained event/transition using the indexed SQLite ordering
+/// and Rust's parsed timestamp. RFC 3339 text is not ordered safely, and
+/// SQLite accepts timestamp spellings that are not canonical `Timestamp`
+/// values. The SQL query selects one bounded candidate per table; an invalid
+/// selected row produces an explicit incomplete result. Accounting never
+/// labels a partial result as complete and never turns post-commit reporting
+/// into a retry signal.
 fn oldest_retained_at(conn: &rusqlite::Connection) -> StoreResult<(Option<String>, bool)> {
     let mut oldest: Option<Timestamp> = None;
     for (table, column) in [
         ("events", "occurred_at"),
         ("job_transitions", "transition_time"),
     ] {
-        let mut statement = conn.prepare_cached(&format!("SELECT {column} FROM {table}"))?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let raw = row
-                .get::<_, String>(0)
-                .map_err(|_| stale_timestamp_error())?;
-            let Some(timestamp) = parse_canonical_timestamp(&raw) else {
-                return Ok((None, false));
-            };
-            if oldest.is_none_or(|current| timestamp < current) {
-                oldest = Some(timestamp);
-            }
+        let sql = format!(
+            "SELECT {column} FROM {table}
+             ORDER BY julianday({column}) ASC, id ASC LIMIT 1"
+        );
+        let raw: Option<String> = conn.query_row(&sql, [], |row| row.get(0)).optional()?;
+        let Some(raw) = raw else { continue };
+        let Some(timestamp) = parse_canonical_timestamp(&raw) else {
+            return Ok((None, false));
+        };
+        if oldest.is_none_or(|current| timestamp < current) {
+            oldest = Some(timestamp);
         }
     }
     Ok((oldest.map(rfc3339), true))
@@ -2217,10 +2217,12 @@ fn select_expired_event_ids(
     cutoff: Timestamp,
     batch: u64,
 ) -> StoreResult<Vec<i64>> {
-    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE) as usize;
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
     let mut statement = conn.prepare_cached(&format!(
         "SELECT id, occurred_at FROM events
-         WHERE {EXACT_EVENT_OWNERSHIP}
+         WHERE (julianday(occurred_at) < julianday(?1)
+                OR julianday(occurred_at) IS NULL)
+           AND {EXACT_EVENT_OWNERSHIP}
            AND NOT EXISTS (
                SELECT 1 FROM jobs j
                WHERE j.instance_slug = events.instance_slug
@@ -2232,10 +2234,14 @@ fn select_expired_event_ids(
                WHERE r.instance_slug = events.instance_slug
                  AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
            )
-         ORDER BY id ASC"
+         ORDER BY CASE WHEN substr(occurred_at, 11, 1) = 'T' THEN 1 ELSE 0 END,
+                  julianday(occurred_at) ASC, id ASC LIMIT ?2"
     ))?;
-    let mut rows = statement.query([])?;
-    let mut candidates = Vec::with_capacity(batch);
+    let mut rows = statement.query(params![
+        rfc3339(cutoff),
+        i64::try_from(batch).unwrap_or(i64::MAX)
+    ])?;
+    let mut ids = Vec::with_capacity(batch as usize);
     while let Some(row) = rows.next()? {
         let id = row.get(0)?;
         let raw = row
@@ -2243,43 +2249,47 @@ fn select_expired_event_ids(
             .map_err(|_| stale_timestamp_error())?;
         let timestamp = parse_canonical_timestamp(&raw).ok_or_else(stale_timestamp_error)?;
         if timestamp < cutoff {
-            candidates.push((timestamp, id));
-            candidates.sort_unstable();
-            if candidates.len() > batch {
-                candidates.pop();
-            }
+            ids.push(id);
         }
     }
-    Ok(candidates.into_iter().map(|(_, id)| id).collect())
+    Ok(ids)
 }
 
 fn select_expired_terminal_job_ids(
     conn: &rusqlite::Connection,
     cutoff: Timestamp,
+    batch: u64,
 ) -> StoreResult<Vec<i64>> {
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
     let mut statement = conn.prepare_cached(&format!(
         "SELECT id, updated_at FROM jobs
          WHERE phase IN {CANONICAL_TERMINAL_PHASES}
+           AND (julianday(updated_at) < julianday(?1)
+                OR julianday(updated_at) IS NULL)
            AND NOT EXISTS (
                SELECT 1 FROM reconciliations r
                WHERE r.instance_slug = jobs.instance_slug
                  AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
            )
-         ORDER BY id ASC"
+         ORDER BY CASE WHEN substr(updated_at, 11, 1) = 'T' THEN 1 ELSE 0 END,
+                  julianday(updated_at) ASC, id ASC LIMIT ?2"
     ))?;
-    let mut rows = statement.query([])?;
-    let mut oldest: Option<(Timestamp, i64)> = None;
+    let mut rows = statement.query(params![
+        rfc3339(cutoff),
+        i64::try_from(batch).unwrap_or(i64::MAX)
+    ])?;
+    let mut ids = Vec::with_capacity(batch as usize);
     while let Some(row) = rows.next()? {
         let id = row.get(0)?;
         let raw = row
             .get::<_, String>(1)
             .map_err(|_| stale_timestamp_error())?;
         let timestamp = parse_canonical_timestamp(&raw).ok_or_else(stale_timestamp_error)?;
-        if timestamp < cutoff && oldest.is_none_or(|candidate| (timestamp, id) < candidate) {
-            oldest = Some((timestamp, id));
+        if timestamp < cutoff {
+            ids.push(id);
         }
     }
-    Ok(oldest.into_iter().map(|(_, id)| id).collect())
+    Ok(ids)
 }
 
 /// IDs strictly below `keep_from_id`, excluding rows protected by a
