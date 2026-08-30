@@ -1,32 +1,31 @@
 # Session coordination registry
 
-## Current operator directive — static campaign branch and one PR
+## Current operator directive — focused PRs per assigned branch
 
-All active work from the `plans/` tree is integrated together on exactly one
-static generic campaign branch: `codex/velnor-project-goal`. It produces
-exactly one pull request. No plan, leaf, task, verifier, or status item may
-create another delivery branch or open another pull request. The explicitly
-authorized `NIMBUS-VELO6-8F4` session may use local branch `velnor6` in
-`/Users/donbeave/Projects/tailrocks/velnor-project/velnor6` for isolated
-session work only; it is not a delivery branch, and its commits must be handed
-to the campaign writer for integration. Subagents return patches/evidence for
-primary reconciliation.
+The 2026-08-31 operator decision assigns `velnor1` through `velnor10` focused
+pull requests to `main`; there is no shared integration branch. This supersedes
+the stale single-branch/one-PR topology. Never commit or push directly to
+`main`, never force-push, and branch from current `main`. This session is
+`dima` on `velnor6`, with one focused PR from `velnor6` to `main`. Preserve
+branch freshness, serialized shared-resource mutations, fixture, signoff, lane,
+and signed-APT/Sentry safety rules.
 
 The active claims and branch-merge entries below preserve historical audit
 context only. Any per-leaf branch, push, PR, or immediate-commit instruction
-in them is superseded by this directive and is non-executable.
+in them that conflicts with the focused-PR topology is superseded by this
+directive and is non-executable.
 
 Historical binding for agent sessions executing
 `plans/goal-execution/README.md` against branch `velnor-estate-standard`.
-This is retained only for audit context and is superseded by the single
-campaign branch directive above. It is non-executable.
+This is retained only for audit context and is superseded by the focused-PR
+directive above. It is non-executable.
 
 ## Historical coordination rules (non-executable)
 
 1. **Claim before write (historical).** Before any writer subagent touches
    leaf scope, its session appends a row to the Active claims table in a
    commit on the historical campaign branch and pushes. A claim names exactly
-   one leaf. This rule is superseded by the single-branch directive above.
+   one leaf. This rule is superseded by the focused-PR directive above.
 2. **One writer per leaf.** A leaf with an unexpired claim must not receive a
    second writer. Read-only investigation, verification, and review may run
    concurrently.
@@ -46,8 +45,8 @@ campaign branch directive above. It is non-executable.
 7. **Commit and push everything (historical operator directive 2026-08-24).**
    Every session commits and pushes its own outputs immediately: leaf code,
    plan and index updates, and sanitized `.velnor-compare/` evidence included.
-   This per-session delivery rule is superseded by the single campaign branch
-   and one pull request directive above.
+   This per-session delivery rule is superseded by the focused-PR directive
+   above.
 
 ## Active claims
 
@@ -62,24 +61,28 @@ campaign branch directive above. It is non-executable.
 
 ## Decisions
 
-- **2026-08-29 single campaign branch and pull request**: all active plans and
+- **2026-08-29 single campaign branch and pull request (superseded 2026-08-31)**:
+  all active plans and
   retained command work are implemented together on the then-current campaign
-  branch and delivered in one pull request. No per-plan, per-task, or per-item
-  branch or pull request is executable.
+  branch and delivered in one pull request. This remains historical context;
+  no per-plan, per-task, or per-item branch or pull request instruction here is
+  executable.
 
-- **2026-08-30 static campaign branch decision**: the one campaign branch for
+- **2026-08-30 static campaign branch decision (superseded 2026-08-31)**: the one campaign branch for
   the whole active goal and plan is the static generic
   `codex/velnor-project-goal`. Keep one pull request for the campaign; do not
   use plan/task names for the branch. No per-task branch or pull request is
   permitted under the current topology; a future topology change requires a
   new explicit operator decision recorded in the governing prompt and plan
-  before any branch is created.
+  before any branch is created. This entry is retained as superseded history.
 
-- **2026-08-31 isolated-session exception**: the operator authorizes
+- **2026-08-31 isolated-session exception (superseded 2026-08-31)**: the operator authorizes
   `NIMBUS-VELO6-8F4` to use local branch `velnor6` only in the named checkout
   for isolated session work. This does not create a delivery branch or PR;
   commits must be handed to the campaign writer for integration on
   `codex/velnor-project-goal`, with no direct `main` push and no force-push.
+  This entry is retained as superseded history; the current `dima` focused-PR
+  directive above governs.
 
 - **2026-08-24 branch-merge directive executed; campaign work recovered**
   (ox-alpha session C): operator ordered all branches merged to `main` via
@@ -104,7 +107,8 @@ campaign branch directive above. It is non-executable.
   `velnorctl-clap-migration` was delivered via #291 and deleted;
   `fix/admit-paths-filter-v4.0.3` was delivered via #292 and deleted; duplicate
   PR #293 was closed as superseded. This record does not direct future leaf
-  work; the current static campaign branch and sole PR rule above governs.
+  work; the then-current static campaign branch and sole PR rule were
+  historical and are superseded by the focused-PR directive above.
 
 - **2026-08-24 OPERATOR RULING — leaf 039 removals + probes** (verbatim
   intent): "Never remove any repositories I listed. We must keep all of them

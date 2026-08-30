@@ -5,14 +5,13 @@ into one unbounded prompt. It is orchestration only. Product direction remains
 owned by `docs/mission.md`, `docs/vision.md`, `docs/roadmap.md`, the marked
 unified-CI contract, and `docs/prompt.md`.
 
-2026-08-31 topology decision: an explicitly authorized isolated session may
-use local branch `velnor6` in this checkout for that session's scoped work
-only. This is not a second campaign branch, task PR, or direct-main path:
-`codex/velnor-project-goal` remains the sole campaign integration branch and
-the sole campaign PR. All branch reconciliation, status/index writes, commits,
-pushes, fixture dispatches, live mutations, and integration are serialized.
-Never write `main` directly and never force-push; reconcile session work into
-the campaign branch before the authorized PR gate.
+2026-08-31 operator topology decision: `velnor1` through `velnor10` ship
+focused pull requests to `main`; no shared integration branch. This supersedes
+the stale single-branch/one-PR topology. Never commit or push directly to
+`main`, never force-push, and branch from current `main`. This session is
+`dima` on `velnor6` and ships one focused PR from `velnor6` to `main`.
+Preserve branch freshness, serialized shared-resource mutations, fixture,
+signoff, lane, and signed-APT/Sentry safety rules.
 
 ## Audited inventory
 
@@ -99,27 +98,25 @@ Three OpenCode sessions run this goal together as peers. Binding channel: plans/
 
 Each session's primary agent orchestrates only: dependencies, dispatch, conflict prevention, operator-approval boundaries, evidence reconciliation, ledger consistency, verdict. Never implement, edit, test, or review a leaf directly. Per leaf dispatch fresh subagents for investigation (drift and dependency validation), implementation (owned file scope), verification (commands, fixture runs, artifacts, done criteria), independent diff review, plus specialists for security, protocol, packaging, fleet, storage, migration, or documentation surfaces. Subagents get the full leaf file, this contract, dependency evidence, applicable AGENTS.md, exact scope, STOP conditions, and return schema. Subagents are mandatory for every plan item; if no slot is free use bounded wait and retry cycles while checking state, never pulling a leaf into primary context. A separate verifier confirms claims against repository state; self-asserted success never counts; an implementer never provides the only review or verdict.
 
-The campaign integration branch `codex/velnor-project-goal` carries every leaf
-commit sequentially. The explicit 2026-08-31 topology decision permits local
-`velnor6` only as an isolated session branch for that session's scoped work,
-preparation, review, and handoff; it is not a second campaign branch, task PR,
-or direct-main path. Prove HEAD and branch match the campaign ledger at every
-handoff; repair mismatch by returning to the recorded campaign branch without
-discarding work. All writes, commits, pushes, fixture dispatches, live
-mutations, and integration are serialized. Never write `main` directly or
-force-push. Commit and push every finished iteration on the campaign branch.
-Velnor execution failures are fixed in Velnor on this branch. The sole
-campaign PR merges to `main` at the authorized safe integration checkpoint;
-repeated per-task PRs or repeated PR merges are forbidden. An urgent pre-merge
-Sentry validation may use the exact pushed branch SHA only through an
-explicitly authorized, immutable signed-APT release over `ssh sentry`, with
-no checkout/binary copy/local package/direct `dpkg -i`.
+Each assigned branch carries its focused work to one pull request on `main`.
+The 2026-08-31 operator topology assigns `velnor1` through `velnor10` focused
+PRs and forbids a shared integration branch. For this session, `dima` works on
+`velnor6` and its one focused PR to `main`. Prove HEAD and branch freshness
+against current `main` at every handoff; repair mismatch without discarding
+work. All writes, commits, pushes, fixture dispatches, live mutations, and
+integration remain serialized where they share resources. Never commit or push
+`main` directly or force-push. Commit and push every finished iteration on the
+assigned branch. Velnor execution failures are fixed in Velnor on that branch.
+The focused PR merges to `main` at the authorized safe integration checkpoint.
+An urgent pre-merge Sentry validation may use the exact pushed branch SHA only
+through an explicitly authorized, immutable signed-APT release over `ssh sentry`,
+with no checkout/binary copy/local package/direct `dpkg -i`.
 
 All gates run through mise tasks invoked via rtk (rtk mise run <task>): fmt, lint, test (nextest), actionlint, deny, composite check, ci. Never call cargo, clippy, nextest, actionlint, or cargo-deny directly where a task wraps them. Filters ride after the task name; focused scopes the task, never bypasses it. Missing capability means a mise.lock-pinned mise.toml task, never ad-hoc commands. Configure mise before gates.
 
 Per leaf: verify rtk and mise; prove dependencies DONE; drift-check against HEAD; inspect cited symbols; record baseline commit, worktree state, fixture commit, manifest version, baseline scoped tests; reconcile plan versus reality through subagents before implementing; never silently adapt or skip. Execute one step at a time verified through its mise task; retain shortest decisive evidence; use Rust and repository patterns; consult current official docs where required; GitHub runner protocol reads actions/runner first; no strict-capability expansion without operator approval; never weaken the fixture or fake missing Velnor behavior locally.
 
-Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration and fixture gates, whitespace check, scope audit, secret scan, independent diff review; affected gates rerun after fixes; every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push every iteration. After each push, fresh security, performance, goal/acceptance, verifier, and reviewer subagents audit the exact pushed diff. Merge the sole campaign PR to `main` only at the authorized safe integration checkpoint; if an urgent pre-merge Sentry validation is authorized, require exact branch-SHA-to-signed-APT binding, SSH host/user confirmation, exact installed version, health, rollback, and all three lanes (`velnor`, `github`, `both`). Before every retry cancel older pending/in-progress runs and delete only validation-owned stale registrations, prove both clear, then monitor only the new run. Dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
+Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration and fixture gates, whitespace check, scope audit, secret scan, independent diff review; affected gates rerun after fixes; every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push every iteration. After each push, fresh security, performance, goal/acceptance, verifier, and reviewer subagents audit the exact pushed diff. Merge the assigned branch's focused PR to `main` only at the authorized safe integration checkpoint; if an urgent pre-merge Sentry validation is authorized, require exact branch-SHA-to-signed-APT binding, SSH host/user confirmation, exact installed version, health, rollback, and all three lanes (`velnor`, `github`, `both`). Before every retry cancel older pending/in-progress runs and delete only validation-owned stale registrations, prove both clear, then monitor only the new run. Dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
 ```
 
 Repository status and evidence, not chat memory, carry progress across
@@ -131,8 +128,8 @@ an unclaimed dependency-ready leaf after recording your own claim row.
 Run this loop for every leaf:
 
 1. Reconcile inventory, dependencies, statuses, HEAD, dirty files, and external
-   approvals. Confirm recorded single campaign branch. Select exactly one
-   dependency-ready item.
+   approvals. Confirm the assigned focused-PR branch and current `main` base.
+   Select exactly one dependency-ready item.
 2. Dispatch fresh investigator and executor subagents for that leaf. Keep one
    campaign goal; never create or clear a separate leaf goal. If no subagent
    slot is free, wait/retry in bounded cycles while checking state, or advance
@@ -140,8 +137,8 @@ Run this loop for every leaf:
    campaign or moves a leaf into primary context.
 3. Require investigator baseline evidence before executor edits. Existing
    unrelated changes remain untouched. Prove HEAD and branch name still match
-   the campaign ledger before and after every handoff; repair mismatch by
-   returning to the recorded branch without discarding work.
+   the branch ledger before and after every handoff; repair mismatch without
+   discarding work.
 4. Executor subagent performs each plan step and immediate verification through
    its mise task per the tooling law. A failed gate stays in the same leaf
    until fixed or proven blocked.
@@ -160,7 +157,7 @@ Run this loop for every leaf:
 7. A fresh verification subagent runs all final gates again after review fixes
    and records exact commands, exit status, fixture run IDs/conclusions, and
    sanitized artifact paths.
-8. A status/commit subagent on same campaign branch marks item `DONE` only after
+8. A status/commit subagent on the assigned focused-PR branch marks item `DONE` only after
    all checkboxes have evidence, updates category and root rollups atomically,
    and commits only item-scoped files using required trailers.
 9. Inspect campaign goal status. Keep it active. Reconcile graph from disk
@@ -173,16 +170,16 @@ transition.
 ## Velnor blocker fast path
 
 When a Velnor execution blocks a plan item, keep the item open and fix the root
-cause in Velnor on the campaign branch. Commit and push the fix, run the fresh
+cause in Velnor on the assigned focused-PR branch. Commit and push the fix, run the fresh
 security/performance/goal/verifier/reviewer audits, and run the focused,
-repository, fixture, and lane gates. A mergeable campaign PR is merged to
-`main` at the one authorized integration point, and the merged SHA is the
+repository, fixture, and lane gates. A mergeable focused PR is merged to
+`main` at the authorized integration point, and the merged SHA is the
 release source. If the PR is temporarily unmergeable but urgent Sentry proof
 is explicitly authorized, publish an immutable signed-APT candidate whose
 source record names the exact branch SHA, install the exact version via
 `ssh sentry`, and capture pre/post state, health, rollback, and lane evidence.
 This exception never permits a checkout, binary, local `.deb`, direct
-`dpkg -i`, or silent branch deployment; the campaign branch must still merge
+`dpkg -i`, or silent branch deployment; the focused branch must still merge
 later. Internal Velnor failures are fix-and-retry, not `BLOCKED`; use
 `BLOCKED` only for a proven external limit or named approval decision.
 
@@ -219,8 +216,8 @@ Plan 039 and Track B may progress independently, but live fleet mutation,
 fixture dispatch, package cutover, and other shared external resources must be
 serialized. Subagents are mandatory for every leaf. Only read-only investigation
 and review may run concurrently. All edits, status transitions, commits, fixture
-dispatches, package operations, and live mutations are serialized on the single
-campaign branch and must not share status-index ownership or live validation
+dispatches, package operations, and live mutations remain serialized where
+resources overlap and must not share status-index ownership or live validation
 resources.
 
 ## Validation layers

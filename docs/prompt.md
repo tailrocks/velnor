@@ -21,16 +21,19 @@ graph, with `plans/TASKS.md` as its checkbox mirror. The active surface is
 exactly: the marked unified-CI contract, the tracked goal graph, and the
 `plans/TASKS.md` mirror.
 
-## Campaign delivery topology
+## Focused delivery topology
 
-All work represented by the active `plans/` tree is one campaign. Implement
-every plan and retained command task on one static generic delivery branch,
-`codex/velnor-project-goal`, and deliver one pull request from that branch.
-Per-plan, per-task, and per-item branches or pull requests are prohibited for
-campaign delivery. Historical coordination text that prescribes branch-per-leaf
-delivery is superseded by this operator directive.
+Every active plan and retained command task is implemented on its assigned
+branch in `velnor1` through `velnor10` and delivered in one focused PR to
+`main`. No shared integration branch exists. For this session, `dima` works on
+`velnor6` and ships one focused PR to `main`. Never commit directly to `main`
+or force-push.
 
-2026-08-31 operator decision: one campaign delivery branch and one campaign PR
+Superseded historical topology (retained): all work represented by the active
+`plans/` tree was one campaign on static branch `codex/velnor-project-goal`,
+with one pull request; per-plan and per-task branches were prohibited.
+
+Superseded historical NIMBUS/session-isolation decision (2026-08-31): one campaign delivery branch and one campaign PR
 remain mandatory. `codex/velnor-project-goal` is the sole delivery branch and
 its sole campaign PR is the only route into `main`. For this session only, the
 operator authorizes checkout `/Users/donbeave/Projects/tailrocks/velnor-project/velnor6`
@@ -40,16 +43,23 @@ integrated by the campaign writer on `codex/velnor-project-goal`. This local
 isolation exception changes no safety, freshness, signed-off commit, validation,
 trust, lane, Sentry, merge-gate, or no-force-push requirement.
 
+2026-08-31 operator decision: `velnor1` through `velnor10` ship focused PRs to
+`main`; no shared integration branch exists. This supersedes the stale
+single-branch/one-PR and NIMBUS/session-isolation topology above. Never commit
+directly to `main` or force-push. For this session, `dima` works on `velnor6`
+and ships one focused PR to `main`. All safety, lane, signed-APT, fixture,
+branch-freshness, and signed-off-commit rules remain unchanged.
+
 ## Velnor blocker integration loop
 
 A failed Velnor execution is a Velnor defect until evidence proves an external
-failure. Fix the enabling Velnor architecture on this campaign branch; never
+failure. Fix the enabling Velnor architecture on the assigned branch; never
 hide the defect in a repository workflow or in `velnor-actions-fixture`.
 Commit and push every finished iteration with the required signed-off commit
-trailers. The sole campaign PR is the only path into `main`: merge it at the
-authorized safe integration checkpoint, then prove the merged SHA on `main`
-before release. Repeated per-task PRs or repeated PR merges are prohibited by
-the one-branch/one-PR topology.
+trailers. The focused PR is the path into `main`: merge it at the authorized
+safe integration checkpoint, then prove the merged SHA on `main` before
+release. Shared integration branches and repeated PR merges are prohibited by
+the focused-PR topology.
 
 Normal releases use the signed `velnor-apt` workflow. For normal and emergency
 paths alike, before accepting publication or installing, verify the exact
@@ -57,9 +67,9 @@ package/source/version/digest binding, trusted signing-key fingerprint, and all
 three APT metadata artifacts—`Release`, clearsigned `InRelease`, and detached
 `Release.gpg`—with matching metadata bytes and checksums. If, and only if, a
 failed Velnor lane must build Velnor itself and urgent Sentry validation is
-required before the sole PR can merge, an explicitly authorized chicken-egg
-bootstrap may build one Debian package from the exact pushed campaign SHA only
-after verifying that the remote campaign branch tip equals that SHA.
+required before the focused PR can merge, an explicitly authorized chicken-egg
+bootstrap may build one Debian package from the exact pushed assigned-branch SHA
+only after verifying that the remote assigned-branch tip equals that SHA.
 Bind the package version and source provenance to that SHA; record the
 package SHA-256 before and after transfer; transfer only that `.deb` via
 `ssh -o BatchMode=yes sentry` using a pinned and verified Sentry host identity
@@ -72,7 +82,7 @@ record all evidence. Cancel stale
 validation state as required, prove it is clear, then retry `velnor`,
 `github`, and `both`. This exception is not raw binary/source/checkout copy,
 local-path installation, an unpinned package, or silent GitHub fallback.
-Merge the same campaign branch when the PR becomes mergeable.
+Merge the same assigned branch when the PR becomes mergeable.
 
 Every Velnor blocker iteration must verify the deployed source/package
 identity, service health, rollback predecessor, and all three lane modes:

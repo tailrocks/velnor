@@ -18,13 +18,17 @@ Velnor unified CI contract (2026-08-09):
 
 Current execution follows the marked contract and the tracked active goal graph.
 
-Campaign delivery rule: every active plan and retained command task is
-implemented on the single static generic delivery branch
-`codex/velnor-project-goal` and delivered in one pull request. No per-plan or
-per-task branch/PR exists for campaign delivery; older coordination entries are
-historical.
+Focused delivery rule: every active plan and retained command task is
+implemented on its assigned branch in `velnor1` through `velnor10` and
+delivered in one focused PR to `main`. No shared integration branch exists. For
+this session, `dima` works on `velnor6` and ships one focused PR; never commit
+directly to `main` or force-push.
 
-2026-08-31 operator decision: one campaign delivery branch and one campaign PR
+Superseded historical topology (retained): every active plan and retained
+command task was implemented on static branch `codex/velnor-project-goal` and
+delivered in one pull request; per-plan and per-task branches were prohibited.
+
+Superseded historical NIMBUS/session-isolation decision (2026-08-31): one campaign delivery branch and one campaign PR
 remain mandatory. `codex/velnor-project-goal` is the sole delivery branch and
 its sole campaign PR is the only route into `main`. For this session only, the
 operator authorizes checkout `/Users/donbeave/Projects/tailrocks/velnor-project/velnor6`
@@ -34,8 +38,15 @@ integrated by the campaign writer on `codex/velnor-project-goal`. This local
 isolation exception changes no safety, freshness, signed-off commit, validation,
 trust, lane, Sentry, merge-gate, or no-force-push requirement.
 
-Velnor blocker rule: fix Velnor itself on that branch, commit and push each
-iteration, and use the sole campaign PR to merge to `main` at its authorized
+2026-08-31 operator decision: `velnor1` through `velnor10` ship focused PRs to
+`main`; no shared integration branch exists. This supersedes the stale
+single-branch/one-PR and NIMBUS/session-isolation topology above. Never commit
+directly to `main` or force-push. For this session, `dima` works on `velnor6`
+and ships one focused PR to `main`. All safety, lane, signed-APT, fixture,
+branch-freshness, and signed-off-commit rules remain unchanged.
+
+Velnor blocker rule: fix Velnor itself on the assigned branch, commit and push
+each iteration, and use its focused PR to merge to `main` at the authorized
 safe integration checkpoint. If urgent Sentry validation is explicitly
 authorized while the PR is unmergeable, release the exact branch SHA through
 the signed `velnor-apt` path and install only that signed version over

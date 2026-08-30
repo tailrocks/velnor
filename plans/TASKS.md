@@ -5,34 +5,31 @@ the dependency graph in [`goal-execution/README.md`](goal-execution/README.md).
 
 Rules for every agent working this list:
 
-2026-08-31 topology decision: an explicitly authorized isolated session may
-use local branch `velnor6` in this checkout for that session's scoped work
-only. This is not a second campaign branch, task PR, or direct-main path:
-`codex/velnor-project-goal` remains the sole campaign integration branch and
-the sole campaign PR. All branch reconciliation, status/index writes, commits,
-pushes, fixture dispatches, live mutations, and integration are serialized.
-Never write `main` directly and never force-push; reconcile session work into
-the campaign branch before the authorized PR gate.
+2026-08-31 operator topology decision: `velnor1` through `velnor10` ship
+focused pull requests to `main`; no shared integration branch. This supersedes
+the stale single-branch/one-PR topology. Never commit or push directly to
+`main`, never force-push, and branch from current `main`. This session is
+`dima` on `velnor6` and ships one focused PR from `velnor6` to `main`.
+Preserve branch freshness, serialized shared-resource mutations, fixture,
+signoff, lane, and signed-APT/Sentry safety rules.
 
 1. The authoritative status lives in each item file and its category index.
    This file is a mirror: when you flip an item here, flip it there in the same
    commit, and never mark `[x]` without evidence mapped to the item's done
    criteria.
 2. Never implement in primary context. Each leaf goes through fresh
-   investigator -> executor -> verifier -> reviewer subagents on the campaign
-   integration branch (`codex/velnor-project-goal`), subject to the isolated
-   `velnor6` session exception recorded above.
+   investigator -> executor -> verifier -> reviewer subagents on its assigned
+   focused-PR branch.
 3. A leaf is DONE only when all gates pass at current HEAD: focused nextest,
    `rtk mise run check`, integration/fixture proof, safety scan, independent
    review, index agreement, commit trailers (`git commit -s`,
    `Co-authored-by: Codex <codex@openai.com>`).
-4. Every finished iteration is committed and pushed on the campaign
-   integration branch after any authorized isolated-session handoff. A Velnor
-   blocker is fixed in Velnor, then audited by fresh security,
-   performance, goal/acceptance, verifier, and reviewer subagents. The sole
-   campaign PR merges to `main` at the authorized safe integration checkpoint;
-   an urgent pre-merge Sentry exception is signed-APT-only and bound to the
-   exact branch SHA over `ssh sentry`.
+4. Every finished iteration is committed and pushed on its assigned focused-PR
+   branch. A Velnor blocker is fixed in Velnor, then audited by fresh security,
+   performance, goal/acceptance, verifier, and reviewer subagents. That focused
+   PR merges to `main` at the authorized safe integration checkpoint; an urgent
+   pre-merge Sentry exception is signed-APT-only and bound to the exact branch
+   SHA over `ssh sentry`.
 5. `BLOCKED` requires exact evidence and the named external decision. Never
    batch-complete siblings; shared code does not transfer proof.
 
@@ -170,13 +167,13 @@ Immediate next actions, in order (update this section as work lands):
 3. Run **039** in parallel via its own subagent lane; live apply waits for
    reviewed digest + explicit operator authorization.
 4. After 063: dispatch 064, then follow the Track B order above.
-5. Keep the campaign integration branch synchronized and push every iteration.
-   Merge the
-   sole campaign PR to `main` only at the authorized safe integration point;
-   then rerun the complete required gates against the merged SHA. Before any
-   retry, clear older validation runs and validation-owned stale registrations.
+5. Keep each focused-PR branch synchronized with current `main` and push every
+   iteration. Merge that branch's focused PR to `main` only at the authorized
+   safe integration point; then rerun the complete required gates against the
+   merged SHA. Before any retry, clear older validation runs and
+   validation-owned stale registrations.
 6. When 079 completes: verify no `velnor-runner` product surface remains; only
-   then use the sole campaign PR for the completion gate.
+   then use its focused PR for the completion gate.
 
 ## Done definition (campaign-wide)
 
