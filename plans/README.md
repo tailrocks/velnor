@@ -19,10 +19,9 @@ Velnor unified CI contract (2026-08-09):
 Current execution follows the marked contract and the tracked active goal graph.
 
 Campaign delivery rule: every active plan and retained command task is
-implemented on the single campaign branch
-`codex/plan-066-operational-history` and delivered in one pull request. No
-per-plan or per-task branch/PR exists; older coordination entries are
-historical.
+implemented on the single static generic campaign branch
+`codex/velnor-project-goal` and delivered in one pull request. No per-plan or
+per-task branch/PR exists; older coordination entries are historical.
 
 Velnor blocker rule: fix Velnor itself on that branch, commit and push each
 iteration, and use the sole campaign PR to merge to `main` at its authorized

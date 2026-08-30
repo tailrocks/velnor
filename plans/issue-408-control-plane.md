@@ -1,7 +1,7 @@
 # Issue 408 — Control-plane idle CPU and reconciliation churn
 
 Issue: https://github.com/tailrocks/velnor/issues/408  
-Working branch: `codex/plan-066-operational-history`
+Working branch: `codex/velnor-project-goal`
 
 This is the execution ledger for the issue. A checkbox is marked `[x]` only
 when current code and a matching test or external artifact prove it. External

@@ -65,4 +65,9 @@ source-SHA Debian artifact is permitted under the exception above. It is
 temporary incident recovery, not a normal release or cutover path; identity,
 signature, lock, health, lane, rollback, and ledger proofs remain mandatory.
 
+2026-08-30 decision: the active goal and plan use the static generic campaign
+branch `codex/velnor-project-goal` and one pull request. Do not use the former
+plan-named branch or create per-task branches unless the operator explicitly
+changes the delivery topology.
+
 Full history: `git log -p -- AGENTS.md`; entries predating the marked contract that conflict with it are historical and non-executable.

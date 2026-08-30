@@ -1,12 +1,12 @@
 # Session coordination registry
 
-## Current operator directive — single campaign branch and PR
+## Current operator directive — static campaign branch and one PR
 
 All active work from the `plans/` tree is implemented together on exactly one
-branch: `codex/plan-066-operational-history`. It produces exactly one pull
-request. No plan, leaf, task, verifier, or status item may create or switch to
-another branch or open another pull request. Subagents work in the same
-campaign scope and return patches/evidence for primary reconciliation.
+static generic branch: `codex/velnor-project-goal`. It produces exactly one
+pull request. No plan, leaf, task, verifier, or status item may create or
+switch to another branch or open another pull request. Subagents work in the
+same campaign scope and return patches/evidence for primary reconciliation.
 
 The active claims and branch-merge entries below preserve historical audit
 context only. Any per-leaf branch, push, PR, or immediate-commit instruction
@@ -59,9 +59,16 @@ campaign branch directive above. It is non-executable.
 ## Decisions
 
 - **2026-08-29 single campaign branch and pull request**: all active plans and
-  retained command work are implemented together on
-  `codex/plan-066-operational-history` and delivered in one pull request. No
-  per-plan, per-task, or per-item branch or pull request is executable.
+  retained command work are implemented together on the then-current campaign
+  branch and delivered in one pull request. No per-plan, per-task, or per-item
+  branch or pull request is executable.
+
+- **2026-08-30 static campaign branch decision**: the one campaign branch for
+  the whole active goal and plan is the static generic
+  `codex/velnor-project-goal`. Keep one pull request for the campaign; do not
+  use plan/task names for the branch. A separately merged task branch is
+  allowed only when the operator explicitly changes the topology for that
+  task.
 
 - **2026-08-24 branch-merge directive executed; campaign work recovered**
   (ox-alpha session C): operator ordered all branches merged to `main` via
