@@ -1912,9 +1912,18 @@ mod tests {
         ] {
             assert!(guard.contains(required), "deb guard missing: {required}");
         }
-        assert!(!guard.contains("dpkg-deb --extract"), "deb guard must not fully extract the package");
-        assert!(!guard.contains("package_root"), "deb guard must not create a package root");
-        assert!(!guard.contains("trap "), "deb guard must not install an extraction cleanup trap");
+        assert!(
+            !guard.contains("dpkg-deb --extract"),
+            "deb guard must not fully extract the package"
+        );
+        assert!(
+            !guard.contains("package_root"),
+            "deb guard must not create a package root"
+        );
+        assert!(
+            !guard.contains("trap "),
+            "deb guard must not install an extraction cleanup trap"
+        );
 
         let copy = guard.find("cp \"$src\" \"$dst\"").expect("deb copy guard");
         assert!(
