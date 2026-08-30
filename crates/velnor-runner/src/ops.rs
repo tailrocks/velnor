@@ -1668,9 +1668,7 @@ mod tests {
             .map(|_| {
                 let sink = Arc::clone(&sink);
                 std::thread::spawn(move || {
-                    if let Some(admission) = sink.try_admit_prune_at(now) {
-                        sink.run_admitted_prune(admission);
-                    }
+                    sink.prune_if_due_at(now);
                 })
             })
             .collect();
