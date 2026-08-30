@@ -6690,8 +6690,9 @@ mod tests {
 
     #[test]
     fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
-        use std::io::{Read, Write};
+        use std::io::{ErrorKind, Read, Write};
         use std::net::TcpListener;
+        use std::time::{Duration, Instant};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -6747,6 +6748,29 @@ mod tests {
                     body.len()
                 )
                 .unwrap();
+            }
+            // Keep the listener alive briefly after FinalizeArtifact. A
+            // regression that restores the old reconciliation path will make
+            // a fourth ListArtifacts request; record it and fail below rather
+            // than letting the client hide it behind a timeout.
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(100)))
+                            .unwrap();
+                        let mut probe = [0_u8; 1];
+                        let _ = stream.read(&mut probe);
+                        requests.push(Vec::new());
+                        break;
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("artifact test listener failed: {error}"),
+                }
             }
             requests
         });
