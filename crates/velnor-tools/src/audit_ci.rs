@@ -1494,7 +1494,7 @@ const GENERATED_OWNER_LANE_CONTRACTS: [GeneratedOwnerLaneContract; 3] = [
         lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}",
     },
 ];
-const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.repository_owner == 'jackin-project') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
+const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name != 'workflow_dispatch' && github.repository_owner == 'jackin-project')) && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
 
 fn audit_generated_caller(
     file: &str,
@@ -2480,7 +2480,7 @@ jobs:
       lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || github.repository_owner == 'jackin-project' && 'github' || 'velnor' }}
   ci-required:
     timeout-minutes: 10
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.repository_owner == 'jackin-project') && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name != 'workflow_dispatch' && github.repository_owner == 'jackin-project')) && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     steps:
       - run: |
           if [ "${sel_result}" != "success" ]; then
@@ -2586,6 +2586,12 @@ jobs:
             &audit(&github_only_aggregator),
             "generated-caller"
         ));
+
+        let manual_lane_override = GENERATED_CALLER.replace(
+            "(github.event_name != 'workflow_dispatch' && github.repository_owner == 'jackin-project')",
+            "github.repository_owner == 'jackin-project'",
+        );
+        assert!(has_rule(&audit(&manual_lane_override), "generated-caller"));
     }
 
     #[test]

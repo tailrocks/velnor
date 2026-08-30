@@ -165,7 +165,7 @@ jobs:
       - tailrocks
       - ChainArgos
     if: ${{ always() }}
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.repository_owner == 'jackin-project') && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name != 'workflow_dispatch' && github.repository_owner == 'jackin-project')) && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     timeout-minutes: 10
     permissions:
       contents: read
