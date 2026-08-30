@@ -4763,6 +4763,7 @@ fn read_bounded_response_body(
 pub(crate) struct ArtifactUploadOptions {
     pub(crate) store_uncompressed: bool,
     pub(crate) retention_days: Option<u8>,
+    pub(crate) overwrite: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4781,7 +4782,7 @@ struct FinalizeArtifactResponse {
 
 #[derive(Debug, Deserialize)]
 struct DeleteArtifactResponse {
-    ok: bool,
+    ok: Option<bool>,
     #[serde(alias = "artifactId")]
     artifact_id: WireU64,
 }
@@ -5045,6 +5046,16 @@ fn upload_artifact_with_zip_builder(
         .build()
         .context("build Results Service HTTP client")?;
 
+    if options.overwrite {
+        let existing = list_results_artifacts(&client, base, token, plan_id, job_id)?
+            .into_iter()
+            .filter(|artifact| artifact.name == name)
+            .collect::<Vec<_>>();
+        for artifact in existing {
+            delete_artifact_descriptor_blocking(&client, base, token, &artifact)?;
+        }
+    }
+
     // 1. CreateArtifact → signed upload URL.
     let create_url = format!("{base}/{SERVICE}/CreateArtifact");
     let create_request = artifact_create_request(
@@ -5106,27 +5117,80 @@ fn upload_artifact_with_zip_builder(
         "hash": {"value": format!("sha256:{zip_hash}")}
     }))
     .context("serialize FinalizeArtifact")?;
-    let finalize_text = results_service_post(
-        &client,
-        &finalize_url,
-        token,
-        &finalize_body,
-        "FinalizeArtifact",
-    )
-    .context("FinalizeArtifact request")?;
-    let finalize: FinalizeArtifactResponse =
-        serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
-    if !finalize.ok {
-        bail!("FinalizeArtifact: backend returned ok=false or absent");
+    let finalize_outcome = (|| -> Result<u64> {
+        let finalize_text = results_service_post(
+            &client,
+            &finalize_url,
+            token,
+            &finalize_body,
+            "FinalizeArtifact",
+        )
+        .context("FinalizeArtifact request")?;
+        let finalize: FinalizeArtifactResponse =
+            serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
+        if !finalize.ok {
+            bail!("FinalizeArtifact: backend returned ok=false or absent");
+        }
+        let artifact_id = finalize.artifact_id.parse("FinalizeArtifact artifact_id")?;
+        if artifact_id == 0 {
+            bail!("FinalizeArtifact: artifact_id must be non-zero");
+        }
+        Ok(artifact_id)
+    })();
+    match finalize_outcome {
+        Ok(artifact_id) => Ok(FinalizedArtifact {
+            id: artifact_id.to_string(),
+            digest: format!("sha256:{zip_hash}"),
+        }),
+        Err(finalize_error) => match reconcile_finalized_artifact(
+            &ResultsArtifactServiceContext {
+                client: &client,
+                base,
+                token,
+                plan_id,
+                job_id,
+            },
+            name,
+            zip_size,
+            &zip_hash,
+        ) {
+            Ok(Some(reconciled)) => Ok(reconciled),
+            Ok(None) => Err(finalize_error),
+            Err(reconcile_error) => Err(anyhow::anyhow!(
+                "FinalizeArtifact failed: {finalize_error:#}; reconciliation failed: {reconcile_error:#}"
+            )),
+        },
     }
-    let artifact_id = finalize.artifact_id.parse("FinalizeArtifact artifact_id")?;
-    if artifact_id == 0 {
-        bail!("FinalizeArtifact: artifact_id must be non-zero");
+}
+
+fn delete_artifact_descriptor_blocking(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    token: &str,
+    artifact: &ValidatedResultsArtifactDescriptor,
+) -> Result<()> {
+    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+    let body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": artifact.workflow_run_backend_id,
+        "workflow_job_run_backend_id": artifact.workflow_job_run_backend_id,
+        "name": artifact.name,
+    }))
+    .context("serialize DeleteArtifact")?;
+    let url = format!("{base}/{SERVICE}/DeleteArtifact");
+    let text = results_service_post(client, &url, token, &body, "DeleteArtifact")?;
+    let response: DeleteArtifactResponse =
+        serde_json::from_str(&text).context("DeleteArtifact parse")?;
+    if response.ok == Some(false) {
+        bail!("DeleteArtifact: backend returned ok=false");
     }
-    Ok(FinalizedArtifact {
-        id: artifact_id.to_string(),
-        digest: format!("sha256:{zip_hash}"),
-    })
+    let response_id = response.artifact_id.parse("DeleteArtifact artifact_id")?;
+    if response_id != artifact.database_id {
+        bail!(
+            "DeleteArtifact returned artifact_id {response_id}, expected {}",
+            artifact.database_id
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn delete_finalized_artifact_blocking(
@@ -5137,7 +5201,6 @@ pub(crate) fn delete_finalized_artifact_blocking(
     name: &str,
     artifact_id: &str,
 ) -> Result<()> {
-    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let results_service_url = validate_known_service_url(
         results_service_url,
         "ResultsServiceUrl",
@@ -5156,25 +5219,17 @@ pub(crate) fn delete_finalized_artifact_blocking(
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
-    let body = serde_json::to_string(&serde_json::json!({
-        "workflow_run_backend_id": plan_id,
-        "workflow_job_run_backend_id": job_id,
-        "name": name,
-        "database_id": artifact_id.to_string(),
-    }))
-    .context("serialize DeleteArtifact")?;
-    let url = format!("{base}/{SERVICE}/DeleteArtifact");
-    let text = results_service_post(&client, &url, token, &body, "DeleteArtifact")?;
-    let response: DeleteArtifactResponse =
-        serde_json::from_str(&text).context("DeleteArtifact parse")?;
-    if !response.ok {
-        bail!("DeleteArtifact: backend returned ok=false or absent");
+    let matches = list_results_artifacts(&client, base, token, plan_id, job_id)?
+        .into_iter()
+        .filter(|artifact| artifact.name == name && artifact.database_id == artifact_id)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        bail!(
+            "cannot safely delete Results Service artifact '{name}': expected one matching artifact ID, found {}",
+            matches.len()
+        );
     }
-    let response_id = response.artifact_id.parse("DeleteArtifact artifact_id")?;
-    if response_id != artifact_id {
-        bail!("DeleteArtifact returned artifact_id {response_id}, expected {artifact_id}");
-    }
-    Ok(())
+    delete_artifact_descriptor_blocking(&client, base, token, &matches[0])
 }
 
 #[derive(Debug)]
@@ -5884,6 +5939,44 @@ fn list_results_artifacts(
         validated.push(artifact);
     }
     Ok(validated)
+}
+
+struct ResultsArtifactServiceContext<'a> {
+    client: &'a reqwest::blocking::Client,
+    base: &'a str,
+    token: &'a str,
+    plan_id: &'a str,
+    job_id: &'a str,
+}
+
+fn reconcile_finalized_artifact(
+    context: &ResultsArtifactServiceContext<'_>,
+    name: &str,
+    size: u64,
+    digest: &str,
+) -> Result<Option<FinalizedArtifact>> {
+    let matches = list_results_artifacts(
+        context.client,
+        context.base,
+        context.token,
+        context.plan_id,
+        context.job_id,
+    )?
+    .into_iter()
+    .filter(|artifact| {
+        artifact.name == name && artifact.size == size && digest_matches(&artifact.digest, digest)
+    })
+    .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [artifact] => Ok(Some(FinalizedArtifact {
+            id: artifact.database_id.to_string(),
+            digest: artifact.digest.clone(),
+        })),
+        _ => bail!(
+            "FinalizeArtifact reconciliation found multiple matching artifacts named '{name}'"
+        ),
+    }
 }
 
 pub(crate) fn results_artifact_id_by_name_blocking(
