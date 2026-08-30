@@ -437,7 +437,7 @@ impl CommandRunner for ProcessCommandRunner {
         }
         let claimed_args = rm_claim
             .as_ref()
-            .map(|claim| crate::docker_lease::force_remove_container_args(&claim.ids));
+            .map(|claim| crate::docker_lease::container_rm_args_with_claimed_ids(args, &claim.ids));
         let args = claimed_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
         command
@@ -3754,6 +3754,8 @@ where
                 container.temp_host.display()
             )
         })?;
+        // Resolve the same trust-scoped runtime used for mounts and env so
+        // Plan 066's shared cache root is initialized without crossing scopes.
         let cache_runtime = container.compiler_cache_runtime();
         if let Some(cache_host) = cache_runtime.host_path() {
             fs::create_dir_all(cache_host).with_context(|| {
@@ -3929,15 +3931,24 @@ where
         let Ok(_lifecycle) = docker_lifecycle_guard() else {
             return;
         };
-        self.run_docker_remove_container(&container.remove_container_args())
-            .ok();
+        // Drop the lease before stale cleanup so an in-flight Engine request
+        // cannot keep dockerd's container lock held while retry cleanup runs.
+        // Unlike terminal cleanup, startup retry must not broad-reclaim a
+        // container that is still live or whose state is unknown.
         self.abort_docker_lease();
-        self.reclaim_job_owned_docker(&container.name).ok();
-        self.cleanup_job_buildkit_unlocked(container).ok();
         for service in container.services.iter().rev() {
-            self.run_docker_remove_container(&service.remove_args())
-                .ok();
+            self.run_docker_cleanup(&crate::docker_lease::remove_one_container_args(
+                &service.name,
+            ))
+            .ok();
         }
+        self.reclaim_stale_job_owned_docker(&container.name).ok();
+    }
+
+    fn reclaim_stale_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
+        crate::docker_lease::reclaim_stale_job_owned(job_id, |args| {
+            self.run_docker_cleanup(args).map(|result| result.stdout)
+        })
     }
 
     fn abort_docker_lease(&mut self) {
@@ -13563,6 +13574,8 @@ esac
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
+            compiler_cache_trust_class:
+                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         }
     }
 
@@ -17588,6 +17601,82 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .unwrap();
     }
 
+    #[derive(Default)]
+    struct StaleServiceCleanupRunner {
+        calls: Vec<Vec<String>>,
+    }
+
+    impl CommandRunner for StaleServiceCleanupRunner {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            let running_service_refusal =
+                args.len() == 2 && args[0] == "rm" && args[1] == "running-service";
+            Ok(CommandResult {
+                code: i32::from(running_service_refusal),
+                stdout: String::new(),
+                stderr: if running_service_refusal {
+                    "cannot remove a running container".into()
+                } else {
+                    String::new()
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn stale_cleanup_removes_stopped_services_without_force_escalation() {
+        let temp = temp_dir();
+        let mut spec = container(&temp);
+        spec.services.push(ServiceContainerSpec {
+            name: "stopped-service".into(),
+            image: "postgres:16".into(),
+            network_alias: "stopped".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        spec.services.push(ServiceContainerSpec {
+            name: "running-service".into(),
+            image: "redis:7".into(),
+            network_alias: "running".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        let mut executor = DockerJobEngine::new(StaleServiceCleanupRunner::default());
+
+        executor.cleanup_stale(&spec);
+
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[0], vec!["rm", "running-service"]);
+        assert_eq!(calls[1], vec!["rm", "stopped-service"]);
+        assert!(calls[..2]
+            .iter()
+            .all(|args| !args.iter().any(|arg| arg == "--force")));
+        assert_eq!(
+            calls[2],
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[3],
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[4],
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|args| args.first().is_some_and(|arg| arg == "rm"))
+                .count(),
+            2
+        );
+        fs::remove_dir_all(temp).ok();
+    }
+
     #[test]
     fn retries_start_after_removing_stale_job_resources() {
         let temp = temp_dir();
@@ -17617,8 +17706,23 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results.len(), 1);
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
-        assert_eq!(calls[7].1, expected_network_create_args());
+        assert_eq!(
+            calls[1].1,
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[2].1,
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[3].1,
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls[4].1,
+            crate::docker_lease::list_owned_volumes_args("job")
+        );
+        assert_eq!(calls[5].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -17630,7 +17734,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -17640,10 +17744,40 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert!(error.to_string().contains("docker run"));
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
-        assert_eq!(calls[7].1, expected_network_create_args());
-        assert_eq!(calls[8].1[0], "run");
-        assert_cleanup_reclaims_job_docker(calls, 9, &temp);
+        assert_eq!(
+            calls[1].1,
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[2].1,
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[3].1,
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls[4].1,
+            crate::docker_lease::list_owned_volumes_args("job")
+        );
+        assert_eq!(calls[5].1, expected_network_create_args());
+        assert_eq!(calls[6].1[0], "run");
+        assert_eq!(
+            calls[7].1,
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[8].1,
+            crate::docker_lease::list_owned_containers_state_args("job")
+        );
+        assert_eq!(
+            calls[9].1,
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls[10].1,
+            crate::docker_lease::list_owned_volumes_args("job")
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

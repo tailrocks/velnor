@@ -2032,7 +2032,9 @@ async fn retention_lifecycle_with_sink(
         return;
     }
     let Some(sink) = injected_sink.or_else(|| crate::ops::global().cloned()) else {
-        eprintln!("forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness");
+        eprintln!(
+            "forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness"
+        );
         return;
     };
     loop {
@@ -2166,6 +2168,16 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     for root in roots {
         if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
+                let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
+                let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
+                if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
+                    eprintln!(
+                            "disk-pressure cache reclaim freed {} bytes across {} entries ({} failures)",
+                            cache_report.freed_bytes,
+                            cache_report.deleted.len(),
+                            cache_report.failures.len()
+                        );
+                }
                 let backend = crate::execution::load_execution_file(config_base, None)
                     .ok()
                     .map(|file| file.backend())
@@ -2437,7 +2449,9 @@ pub(crate) async fn run_daemon_slot(
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
+                &format!(
+                    "slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"
+                ),
             );
             reconfigure_daemon_slot_forever(
                 &args,
@@ -3462,9 +3476,9 @@ fn maybe_startup_host_docker_reclaim_with(
 /// job network + container leak; enough leaked `velnor-net-*` networks exhaust
 /// Docker's address pool and then EVERY new job fails to create its network
 /// ("all predefined address pools have been fully subnetted"). Pruning on
-/// startup makes a crash self-healing. Best-effort — never fails startup. Safe
-/// because a daemon restart already orphans any in-flight job (JIT runners are
-/// per-job), so anything matching here is dead.
+/// startup makes a crash self-healing. Best-effort — never fails startup. Use
+/// non-force removal so Docker refuses a container that is still live while
+/// stopped stale containers can be cleaned.
 fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     let docker = |args: &[&str]| {
         std::process::Command::new("docker")
@@ -3505,7 +3519,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         })
         .collect::<Vec<_>>();
     if !containers.is_empty() {
-        let mut args = vec!["rm".to_string(), "-f".to_string()];
+        let mut args = vec!["rm".to_string()];
         args.extend(containers.iter().cloned());
         let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
         eprintln!(
@@ -3521,12 +3535,20 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}",
+                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
                 id,
             ])
             .filter(|output| output.status.success())
             .is_some_and(|output| {
-                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut parts = text.trim().split('\t');
+                let owner = parts.next().unwrap_or("");
+                // Unknown endpoint count stays conservative: never removed.
+                let endpoints = parts
+                    .next()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(1);
+                stale_network_prunable(owner, endpoints, daemon_id)
             })
         })
         .collect::<Vec<_>>();
@@ -3543,6 +3565,19 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
     crate::docker_lease::daemon_owns_label(owner, daemon_id)
+}
+
+/// True when a `velnor-net-*` network is safe to remove at startup. Networks
+/// carrying THIS daemon's ownership label are stale by definition (a daemon
+/// restart orphans any in-flight job). Networks with no ownership label at
+/// all predate the guest-plan ownership labels; the `velnor-net-` prefix is
+/// Velnor-owned, so an endpoint-less one is dead weight and is reclaimed as a
+/// backstop. A foreign daemon's labeled network is never touched.
+fn stale_network_prunable(owner: &str, connected_endpoints: usize, daemon_id: &str) -> bool {
+    if daemon_owns_resource(owner, daemon_id) {
+        return true;
+    }
+    owner.is_empty() && connected_endpoints == 0
 }
 
 fn daemon_slot_configure_args(
@@ -5938,8 +5973,8 @@ fn start_broker_cancellation_poll(
                                     Ok(refreshed) => {
                                         broker = refreshed;
                                         println!(
-                                        "Cancellation poller refreshed broker credentials mid-job."
-                                    );
+                                            "Cancellation poller refreshed broker credentials mid-job."
+                                        );
                                     }
                                     Err(error) => eprintln!(
                                         "Cancellation poller failed to rebuild broker client: {}",
@@ -10819,7 +10854,10 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
 
     println!(
         "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy, {stale_busy} offline+busy) for prefix '{}'",
-        args.url, args.slots, mine.len(), args.name
+        args.url,
+        args.slots,
+        mine.len(),
+        args.name
     );
     println!(
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
@@ -12343,6 +12381,28 @@ jobs:
         );
         assert_eq!(pruned.as_deref(), Some("daemon-x"));
         assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn stale_network_prunable_removes_owned_and_unlabeled_endpointless() {
+        // This daemon's own label (or a direct slot child) is stale at startup.
+        assert!(stale_network_prunable("/daemon/work", 3, "/daemon/work"));
+        assert!(stale_network_prunable(
+            "/daemon/work/slot-2",
+            1,
+            "/daemon/work"
+        ));
+        // Unlabeled guest-plan leak with no endpoints is reclaimed as a backstop.
+        assert!(stale_network_prunable("", 0, "/daemon/work"));
+        // Unlabeled but still connected: left alone.
+        assert!(!stale_network_prunable("", 2, "/daemon/work"));
+        // A foreign daemon's labeled network is never touched, even endpoint-less.
+        assert!(!stale_network_prunable("/other/work", 0, "/daemon/work"));
+        assert!(!stale_network_prunable(
+            "/other/work/slot-1",
+            0,
+            "/daemon/work"
+        ));
     }
 
     #[test]
@@ -16651,6 +16711,8 @@ runs:
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
+            compiler_cache_trust_class:
+                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         }
     }
 
