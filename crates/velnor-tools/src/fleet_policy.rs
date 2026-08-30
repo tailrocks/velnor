@@ -16,15 +16,15 @@ use sha2::{Digest as ShaDigest, Sha256};
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     fmt, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 #[cfg(unix)]
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString, OsString},
     fs::File,
     io::{self, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd},
+        fd::{AsRawFd, FromRawFd, RawFd},
         unix::ffi::OsStrExt,
     },
 };
@@ -1053,19 +1053,8 @@ struct PolicyDirectory {
 
 #[cfg(unix)]
 impl PolicyDirectory {
-    fn open(path: &Path) -> Result<Self> {
-        let path_c = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| anyhow::anyhow!("fleet policy output directory contains NUL"))?;
-        let directory_fd = unsafe {
-            libc::open(
-                path_c.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
-        };
-        if directory_fd < 0 {
-            return Err(io::Error::last_os_error())
-                .with_context(|| format!("opening fleet policy directory {}", path.display()));
-        }
+    fn open_or_create(path: &Path) -> Result<Self> {
+        let directory_fd = open_policy_directory_fd(path, true)?;
         Ok(Self {
             path: path.to_owned(),
             file: unsafe { File::from_raw_fd(directory_fd) },
@@ -1073,9 +1062,157 @@ impl PolicyDirectory {
     }
 }
 
+#[cfg(unix)]
+fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!(
+            "refusing parent component in fleet policy directory {}",
+            path.display()
+        );
+    }
+
+    // Resolve only the existing parent prefix. This accommodates platform
+    // aliases such as macOS /var -> /private/var without following the final
+    // directory member, which remains protected by O_NOFOLLOW below. Any
+    // missing suffix is then created and opened through the resolved parent
+    // descriptor, so replacement races cannot redirect later operations.
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut missing = Vec::<OsString>::new();
+    let mut existing_prefix = parent.to_owned();
+    loop {
+        match fs::symlink_metadata(&existing_prefix) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let component = existing_prefix
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("invalid fleet policy directory path"))?;
+                missing.push(component.to_os_string());
+                existing_prefix = existing_prefix
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_owned();
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspecting fleet policy directory {}", path.display())
+                });
+            }
+        }
+    }
+    let mut resolved_path = fs::canonicalize(&existing_prefix).with_context(|| {
+        format!(
+            "resolving existing fleet policy directory prefix {}",
+            existing_prefix.display()
+        )
+    })?;
+    for component in missing.into_iter().rev() {
+        resolved_path.push(component);
+    }
+    if let Some(file_name) = path.file_name() {
+        resolved_path.push(file_name);
+    }
+
+    let start_c = CString::new("/").expect("static path has no NUL");
+    let mut current = unsafe {
+        libc::open(
+            start_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if current < 0 {
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!("opening root for fleet policy directory {}", path.display())
+        });
+    }
+
+    for component in resolved_path.components() {
+        let component = match component {
+            Component::Normal(component) => component,
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => {
+                unsafe { libc::close(current) };
+                bail!(
+                    "refusing parent component in fleet policy directory {}",
+                    path.display()
+                );
+            }
+            Component::Prefix(_) => {
+                unsafe { libc::close(current) };
+                bail!(
+                    "unsupported path prefix in fleet policy directory {}",
+                    path.display()
+                );
+            }
+        };
+        let component_c = CString::new(component.as_bytes())
+            .map_err(|_| anyhow::anyhow!("fleet policy output directory contains NUL"))?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        let mut next = unsafe { libc::openat(current, component_c.as_ptr(), flags) };
+        if next < 0 && create && io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            let mkdir_result =
+                unsafe { libc::mkdirat(current, component_c.as_ptr(), 0o755 as libc::mode_t) };
+            if mkdir_result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+                let error = io::Error::last_os_error();
+                unsafe { libc::close(current) };
+                return Err(error).with_context(|| {
+                    format!(
+                        "creating fleet policy directory component {}",
+                        component.display()
+                    )
+                });
+            }
+            next = unsafe { libc::openat(current, component_c.as_ptr(), flags) };
+        }
+        if next < 0 {
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(current) };
+            return Err(error)
+                .with_context(|| format!("opening fleet policy directory {}", path.display()));
+        }
+        unsafe { libc::close(current) };
+        current = next;
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+unsafe fn clear_errno() {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    {
+        *libc::__error() = 0;
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )))]
+    {
+        *libc::__errno_location() = 0;
+    }
+}
+
 #[cfg(all(unix, test))]
 fn write_policy_file(directory: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
-    let directory = PolicyDirectory::open(directory)?;
+    let directory = PolicyDirectory::open_or_create(directory)?;
     write_policy_file_at(&directory, file_name, bytes)
 }
 
@@ -1223,16 +1360,43 @@ fn remove_policy_file_at(directory: &PolicyDirectory, file_name: &str) -> Result
 #[cfg(unix)]
 fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut existing = BTreeMap::new();
-    for entry in fs::read_dir(&directory.path)
-        .with_context(|| format!("reading {}", directory.path.display()))?
-    {
-        let path = entry
-            .with_context(|| format!("reading entry under {}", directory.path.display()))?
-            .path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
+    let scan_fd = unsafe { libc::dup(directory.file.as_raw_fd()) };
+    if scan_fd < 0 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("duplicating {} for policy scan", directory.path.display()));
+    }
+    let directory_stream = unsafe { libc::fdopendir(scan_fd) };
+    if directory_stream.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(scan_fd) };
+        return Err(error)
+            .with_context(|| format!("opening {} for policy scan", directory.path.display()));
+    }
+    let mut names = Vec::new();
+    loop {
+        unsafe { clear_errno() };
+        let entry = unsafe { libc::readdir(directory_stream) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            let close_result = unsafe { libc::closedir(directory_stream) };
+            if error.raw_os_error().is_some_and(|code| code != 0) {
+                return Err(error).with_context(|| format!("reading {}", directory.path.display()));
+            }
+            if close_result != 0 {
+                return Err(io::Error::last_os_error()).with_context(|| {
+                    format!("closing {} after policy scan", directory.path.display())
+                });
+            }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
+            .to_bytes()
+            .to_vec();
+        names.push(name);
+    }
+
+    for name_bytes in names {
+        let name = std::str::from_utf8(&name_bytes).unwrap_or_default();
         let Some(stem) = name.strip_suffix("-desired-policy.json") else {
             continue;
         };
@@ -1240,13 +1404,47 @@ fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<St
             continue;
         }
 
-        let name_c = CString::new(name)
+        let name_c = CString::new(name_bytes.clone())
             .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let stat_result = unsafe {
+            libc::fstatat(
+                directory.file.as_raw_fd(),
+                name_c.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if stat_result < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                continue;
+            }
+            return Err(error)
+                .with_context(|| format!("inspecting {}/{}", directory.path.display(), name));
+        }
+        let stat = unsafe { stat.assume_init() };
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFLNK => bail!(
+                "refusing symlinked fleet policy entry {}/{}; expected a regular file inside {}",
+                directory.path.display(),
+                name,
+                directory.path.display()
+            ),
+            libc::S_IFDIR => continue,
+            libc::S_IFREG => {}
+            _ => bail!(
+                "refusing non-regular fleet policy entry {}/{}; expected a regular file inside {}",
+                directory.path.display(),
+                name,
+                directory.path.display()
+            ),
+        }
         let fd = unsafe {
             libc::openat(
                 directory.file.as_raw_fd(),
                 name_c.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
         if fd < 0 {
@@ -1275,7 +1473,12 @@ fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<St
             .metadata()
             .with_context(|| format!("inspecting {}/{}", directory.path.display(), name))?;
         if !metadata.is_file() {
-            continue;
+            bail!(
+                "refusing non-regular fleet policy entry {}/{}; expected a regular file inside {}",
+                directory.path.display(),
+                name,
+                directory.path.display()
+            );
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
@@ -1296,12 +1499,13 @@ fn write_policy_file(directory: &Path, file_name: &str, _bytes: &[u8]) -> Result
 fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
     let ledger = ReleaseRefLedger::load(&args.ledger)?;
     let policies = generate_policies_from_ledger(&ledger)?;
-    fs::create_dir_all(&args.out_dir)
-        .with_context(|| format!("creating {}", args.out_dir.display()))?;
     #[cfg(unix)]
-    let policy_directory = PolicyDirectory::open(&args.out_dir)?;
+    let policy_directory = PolicyDirectory::open_or_create(&args.out_dir)?;
     #[cfg(unix)]
     let existing = read_existing_policy_files(&policy_directory)?;
+    #[cfg(not(unix))]
+    fs::create_dir_all(&args.out_dir)
+        .with_context(|| format!("creating {}", args.out_dir.display()))?;
     #[cfg(not(unix))]
     let existing = read_existing_policy_files(&args.out_dir)?;
     let plan = plan_policy_actions(&policies, &existing)?;
@@ -2464,6 +2668,24 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn generate_fails_closed_on_fifo_policy_names_without_blocking() {
+        let dir = PolicyDir::new("fifo");
+        let fifo = dir.path.join("ghost-desired-policy.json");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        let args = FleetGenerateArgs {
+            ledger: repo_root().join("fleet/release-refs.toml"),
+            out_dir: dir.path.clone(),
+        };
+        let err = fleet_generate(args)
+            .expect_err("FIFO policy-named entries must abort generation")
+            .to_string();
+        assert!(err.contains("non-regular"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn policy_write_rejects_final_symlink_and_preserves_regular_file_mode() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2541,6 +2763,25 @@ mod tests {
                 .file_type()
                 .is_symlink(),
             "failed open must not replace the symlink"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn policy_write_anchors_existing_symlinked_ancestor_directory() {
+        let root = PolicyDir::new("nofollow-ancestor");
+        let real = root.path.join("real");
+        fs::create_dir(&real).expect("real directory");
+        let child = real.join("child");
+        fs::create_dir(&child).expect("real child directory");
+        let alias = root.path.join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("ancestor symlink");
+
+        write_policy_file(&alias.join("child"), "policy.json", b"anchored")
+            .expect("stable ancestor alias resolves before descriptor walk");
+        assert_eq!(
+            fs::read(child.join("policy.json")).expect("anchored file"),
+            b"anchored"
         );
     }
 
