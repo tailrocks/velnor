@@ -10767,7 +10767,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let cache_root = layout
         .as_ref()
         .map(|layout| layout.cache_root.clone())
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| run_root.join("cache"));
     let free = free_space_bytes(&cache_root).unwrap_or(0);
     let (reservation_count, reserved_bytes) =
         crate::capacity::reservation_summary(&run_root).unwrap_or((0, 0));
@@ -10776,6 +10776,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .unwrap_or(0);
     let (cache_logical, cache_physical) =
         crate::cache::accounting_summary(&cache_root).unwrap_or((0, 0));
+    probe_compiler_cache(&cache_root, &args.name)?;
     let client = RegistrationClient::new()?;
     let runners = client
         .list_runners(&scope, pat)
@@ -10931,6 +10932,51 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn probe_compiler_cache(cache_root: &Path, owner: &str) -> Result<()> {
+    use velnor_action_model::TrustClass;
+    use velnor_cache_service::{
+        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
+        KACHE_VERSION, SCCACHE_VERSION,
+    };
+
+    println!(
+        "compiler-cache: policy=auto backend=kache version={KACHE_VERSION}; rollback=sccache version={SCCACHE_VERSION}"
+    );
+    let mut failures = Vec::new();
+    for trust_class in [
+        TrustClass::Untrusted,
+        TrustClass::Trusted,
+        TrustClass::Release,
+    ] {
+        let mut config = CompilerCacheConfig::new(cache_root, owner);
+        config.trust_class = trust_class;
+        config.policy = CompilerCachePolicy::Auto;
+        match CompilerCacheService::open_production(config, WrapperDeclaration::default())
+            .and_then(|service| service.probe_restore_path())
+        {
+            Ok(probe) if probe.writable && probe.regular_round_trip => println!(
+                "compiler-cache: trust={trust_class:?} path={} writable=true round_trip=true",
+                probe.path.display()
+            ),
+            Ok(probe) => failures.push(format!(
+                "{trust_class:?}: path={} writable={} round_trip={}",
+                probe.path.display(),
+                probe.writable,
+                probe.regular_round_trip
+            )),
+            Err(error) => failures.push(format!("{trust_class:?}: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "compiler-cache restore probe failed: {}; refusing degraded cache startup",
+            failures.join("; ")
+        )
+    }
 }
 
 pub async fn status(args: StatusArgs) -> Result<()> {

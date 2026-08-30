@@ -3728,6 +3728,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "velnor-action-model",
  "velnor-cache-service",
  "velnor-control",
  "velnor-model",

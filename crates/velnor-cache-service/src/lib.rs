@@ -26,6 +26,8 @@ use velnor_cas::{CasError, CasStore};
 
 /// Compiler-cache metadata schema written beside each backend namespace.
 pub const COMPILER_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const KACHE_VERSION: &str = "0.14.2";
+pub const SCCACHE_VERSION: &str = "0.16.0";
 const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
 
@@ -378,6 +380,20 @@ impl<C: Clock> CompilerCacheService<C> {
             writable,
             regular_round_trip,
         })
+    }
+}
+
+impl CompilerCacheService<velnor_action_journal::TokioClock> {
+    /// Open a production service with the journal's wall-clock lease source.
+    pub fn open_production(
+        config: CompilerCacheConfig,
+        declaration: WrapperDeclaration,
+    ) -> Result<Self, CacheError> {
+        Self::open(
+            config,
+            declaration,
+            velnor_action_journal::TokioClock::default(),
+        )
     }
 }
 
