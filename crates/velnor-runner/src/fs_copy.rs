@@ -602,11 +602,11 @@ impl NoFollowDestinationDir {
                 .flush()
                 .context("flush artifact destination")?;
             rustix::fs::fchmod(
-                    &destination_file,
-                    rustix::fs::Mode::from_raw_mode(rustix::fs::RawMode::from(mode)),
-                )
-                .map_err(std::io::Error::from)
-                .context("set artifact destination mode")?;
+                &destination_file,
+                rustix::fs::Mode::from_raw_mode(rustix::fs::RawMode::from(mode)),
+            )
+            .map_err(std::io::Error::from)
+            .context("set artifact destination mode")?;
             drop(destination_file);
             if let Err(error) =
                 rustix::fs::renameat(&parent.file, &temporary_name, &parent.file, &file_name)
