@@ -9,12 +9,12 @@
 //! state through [`crate::fleet_policy_client::FleetGateway`]
 //! (`ReqwestFleetHttp`); apply stays manual and digest-gated.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
     fmt, fs,
     path::{Path, PathBuf},
 };
@@ -31,7 +31,7 @@ use std::{
 use time::{Date, Month, OffsetDateTime};
 
 use crate::fleet_policy_client::{
-    DEFAULT_GITHUB_API_URL, FleetGateway, ReqwestFleetHttp, RetryPolicy,
+    FleetGateway, ReqwestFleetHttp, RetryPolicy, DEFAULT_GITHUB_API_URL,
 };
 
 /// Version of the fleet-policy contract this module implements.
@@ -1715,12 +1715,10 @@ mod tests {
         let ledger = ReleaseRefLedger::load(&path).expect("production ledger parses");
         assert_eq!(ledger.schema_version, 1);
         assert_eq!(ledger.entries.len(), 157);
-        assert!(
-            ledger
-                .entries
-                .iter()
-                .all(|entry| matches!(entry.review_state, ReviewState::Approved))
-        );
+        assert!(ledger
+            .entries
+            .iter()
+            .all(|entry| matches!(entry.review_state, ReviewState::Approved)));
         assert_eq!(
             ledger
                 .approved_workflow_identities()
@@ -1881,11 +1879,9 @@ mod tests {
                 "tailrocks/schemalane/.github/workflows/ci.yml@refs/heads/trunk".to_owned(),
             ]),
         };
-        assert!(
-            semantic_diff(&desired, "tailrocks", &exact)
-                .expect("diff")
-                .is_empty()
-        );
+        assert!(semantic_diff(&desired, "tailrocks", &exact)
+            .expect("diff")
+            .is_empty());
         // Wrong organization short-circuits deterministically.
         let errs = semantic_diff(&desired, "ChainArgos", &exact).expect("diff");
         assert_eq!(errs.len(), 1);
@@ -1945,11 +1941,9 @@ mod tests {
             removals,
             "reason must appear exactly once per removal and nowhere else: {diffs:?}"
         );
-        assert!(
-            diffs
-                .iter()
-                .all(|line| !line.contains("missing '") || !line.contains("reason="))
-        );
+        assert!(diffs
+            .iter()
+            .all(|line| !line.contains("missing '") || !line.contains("reason=")));
     }
 
     #[test]
@@ -1976,11 +1970,9 @@ mod tests {
             .observed_group("tailrocks")
             .expect("fake fetch")
             .expect("present");
-        assert!(
-            semantic_diff(&desired, "tailrocks", &observed)
-                .expect("diff")
-                .is_empty()
-        );
+        assert!(semantic_diff(&desired, "tailrocks", &observed)
+            .expect("diff")
+            .is_empty());
     }
 
     fn repo_root() -> PathBuf {
