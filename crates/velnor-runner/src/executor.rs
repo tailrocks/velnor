@@ -3754,6 +3754,8 @@ where
                 container.temp_host.display()
             )
         })?;
+        // Resolve the same trust-scoped runtime used for mounts and env so
+        // Plan 066's shared cache root is initialized without crossing scopes.
         let cache_runtime = container.compiler_cache_runtime();
         if let Some(cache_host) = cache_runtime.host_path() {
             fs::create_dir_all(cache_host).with_context(|| {
