@@ -1888,57 +1888,97 @@ mod tests {
         let steps = workflow["jobs"]["build"]["steps"]
             .as_sequence()
             .expect("build job steps");
-        let guard = steps
+        let matching_steps: Vec<_> = steps
             .iter()
-            .find(|step| {
+            .filter(|step| {
                 step.get("name")
                     .and_then(serde_yaml::Value::as_str)
                     .is_some_and(|name| name == "Stage .deb with the empty-deb-incident guards")
             })
-            .and_then(|step| step.get("run"))
+            .collect();
+        assert_eq!(
+            matching_steps.len(),
+            1,
+            "build job must contain exactly one deb staging guard step"
+        );
+        let guard = matching_steps[0]
+            .get("run")
             .and_then(serde_yaml::Value::as_str)
             .expect("build job must stage the deb with its guards");
 
-        for required in [
-            "dpkg-deb -c \"$src\" > \"$manifest\"",
-            "awk '$NF == \"./usr/bin/velnor-runner\"",
-            "substr($1, 1, 1) != \"-\"",
-            "build_binary=\"target/${{ matrix.target }}/release/velnor-runner\"",
-            "velnor-runner-${{ matrix.arch }}.bin.sha256",
-            "sha256sum \"$build_binary\"",
-            "dpkg-deb --fsys-tarfile \"$src\" | tar -xOf - ./usr/bin/velnor-runner | sha256sum",
-            "[ \"$packaged_binary_sha\" = \"$build_binary_sha\" ]",
-            "[ \"$packaged_binary_sha\" = \"$recorded_binary_sha\" ]",
-        ] {
-            assert!(guard.contains(required), "deb guard missing: {required}");
-        }
+        let shell_lines: Vec<_> = guard
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.strip_suffix('\\').map(str::trim_end).unwrap_or(line))
+            .collect();
+        let unique_position = |expected: &str| {
+            let mut matches = shell_lines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, line)| (*line == expected).then_some(index));
+            let position = matches
+                .next()
+                .unwrap_or_else(|| panic!("deb guard missing exact shell line: {expected}"));
+            assert!(
+                matches.next().is_none(),
+                "deb guard must contain one exact shell line: {expected}"
+            );
+            position
+        };
+
+        unique_position("set -euo pipefail");
+        let manifest = unique_position(r#"dpkg-deb -c "$src" > "$manifest""#);
+        let runner_entry_check = unique_position(
+            r#"awk '$NF == "./usr/bin/velnor-runner" { count++; if (substr($1, 1, 1) != "-") type_ok=0; else if (count == 1) type_ok=1 } END { exit !(count == 1 && type_ok == 1) }' "$manifest""#,
+        );
+        let build_binary =
+            unique_position(r#"build_binary="target/${{ matrix.target }}/release/velnor-runner""#);
+        let recorded_binary_sha = unique_position(
+            r#"recorded_binary_sha="$(tr -d '\n' < "velnor-runner-${{ matrix.arch }}.bin.sha256")""#,
+        );
+        let build_binary_sha = unique_position(
+            r#"build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')""#,
+        );
+        let streaming_verification = unique_position(
+            r#"packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')""#,
+        );
+        let sidecar_check = unique_position(
+            r#"[ "$build_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::runner binary sidecar does not match target build" >&2; exit 1; }"#,
+        );
+        let package_build_check = unique_position(
+            r#"[ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }"#,
+        );
+        let package_sidecar_check = unique_position(
+            r#"[ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }"#,
+        );
         assert!(
-            !guard.contains("dpkg-deb --extract"),
+            !shell_lines
+                .iter()
+                .any(|line| line.contains("dpkg-deb --extract")),
             "deb guard must not fully extract the package"
         );
         assert!(
-            !guard.contains("package_root"),
+            !shell_lines.iter().any(|line| line.contains("package_root")),
             "deb guard must not create a package root"
         );
         assert!(
-            !guard.contains("trap "),
+            !shell_lines.iter().any(|line| line.contains("trap ")),
             "deb guard must not install an extraction cleanup trap"
         );
 
-        let copy = guard.find("cp \"$src\" \"$dst\"").expect("deb copy guard");
+        let copy = unique_position(r#"cp "$src" "$dst""#);
         assert!(
-            guard
-                .find("dpkg-deb --fsys-tarfile \"$src\" | tar -xOf - ./usr/bin/velnor-runner | sha256sum")
-                .expect("deb streaming verification")
-                < copy,
-            "deb provenance must be checked before copying the package"
-        );
-        assert!(
-            guard
-                .find("$build_binary_sha\" = \"$recorded_binary_sha")
-                .expect("build binary must bind to its sidecar")
-                < copy,
-            "binary sidecar must be checked before copying the package"
+            manifest < runner_entry_check
+                && build_binary < recorded_binary_sha
+                && recorded_binary_sha < build_binary_sha
+                && build_binary_sha < sidecar_check
+                && sidecar_check < streaming_verification
+                && runner_entry_check < streaming_verification
+                && streaming_verification < package_build_check
+                && package_build_check < package_sidecar_check
+                && package_sidecar_check < copy,
+            "all package provenance checks must precede copying the package"
         );
     }
 
