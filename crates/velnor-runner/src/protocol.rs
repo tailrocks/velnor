@@ -5638,7 +5638,7 @@ fn download_artifacts_blocking_in_temp_dir(
         .get("artifacts")
         .and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
-        .unwrap_or(&[]);
+        .context("Results Service ListArtifacts response is missing an artifacts array")?;
     if artifacts.len() > RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS {
         bail!(
             "Results Service listed {} artifacts, exceeding the {}-artifact limit; narrow the workflow scope",
