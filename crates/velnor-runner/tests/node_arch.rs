@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use velnor_control::journal::{Event, Journal};
 use velnor_model::{FleetHealthState, Generation, HealthDocument, SlotId};
 
-use velnor_runner::node::slot::heartbeat_path;
+use velnor_runner::node::slot::{heartbeat_path, SlotHeartbeat};
 
 fn scratch(label: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -492,6 +492,34 @@ fn assert_no_owned_slot_processes(dir: &Path, scope: &str) {
         owned.is_empty(),
         "unexpected owned slot processes: {owned:?}"
     );
+}
+
+struct TestChild(Option<std::process::Child>);
+
+impl TestChild {
+    fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn as_mut(&mut self) -> &mut std::process::Child {
+        self.0.as_mut().expect("test child still owned")
+    }
+
+    fn id(&self) -> u32 {
+        self.0.as_ref().expect("test child still owned").id()
+    }
+}
+
+impl Drop for TestChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
 }
 
 fn process_snapshot(pid: u32) -> String {
@@ -1074,6 +1102,123 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
     );
     slot.kill().ok();
     let _ = slot.wait();
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn observe_slot_session_requires_fresh_generation_bound_heartbeat() {
+    let dir = scratch("session-proof");
+    let mut slot = TestChild::new(
+        Command::new(runner())
+            .args([
+                "slot",
+                "--state-dir",
+                dir.to_str().unwrap(),
+                "--scope",
+                "session-proof",
+                "--slot-index",
+                "1",
+                "--generation",
+                "1",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn slot"),
+    );
+    let slot_id = SlotId("session-proof-1".to_owned());
+    for _ in 0..250 {
+        if heartbeat_path(&dir, 1).is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        heartbeat_path(&dir, 1).is_file(),
+        "slot heartbeat never landed"
+    );
+
+    let pid = slot.id();
+    assert!(velnor_runner::node::prove::observe_slot_session(
+        Some(slot.as_mut()),
+        Some(pid),
+        &dir,
+        &slot_id,
+        Generation(1),
+    ));
+    assert!(!velnor_runner::node::prove::slot_heartbeat_is_fresh(
+        &dir,
+        &slot_id,
+        Generation(1),
+        Duration::ZERO,
+    ));
+
+    std::fs::write(heartbeat_path(&dir, 1), b"not-json").unwrap();
+    assert!(!velnor_runner::node::prove::observe_slot_session(
+        Some(slot.as_mut()),
+        Some(pid),
+        &dir,
+        &slot_id,
+        Generation(1),
+    ));
+
+    let mismatched = SlotHeartbeat {
+        generation: 2,
+        pid,
+        sequence: 1,
+    };
+    std::fs::write(
+        heartbeat_path(&dir, 1),
+        serde_json::to_vec(&mismatched).unwrap(),
+    )
+    .unwrap();
+    assert!(!velnor_runner::node::prove::observe_slot_session(
+        Some(slot.as_mut()),
+        Some(pid),
+        &dir,
+        &slot_id,
+        Generation(1),
+    ));
+
+    drop(slot);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn observe_slot_session_rejects_inert_live_pid() {
+    let dir = scratch("inert-session-proof");
+    let mut inert = TestChild::new(
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn inert child"),
+    );
+    let pid = inert.id();
+    let slot_id = SlotId("inert-session-proof-1".to_owned());
+    let heartbeat = SlotHeartbeat {
+        generation: 1,
+        pid,
+        sequence: 1,
+    };
+    std::fs::write(
+        heartbeat_path(&dir, 1),
+        serde_json::to_vec(&heartbeat).unwrap(),
+    )
+    .unwrap();
+
+    let observed = velnor_runner::node::prove::observe_slot_session(
+        Some(inert.as_mut()),
+        Some(pid),
+        &dir,
+        &slot_id,
+        Generation(1),
+    );
+    drop(inert);
+    assert!(!observed, "a live inert child is not a proven slot session");
     std::fs::remove_dir_all(dir).ok();
 }
 

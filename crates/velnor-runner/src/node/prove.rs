@@ -97,7 +97,8 @@ pub fn observe_executor(state_dir: &Path, backend: ExecutionBackendKind) -> bool
     crate::execution::executor_is_proven(state_dir, backend, Path::new(HOST_DOCKER_SOCKET))
 }
 
-/// Session is live when the slot child is running or its journal pid still exists.
+/// Legacy process-liveness helper. Slot proofs must use
+/// [`observe_slot_session`], which requires fresh generation-bound evidence.
 #[must_use]
 pub fn observe_session(child: Option<&mut Child>, pid: Option<u32>) -> bool {
     if let Some(child) = child {
@@ -108,8 +109,11 @@ pub fn observe_session(child: Option<&mut Child>, pid: Option<u32>) -> bool {
     pid.is_some_and(pid_is_alive)
 }
 
-/// Session proof for a controller-recovered slot. A persisted PID is accepted
-/// only when its procfs command line still identifies the same slot actor.
+/// Session proof for a controller-recovered slot.
+///
+/// `child` and `pid` remain in the public signature for compatibility, but
+/// process liveness alone is not evidence: only a fresh heartbeat with the
+/// expected generation and command-line identity can prove the slot session.
 #[must_use]
 pub fn observe_slot_session(
     child: Option<&mut Child>,
@@ -118,12 +122,8 @@ pub fn observe_slot_session(
     slot_id: &SlotId,
     generation: Generation,
 ) -> bool {
-    if let Some(child) = child {
-        if child.try_wait().ok().flatten().is_none() {
-            return true;
-        }
-    }
-    pid.is_some_and(|pid| slot_process_is_alive(pid, state_dir, slot_id, generation))
+    let _ = (child, pid);
+    slot_heartbeat_is_fresh(state_dir, slot_id, generation, Duration::from_secs(10))
 }
 
 /// SIGNAL 0 existence check. Does not deliver a signal.
@@ -136,9 +136,9 @@ pub fn pid_is_alive(pid: u32) -> bool {
 
 /// Verify that a persisted PID is the slot actor Velnor launched, not merely
 /// an unrelated process that reused the number after a controller restart.
-/// Linux exposes the child argv through procfs; other targets retain the old
-/// existence-only behavior because they do not provide an equivalent stable
-/// argv interface here.
+/// Linux exposes the child argv through procfs. Other Unix targets use the
+/// standard `ps` command and reject any missing, malformed, or mismatched
+/// command-line evidence.
 #[must_use]
 pub fn slot_process_is_alive(
     pid: u32,
@@ -163,6 +163,15 @@ pub fn slot_process_is_alive(
             .split(|byte| *byte == 0)
             .filter(|arg| !arg.is_empty())
             .collect();
+        let Some(executable) = args
+            .first()
+            .and_then(|arg| arg.rsplit(|byte| *byte == b'/').next())
+        else {
+            return false;
+        };
+        if executable != b"velnor-runner" {
+            return false;
+        }
         let state_dir = state_dir.to_string_lossy();
         let generation = generation.0.to_string();
         let expected = [
@@ -176,13 +185,59 @@ pub fn slot_process_is_alive(
             b"--generation".as_slice(),
             generation.as_bytes(),
         ];
-        args.get(1..).is_some_and(|args| {
-            args.windows(expected.len())
-                .any(|window| window == expected)
-        })
+        args.get(1..)
+            .is_some_and(|args| args == expected.as_slice())
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
+            return false;
+        };
+        let Some(state_dir) = state_dir.to_str() else {
+            return false;
+        };
+        let generation = generation.0.to_string();
+        let pid = pid.to_string();
+        let Ok(output) = std::process::Command::new("ps")
+            .args(["-ww", "-p", &pid, "-o", "command="])
+            .output()
+        else {
+            return false;
+        };
+        if !output.status.success() {
+            return false;
+        }
+        let Ok(command_line) = std::str::from_utf8(&output.stdout) else {
+            return false;
+        };
+        let mut args = command_line.split_ascii_whitespace();
+        let Some(executable) = args.next() else {
+            return false;
+        };
+        if std::path::Path::new(executable)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            != Some("velnor-runner")
+        {
+            return false;
+        }
+        let expected = [
+            "slot",
+            "--state-dir",
+            state_dir,
+            "--scope",
+            scope,
+            "--slot-index",
+            index,
+            "--generation",
+            generation.as_str(),
+        ];
+        let args: Vec<&str> = args.collect();
+        args.as_slice() == expected.as_slice()
+    }
+
+    #[cfg(not(unix))]
     {
         let _ = (state_dir, slot_id, generation);
         pid_is_alive(pid)
@@ -217,7 +272,7 @@ pub fn slot_heartbeat_is_fresh(
     else {
         return false;
     };
-    if age > max_age {
+    if max_age.is_zero() || age > max_age {
         return false;
     }
     let Ok(bytes) = std::fs::read(path) else {
