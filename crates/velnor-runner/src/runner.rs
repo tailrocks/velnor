@@ -3267,8 +3267,31 @@ async fn delete_runner_keeping_busy_identity(
     {
         Ok(()) => {
             if let Some(dir) = slot_dir {
-                clear_in_flight_job(dir)
-                    .context("clear in-flight job after remote runner deletion")?;
+                let has_in_flight_job = load_in_flight_job(dir)
+                    .map_err(local_failure)
+                    .with_context(|| {
+                        format!(
+                            "inspect in-flight job after remote runner deletion of runner id {agent_id}; local identity preserved"
+                        )
+                    })?
+                    .is_some();
+                if has_in_flight_job {
+                    let stored = config::load(dir)
+                        .map_err(local_failure)
+                        .with_context(|| {
+                            format!(
+                                "load runner identity before completing in-flight job for runner id {agent_id}; local identity preserved"
+                            )
+                        })?;
+                    complete_recorded_in_flight_job(dir, &stored)
+                        .await
+                        .map_err(local_failure)
+                        .with_context(|| {
+                            format!(
+                                "complete recorded in-flight job after remote runner deletion of runner id {agent_id}; local identity preserved"
+                            )
+                        })?;
+                }
             }
             Ok(())
         }
@@ -14023,7 +14046,7 @@ jobs:
     }
 
     #[tokio::test]
-    async fn successful_runner_delete_surfaces_in_flight_cleanup_failure() {
+    async fn successful_runner_delete_preserves_identity_when_stale_completion_fails() {
         use wiremock::{
             matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
@@ -14039,17 +14062,33 @@ jobs:
             .mount(&server)
             .await;
 
-        let config_dir = unique_temp_dir("runner-delete-cleanup-failure");
-        fs::create_dir_all(config_dir.join("in-flight-job.json")).unwrap();
+        let config_dir = unique_temp_dir("runner-delete-stale-completion-failure");
+        fs::create_dir_all(&config_dir).unwrap();
+        config::save(&config_dir, &stored_config()).unwrap();
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: format!("{}/run-service", server.uri()),
+            billing_owner_id: None,
+            journal_dir: config_dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        persist_in_flight_job(&config_dir, &context, &job).unwrap();
         let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
 
         let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
             .await
             .unwrap_err();
 
+        assert!(error.to_string().contains(
+            "complete recorded in-flight job after remote runner deletion of runner id 123"
+        ));
         assert!(error
-            .to_string()
-            .contains("clear in-flight job after remote runner deletion"));
+            .chain()
+            .any(|cause| cause.to_string().contains("missing credentials")));
+        assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
+        assert!(config::load(&config_dir).is_ok());
+        assert!(in_flight_job_path(&config_dir).exists());
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
