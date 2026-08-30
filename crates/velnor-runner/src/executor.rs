@@ -3755,13 +3755,13 @@ where
             )
         })?;
         let cache_host = match container.compiler_cache_backend {
-            crate::compiler_cache::CompilerCacheBackend::Sccache => {
+            velnor_cache_service::CompilerCacheBackend::Sccache => {
                 Some(sccache_host(&container.temp_host))
             }
-            crate::compiler_cache::CompilerCacheBackend::Kache => {
+            velnor_cache_service::CompilerCacheBackend::Kache => {
                 Some(kache_host(&container.temp_host))
             }
-            crate::compiler_cache::CompilerCacheBackend::Off => None,
+            velnor_cache_service::CompilerCacheBackend::Off => None,
         };
         if let Some(cache_host) = cache_host {
             fs::create_dir_all(cache_host).with_context(|| {
@@ -4517,8 +4517,8 @@ sccache --start-server 2>/dev/null || true
 
 fn kache_setup_script() -> String {
     r#"set -e
-command -v kache >/dev/null 2>&1 || { echo 'kache v0.10.0 must be preinstalled in the job image' >&2; exit 1; }
-kache --version | grep -F 'kache 0.10.0'
+command -v kache >/dev/null 2>&1 || { echo 'kache v0.14.2 must be preinstalled in the job image' >&2; exit 1; }
+kache --version | grep -F 'kache 0.14.2'
 mkdir -p /var/cache/kache
 export KACHE_CACHE_DIR=/var/cache/kache
 export KACHE_MAX_SIZE=20GiB
@@ -12250,7 +12250,7 @@ mod tests {
             assert!(!script.contains("wget"));
         }
         assert!(sccache.contains("0.16.0"));
-        assert!(kache.contains("0.10.0"));
+        assert!(kache.contains("0.14.2"));
     }
 
     #[test]
@@ -13568,7 +13568,7 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
+            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
         }
     }
 

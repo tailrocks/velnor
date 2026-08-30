@@ -72,20 +72,20 @@ url = "https://github.com/fornwall/rust-script/releases/download/0.36.0/rust-scr
 url_api = "https://api.github.com/repos/fornwall/rust-script/releases/assets/283099032"
 
 [[tools."github:kunobi-ninja/kache"]]
-version = "0.10.0"
+version = "0.14.2"
 backend = "github:kunobi-ninja/kache"
-specifiers = ["0.10.0"]
+specifiers = ["0.14.2"]
 
 [tools."github:kunobi-ninja/kache"."platforms.linux-arm64"]
-checksum = "sha256:d91090996d9a5af9f348f661dc12ff2dbd4e641016a8f49180a06211a0ae2417"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.10.0/kache-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/477065716"
+checksum = "sha256:2892fd7d6243ec791879c5538691ddc501934ae8a70f5bdf497567eafcce1d39"
+url = "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/512934148"
 provenance = "github-attestations"
 
 [tools."github:kunobi-ninja/kache"."platforms.linux-x64"]
-checksum = "sha256:4f78f2897de2a5e40c1ba9cfa983deb8a17ff2d843d13f067ba3fcfa240529fc"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.10.0/kache-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/477065741"
+checksum = "sha256:8cc4a3eb1621268732c030b3c74bbf3066fae905e4ed0f27e32aeca836b3e95a"
+url = "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/512934175"
 provenance = "github-attestations"
 
 [[tools.hadolint]]

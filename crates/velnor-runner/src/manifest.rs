@@ -8,14 +8,15 @@ use crate::action::{
     string_inputs, unsupported_action_error, NativeActionAdapter, NATIVE_ACTION_REF,
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
-use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
+use velnor_cache_service::CompilerCacheBackend;
 
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
-// Approved composites introduced v8; the native GitHub App token adapter is v9.
-pub const MANIFEST_VERSION: u32 = 9;
+// Approved composites introduced v8; the native GitHub App token adapter is v9;
+// Kache v0.14.2 admission is v10.
+pub const MANIFEST_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -270,7 +271,7 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Forbidden("token"),
 ];
 const KACHE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["v0.10.0"]),
+    InputRule::Literal("version", &["v0.14.2"]),
     InputRule::Literal("github-cache", &["false"]),
     InputRule::Literal("cache-executables", &["false"]),
     InputRule::Literal("pr-comment", &["false"]),
@@ -1757,11 +1758,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_nine_and_structurally_immutable() {
-        // Unified-CI composite admission changes the accepted capability surface,
-        // and the approved GitHub App token adapter advances it from v8 to v9.
-        assert_eq!(MANIFEST_VERSION, 9);
-        assert_eq!(MANIFEST.version, 9);
+    fn compiled_manifest_is_version_ten_and_structurally_immutable() {
+        // Kache v0.14.2 changes the accepted capability surface and requires a
+        // new manifest version so stale workflow inputs fail closed.
+        assert_eq!(MANIFEST_VERSION, 10);
+        assert_eq!(MANIFEST.version, 10);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
@@ -2710,7 +2711,7 @@ mod tests {
             "kunobi-ninja/kache-action",
             Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
             serde_json::json!({
-                "version": "v0.10.0",
+                "version": "v0.14.2",
                 "github-cache": "false",
                 "cache-executables": "false",
                 "pr-comment": "false",

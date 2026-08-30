@@ -11393,7 +11393,7 @@ mod tests {
         assert!(text.contains("unsupported capability"), "{text}");
         assert!(text.contains("execution.context_data"), "{text}");
         assert!(text.contains("received '<empty>'"), "{text}");
-        assert!(text.contains("manifest version 9"), "{text}");
+        assert!(text.contains("manifest version 10"), "{text}");
     }
 
     #[test]
@@ -16435,7 +16435,7 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Off,
+            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
         }
     }
 

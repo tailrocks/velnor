@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::compiler_cache::CompilerCacheBackend;
+use velnor_cache_service::CompilerCacheBackend;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;

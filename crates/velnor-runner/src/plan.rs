@@ -116,7 +116,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
-            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
+            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
         }
     }
 
