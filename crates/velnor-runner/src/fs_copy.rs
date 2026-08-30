@@ -1,68 +1,1537 @@
-use std::{fs, path::Path};
+use std::{
+    ffi::{OsStr, OsString},
+    fs,
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+};
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use std::{
+    os::unix::{ffi::OsStringExt, fs::PermissionsExt},
+    path::{Component, PathBuf},
+};
 
-pub fn clone_or_copy(source: &Path, destination: &Path) -> Result<u64> {
-    clone_or_copy_with_method(source, destination).map(|(bytes, _)| bytes)
+use anyhow::{bail, Context, Result};
+
+#[derive(Debug)]
+pub(crate) enum NoFollowSource {
+    File(fs::File),
+    Directory(NoFollowDir),
 }
 
-fn clone_or_copy_with_method(source: &Path, destination: &Path) -> Result<(u64, bool)> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+#[derive(Debug)]
+pub(crate) struct NoFollowDirEntry {
+    pub name: OsString,
+    pub source: NoFollowSource,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct NoFollowDir {
+    file: fs::File,
+    display_path: PathBuf,
+}
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub(crate) struct NoFollowDir;
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct NoFollowDestinationDir {
+    file: fs::File,
+    display_path: PathBuf,
+}
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub(crate) struct NoFollowDestinationDir;
+
+#[cfg(unix)]
+impl NoFollowDir {
+    pub fn open_absolute(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            bail!(
+                "approved artifact source root must be absolute: {}",
+                path.display()
+            );
+        }
+
+        let root = rustix::fs::openat(
+            rustix::fs::CWD,
+            Path::new("/"),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)
+        .context("open filesystem root for artifact source")?;
+        let mut current = Self {
+            file: root.into(),
+            display_path: PathBuf::from("/"),
+        };
+
+        for component in path.components() {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => {
+                    let display_path = current.display_path.join(name);
+                    current = match current.open_entry(name)? {
+                        Some(NoFollowSource::Directory(directory)) => directory,
+                        Some(NoFollowSource::File(_)) => bail!(
+                            "approved artifact source root has a non-directory ancestor: {}",
+                            display_path.display()
+                        ),
+                        None => bail!(
+                            "approved artifact source root does not exist: {}",
+                            display_path.display()
+                        ),
+                    };
+                }
+                Component::ParentDir | Component::Prefix(_) => bail!(
+                    "approved artifact source root is not normalized: {}",
+                    path.display()
+                ),
+            }
+        }
+        Ok(current)
     }
-    match try_clone(source, destination) {
-        Ok(()) => {
-            let metadata = fs::metadata(source)
-                .with_context(|| format!("stat cloned file {}", source.display()))?;
-            fs::set_permissions(destination, metadata.permissions()).with_context(|| {
-                format!("set cloned file permissions {}", destination.display())
+
+    /// Opens a trusted root from daemon configuration after resolving host aliases.
+    ///
+    /// This is only for a root whose complete path was already admitted by trusted
+    /// configuration, such as macOS `/var`. Workflow-provided paths must use
+    /// [`Self::open_absolute`] or [`Self::open_source`] so their symlinks are never
+    /// followed.
+    pub fn open_trusted_configured_root(configured_root: &Path) -> Result<Self> {
+        if !configured_root.is_absolute() {
+            bail!(
+                "trusted configured artifact source root must be absolute: {}",
+                configured_root.display()
+            );
+        }
+
+        let canonical_root = fs::canonicalize(configured_root).with_context(|| {
+            format!(
+                "canonicalize trusted configured artifact source root {}",
+                configured_root.display()
+            )
+        })?;
+        Self::open_absolute(&canonical_root).with_context(|| {
+            format!(
+                "securely open canonical trusted configured artifact source root {}",
+                canonical_root.display()
+            )
+        })
+    }
+
+    pub fn open_source(&self, relative: &Path) -> Result<Option<NoFollowSource>> {
+        let mut components = relative
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .peekable();
+        if components.peek().is_none() {
+            return self
+                .try_clone()
+                .map(|directory| Some(NoFollowSource::Directory(directory)));
+        }
+
+        let mut current = self.try_clone()?;
+        while let Some(component) = components.next() {
+            let Component::Normal(name) = component else {
+                bail!(
+                    "artifact source path is not a normalized relative path: {}",
+                    relative.display()
+                );
+            };
+            let source = current.open_entry(name)?;
+            if components.peek().is_none() {
+                return Ok(source);
+            }
+            current = match source {
+                Some(NoFollowSource::Directory(directory)) => directory,
+                Some(NoFollowSource::File(_)) => bail!(
+                    "artifact source path has a non-directory ancestor: {}",
+                    current.display_path.join(name).display()
+                ),
+                None => return Ok(None),
+            };
+        }
+        Ok(None)
+    }
+
+    pub fn for_each_entry_filtered(
+        &self,
+        mut include: impl FnMut(&OsStr) -> bool,
+        mut visit: impl FnMut(NoFollowDirEntry) -> Result<()>,
+    ) -> Result<()> {
+        let entries = rustix::fs::Dir::read_from(&self.file)
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "read artifact source directory {}",
+                    self.display_path.display()
+                )
             })?;
-            Ok((metadata.len(), true))
+        for entry in entries {
+            let entry = entry.map_err(std::io::Error::from).with_context(|| {
+                format!(
+                    "read artifact source directory {}",
+                    self.display_path.display()
+                )
+            })?;
+            let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+            if name == "." || name == ".." {
+                continue;
+            }
+            if !include(&name) {
+                continue;
+            }
+            let source = self.open_entry(&name)?.with_context(|| {
+                format!(
+                    "artifact source disappeared during secure enumeration: {}",
+                    self.display_path.join(&name).display()
+                )
+            })?;
+            visit(NoFollowDirEntry { name, source })?;
         }
-        Err(_) => {
-            let _ = fs::remove_file(destination);
-            fs::copy(source, destination)
-                .map(|bytes| (bytes, false))
-                .with_context(|| format!("copy {} to {}", source.display(), destination.display()))
+        Ok(())
+    }
+
+    pub fn for_each_entry_name(&self, mut visit: impl FnMut(OsString) -> Result<()>) -> Result<()> {
+        let entries = rustix::fs::Dir::read_from(&self.file)
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "read artifact source directory {}",
+                    self.display_path.display()
+                )
+            })?;
+        for entry in entries {
+            let entry = entry.map_err(std::io::Error::from).with_context(|| {
+                format!(
+                    "read artifact source directory {}",
+                    self.display_path.display()
+                )
+            })?;
+            let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+            if name == "." || name == ".." {
+                continue;
+            }
+            visit(name)?;
+        }
+        Ok(())
+    }
+
+    pub fn try_clone(&self) -> Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone().with_context(|| {
+                format!(
+                    "duplicate artifact source directory {}",
+                    self.display_path.display()
+                )
+            })?,
+            display_path: self.display_path.clone(),
+        })
+    }
+
+    fn open_entry(&self, name: &std::ffi::OsStr) -> Result<Option<NoFollowSource>> {
+        let display_path = self.display_path.join(name);
+        let stat = match rustix::fs::statat(&self.file, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => {
+                return Err(std::io::Error::from(error)).with_context(|| {
+                    format!("inspect artifact source {}", display_path.display())
+                });
+            }
+        };
+        match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::Symlink => {
+                bail!("artifact source is a symlink: {}", display_path.display())
+            }
+            rustix::fs::FileType::Directory => {
+                let file = rustix::fs::openat(
+                    &self.file,
+                    name,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(std::io::Error::from)
+                .with_context(|| {
+                    format!(
+                        "open artifact source directory without following links: {}",
+                        display_path.display()
+                    )
+                })?;
+                Ok(Some(NoFollowSource::Directory(Self {
+                    file: file.into(),
+                    display_path,
+                })))
+            }
+            rustix::fs::FileType::RegularFile => {
+                let file = open_source_file_nonblocking_no_follow_at(&self.file, Path::new(name))
+                    .with_context(|| {
+                    format!(
+                        "open artifact source file without following links: {}",
+                        display_path.display()
+                    )
+                })?;
+                if !file
+                    .metadata()
+                    .with_context(|| {
+                        format!("inspect opened artifact source {}", display_path.display())
+                    })?
+                    .is_file()
+                {
+                    bail!(
+                        "artifact source changed type during secure open: {}",
+                        display_path.display()
+                    );
+                }
+                Ok(Some(NoFollowSource::File(file)))
+            }
+            _ => bail!(
+                "artifact source has unsupported file type: {}",
+                display_path.display()
+            ),
         }
     }
 }
 
-#[cfg(target_os = "linux")]
-fn try_clone(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let source = fs::File::open(source)?;
-    let destination = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
-    rustix::fs::ioctl_ficlone(&destination, &source).map_err(std::io::Error::from)
+#[cfg(unix)]
+impl NoFollowDestinationDir {
+    /// Opens a workflow-relative destination below a trusted configured root.
+    ///
+    /// Canonicalization is intentionally limited to `trusted_root`. The untrusted
+    /// `relative` suffix is validated before side effects, then walked with
+    /// descriptor-relative, no-follow operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the trusted root is not absolute, cannot be securely
+    /// opened as a directory, or the relative path is absolute, contains a parent
+    /// component, or encounters a symlink or non-directory descendant.
+    pub fn open_trusted_rooted_destination(trusted_root: &Path, relative: &Path) -> Result<Self> {
+        if !trusted_root.is_absolute() {
+            bail!(
+                "trusted configured artifact destination root must be absolute: {}",
+                trusted_root.display()
+            );
+        }
+
+        for component in relative.components() {
+            match component {
+                Component::CurDir | Component::Normal(_) => {}
+                Component::RootDir | Component::ParentDir | Component::Prefix(_) => bail!(
+                    "artifact destination is not a normalized relative path: {}",
+                    relative.display()
+                ),
+            }
+        }
+
+        let canonical_root = fs::canonicalize(trusted_root).with_context(|| {
+            format!(
+                "canonicalize trusted configured artifact destination root {}",
+                trusted_root.display()
+            )
+        })?;
+        let strict_root = NoFollowDir::open_absolute(&canonical_root).with_context(|| {
+            format!(
+                "securely open canonical trusted configured artifact destination root {}",
+                canonical_root.display()
+            )
+        })?;
+        let mut current = Self {
+            file: strict_root.file,
+            display_path: strict_root.display_path,
+        };
+
+        for component in relative.components() {
+            if let Component::Normal(name) = component {
+                current = current.open_or_create_directory(name)?;
+            }
+        }
+        Ok(current)
+    }
+
+    pub fn clone_or_copy_file(&self, source: &fs::File, relative: &Path) -> Result<u64> {
+        self.clone_or_copy_file_with_method(source, relative)
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// Atomically publishes a private staging directory at `destination_name`.
+    ///
+    /// Both names are resolved relative to this already-open parent directory.
+    /// An existing destination is moved aside first, and is removed only after
+    /// the staged tree is visible. Any failed publication attempts to restore
+    /// the original destination.
+    pub fn publish_staged_directory(
+        &self,
+        staging_name: &OsStr,
+        destination_name: &OsStr,
+    ) -> Result<()> {
+        validate_single_component(staging_name, "staging directory")?;
+        validate_single_component(destination_name, "destination directory")?;
+
+        let staging_stat = rustix::fs::statat(
+            &self.file,
+            staging_name,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(std::io::Error::from)
+        .with_context(|| {
+            format!(
+                "inspect staged artifact directory {}",
+                self.display_path.join(staging_name).display()
+            )
+        })?;
+        if rustix::fs::FileType::from_raw_mode(staging_stat.st_mode)
+            != rustix::fs::FileType::Directory
+        {
+            bail!(
+                "staged artifact is not a directory: {}",
+                self.display_path.join(staging_name).display()
+            );
+        }
+
+        let destination_exists = match rustix::fs::statat(
+            &self.file,
+            destination_name,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(stat) => {
+                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                    != rustix::fs::FileType::Directory
+                {
+                    bail!(
+                        "artifact destination is not a directory: {}",
+                        self.display_path.join(destination_name).display()
+                    );
+                }
+                true
+            }
+            Err(rustix::io::Errno::NOENT) => false,
+            Err(error) => {
+                return Err(std::io::Error::from(error)).with_context(|| {
+                    format!(
+                        "inspect artifact destination {}",
+                        self.display_path.join(destination_name).display()
+                    )
+                });
+            }
+        };
+
+        if !destination_exists {
+            rustix::fs::renameat(&self.file, staging_name, &self.file, destination_name)
+                .map_err(std::io::Error::from)
+                .with_context(|| {
+                    format!(
+                        "publish staged artifact directory {}",
+                        self.display_path.join(destination_name).display()
+                    )
+                })?;
+            return Ok(());
+        }
+
+        for _ in 0..16 {
+            let backup_name = OsString::from(format!(
+                ".velnor-replaced-artifact-{}",
+                uuid::Uuid::new_v4()
+            ));
+            match rustix::fs::renameat(&self.file, destination_name, &self.file, &backup_name) {
+                Ok(()) => {
+                    if let Err(error) =
+                        rustix::fs::renameat(&self.file, staging_name, &self.file, destination_name)
+                    {
+                        let rollback = rustix::fs::renameat(
+                            &self.file,
+                            &backup_name,
+                            &self.file,
+                            destination_name,
+                        );
+                        let error = std::io::Error::from(error);
+                        return match rollback {
+                            Ok(()) => Err(error).context("publish staged artifact directory"),
+                            Err(rollback_error) => Err(anyhow::anyhow!(
+                                "publish staged artifact directory failed: {error}; rollback failed: {}",
+                                std::io::Error::from(rollback_error)
+                            )),
+                        };
+                    }
+                    remove_tree_at(&self.file, &backup_name).with_context(|| {
+                        format!(
+                            "remove replaced artifact directory {}",
+                            self.display_path.join(&backup_name).display()
+                        )
+                    })?;
+                    return Ok(());
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(rustix::io::Errno::NOENT) => {
+                    // The destination changed between inspection and rename.
+                    // Re-inspect it and repeat the fail-closed decision.
+                    continue;
+                }
+                Err(error) => {
+                    return Err(std::io::Error::from(error)).with_context(|| {
+                        format!(
+                            "move existing artifact destination aside: {}",
+                            self.display_path.join(destination_name).display()
+                        )
+                    });
+                }
+            }
+        }
+        bail!("could not allocate a unique replaced artifact directory name")
+    }
+
+    pub(crate) fn remove_tree_entry(&self, name: &OsStr) -> Result<()> {
+        validate_single_component(name, "artifact tree entry")?;
+        remove_tree_at(&self.file, name).with_context(|| {
+            format!(
+                "remove artifact tree entry {}",
+                self.display_path.join(name).display()
+            )
+        })
+    }
+
+    pub fn open_relative_directory(&self, relative: &Path) -> Result<Self> {
+        let mut current = self.try_clone()?;
+        for component in relative.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(name) => {
+                    current = current.open_or_create_directory(name)?;
+                }
+                Component::RootDir | Component::ParentDir | Component::Prefix(_) => bail!(
+                    "artifact destination is not a normalized relative path: {}",
+                    relative.display()
+                ),
+            }
+        }
+        Ok(current)
+    }
+
+    pub fn create_unique_directory(&self, prefix: &str) -> Result<(Self, OsString)> {
+        for _ in 0..16 {
+            let name = OsString::from(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+            match rustix::fs::mkdirat(&self.file, &name, rustix::fs::Mode::from_raw_mode(0o700)) {
+                Ok(()) => return Ok((self.open_or_create_directory(&name)?, name)),
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(error) => {
+                    return Err(std::io::Error::from(error)).with_context(|| {
+                        format!(
+                            "create secure temporary directory {}",
+                            name.to_string_lossy()
+                        )
+                    })
+                }
+            }
+        }
+        bail!("could not allocate a unique secure temporary directory")
+    }
+
+    pub fn write_file_from_reader(
+        &self,
+        reader: &mut impl Read,
+        relative: &Path,
+        expected_size: u64,
+        mode: u16,
+    ) -> Result<u64> {
+        let mut components = relative
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .peekable();
+        if components.peek().is_none() {
+            bail!(
+                "artifact destination has no file name: {}",
+                relative.display()
+            );
+        }
+
+        let mut parent = self.try_clone()?;
+        let file_name = loop {
+            let Some(component) = components.next() else {
+                bail!(
+                    "artifact destination has no file name: {}",
+                    relative.display()
+                );
+            };
+            let Component::Normal(name) = component else {
+                bail!(
+                    "artifact destination is not a normalized relative path: {}",
+                    relative.display()
+                );
+            };
+            if components.peek().is_none() {
+                break name.to_os_string();
+            }
+            parent = parent.open_or_create_directory(name)?;
+        };
+        parent.validate_destination_file(&file_name)?;
+
+        for _ in 0..16 {
+            let temporary_name =
+                OsString::from(format!(".velnor-copy-{}.tmp", uuid::Uuid::new_v4()));
+            let mut destination_file = match create_temporary_file(&parent.file, &temporary_name) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error).context("create temporary artifact destination"),
+            };
+            let copied = {
+                let mut limited = (&mut *reader).take(expected_size.saturating_add(1));
+                std::io::copy(&mut limited, &mut destination_file)
+                    .context("copy reader to temporary artifact destination")?
+            };
+            if copied != expected_size {
+                drop(destination_file);
+                remove_temporary_file(&parent.file, &temporary_name);
+                bail!(
+                    "artifact source size changed while copying {}",
+                    relative.display()
+                );
+            }
+            destination_file
+                .flush()
+                .context("flush artifact destination")?;
+            rustix::fs::fchmod(
+                &destination_file,
+                rustix::fs::Mode::from_raw_mode(rustix::fs::RawMode::from(mode)),
+            )
+            .map_err(std::io::Error::from)
+            .context("set artifact destination mode")?;
+            drop(destination_file);
+            if let Err(error) =
+                rustix::fs::renameat(&parent.file, &temporary_name, &parent.file, &file_name)
+            {
+                remove_temporary_file(&parent.file, &temporary_name);
+                return Err(std::io::Error::from(error))
+                    .context("atomically replace artifact destination");
+            }
+            return Ok(copied);
+        }
+
+        bail!("could not allocate a unique temporary artifact destination")
+    }
+
+    fn clone_or_copy_file_with_method(
+        &self,
+        source: &fs::File,
+        relative: &Path,
+    ) -> Result<(u64, bool)> {
+        let mut components = relative
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .peekable();
+        if components.peek().is_none() {
+            bail!(
+                "artifact destination has no file name: {}",
+                relative.display()
+            );
+        }
+
+        let mut parent = self.try_clone()?;
+        let file_name = loop {
+            let Some(component) = components.next() else {
+                bail!(
+                    "artifact destination has no file name: {}",
+                    relative.display()
+                );
+            };
+            let Component::Normal(name) = component else {
+                bail!(
+                    "artifact destination is not a normalized relative path: {}",
+                    relative.display()
+                );
+            };
+            if components.peek().is_none() {
+                break name.to_os_string();
+            }
+            parent = parent.open_or_create_directory(name)?;
+        };
+        let destination_path = parent.display_path.join(&file_name);
+        parent.validate_destination_file(&file_name)?;
+
+        let metadata = source.metadata().context("inspect opened copy source")?;
+        if !metadata.is_file() {
+            bail!("copy source is not a regular file");
+        }
+
+        for _ in 0..16 {
+            let temporary_name =
+                OsString::from(format!(".velnor-copy-{}.tmp", uuid::Uuid::new_v4()));
+            let (mut destination_file, used_reflink) =
+                match create_temporary_clone_or_file(source, &parent.file, &temporary_name) {
+                    Ok(created) => created,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        remove_temporary_file(&parent.file, &temporary_name);
+                        return Err(error).with_context(|| {
+                            format!(
+                                "create temporary artifact destination in {}",
+                                parent.display_path.display()
+                            )
+                        });
+                    }
+                };
+
+            let write_result = (|| -> Result<u64> {
+                let bytes = if used_reflink {
+                    metadata.len()
+                } else {
+                    destination_file
+                        .set_len(0)
+                        .context("reset temporary artifact destination")?;
+                    destination_file
+                        .seek(SeekFrom::Start(0))
+                        .context("rewind temporary artifact destination")?;
+                    let mut source = source
+                        .try_clone()
+                        .context("duplicate source file for copy")?;
+                    source
+                        .seek(SeekFrom::Start(0))
+                        .context("rewind source file for copy")?;
+                    std::io::copy(&mut source, &mut destination_file).with_context(|| {
+                        format!("copy opened source to {}", destination_path.display())
+                    })?
+                };
+                destination_file.flush().with_context(|| {
+                    format!(
+                        "flush temporary artifact destination for {}",
+                        destination_path.display()
+                    )
+                })?;
+                #[allow(clippy::useless_conversion)]
+                let raw_mode: rustix::fs::RawMode = metadata
+                    .permissions()
+                    .mode()
+                    .try_into()
+                    .context("convert opened copy source mode")?;
+                rustix::fs::fchmod(&destination_file, rustix::fs::Mode::from_raw_mode(raw_mode))
+                    .map_err(std::io::Error::from)
+                    .with_context(|| {
+                        format!(
+                            "set temporary artifact destination mode for {}",
+                            destination_path.display()
+                        )
+                    })?;
+                Ok(bytes)
+            })();
+
+            let bytes = match write_result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    drop(destination_file);
+                    remove_temporary_file(&parent.file, &temporary_name);
+                    return Err(error);
+                }
+            };
+            drop(destination_file);
+
+            if let Err(error) =
+                rustix::fs::renameat(&parent.file, &temporary_name, &parent.file, &file_name)
+            {
+                remove_temporary_file(&parent.file, &temporary_name);
+                return Err(std::io::Error::from(error)).with_context(|| {
+                    format!(
+                        "atomically replace artifact destination {}",
+                        destination_path.display()
+                    )
+                });
+            }
+            return Ok((bytes, used_reflink));
+        }
+
+        bail!(
+            "could not allocate a unique temporary artifact destination in {}",
+            parent.display_path.display()
+        )
+    }
+
+    fn try_clone(&self) -> Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone().with_context(|| {
+                format!(
+                    "duplicate artifact destination directory {}",
+                    self.display_path.display()
+                )
+            })?,
+            display_path: self.display_path.clone(),
+        })
+    }
+
+    fn validate_destination_file(&self, name: &OsStr) -> Result<()> {
+        let display_path = self.display_path.join(name);
+        let stat = match rustix::fs::statat(&self.file, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => return Ok(()),
+            Err(error) => {
+                return Err(std::io::Error::from(error)).with_context(|| {
+                    format!("inspect artifact destination {}", display_path.display())
+                });
+            }
+        };
+        match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::RegularFile => Ok(()),
+            rustix::fs::FileType::Symlink => {
+                bail!(
+                    "artifact destination is a symlink: {}",
+                    display_path.display()
+                )
+            }
+            _ => bail!(
+                "artifact destination is not a regular file: {}",
+                display_path.display()
+            ),
+        }
+    }
+
+    fn open_or_create_directory(&self, name: &OsStr) -> Result<Self> {
+        let display_path = self.display_path.join(name);
+        let open = || {
+            rustix::fs::openat(
+                &self.file,
+                name,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+        };
+        let file = match open() {
+            Ok(file) => file,
+            Err(rustix::io::Errno::NOENT) => {
+                match rustix::fs::mkdirat(&self.file, name, rustix::fs::Mode::from_raw_mode(0o755))
+                {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => {
+                        return Err(std::io::Error::from(error)).with_context(|| {
+                            format!(
+                                "create artifact destination directory {}",
+                                display_path.display()
+                            )
+                        });
+                    }
+                }
+                open().map_err(std::io::Error::from).with_context(|| {
+                    format!(
+                        "open created artifact destination directory without following links: {}",
+                        display_path.display()
+                    )
+                })?
+            }
+            Err(error) => {
+                return Err(std::io::Error::from(error)).with_context(|| {
+                    format!(
+                        "open artifact destination directory without following links: {}",
+                        display_path.display()
+                    )
+                });
+            }
+        };
+        Ok(Self {
+            file: file.into(),
+            display_path,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn validate_single_component(name: &OsStr, label: &str) -> Result<()> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        bail!("{label} name is not a single normalized path component")
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_tree_at(parent: &fs::File, name: &OsStr) -> Result<()> {
+    let stat = match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
+        match rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => return Ok(()),
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+    }
+
+    let directory = rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let directory: fs::File = directory.into();
+    let entries = rustix::fs::Dir::read_from(&directory)
+        .map_err(std::io::Error::from)
+        .context("read artifact tree for secure cleanup")?;
+    for entry in entries {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let entry_name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+        if entry_name == "." || entry_name == ".." {
+            continue;
+        }
+        remove_tree_at(&directory, &entry_name)?;
+    }
+    match rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(error) => Err(std::io::Error::from(error).into()),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn create_temporary_clone_or_file(
+    source: &fs::File,
+    parent: &fs::File,
+    temporary_name: &OsStr,
+) -> std::io::Result<(fs::File, bool)> {
+    let destination = create_temporary_file(parent, temporary_name)?;
+    #[cfg(target_os = "linux")]
+    let used_reflink = rustix::fs::ioctl_ficlone(&destination, source).is_ok();
+    #[cfg(not(target_os = "linux"))]
+    let used_reflink = false;
+    Ok((destination, used_reflink))
 }
 
 #[cfg(target_os = "macos")]
-fn try_clone(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let source = fs::File::open(source)?;
-    let parent = fs::File::open(destination.parent().unwrap_or_else(|| Path::new(".")))?;
-    let file_name = destination.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "destination has no file name",
-        )
-    })?;
-    rustix::fs::fclonefileat(&source, &parent, file_name, rustix::fs::CloneFlags::empty())
-        .map_err(std::io::Error::from)
+fn create_temporary_clone_or_file(
+    source: &fs::File,
+    parent: &fs::File,
+    temporary_name: &OsStr,
+) -> std::io::Result<(fs::File, bool)> {
+    match rustix::fs::fclonefileat(
+        source,
+        parent,
+        temporary_name,
+        rustix::fs::CloneFlags::empty(),
+    ) {
+        Ok(()) => {
+            let destination = rustix::fs::openat(
+                parent,
+                temporary_name,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )?;
+            Ok((destination.into(), true))
+        }
+        Err(rustix::io::Errno::EXIST) => Err(std::io::Error::from(rustix::io::Errno::EXIST)),
+        Err(_) => {
+            remove_temporary_file(parent, temporary_name);
+            create_temporary_file(parent, temporary_name).map(|file| (file, false))
+        }
+    }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn try_clone(_source: &Path, _destination: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "filesystem cloning is unavailable on this platform",
-    ))
+#[cfg(unix)]
+fn create_temporary_file(parent: &fs::File, temporary_name: &OsStr) -> std::io::Result<fs::File> {
+    rustix::fs::openat(
+        parent,
+        temporary_name,
+        rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .map(Into::into)
+    .map_err(Into::into)
+}
+
+#[cfg(unix)]
+fn remove_temporary_file(parent: &fs::File, temporary_name: &OsStr) {
+    let _ = rustix::fs::unlinkat(parent, temporary_name, rustix::fs::AtFlags::empty());
+}
+
+#[cfg(not(unix))]
+impl NoFollowDir {
+    pub fn open_absolute(path: &Path) -> Result<Self> {
+        bail!(
+            "secure artifact source copying is unsupported on this platform for {}",
+            path.display()
+        )
+    }
+
+    pub fn open_trusted_configured_root(configured_root: &Path) -> Result<Self> {
+        bail!(
+            "secure trusted configured artifact source copying is unsupported on this platform for {}",
+            configured_root.display()
+        )
+    }
+
+    pub fn open_source(&self, _relative: &Path) -> Result<Option<NoFollowSource>> {
+        bail!("secure artifact source copying is unsupported on this platform")
+    }
+
+    pub fn for_each_entry_filtered(
+        &self,
+        _include: impl FnMut(&OsStr) -> bool,
+        _visit: impl FnMut(NoFollowDirEntry) -> Result<()>,
+    ) -> Result<()> {
+        bail!("secure artifact source copying is unsupported on this platform")
+    }
+
+    pub fn for_each_entry_name(&self, _visit: impl FnMut(OsString) -> Result<()>) -> Result<()> {
+        bail!("secure artifact source copying is unsupported on this platform")
+    }
+
+    pub fn try_clone(&self) -> Result<Self> {
+        bail!("secure artifact source copying is unsupported on this platform")
+    }
+}
+
+#[cfg(not(unix))]
+impl NoFollowDestinationDir {
+    pub fn open_trusted_rooted_destination(trusted_root: &Path, relative: &Path) -> Result<Self> {
+        bail!(
+            "secure trusted-rooted artifact destination copying is unsupported on this platform for {} below {}",
+            relative.display(),
+            trusted_root.display()
+        )
+    }
+
+    pub fn clone_or_copy_file(&self, _source: &fs::File, relative: &Path) -> Result<u64> {
+        bail!(
+            "secure artifact destination copying is unsupported on this platform for {}",
+            relative.display()
+        )
+    }
+
+    pub fn open_relative_directory(&self, relative: &Path) -> Result<Self> {
+        bail!(
+            "secure artifact destination copying is unsupported on this platform for {}",
+            relative.display()
+        )
+    }
+
+    pub fn create_unique_directory(&self, prefix: &str) -> Result<(Self, OsString)> {
+        bail!("secure artifact destination copying is unsupported on this platform for {prefix}")
+    }
+
+    pub fn write_file_from_reader(
+        &self,
+        _reader: &mut impl Read,
+        relative: &Path,
+        _expected_size: u64,
+        _mode: u16,
+    ) -> Result<u64> {
+        bail!(
+            "secure artifact destination copying is unsupported on this platform for {}",
+            relative.display()
+        )
+    }
+
+    pub fn publish_staged_directory(
+        &self,
+        _staging_name: &OsStr,
+        destination_name: &OsStr,
+    ) -> Result<()> {
+        bail!(
+            "secure artifact destination publishing is unsupported on this platform for {}",
+            destination_name.to_string_lossy()
+        )
+    }
+
+    pub(crate) fn remove_tree_entry(&self, name: &OsStr) -> Result<()> {
+        bail!(
+            "secure artifact tree cleanup is unsupported on this platform for {}",
+            name.to_string_lossy()
+        )
+    }
+}
+
+#[cfg(unix)]
+fn open_source_file_nonblocking_no_follow_at(
+    directory: impl rustix::fd::AsFd,
+    source: &Path,
+) -> std::io::Result<fs::File> {
+    // Never retry without NONBLOCK: an unsupported flag must fail closed because
+    // the entry can become a FIFO between the caller's type check and this open.
+    rustix::fs::openat(
+        directory,
+        source,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(Into::into)
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::{
+        ffi::CString, io::Read, os::unix::ffi::OsStrExt, sync::mpsc, thread, time::Duration,
+    };
+
     use super::*;
+
+    #[cfg(unix)]
+    fn open_regular_source(path: &Path) -> fs::File {
+        let parent = NoFollowDir::open_trusted_configured_root(path.parent().unwrap()).unwrap();
+        let Some(NoFollowSource::File(file)) = parent
+            .open_source(Path::new(path.file_name().unwrap()))
+            .unwrap()
+        else {
+            panic!("test source must be a regular file");
+        };
+        file
+    }
+
+    #[cfg(not(unix))]
+    fn open_regular_source(path: &Path) -> fs::File {
+        fs::File::open(path).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_source_accepts_curdir_relative_path() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::write(root.join("dist/artifact.txt"), b"artifact").unwrap();
+
+        let source = fs::canonicalize(&root).unwrap();
+        let source = NoFollowDir::open_absolute(&source).unwrap();
+        let Some(NoFollowSource::File(mut file)) = source
+            .open_source(Path::new("./dist/artifact.txt"))
+            .unwrap()
+        else {
+            panic!("CurDir-relative artifact path must open its file");
+        };
+        let mut content = String::new();
+        file.read_to_string(&mut content).unwrap();
+
+        assert_eq!(content, "artifact");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_configured_root_resolves_var_style_alias_only_at_root() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let canonical_root = root.join("private/var");
+        let configured_root = root.join("var");
+        fs::create_dir_all(&canonical_root).unwrap();
+        fs::write(canonical_root.join("artifact"), b"artifact").unwrap();
+        std::os::unix::fs::symlink(&canonical_root, &configured_root).unwrap();
+        std::os::unix::fs::symlink("artifact", canonical_root.join("workflow-link")).unwrap();
+
+        let strict_error = NoFollowDir::open_absolute(&configured_root).unwrap_err();
+        assert!(strict_error
+            .to_string()
+            .contains("artifact source is a symlink"));
+
+        let trusted = NoFollowDir::open_trusted_configured_root(&configured_root).unwrap();
+        let Some(NoFollowSource::File(mut artifact)) =
+            trusted.open_source(Path::new("artifact")).unwrap()
+        else {
+            panic!("trusted configured root must open its regular-file descendant");
+        };
+        let mut content = String::new();
+        artifact.read_to_string(&mut content).unwrap();
+        assert_eq!(content, "artifact");
+
+        let descendant_error = trusted.open_source(Path::new("workflow-link")).unwrap_err();
+        assert!(descendant_error
+            .to_string()
+            .contains("artifact source is a symlink"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_file_open_uses_nonblock_for_fifo() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let fifo = root.join("source.fifo");
+        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_path` is a live, NUL-terminated pathname and mode has
+        // no pointer or lifetime requirements.
+        let result = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
+        assert_eq!(
+            result,
+            0,
+            "create FIFO: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let result = open_source_file_nonblocking_no_follow_at(rustix::fs::CWD, &fifo);
+            sender.send(result).unwrap();
+        });
+        let file = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("opening a FIFO source must not block")
+            .unwrap();
+        worker.join().unwrap();
+
+        assert!(!file.metadata().unwrap().is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_destination_rejects_symlink() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination_root = root.join("destination");
+        let outside = root.join("outside");
+        fs::create_dir_all(&destination_root).unwrap();
+        fs::write(&source, b"source").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, destination_root.join("artifact")).unwrap();
+
+        let source = open_regular_source(&source);
+        let destination = NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("destination"),
+        )
+        .unwrap();
+        let error = destination
+            .clone_or_copy_file(&source, Path::new("artifact"))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("artifact destination is a symlink"));
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        assert!(fs::symlink_metadata(destination_root.join("artifact"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_destination_creates_missing_parents() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination_root = root.join("missing/root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&source, b"source").unwrap();
+
+        let source = open_regular_source(&source);
+        let destination = NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("missing/root"),
+        )
+        .unwrap();
+        destination
+            .clone_or_copy_file(&source, Path::new("nested/artifact"))
+            .unwrap();
+
+        assert_eq!(
+            fs::read(destination_root.join("nested/artifact")).unwrap(),
+            b"source"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_destination_atomically_replaces_regular_file() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination_root = root.join("destination");
+        let destination_path = destination_root.join("artifact");
+        fs::create_dir_all(&destination_root).unwrap();
+        fs::write(&source, b"new").unwrap();
+        fs::write(&destination_path, b"old").unwrap();
+        let mut opened_old_destination = fs::File::open(&destination_path).unwrap();
+
+        let source = open_regular_source(&source);
+        let destination = NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("destination"),
+        )
+        .unwrap();
+        destination
+            .clone_or_copy_file(&source, Path::new("artifact"))
+            .unwrap();
+
+        let mut old_content = String::new();
+        opened_old_destination
+            .read_to_string(&mut old_content)
+            .unwrap();
+        assert_eq!(fs::read(&destination_path).unwrap(), b"new");
+        assert_eq!(old_content, "old");
+        assert!(fs::read_dir(&destination_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .as_encoded_bytes()
+                .starts_with(b".velnor-copy-")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_destination_atomically_publishes_and_cleans_staged_tree() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let destination_path = root.join("artifact");
+        let outside = root.join("outside");
+        fs::create_dir_all(&destination_path).unwrap();
+        fs::write(destination_path.join("stale"), b"stale").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, destination_path.join("link")).unwrap();
+
+        let parent =
+            NoFollowDestinationDir::open_trusted_rooted_destination(&root, Path::new("")).unwrap();
+        let (staged, staging_name) = parent.create_unique_directory(".staged").unwrap();
+        staged
+            .write_file_from_reader(&mut &b"published"[..], Path::new("new/file"), 9, 0o644)
+            .unwrap();
+
+        parent
+            .publish_staged_directory(&staging_name, OsStr::new("artifact"))
+            .unwrap();
+
+        assert_eq!(
+            fs::read(destination_path.join("new/file")).unwrap(),
+            b"published"
+        );
+        assert!(!destination_path.join("stale").exists());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .as_encoded_bytes()
+                .starts_with(b".velnor-replaced-artifact-")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_destination_copies_opened_regular_file() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&destination_root).unwrap();
+        fs::write(&source, b"artifact").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let source = open_regular_source(&source);
+        let destination = NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("destination"),
+        )
+        .unwrap();
+        let bytes = destination
+            .clone_or_copy_file(&source, Path::new("artifact"))
+            .unwrap();
+
+        let destination_path = destination_root.join("artifact");
+        assert_eq!(bytes, 8);
+        assert_eq!(fs::read(&destination_path).unwrap(), b"artifact");
+        assert_eq!(
+            fs::metadata(destination_path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_destination_rejects_unsafe_components() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&destination_root).unwrap();
+        fs::write(&source, b"source").unwrap();
+        fs::write(destination_root.join("not-a-directory"), b"file").unwrap();
+
+        let source = open_regular_source(&source);
+        assert!(NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("created-before/../escape")
+        )
+        .is_err());
+        assert!(!root.join("created-before").exists());
+        assert!(NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            &root.join("absolute")
+        )
+        .is_err());
+        assert!(NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("destination/not-a-directory/nested")
+        )
+        .is_err());
+
+        let destination = NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("destination"),
+        )
+        .unwrap();
+
+        assert!(destination
+            .clone_or_copy_file(&source, Path::new("../escape"))
+            .is_err());
+        assert!(destination
+            .clone_or_copy_file(&source, &root.join("absolute"))
+            .is_err());
+        assert!(destination
+            .clone_or_copy_file(&source, Path::new("not-a-directory/artifact"))
+            .is_err());
+        assert!(!root.join("escape").exists());
+        assert!(!root.join("absolute").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_rooted_destination_resolves_var_style_alias_only_at_root() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let canonical_root = root.join("private/var");
+        let configured_root = root.join("var");
+        let outside = root.join("outside");
+        let source = root.join("source");
+        fs::create_dir_all(&canonical_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(&source, b"artifact").unwrap();
+        std::os::unix::fs::symlink(&canonical_root, &configured_root).unwrap();
+        std::os::unix::fs::symlink(&outside, canonical_root.join("workflow-link")).unwrap();
+
+        let source = open_regular_source(&source);
+        let destination = NoFollowDestinationDir::open_trusted_rooted_destination(
+            &configured_root,
+            Path::new("workflow/nested"),
+        )
+        .unwrap();
+        destination
+            .clone_or_copy_file(&source, Path::new("artifact"))
+            .unwrap();
+        assert_eq!(
+            fs::read(canonical_root.join("workflow/nested/artifact")).unwrap(),
+            b"artifact"
+        );
+
+        assert!(NoFollowDestinationDir::open_trusted_rooted_destination(
+            &configured_root,
+            Path::new("workflow-link/nested")
+        )
+        .is_err());
+        assert!(!outside.join("nested").exists());
+        assert!(fs::symlink_metadata(canonical_root.join("workflow-link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_iteration_streams_large_directory() {
+        const FILE_COUNT: usize = 1_024;
+
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        for index in 0..FILE_COUNT {
+            fs::write(source.join(format!("file-{index:04}")), b"content").unwrap();
+        }
+
+        let source = fs::canonicalize(source).unwrap();
+        let source = NoFollowDir::open_absolute(&source).unwrap();
+        let destination_root = NoFollowDestinationDir::open_trusted_rooted_destination(
+            &root,
+            Path::new("destination"),
+        )
+        .unwrap();
+        let mut copied = 0;
+        source
+            .for_each_entry_filtered(
+                |_| true,
+                |entry| {
+                    let NoFollowSource::File(file) = entry.source else {
+                        panic!("large flat fixture contains only files");
+                    };
+                    destination_root.clone_or_copy_file(&file, Path::new(&entry.name))?;
+                    copied += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(copied, FILE_COUNT);
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), FILE_COUNT);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_iteration_filters_before_opening_and_recurses() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("included"), b"included").unwrap();
+        fs::write(source.join("nested/child"), b"child").unwrap();
+        std::os::unix::fs::symlink("included", source.join(".excluded")).unwrap();
+
+        let source = fs::canonicalize(source).unwrap();
+        let source = NoFollowDir::open_absolute(&source).unwrap();
+        let mut paths = Vec::new();
+        source
+            .for_each_entry_filtered(
+                |name| !name.as_encoded_bytes().starts_with(b"."),
+                |entry| {
+                    match entry.source {
+                        NoFollowSource::File(_) => paths.push(PathBuf::from(entry.name)),
+                        NoFollowSource::Directory(directory) => {
+                            let parent = PathBuf::from(entry.name);
+                            directory.for_each_entry_filtered(
+                                |_| true,
+                                |entry| {
+                                    let NoFollowSource::File(_) = entry.source else {
+                                        panic!("nested fixture contains only one file");
+                                    };
+                                    paths.push(parent.join(entry.name));
+                                    Ok(())
+                                },
+                            )?;
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        paths.sort();
+        assert_eq!(
+            paths,
+            [PathBuf::from("included"), PathBuf::from("nested/child")]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn clone_or_copy_preserves_content_and_length() {
@@ -72,23 +1541,20 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(&source, b"reflink-or-copy").unwrap();
 
-        let probe = root.join("probe");
-        let reflink_capable = try_clone(&source, &probe).is_ok();
-        let _ = fs::remove_file(probe);
-        let (bytes, used_reflink) = clone_or_copy_with_method(&source, &destination).unwrap();
+        let source_file = open_regular_source(&source);
+        let destination_root =
+            NoFollowDestinationDir::open_trusted_rooted_destination(&root, Path::new("nested"))
+                .unwrap();
+        let bytes = destination_root
+            .clone_or_copy_file(&source_file, Path::new("destination"))
+            .unwrap();
         assert_eq!(bytes, 15);
-        if reflink_capable {
-            assert!(
-                used_reflink,
-                "capable filesystem did not use its clone path"
-            );
-        }
         assert_eq!(fs::read(&destination).unwrap(), b"reflink-or-copy");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn clone_or_copy_replaces_existing_destination() {
+    fn clone_or_copy_file_replaces_existing_destination() {
         let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
         let source = root.join("source");
         let destination = root.join("destination");
@@ -96,7 +1562,12 @@ mod tests {
         fs::write(&source, b"new").unwrap();
         fs::write(&destination, b"stale-long-value").unwrap();
 
-        clone_or_copy(&source, &destination).unwrap();
+        let source = open_regular_source(&source);
+        let destination_root =
+            NoFollowDestinationDir::open_trusted_rooted_destination(&root, Path::new(".")).unwrap();
+        destination_root
+            .clone_or_copy_file(&source, Path::new("destination"))
+            .unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"new");
         fs::remove_dir_all(root).unwrap();
     }

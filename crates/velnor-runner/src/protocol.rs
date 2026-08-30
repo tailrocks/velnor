@@ -4322,12 +4322,12 @@ fn write_artifact_zip_temp_file(
     finish_artifact_zip(zip, temp)
 }
 
-fn write_artifact_zip_from_paths_temp_file(
+fn write_artifact_zip_from_files_temp_file(
     path: std::path::PathBuf,
     files: &[ArtifactUploadFile],
     store_uncompressed: bool,
 ) -> Result<(ArtifactTempFile, u64, String)> {
-    use std::io::Read;
+    use std::io::{Read, Seek, SeekFrom};
 
     ensure_upload_file_count(files.len())?;
     let (temp, file) = open_artifact_temp_file(path).context("create artifact zip temp file")?;
@@ -4340,47 +4340,25 @@ fn write_artifact_zip_from_paths_temp_file(
     let options = zip::write::FileOptions::<()>::default().compression_method(method);
     let mut source_total = 0_u64;
     for source in files {
-        #[cfg(unix)]
-        let mut input = {
-            use std::os::unix::fs::OpenOptionsExt;
-
-            let input = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&source.source_path)
-                .with_context(|| {
-                    format!("open artifact source {}", source.source_path.display())
-                })?;
-            let metadata = input.metadata().with_context(|| {
-                format!(
-                    "stat opened artifact source {}",
-                    source.source_path.display()
-                )
-            })?;
-            if !metadata.is_file() {
-                bail!(
-                    "artifact source {} is not a regular file",
-                    source.source_path.display()
-                );
-            }
-            checked_upload_source_add(source_total, metadata.len())?;
-            input
-        };
-        #[cfg(not(unix))]
-        let mut input = {
-            let metadata = std::fs::metadata(&source.source_path).with_context(|| {
-                format!("stat artifact source {}", source.source_path.display())
-            })?;
-            if !metadata.is_file() {
-                bail!(
-                    "artifact source {} is not a regular file",
-                    source.source_path.display()
-                );
-            }
-            checked_upload_source_add(source_total, metadata.len())?;
-            std::fs::File::open(&source.source_path)
-                .with_context(|| format!("open artifact source {}", source.source_path.display()))?
-        };
+        let mut input = source.source.try_clone().with_context(|| {
+            format!("duplicate artifact source {}", source.source_path.display())
+        })?;
+        let metadata = input.metadata().with_context(|| {
+            format!(
+                "stat opened artifact source {}",
+                source.source_path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            bail!(
+                "artifact source {} is not a regular file",
+                source.source_path.display()
+            );
+        }
+        input
+            .seek(SeekFrom::Start(0))
+            .with_context(|| format!("rewind artifact source {}", source.source_path.display()))?;
+        checked_upload_source_add(source_total, metadata.len())?;
         zip.start_file(&source.archive_path, options)
             .context("zip start_file")?;
         let remaining = RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES - source_total;
@@ -4402,6 +4380,8 @@ fn finish_artifact_zip(
     zip: zip::ZipWriter<std::fs::File>,
     temp: ArtifactTempFile,
 ) -> Result<(ArtifactTempFile, u64, String)> {
+    use std::io::Seek;
+
     let file = zip.finish().context("zip finish")?;
     file.sync_all().context("sync artifact zip temp file")?;
     let zip_size = file
@@ -4415,9 +4395,18 @@ fn finish_artifact_zip(
         RESULTS_ARTIFACT_MAX_UPLOAD_ZIP_BYTES,
         "split the artifact into smaller uploads",
     )?;
-    drop(file);
-
-    let zip_hash = hash_artifact_file(temp.path())?;
+    let mut temp = temp;
+    temp.file = Some(file);
+    let zip_hash = hash_artifact_file(
+        temp.file
+            .as_mut()
+            .context("retain artifact zip temp file")?,
+    )?;
+    temp.file
+        .as_mut()
+        .context("retain artifact zip temp file")?
+        .seek(std::io::SeekFrom::Start(0))
+        .context("rewind artifact zip temp file after hashing")?;
     Ok((temp, zip_size, zip_hash))
 }
 
@@ -4444,10 +4433,11 @@ fn checked_upload_source_add(current: u64, additional: u64) -> Result<u64> {
     Ok(total)
 }
 
-fn hash_artifact_file(path: &std::path::Path) -> Result<String> {
-    use std::io::Read;
+fn hash_artifact_file(file: &mut std::fs::File) -> Result<String> {
+    use std::io::{Read, Seek};
 
-    let mut file = std::fs::File::open(path).context("open artifact zip for hashing")?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .context("rewind artifact zip for hashing")?;
     let mut hasher = sha2::Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -4490,17 +4480,23 @@ fn artifact_create_request(
 }
 
 #[derive(Debug)]
-struct ArtifactTempFile(std::path::PathBuf);
+struct ArtifactTempFile {
+    #[cfg(test)]
+    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
+}
 
+#[cfg(test)]
 impl ArtifactTempFile {
     fn path(&self) -> &std::path::Path {
-        &self.0
+        &self.path
     }
 }
 
 impl Drop for ArtifactTempFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        #[cfg(test)]
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -4523,12 +4519,22 @@ fn open_artifact_temp_file(
     // Acquire ownership atomically before constructing the cleanup guard.
     // A failed create_new must never allow Drop to remove another owner's file.
     let file = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .create_new(true)
         .truncate(true)
         .mode(0o600)
         .open(&path)?;
-    Ok((ArtifactTempFile(path), file))
+    #[cfg(not(test))]
+    std::fs::remove_file(&path)?;
+    Ok((
+        ArtifactTempFile {
+            #[cfg(test)]
+            path,
+            file: None,
+        },
+        file,
+    ))
 }
 
 fn results_service_post(
@@ -4608,9 +4614,10 @@ pub struct ArtifactUploadOptions {
 
 /// A file-backed artifact input. The upload path reads each source in bounded
 /// chunks, so artifact contents do not need to be materialized in memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ArtifactUploadFile {
     pub archive_path: String,
+    pub source: std::fs::File,
     pub source_path: std::path::PathBuf,
 }
 
@@ -4640,7 +4647,7 @@ pub fn upload_artifact_files_blocking(
     plan_id: &str,
     job_id: &str,
     name: &str,
-    files: &[ArtifactUploadFile],
+    files: Vec<ArtifactUploadFile>,
     options: ArtifactUploadOptions,
 ) -> Result<String> {
     upload_artifact_with_zip_builder(
@@ -4650,8 +4657,8 @@ pub fn upload_artifact_files_blocking(
         job_id,
         name,
         options,
-        |zip_path| {
-            write_artifact_zip_from_paths_temp_file(zip_path, files, options.store_uncompressed)
+        move |zip_path| {
+            write_artifact_zip_from_files_temp_file(zip_path, &files, options.store_uncompressed)
         },
     )
 }
@@ -4674,7 +4681,7 @@ fn upload_artifact_with_zip_builder(
     let base = results_service_url.as_str().trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
     let zip_path = tmp_dir.join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
-    let (zip_path, zip_size, zip_hash) = build_zip(zip_path)?;
+    let (mut zip_path, zip_size, zip_hash) = build_zip(zip_path)?;
 
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -4710,7 +4717,15 @@ fn upload_artifact_with_zip_builder(
 
     // 2. PUT the prepared mode-0600 temp archive without retaining a second
     // full archive in RAM.
-    let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
+    use std::io::Seek;
+
+    let mut zip_file = zip_path
+        .file
+        .take()
+        .context("take owned artifact zip temp file")?;
+    zip_file
+        .seek(std::io::SeekFrom::Start(0))
+        .context("rewind artifact zip temp file")?;
     let put_response = client
         .put(upload_url)
         .header("Content-Type", "application/zip")
@@ -4768,8 +4783,18 @@ pub struct ResultsArtifactFile {
 }
 
 impl ResultsArtifactFile {
+    #[cfg(test)]
     pub fn path(&self) -> &std::path::Path {
         self.temp.path()
+    }
+
+    pub(crate) fn file(&self) -> Result<std::fs::File> {
+        self.temp
+            .file
+            .as_ref()
+            .context("downloaded artifact file descriptor is unavailable")?
+            .try_clone()
+            .context("duplicate downloaded artifact file descriptor")
     }
 }
 
@@ -5043,7 +5068,7 @@ fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 }
 
 fn validate_zip_central_directory(
-    path: &std::path::Path,
+    file: &mut std::fs::File,
     artifact_name: &str,
 ) -> Result<Option<ZipCentralDirectoryMetadata>> {
     use std::io::{Read, Seek, SeekFrom};
@@ -5055,7 +5080,6 @@ fn validate_zip_central_directory(
     const MAX_ZIP_COMMENT_BYTES: u64 = u16::MAX as u64;
     const ZIP64_LOCATOR_BYTES: u64 = 20;
 
-    let mut file = std::fs::File::open(path).context("open ZIP for metadata preflight")?;
     let file_len = file
         .metadata()
         .context("stat ZIP for metadata preflight")?
@@ -5302,7 +5326,7 @@ fn download_artifacts_blocking_in_temp_dir(
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let (artifact_path, mut output_file) =
+        let (mut artifact_path, mut output_file) =
             open_artifact_temp_file(artifact_path).context("create artifact zip temp file")?;
         copy_artifact_response_bounded(
             &mut response,
@@ -5311,10 +5335,24 @@ fn download_artifacts_blocking_in_temp_dir(
             RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES,
         )
         .context("write downloaded artifact zip")?;
-        drop(output_file);
+        output_file
+            .sync_all()
+            .context("sync downloaded artifact zip")?;
+        artifact_path.file = Some(output_file);
         let is_zip = artifact_response_is_zip(content_type.as_deref(), signed_url.as_str());
-        validate_zip_central_directory(artifact_path.path(), artifact_name)?;
-        let archive_file = std::fs::File::open(artifact_path.path())?;
+        let mut validation_file = artifact_path
+            .file
+            .as_ref()
+            .context("retain downloaded artifact zip")?
+            .try_clone()
+            .context("duplicate downloaded artifact zip for metadata preflight")?;
+        validate_zip_central_directory(&mut validation_file, artifact_name)?;
+        let archive_file = artifact_path
+            .file
+            .as_ref()
+            .context("retain downloaded artifact zip")?
+            .try_clone()
+            .context("duplicate downloaded artifact zip for ZIP parsing")?;
         let mut archive = match zip::ZipArchive::new(archive_file) {
             Ok(archive) => archive,
             Err(err) => {
@@ -5326,7 +5364,11 @@ fn download_artifacts_blocking_in_temp_dir(
                 if is_zip {
                     bail!("artifact '{artifact_name}' is not a valid ZIP archive: {err}");
                 }
-                let raw_size = std::fs::metadata(artifact_path.path())
+                let raw_size = artifact_path
+                    .file
+                    .as_ref()
+                    .context("retain downloaded raw artifact")?
+                    .metadata()
                     .context("stat raw artifact")?
                     .len();
                 ensure_artifact_size_limit(
@@ -5393,7 +5435,7 @@ fn download_artifacts_blocking_in_temp_dir(
                 "velnor-artifact-member-{}.tmp",
                 uuid::Uuid::new_v4()
             ));
-            let (member_temp, mut member_file) =
+            let (mut member_temp, mut member_file) =
                 open_artifact_temp_file(member_path).context("create extracted artifact file")?;
             let content_size = copy_zip_entry_bounded(
                 &mut entry,
@@ -5421,6 +5463,7 @@ fn download_artifacts_blocking_in_temp_dir(
                 RESULTS_ARTIFACT_MAX_TOTAL_RETURNED_BYTES,
                 "narrow the artifact name or pattern selection",
             )?;
+            member_temp.file = Some(member_file);
             files.push(ResultsArtifactFile {
                 relative_path: path,
                 temp: member_temp,
@@ -5708,10 +5751,11 @@ mod tests {
         ));
         let source = ArtifactUploadFile {
             archive_path: "dist/output.txt".to_string(),
+            source: std::fs::File::open(&source_path).unwrap(),
             source_path: source_path.clone(),
         };
         let (zip_temp, _, _) =
-            write_artifact_zip_from_paths_temp_file(zip_path, &[source], false).unwrap();
+            write_artifact_zip_from_files_temp_file(zip_path, &[source], false).unwrap();
         let bytes = std::fs::read(zip_temp.path()).unwrap();
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut entry = archive.by_name("dist/output.txt").unwrap();
@@ -5724,27 +5768,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn artifact_path_writer_rejects_symlink_at_descriptor_open() {
-        let root = std::env::temp_dir().join(format!("velnor-artifact-symlink-{}", Uuid::new_v4()));
+    fn artifact_path_writer_rejects_non_regular_descriptor() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-artifact-non-regular-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let target = root.join("target.txt");
-        let source = root.join("source.txt");
         let zip_path = root.join("artifact.zip");
-        std::fs::write(&target, b"must not upload").unwrap();
-        std::os::unix::fs::symlink(&target, &source).unwrap();
+        let source = root.join("source.txt");
 
-        let error = write_artifact_zip_from_paths_temp_file(
+        let error = write_artifact_zip_from_files_temp_file(
             zip_path,
-            &[ArtifactUploadFile {
+            vec![ArtifactUploadFile {
                 archive_path: "source.txt".to_string(),
+                source: std::fs::File::open(&root).unwrap(),
                 source_path: source,
-            }],
+            }]
+            .as_slice(),
             false,
         )
         .unwrap_err();
 
         assert!(
-            error.to_string().contains("open artifact source"),
+            error.to_string().contains("not a regular file"),
             "{error:#}"
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -5796,7 +5840,8 @@ mod tests {
         bytes.extend_from_slice(&eocd);
         let temp = write_artifact_temp_file(path, &bytes).unwrap();
 
-        let error = validate_zip_central_directory(temp.path(), "release").unwrap_err();
+        let mut file = std::fs::File::open(temp.path()).unwrap();
+        let error = validate_zip_central_directory(&mut file, "release").unwrap_err();
         assert!(error.to_string().contains("100001"), "{error:#}");
     }
 
@@ -6013,8 +6058,9 @@ mod tests {
             "plan",
             "job",
             "release",
-            &[ArtifactUploadFile {
+            vec![ArtifactUploadFile {
                 archive_path: "dist/output.txt".to_string(),
+                source: std::fs::File::open(".").unwrap(),
                 source_path: missing_source,
             }],
             ArtifactUploadOptions::default(),

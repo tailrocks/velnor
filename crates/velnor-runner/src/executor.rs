@@ -22,8 +22,9 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    ffi::OsString,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -49,6 +50,10 @@ const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
 const RESULTS_ARTIFACT_MAX_UPLOAD_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_UPLOAD_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_TOOL_PREP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const PREPARED_ARTIFACT_MAX_RESPONSE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const PREPARED_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+const PREPARED_ARTIFACT_MAX_ZIP_MEMBERS: usize = 100_000;
+const PREPARED_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -4935,9 +4940,7 @@ fn restore_cache_paths(
         let Some(destination) = resolve_cache_path(state, path) else {
             continue;
         };
-        fs::create_dir_all(&destination)
-            .with_context(|| format!("create cache restore path {}", destination.display()))?;
-        copy_dir_contents(&source, &destination)?;
+        restore_cache_dir_contents(state, &source, &destination)?;
     }
     Ok(())
 }
@@ -4961,7 +4964,7 @@ enum CacheGlobEntryKind {
     File,
 }
 
-type CacheGlobSource = (PathBuf, PathBuf, CacheGlobEntryKind);
+type CacheGlobSource = (PathBuf, CacheGlobEntryKind);
 type CacheGlobSources = Vec<CacheGlobSource>;
 
 fn cache_entry_complete_for_paths(path: &Path, paths: &str) -> bool {
@@ -4999,91 +5002,24 @@ fn cache_glob_manifest_is_valid(cache_entry: &Path, index: usize) -> bool {
     })
 }
 
-fn canonicalize_cache_path_with_missing_tail(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute() {
-        bail!("cache glob root must be absolute: {}", path.display());
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        bail!(
-            "cache glob root contains a parent traversal: {}",
-            path.display()
-        );
-    }
-
-    let mut cursor = path.to_path_buf();
-    let mut missing = Vec::new();
-    loop {
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    bail!("cache glob root contains a symlink: {}", cursor.display());
-                }
-                let mut canonical = fs::canonicalize(&cursor).with_context(|| {
-                    format!("canonicalize cache glob root {}", cursor.display())
-                })?;
-                for component in missing.iter().rev() {
-                    canonical.push(component);
-                }
-                return Ok(canonical);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let Some(name) = cursor.file_name() else {
-                    bail!(
-                        "cache glob root has no existing ancestor: {}",
-                        path.display()
-                    );
-                };
-                missing.push(name.to_owned());
-                if !cursor.pop() {
-                    bail!(
-                        "cache glob root has no existing ancestor: {}",
-                        path.display()
-                    );
-                }
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("inspect cache glob root {}", cursor.display()));
-            }
-        }
-    }
-}
-
 fn cache_glob_base_and_pattern(
     state: &JobExecutionState,
     path: &str,
 ) -> Result<Option<(PathBuf, String)>> {
-    let Some((base, pattern)) = artifact_glob_base_and_pattern(state, path) else {
+    let resolved = artifact_glob_base_and_pattern(state, path).with_context(|| {
+        format!("cache glob '{path}' resolves outside Velnor-mapped job storage")
+    })?;
+    let Some((base, pattern)) = resolved else {
         bail!("cache glob '{path}' cannot resolve to Velnor-mapped job storage");
     };
 
-    let canonical_base = canonicalize_cache_path_with_missing_tail(&base)?;
-    let mut mapped = false;
-    for root in [
-        state.workspace_host.as_deref(),
-        state.temp_host.as_deref(),
-        state.cargo_target_host.as_deref(),
-        state_home_host(state).as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let canonical_root = canonicalize_cache_path_with_missing_tail(root)?;
-        if canonical_base == canonical_root || canonical_base.starts_with(&canonical_root) {
-            mapped = true;
-            break;
-        }
-    }
-    if !mapped {
-        bail!(
+    trusted_job_destination(state, &base).with_context(|| {
+        format!(
             "cache glob '{path}' resolves outside Velnor-mapped job storage: {}",
-            canonical_base.display()
-        );
-    }
-    Ok(Some((canonical_base, pattern)))
+            base.display()
+        )
+    })?;
+    Ok(Some((base, pattern)))
 }
 
 fn validate_cache_glob_relative(relative: &str) -> Result<PathBuf> {
@@ -5103,60 +5039,42 @@ fn validate_cache_glob_relative(relative: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn safe_cache_glob_join(root: &Path, relative: &str) -> Result<PathBuf> {
-    let relative = validate_cache_glob_relative(relative)?;
-    if let Ok(metadata) = fs::symlink_metadata(root) {
-        if metadata.file_type().is_symlink() {
-            bail!("cache glob root is a symlink: {}", root.display());
-        }
-    }
-    let mut current = root.to_path_buf();
-    let mut components = relative.components().peekable();
-    while let Some(component) = components.next() {
-        current.push(component);
-        if let Ok(metadata) = fs::symlink_metadata(&current) {
-            if metadata.file_type().is_symlink() {
-                bail!("cache glob path contains a symlink: {}", current.display());
-            }
-            if components.peek().is_some() && !metadata.file_type().is_dir() {
-                bail!(
-                    "cache glob path contains a non-directory parent: {}",
-                    current.display()
-                );
-            }
-        }
-    }
-    Ok(current)
-}
-
 fn cache_glob_sources(
     state: &JobExecutionState,
     path: &str,
-) -> Result<Option<(PathBuf, CacheGlobSources)>> {
+) -> Result<
+    Option<(
+        PathBuf,
+        Option<crate::fs_copy::NoFollowDir>,
+        CacheGlobSources,
+    )>,
+> {
     let Some((base, pattern)) = cache_glob_base_and_pattern(state, path)? else {
         return Ok(None);
     };
     if !base.exists() {
-        return Ok(Some((base, Vec::new())));
+        return Ok(Some((base, None, Vec::new())));
     }
+    let directory = crate::fs_copy::NoFollowDir::open_absolute(&base)
+        .with_context(|| format!("securely open cache glob root {}", base.display()))?;
     let matcher = Glob::new(&normalize_glob_pattern(&pattern))?.compile_matcher();
     let mut sources = Vec::new();
-    collect_cache_glob_matches(&base, &base, &matcher, &mut sources)?;
+    collect_cache_glob_matches(&directory, &base, Path::new(""), &matcher, &mut sources)?;
     sources.sort_by(|left, right| left.0.cmp(&right.0));
     sources.dedup_by(|left, right| left.0 == right.0);
 
     // A matching directory contains every matching descendant. Keep only the
     // shallowest roots so one glob cannot publish duplicate overlapping trees.
     let mut roots = Vec::with_capacity(sources.len());
-    for (source, relative, kind) in sources {
-        if roots.iter().any(|(root, _, root_kind)| {
-            *root_kind == CacheGlobEntryKind::Directory && source.starts_with(root)
+    for (relative, kind) in sources {
+        if roots.iter().any(|(root, root_kind)| {
+            *root_kind == CacheGlobEntryKind::Directory && relative.starts_with(root)
         }) {
             continue;
         }
-        roots.push((source, relative, kind));
+        roots.push((relative, kind));
     }
-    Ok(Some((base, roots)))
+    Ok(Some((base, Some(directory), roots)))
 }
 
 fn cache_glob_source_overlaps_persistent_exact(
@@ -5198,47 +5116,44 @@ fn workspace_target_relative(path: &str) -> Option<PathBuf> {
 }
 
 fn collect_cache_glob_matches(
+    current: &crate::fs_copy::NoFollowDir,
     root: &Path,
-    current: &Path,
+    current_relative: &Path,
     matcher: &globset::GlobMatcher,
-    matches: &mut Vec<(PathBuf, PathBuf, CacheGlobEntryKind)>,
+    matches: &mut CacheGlobSources,
 ) -> Result<()> {
-    for entry in fs::read_dir(current).with_context(|| format!("read {}", current.display()))? {
-        let entry = entry?;
-        let source = entry.path();
-        let relative = source
-            .strip_prefix(root)
-            .with_context(|| format!("strip cache glob root from {}", source.display()))?
-            .to_path_buf();
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            // Repository symlinks are not needed for a cache optimization and
-            // must never be recreated from untrusted cache content.
-            continue;
-        }
-        let kind = if file_type.is_dir() {
-            CacheGlobEntryKind::Directory
-        } else if file_type.is_file() {
-            CacheGlobEntryKind::File
-        } else {
-            bail!(
-                "cache glob contains unsupported file type at {}",
-                source.display()
-            );
-        };
-        let matched = matcher.is_match(&relative);
-        if matched {
-            matches.push((source.clone(), relative, kind));
-        }
-        // A matched directory is already a complete restore root. Do not
-        // descend into it looking for overlapping matches; this keeps the
-        // canonical `**/target` and `**/node_modules` scans bounded by the
-        // directory roots they will copy.
-        if matches!(kind, CacheGlobEntryKind::Directory) && !matched {
-            collect_cache_glob_matches(root, &source, matcher, matches)?;
-        }
-    }
-    Ok(())
+    let current_path = root.join(current_relative);
+    current.for_each_entry_filtered(
+        |name| cache_source_entry_is_not_symlink(&current_path, name),
+        |entry| {
+            let relative = current_relative.join(&entry.name);
+            let matched = matcher.is_match(&relative);
+            match entry.source {
+                crate::fs_copy::NoFollowSource::Directory(directory) => {
+                    if matched {
+                        matches.push((relative, CacheGlobEntryKind::Directory));
+                    } else {
+                        // A matched directory is already a complete restore
+                        // root. Do not scan its descendants for overlapping
+                        // matches.
+                        collect_cache_glob_matches(&directory, root, &relative, matcher, matches)?;
+                    }
+                }
+                crate::fs_copy::NoFollowSource::File(_) => {
+                    if matched {
+                        matches.push((relative, CacheGlobEntryKind::File));
+                    }
+                }
+            }
+            Ok(())
+        },
+    )
+}
+
+fn cache_source_entry_is_not_symlink(directory: &Path, name: &std::ffi::OsStr) -> bool {
+    fs::symlink_metadata(directory.join(name))
+        .map(|metadata| !metadata.file_type().is_symlink())
+        .unwrap_or(true)
 }
 
 fn restore_cache_glob_path(
@@ -5268,6 +5183,16 @@ fn restore_cache_glob_path(
         );
     }
 
+    let payload = index_dir.join("payload");
+    let payload_directory = if manifest.entries.is_empty() {
+        None
+    } else {
+        Some(
+            crate::fs_copy::NoFollowDir::open_absolute(&payload).with_context(|| {
+                format!("securely open cache glob payload {}", payload.display())
+            })?,
+        )
+    };
     let mut seen = BTreeSet::new();
     let mut validated = Vec::with_capacity(manifest.entries.len());
     for entry in manifest.entries {
@@ -5278,8 +5203,8 @@ fn restore_cache_glob_path(
                 entry.relative
             );
         }
-        let source = safe_cache_glob_join(&index_dir.join("payload"), &entry.relative)?;
-        let destination = safe_cache_glob_join(&base, &entry.relative)?;
+        let source_path = payload.join(&relative);
+        let destination = base.join(&relative);
         if cache_glob_source_overlaps_persistent_exact(
             state,
             declared_paths,
@@ -5288,51 +5213,76 @@ fn restore_cache_glob_path(
         ) {
             continue;
         }
-        let source_type = fs::symlink_metadata(&source).with_context(|| {
-            format!(
-                "read cache glob payload for '{}': {}",
-                entry.relative,
-                source.display()
+        let source = payload_directory
+            .as_ref()
+            .context("cache glob manifest has entries but no payload directory")?
+            .open_source(&relative)?
+            .with_context(|| {
+                format!(
+                    "cache glob payload is missing for '{}': {}",
+                    entry.relative,
+                    source_path.display()
+                )
+            })?;
+        let kind_matches = matches!(
+            (entry.kind, &source),
+            (
+                CacheGlobEntryKind::Directory,
+                crate::fs_copy::NoFollowSource::Directory(_)
+            ) | (
+                CacheGlobEntryKind::File,
+                crate::fs_copy::NoFollowSource::File(_)
             )
-        })?;
-        if source_type.file_type().is_symlink() {
-            bail!("cache glob payload is a symlink for '{}'", entry.relative);
-        }
-        let valid_kind = match entry.kind {
-            CacheGlobEntryKind::Directory => source_type.file_type().is_dir(),
-            CacheGlobEntryKind::File => source_type.file_type().is_file(),
-        };
-        if !valid_kind {
+        );
+        if !kind_matches {
             bail!(
                 "cache glob manifest kind does not match payload for '{}'",
                 entry.relative
             );
         }
-        validated.push((source, destination, entry.kind));
+        validated.push((entry.kind, source_path, relative));
     }
-    for (source, destination, kind) in validated {
-        match kind {
-            CacheGlobEntryKind::Directory => {
-                fs::create_dir_all(&destination).with_context(|| {
-                    format!("create cache glob restore path {}", destination.display())
-                })?;
-                copy_cache_glob_dir_contents(&source, &destination)?;
-            }
-            CacheGlobEntryKind::File => {
-                let parent = destination.parent().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "cache glob destination has no parent: {}",
-                        destination.display()
-                    )
-                })?;
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("create cache glob restore path {}", parent.display())
-                })?;
-                crate::fs_copy::clone_or_copy(&source, &destination).with_context(|| {
-                    format!("restore cache glob file {}", destination.display())
-                })?;
-            }
+    if validated.is_empty() {
+        return Ok(());
+    }
+    let destination_scope = trusted_job_destination(state, &base)?;
+    let destination_root = destination_scope
+        .open_relative_directory(Path::new(""))
+        .with_context(|| format!("securely open cache glob restore root {}", base.display()))?;
+    for (kind, source_path, relative) in validated {
+        let source = payload_directory
+            .as_ref()
+            .context("cache glob manifest has entries but no payload directory")?
+            .open_source(&relative)?
+            .with_context(|| {
+                format!(
+                    "cache glob payload disappeared before restore: {}",
+                    source_path.display()
+                )
+            })?;
+        let kind_matches = matches!(
+            (kind, &source),
+            (
+                CacheGlobEntryKind::Directory,
+                crate::fs_copy::NoFollowSource::Directory(_)
+            ) | (
+                CacheGlobEntryKind::File,
+                crate::fs_copy::NoFollowSource::File(_)
+            )
+        );
+        if !kind_matches {
+            bail!(
+                "cache glob source changed type before restore: {}",
+                source_path.display()
+            );
         }
+        copy_opened_cache_restore_source(
+            source,
+            &source_path,
+            &destination_root,
+            &destination_scope,
+            &relative,
+        )?;
     }
     Ok(())
 }
@@ -5526,11 +5476,25 @@ fn save_cache_result(
         }
         let target = staging_dir.join(index.to_string());
         if has_glob_pattern(path) {
-            let Some((_base, sources)) = cache_glob_sources(state, path)? else {
+            let Some((base, base_directory, sources)) = cache_glob_sources(state, path)? else {
                 continue;
             };
             let mut entries = Vec::new();
-            for (source, relative, kind) in sources {
+            let destination_root = if sources.is_empty() {
+                None
+            } else {
+                Some(
+                    crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+                        &staging_dir,
+                        Path::new(&format!("{index}/payload")),
+                    )
+                    .with_context(|| {
+                        format!("create cache glob staging directory {}", target.display())
+                    })?,
+                )
+            };
+            for (relative, kind) in sources {
+                let source = base.join(&relative);
                 if cache_glob_source_overlaps_persistent_exact(
                     state,
                     &declared_paths,
@@ -5543,50 +5507,49 @@ fn save_cache_result(
                     anyhow::anyhow!("cache glob path is not valid UTF-8: {}", relative.display())
                 })?;
                 validate_cache_glob_relative(relative_string)?;
-                let destination = safe_cache_glob_join(&target.join("payload"), relative_string)?;
-                match kind {
-                    CacheGlobEntryKind::Directory => {
-                        fs::create_dir_all(&destination).with_context(|| {
-                            format!("create cache glob entry {}", destination.display())
-                        })?;
-                        if let Err(error) = copy_cache_glob_dir_contents(&source, &destination) {
-                            fs::remove_dir_all(&staging_dir).ok();
-                            return Ok(cache_save_step_result(
-                                key,
-                                SaveOutcome::Contended {
-                                    phase: SaveContentionPhase::Copy,
-                                    detail: format!("{error:#}"),
-                                },
-                                SaveTiming {
-                                    lock_wait_ms,
-                                    copy_ms: copy_start.elapsed().as_millis(),
-                                    total_ms: t0.elapsed().as_millis(),
-                                },
-                            ));
-                        }
+                let copy_result = (|| {
+                    let directory = base_directory
+                        .as_ref()
+                        .context("cache glob root disappeared before secure copy")?;
+                    let opened = directory.open_source(&relative)?.with_context(|| {
+                        format!("cache glob source disappeared: {}", source.display())
+                    })?;
+                    let kind_matches = matches!(
+                        (kind, &opened),
+                        (
+                            CacheGlobEntryKind::Directory,
+                            crate::fs_copy::NoFollowSource::Directory(_)
+                        ) | (
+                            CacheGlobEntryKind::File,
+                            crate::fs_copy::NoFollowSource::File(_)
+                        )
+                    );
+                    if !kind_matches {
+                        bail!("cache glob source changed type: {}", source.display());
                     }
-                    CacheGlobEntryKind::File => {
-                        if let Some(parent) = destination.parent() {
-                            fs::create_dir_all(parent).with_context(|| {
-                                format!("create cache glob entry {}", parent.display())
-                            })?;
-                        }
-                        if let Err(error) = crate::fs_copy::clone_or_copy(&source, &destination) {
-                            fs::remove_dir_all(&staging_dir).ok();
-                            return Ok(cache_save_step_result(
-                                key,
-                                SaveOutcome::Contended {
-                                    phase: SaveContentionPhase::Copy,
-                                    detail: format!("{error:#}"),
-                                },
-                                SaveTiming {
-                                    lock_wait_ms,
-                                    copy_ms: copy_start.elapsed().as_millis(),
-                                    total_ms: t0.elapsed().as_millis(),
-                                },
-                            ));
-                        }
-                    }
+                    copy_opened_cache_glob_source(
+                        opened,
+                        &source,
+                        destination_root
+                            .as_ref()
+                            .context("cache glob destination root disappeared")?,
+                        &validate_cache_glob_relative(relative_string)?,
+                    )
+                })();
+                if let Err(error) = copy_result {
+                    fs::remove_dir_all(&staging_dir).ok();
+                    return Ok(cache_save_step_result(
+                        key,
+                        SaveOutcome::Contended {
+                            phase: SaveContentionPhase::Copy,
+                            detail: format!("{error:#}"),
+                        },
+                        SaveTiming {
+                            lock_wait_ms,
+                            copy_ms: copy_start.elapsed().as_millis(),
+                            total_ms: t0.elapsed().as_millis(),
+                        },
+                    ));
                 }
                 entries.push(CacheGlobManifestEntry {
                     relative: relative_string.to_owned(),
@@ -5900,6 +5863,7 @@ const RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS: ArtifactUploadSourceLimits =
 #[derive(Debug)]
 struct ArtifactUploadSource {
     path: PathBuf,
+    file: fs::File,
     file_name: String,
     metadata_bytes: u64,
 }
@@ -5911,10 +5875,18 @@ fn artifact_upload_sources(
 ) -> Result<Vec<ArtifactUploadSource>> {
     let mut sources = Vec::new();
     let mut total_bytes = 0_u64;
+    let root_directory = crate::fs_copy::NoFollowDir::open_trusted_configured_root(artifact_dir)
+        .with_context(|| {
+            format!(
+                "enumerate local files for Results Service artifact '{artifact_name}' in {}",
+                artifact_dir.display()
+            )
+        })?;
     collect_artifact_upload_sources(
         artifact_name,
+        &root_directory,
         artifact_dir,
-        artifact_dir,
+        Path::new(""),
         limits,
         &mut sources,
         &mut total_bytes,
@@ -5924,118 +5896,100 @@ fn artifact_upload_sources(
 
 fn collect_artifact_upload_sources(
     artifact_name: &str,
+    current_directory: &crate::fs_copy::NoFollowDir,
     root: &Path,
-    current: &Path,
+    current_relative: &Path,
     limits: ArtifactUploadSourceLimits,
     sources: &mut Vec<ArtifactUploadSource>,
     total_bytes: &mut u64,
 ) -> Result<()> {
-    let entries = fs::read_dir(current).with_context(|| {
-        format!(
-            "enumerate local files for Results Service artifact '{artifact_name}' in {}",
-            current.display()
-        )
-    })?;
-    for entry in entries {
-        let entry = entry.with_context(|| {
-            format!(
-                "enumerate local files for Results Service artifact '{artifact_name}' in {}",
-                current.display()
-            )
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().with_context(|| {
-            format!(
-                "read file type for Results Service artifact '{artifact_name}' source {}",
-                path.display()
-            )
-        })?;
-        if file_type.is_symlink() {
-            bail!(
-                "Results Service artifact '{artifact_name}' source {} is a symlink",
-                path.display()
-            );
-        }
-        if file_type.is_dir() {
-            collect_artifact_upload_sources(
-                artifact_name,
-                root,
-                &path,
-                limits,
-                sources,
-                total_bytes,
-            )?;
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path).with_context(|| {
-            format!(
-                "read metadata for Results Service artifact '{artifact_name}' source {}",
-                path.display()
-            )
-        })?;
-        if !metadata.is_file() {
-            continue;
-        }
+    current_directory.for_each_entry_filtered(
+        |_| true,
+        |entry| {
+            let relative = current_relative.join(&entry.name);
+            let path = root.join(&relative);
+            match entry.source {
+                crate::fs_copy::NoFollowSource::Directory(directory) => {
+                    collect_artifact_upload_sources(
+                        artifact_name,
+                        &directory,
+                        root,
+                        &relative,
+                        limits,
+                        sources,
+                        total_bytes,
+                    )?;
+                    return Ok(());
+                }
+                crate::fs_copy::NoFollowSource::File(file) => {
+                    let metadata = file.metadata().with_context(|| {
+                        format!(
+                            "read metadata for Results Service artifact '{artifact_name}' source {}",
+                            path.display()
+                        )
+                    })?;
+                    if !metadata.is_file() {
+                        return Ok(());
+                    }
 
-        let file_count = sources
-            .len()
-            .checked_add(1)
-            .context("Results Service artifact upload file count overflowed")?;
-        if file_count > limits.files {
-            bail!(
-                "Results Service artifact '{artifact_name}' contains {file_count} files, exceeding the {}-file upload limit; split it into artifacts with fewer files",
-                limits.files
-            );
-        }
+                    let file_count = sources
+                        .len()
+                        .checked_add(1)
+                        .context("Results Service artifact upload file count overflowed")?;
+                    if file_count > limits.files {
+                        bail!(
+                            "Results Service artifact '{artifact_name}' contains {file_count} files, exceeding the {}-file upload limit; split it into artifacts with fewer files",
+                            limits.files
+                        );
+                    }
 
-        let file_bytes = metadata.len();
-        if file_bytes > limits.file_bytes {
-            bail!(
-                "Results Service artifact '{artifact_name}' source {} is {file_bytes} bytes, exceeding the {}-byte per-file upload limit; split or reduce this file",
-                path.display(),
-                limits.file_bytes
-            );
-        }
-        *total_bytes = total_bytes.checked_add(file_bytes).with_context(|| {
-            format!(
-                "Results Service artifact '{artifact_name}' source byte count overflowed while adding {}",
-                path.display()
-            )
-        })?;
-        if *total_bytes > limits.total_bytes {
-            bail!(
-                "Results Service artifact '{artifact_name}' sources total {total_bytes} bytes, exceeding the {}-byte upload limit; split them into smaller artifacts",
-                limits.total_bytes
-            );
-        }
+                    let file_bytes = metadata.len();
+                    if file_bytes > limits.file_bytes {
+                        bail!(
+                            "Results Service artifact '{artifact_name}' source {} is {file_bytes} bytes, exceeding the {}-byte per-file upload limit; split or reduce this file",
+                            path.display(),
+                            limits.file_bytes
+                        );
+                    }
+                    *total_bytes = total_bytes.checked_add(file_bytes).with_context(|| {
+                        format!(
+                            "Results Service artifact '{artifact_name}' source byte count overflowed while adding {}",
+                            path.display()
+                        )
+                    })?;
+                    if *total_bytes > limits.total_bytes {
+                        bail!(
+                            "Results Service artifact '{artifact_name}' sources total {total_bytes} bytes, exceeding the {}-byte upload limit; split them into smaller artifacts",
+                            limits.total_bytes
+                        );
+                    }
 
-        let file_name = path
-            .strip_prefix(root)
-            .ok()
-            .and_then(|relative| {
-                relative
-                    .components()
-                    .map(|component| match component {
-                        std::path::Component::Normal(name) => name.to_str(),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>()
-            })
-            .map(|components| components.join("/"))
-            .filter(|name| !name.is_empty())
-            .with_context(|| {
-                format!(
-                    "Results Service artifact '{artifact_name}' source {} has a non-UTF-8 or unsafe relative file name",
-                    path.display()
-                )
-            })?;
-        sources.push(ArtifactUploadSource {
-            path,
-            file_name,
-            metadata_bytes: file_bytes,
-        });
-    }
-    Ok(())
+                    let file_name = relative
+                        .components()
+                        .map(|component| match component {
+                            std::path::Component::Normal(name) => name.to_str(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .map(|components| components.join("/"))
+                        .filter(|name| !name.is_empty())
+                        .with_context(|| {
+                            format!(
+                                "Results Service artifact '{artifact_name}' source {} has a non-UTF-8 or unsafe relative file name",
+                                path.display()
+                            )
+                        })?;
+                    sources.push(ArtifactUploadSource {
+                        path,
+                        file,
+                        file_name,
+                        metadata_bytes: file_bytes,
+                    });
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 fn read_artifact_upload_sources(
@@ -6046,7 +6000,20 @@ fn read_artifact_upload_sources(
     let mut files = Vec::with_capacity(sources.len());
     let mut total_bytes = 0_u64;
     for source in sources {
-        let content = fs::read(&source.path).with_context(|| {
+        let mut file = source.file.try_clone().with_context(|| {
+            format!(
+                "duplicate Results Service artifact '{artifact_name}' source {}",
+                source.path.display()
+            )
+        })?;
+        file.seek(SeekFrom::Start(0)).with_context(|| {
+            format!(
+                "rewind Results Service artifact '{artifact_name}' source {}",
+                source.path.display()
+            )
+        })?;
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).with_context(|| {
             format!(
                 "read Results Service artifact '{artifact_name}' source {}",
                 source.path.display()
@@ -6106,6 +6073,16 @@ fn native_upload_artifact(
             .get("GITHUB_RETENTION_DAYS")
             .map(String::as_str),
     );
+    let paths = artifact_paths(&path_input);
+    let validated_paths = paths
+        .iter()
+        .map(|path| validate_artifact_input_path(path))
+        .collect::<Result<Vec<_>>>()?;
+    let mut sources = Vec::new();
+    for path in validated_paths {
+        sources.extend(resolve_artifact_sources(state, path)?);
+    }
+
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
     if artifact_dir.exists() {
         // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
@@ -6115,18 +6092,27 @@ fn native_upload_artifact(
     }
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("create artifact directory {}", artifact_dir.display()))?;
+    let artifact_destination =
+        crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+            &artifact_dir,
+            Path::new(""),
+        )
+        .with_context(|| {
+            format!(
+                "securely open artifact destination without following symlinks: {}",
+                artifact_dir.display()
+            )
+        })?;
 
     let mut uploaded_count = 0_usize;
-    for path in artifact_paths(&path_input) {
-        for source in resolve_artifact_sources(state, &path)? {
-            if !include_hidden_files && artifact_source_is_hidden(state, &source) {
-                continue;
-            }
-            copy_artifact_source(&source, &artifact_dir, include_hidden_files)?;
-            uploaded_count = uploaded_count
-                .checked_add(1)
-                .context("uploaded artifact path count overflowed")?;
+    for source in sources {
+        if !include_hidden_files && artifact_source_is_hidden(state, &source.path) {
+            continue;
         }
+        copy_artifact_source(&source, &artifact_destination, include_hidden_files)?;
+        uploaded_count = uploaded_count
+            .checked_add(1)
+            .context("uploaded artifact path count overflowed")?;
     }
 
     if uploaded_count == 0 {
@@ -6174,6 +6160,7 @@ fn native_upload_artifact(
             .into_iter()
             .map(|source| crate::protocol::ArtifactUploadFile {
                 archive_path: source.file_name,
+                source: source.file,
                 source_path: source.path,
             })
             .collect::<Vec<_>>();
@@ -6184,7 +6171,7 @@ fn native_upload_artifact(
                     &plan_id,
                     &job_id,
                     &name,
-                    &zip_files,
+                    zip_files,
                     crate::protocol::ArtifactUploadOptions {
                         store_uncompressed,
                         retention_days,
@@ -6258,8 +6245,15 @@ fn native_download_artifact(
     let merge_multiple = input_truthy(&native_input(action, &action_state, "merge-multiple"));
     let destination = resolve_host_path(state, &destination_input)
         .ok_or_else(|| anyhow::anyhow!("download-artifact requires a workspace or temp path"))?;
-    fs::create_dir_all(&destination)
-        .with_context(|| format!("create artifact download dir {}", destination.display()))?;
+    let destination_scope = trusted_job_destination(state, &destination)?;
+    let destination_root = destination_scope
+        .open_relative_directory(Path::new(""))
+        .with_context(|| {
+            format!(
+                "securely open artifact download dir {}",
+                destination.display()
+            )
+        })?;
 
     let downloaded_count = if let Some(runtime_token) = action_state
         .env
@@ -6285,24 +6279,22 @@ fn native_download_artifact(
             &pattern,
         )?;
         for artifact in &selected {
-            let target = if merge_multiple || !name.is_empty() {
-                destination.clone()
+            let target_relative = if merge_multiple || !name.is_empty() {
+                PathBuf::new()
             } else {
-                destination.join(&artifact.name)
+                PathBuf::from(&artifact.name)
             };
             for file in &artifact.files {
-                let output = target.join(&file.relative_path);
-                if let Some(parent) = output.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("create artifact target {}", parent.display()))?;
-                }
-                let mut input = fs::File::open(file.path()).with_context(|| {
-                    format!("open downloaded artifact {}", file.path().display())
+                let output_relative = target_relative.join(&file.relative_path);
+                let input = file.file().with_context(|| {
+                    format!("open downloaded artifact {}", file.relative_path.display())
                 })?;
-                let mut output_file = fs::File::create(&output)
-                    .with_context(|| format!("create artifact file {}", output.display()))?;
-                std::io::copy(&mut input, &mut output_file)
-                    .with_context(|| format!("write artifact file {}", output.display()))?;
+                copy_opened_artifact_download_file(
+                    &input,
+                    &destination_root,
+                    &destination_scope,
+                    &output_relative,
+                )?;
             }
         }
         selected.len()
@@ -6312,14 +6304,25 @@ fn native_download_artifact(
         let store = artifact_store_dir(state)?;
         let artifacts = matching_artifacts(&store, &name, &pattern)?;
         for (artifact_name, artifact_dir) in &artifacts {
-            let target = if merge_multiple || !name.is_empty() {
-                destination.clone()
+            let target_relative = if merge_multiple || !name.is_empty() {
+                PathBuf::new()
             } else {
-                destination.join(artifact_name)
+                PathBuf::from(artifact_name)
             };
-            fs::create_dir_all(&target)
-                .with_context(|| format!("create artifact target {}", target.display()))?;
-            copy_artifact_download_contents(artifact_dir, &target)?;
+            let source =
+                crate::fs_copy::NoFollowDir::open_absolute(artifact_dir).with_context(|| {
+                    format!(
+                        "securely open artifact download source {}",
+                        artifact_dir.display()
+                    )
+                })?;
+            copy_artifact_download_contents(
+                &source,
+                artifact_dir,
+                &destination_root,
+                &destination_scope,
+                &target_relative,
+            )?;
         }
         artifacts.len()
     };
@@ -6355,6 +6358,20 @@ fn native_upload_pages_artifact(
     let source_input = native_input_or(&action_state, action, "path", "_site/");
     let source = resolve_host_path(state, &source_input)
         .context("actions/upload-pages-artifact requires a workspace path")?;
+    let workspace = state
+        .workspace_host
+        .as_deref()
+        .context("actions/upload-pages-artifact requires a workspace path")?;
+    let workspace = fs::canonicalize(workspace)
+        .with_context(|| format!("resolve Pages workspace root {}", workspace.display()))?;
+    let source = fs::canonicalize(&source)
+        .with_context(|| format!("resolve Pages artifact directory {}", source.display()))?;
+    if !source.starts_with(&workspace) {
+        bail!(
+            "actions/upload-pages-artifact path '{}' resolves outside the admitted workspace",
+            source_input
+        );
+    }
     if !source.is_dir() {
         bail!(
             "actions/upload-pages-artifact path '{}' is not a directory",
@@ -6371,8 +6388,7 @@ fn native_upload_pages_artifact(
         .temp_host
         .as_deref()
         .context("actions/upload-pages-artifact requires RUNNER_TEMP")?;
-    let archive = temp_host.join("artifact.tar");
-    create_pages_archive(&source, &archive)?;
+    create_pages_archive_from_canonical_source(&source, temp_host, Path::new("artifact.tar"))?;
 
     let mut page_action = action.clone();
     page_action.inputs.insert(
@@ -6399,73 +6415,278 @@ fn native_upload_pages_artifact(
     })
 }
 
-fn create_pages_archive(source: &Path, archive: &Path) -> Result<()> {
-    if let Some(parent) = archive.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create Pages archive directory {}", parent.display()))?;
-    }
-    let file = fs::File::create(archive)
-        .with_context(|| format!("create Pages archive {}", archive.display()))?;
+fn create_pages_archive(
+    source: &Path,
+    trusted_temp_root: &Path,
+    archive_relative: &Path,
+) -> Result<()> {
+    let canonical_source = fs::canonicalize(source)
+        .with_context(|| format!("resolve Pages artifact directory {}", source.display()))?;
+    create_pages_archive_from_canonical_source(
+        &canonical_source,
+        trusted_temp_root,
+        archive_relative,
+    )
+}
+
+fn create_pages_archive_from_canonical_source(
+    canonical_source: &Path,
+    trusted_temp_root: &Path,
+    archive_relative: &Path,
+) -> Result<()> {
+    let archive_relative = normalized_destination_relative(archive_relative)?;
+    let archive = trusted_temp_root.join(&archive_relative);
+    let parent_relative = archive_relative
+        .parent()
+        .with_context(|| format!("Pages archive has no parent: {}", archive.display()))?;
+    let file_name = archive_relative
+        .file_name()
+        .with_context(|| format!("Pages archive has no file name: {}", archive.display()))?;
+    let destination = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+        trusted_temp_root,
+        parent_relative,
+    )
+    .with_context(|| {
+        format!(
+            "create Pages archive directory {}",
+            trusted_temp_root.join(parent_relative).display()
+        )
+    })?;
+    let parent = trusted_temp_root.join(parent_relative);
+    let (file, _staging_path) = create_pages_archive_staging_file(&parent)?;
     let mut builder = tar::Builder::new(file);
-    // Latest actions/upload-pages-artifact uses GNU tar --dereference and
-    // --hard-dereference because Pages rejects links in deployment content.
-    builder.follow_symlinks(true);
-    builder
-        .append_dir(".", source)
-        .with_context(|| format!("archive Pages root {}", source.display()))?;
-    append_pages_archive_dir(&mut builder, source, Path::new(""), &mut BTreeSet::new())?;
+    if !canonical_source.is_dir() {
+        bail!(
+            "Pages artifact path is not a directory: {}",
+            canonical_source.display()
+        );
+    }
+    let source_directory = crate::fs_copy::NoFollowDir::open_absolute(canonical_source)
+        .with_context(|| {
+            format!(
+                "securely open Pages artifact directory without following links: {}",
+                canonical_source.display()
+            )
+        })?;
+    append_pages_directory_header(&mut builder, Path::new("."))?;
+    let mut active_directories = BTreeSet::new();
+    active_directories.insert(canonical_source.to_path_buf());
+    append_pages_archive_dir(
+        &mut builder,
+        canonical_source,
+        &source_directory,
+        &source_directory,
+        canonical_source,
+        Path::new(""),
+        &mut active_directories,
+    )?;
     builder
         .finish()
         .with_context(|| format!("finish Pages archive {}", archive.display()))?;
+    let mut file = builder
+        .into_inner()
+        .with_context(|| format!("close Pages archive writer {}", archive.display()))?;
+    file.flush()
+        .with_context(|| format!("flush Pages archive {}", archive.display()))?;
+    destination
+        .clone_or_copy_file(&file, Path::new(file_name))
+        .with_context(|| format!("publish Pages archive {}", archive.display()))?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct PagesArchiveStagingPath(PathBuf);
+
+impl Drop for PagesArchiveStagingPath {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[derive(Debug)]
+struct RepositoryArtifactStagingDirectory {
+    parent: crate::fs_copy::NoFollowDestinationDir,
+    name: OsString,
+}
+
+impl Drop for RepositoryArtifactStagingDirectory {
+    fn drop(&mut self) {
+        let _ = self.parent.remove_tree_entry(&self.name);
+    }
+}
+
+fn create_repository_artifact_staging_directory(
+    staging_parent: &Path,
+    staging_parent_root: &crate::fs_copy::NoFollowDestinationDir,
+) -> Result<(
+    RepositoryArtifactStagingDirectory,
+    crate::fs_copy::NoFollowDestinationDir,
+)> {
+    let cleanup_parent = staging_parent_root
+        .open_relative_directory(Path::new(""))
+        .with_context(|| {
+            format!(
+                "duplicate prepared CI artifact staging parent {}",
+                staging_parent.display()
+            )
+        })?;
+    let (staging_root, staging_name) = staging_parent_root
+        .create_unique_directory(".velnor-repository-artifact")
+        .with_context(|| {
+            format!(
+                "create prepared CI artifact staging directory in {}",
+                staging_parent.display()
+            )
+        })?;
+    Ok((
+        RepositoryArtifactStagingDirectory {
+            parent: cleanup_parent,
+            name: staging_name,
+        },
+        staging_root,
+    ))
+}
+
+fn create_pages_archive_staging_file(
+    staging_directory: &Path,
+) -> Result<(fs::File, PagesArchiveStagingPath)> {
+    for _ in 0..16 {
+        let path = staging_directory.join(format!(
+            ".velnor-pages-archive-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&path) {
+            Ok(file) => return Ok((file, PagesArchiveStagingPath(path))),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "create Pages archive staging file in {}",
+                        staging_directory.display()
+                    )
+                });
+            }
+        }
+    }
+    bail!(
+        "could not allocate a unique Pages archive staging file in {}",
+        staging_directory.display()
+    )
 }
 
 fn append_pages_archive_dir<W: Write>(
     builder: &mut tar::Builder<W>,
-    source: &Path,
+    root: &Path,
+    root_directory: &crate::fs_copy::NoFollowDir,
+    current_directory: &crate::fs_copy::NoFollowDir,
+    current: &Path,
     relative: &Path,
     active_directories: &mut BTreeSet<PathBuf>,
 ) -> Result<()> {
-    let directory = source.join(relative);
-    let canonical = fs::canonicalize(&directory)
-        .with_context(|| format!("resolve Pages artifact directory {}", directory.display()))?;
-    if !active_directories.insert(canonical.clone()) {
-        bail!(
-            "Pages artifact directory contains a symlink cycle at {}",
-            directory.display()
-        );
-    }
-
-    let mut entries = fs::read_dir(&directory)
-        .with_context(|| format!("read Pages artifact directory {}", directory.display()))?
-        .collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let name = entry.file_name();
+    let mut names = Vec::new();
+    current_directory.for_each_entry_name(|name| {
+        names.push(name);
+        Ok(())
+    })?;
+    names.sort();
+    for name in names {
         let name_text = name.to_string_lossy();
         if name_text.starts_with('.') {
             continue;
         }
         let child_relative = relative.join(&name);
-        let child = entry.path();
-        let metadata = fs::metadata(&child)
-            .with_context(|| format!("read Pages artifact path {}", child.display()))?;
-        let archive_path = Path::new(".").join(&child_relative);
-        if metadata.is_dir() {
-            builder
-                .append_dir(&archive_path, &child)
-                .with_context(|| format!("archive Pages directory {}", child.display()))?;
-            append_pages_archive_dir(builder, source, &child_relative, active_directories)?;
-        } else if metadata.is_file() {
-            builder
-                .append_path_with_name(&child, &archive_path)
-                .with_context(|| format!("archive Pages file {}", child.display()))?;
-        } else {
-            bail!("unsupported Pages artifact path {}", child.display());
+        let child = current.join(&name);
+        let canonical = fs::canonicalize(&child)
+            .with_context(|| format!("resolve Pages artifact path {}", child.display()))?;
+        if !canonical.starts_with(root) {
+            bail!(
+                "Pages artifact path resolves outside the admitted directory: {}",
+                child.display()
+            );
+        }
+        let canonical_relative = canonical.strip_prefix(root).with_context(|| {
+            format!(
+                "resolve Pages artifact path below root: {}",
+                canonical.display()
+            )
+        })?;
+        let opened = root_directory
+            .open_source(canonical_relative)?
+            .with_context(|| format!("open Pages artifact path {}", child.display()))?;
+        match opened {
+            crate::fs_copy::NoFollowSource::Directory(directory) => {
+                if !active_directories.insert(canonical.clone()) {
+                    bail!(
+                        "Pages artifact directory contains a symlink cycle at {}",
+                        child.display()
+                    );
+                }
+                append_pages_directory_header(builder, &child_relative)?;
+                append_pages_archive_dir(
+                    builder,
+                    root,
+                    root_directory,
+                    &directory,
+                    &canonical,
+                    &child_relative,
+                    active_directories,
+                )?;
+                active_directories.remove(&canonical);
+            }
+            crate::fs_copy::NoFollowSource::File(file) => {
+                append_pages_file(builder, &child_relative, &file)?;
+            }
         }
     }
-    active_directories.remove(&canonical);
     Ok(())
+}
+
+fn append_pages_directory_header<W: Write>(
+    builder: &mut tar::Builder<W>,
+    path: &Path,
+) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_mode(0o755);
+    header.set_size(0);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, path, std::io::empty())
+        .with_context(|| format!("archive Pages directory {}", path.display()))
+}
+
+fn append_pages_file<W: Write>(
+    builder: &mut tar::Builder<W>,
+    path: &Path,
+    file: &fs::File,
+) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("read Pages artifact file {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("unsupported Pages artifact path {}", path.display());
+    }
+    let mut input = file
+        .try_clone()
+        .with_context(|| format!("duplicate Pages artifact file {}", path.display()))?;
+    input
+        .seek(SeekFrom::Start(0))
+        .with_context(|| format!("rewind Pages artifact file {}", path.display()))?;
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    #[cfg(unix)]
+    header.set_mode(metadata.permissions().mode());
+    #[cfg(not(unix))]
+    header.set_mode(0o644);
+    header.set_size(metadata.len());
+    header.set_cksum();
+    builder
+        .append_data(&mut header, path, &mut input)
+        .with_context(|| format!("archive Pages file {}", path.display()))
 }
 
 fn native_attest_build_provenance(
@@ -7281,7 +7502,7 @@ fn native_restore_prepared_jackin_tools(
             required_env(env, "JACKIN_RUNNER_ARCH")?,
             required_env(env, "JACKIN_TOOLS_CONTRACT")?
         );
-        tools_hit = restore_repository_artifact(env, &artifact, &tools_dir, allow_miss)?;
+        tools_hit = restore_repository_artifact(env, state, &artifact, &tools_dir, allow_miss)?;
         if tools_hit && !prepared_jackin_tools_complete(&tools_dir) {
             if !allow_miss {
                 bail!("prepared CI tools artifact is incomplete: {artifact}");
@@ -7296,7 +7517,7 @@ fn native_restore_prepared_jackin_tools(
             required_env(env, "JACKIN_RUNNER_ARCH")?
         );
         let primary = format!("{prefix}{}", required_env(env, "JACKIN_XTASK_CONTRACT")?);
-        xtask_hit = restore_repository_artifact(env, &primary, &xtask_dir, true)?;
+        xtask_hit = restore_repository_artifact(env, state, &primary, &xtask_dir, true)?;
         if !xtask_hit {
             if let Some(fallback) = env
                 .get("JACKIN_FALLBACK_XTASK_CONTRACT")
@@ -7304,6 +7525,7 @@ fn native_restore_prepared_jackin_tools(
             {
                 xtask_hit = restore_repository_artifact(
                     env,
+                    state,
                     &format!("{prefix}{fallback}"),
                     &xtask_dir,
                     allow_miss,
@@ -7398,6 +7620,7 @@ fn required_env<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Result<&'a
 
 fn restore_repository_artifact(
     env: &BTreeMap<String, String>,
+    state: &JobExecutionState,
     name: &str,
     destination: &Path,
     allow_miss: bool,
@@ -7433,6 +7656,7 @@ fn restore_repository_artifact(
                     .header("X-GitHub-Api-Version", "2026-03-10")
             },
             "list repository artifacts",
+            PREPARED_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES,
         )?)?;
         if let Some(id) = body["artifacts"]
             .as_array()
@@ -7440,7 +7664,11 @@ fn restore_repository_artifact(
             .and_then(|item| item["id"].as_u64())
         {
             let archive_url = format!("{api}/repos/{owner}/{repo}/actions/artifacts/{id}/zip");
-            let archive = repository_artifact_response(
+            let temp_host = state
+                .temp_host
+                .as_deref()
+                .context("prepared CI artifact restore requires a runner temp directory")?;
+            let archive = repository_artifact_archive_response(
                 || {
                     client
                         .get(&archive_url)
@@ -7448,26 +7676,66 @@ fn restore_repository_artifact(
                         .header("X-GitHub-Api-Version", "2026-03-10")
                 },
                 "download repository artifact",
+                PREPARED_ARTIFACT_MAX_RESPONSE_BYTES,
+                temp_host,
             )?;
-            fs::create_dir_all(destination)?;
-            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
-            for index in 0..zip.len() {
+            let mut zip = zip::ZipArchive::new(archive)?;
+            let entries = preflight_prepared_artifact_zip(&mut zip)?;
+            let destination_scope = trusted_job_destination(state, destination)?;
+            let destination_relative = destination_scope.relative.clone();
+            let destination_name = destination_relative
+                .file_name()
+                .context("prepared CI artifact destination has no final directory name")?
+                .to_os_string();
+            let destination_parent_relative =
+                destination_relative.parent().unwrap_or(Path::new(""));
+            let destination_parent_path = destination_scope.root.join(destination_parent_relative);
+            let destination_parent =
+                crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+                    &destination_scope.root,
+                    destination_parent_relative,
+                )
+                .with_context(|| {
+                    format!(
+                        "securely open prepared CI artifact destination parent {}",
+                        destination_parent_path.display()
+                    )
+                })?;
+            let (staging_directory, staging_root) = create_repository_artifact_staging_directory(
+                &destination_parent_path,
+                &destination_parent,
+            )?;
+            for (index, entry) in entries.into_iter().enumerate() {
                 let mut file = zip.by_index(index)?;
-                let relative = file
-                    .enclosed_name()
-                    .context("artifact archive contains an unsafe path")?
-                    .to_path_buf();
-                let target = destination.join(relative);
-                if file.is_dir() {
-                    fs::create_dir_all(&target)?;
+                if entry.is_directory {
+                    staging_root
+                        .open_relative_directory(&entry.relative)
+                        .with_context(|| {
+                            format!(
+                                "create prepared CI artifact directory {}",
+                                entry.relative.display()
+                            )
+                        })?;
                 } else {
-                    if let Some(parent) = target.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    let mut output = fs::File::create(target)?;
-                    std::io::copy(&mut file, &mut output)?;
+                    staging_root
+                        .write_file_from_reader(
+                            &mut file,
+                            &entry.relative,
+                            entry.uncompressed_size,
+                            0o644,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "stage prepared CI artifact file {}",
+                                entry.relative.display()
+                            )
+                        })?;
                 }
             }
+            let staging_name = staging_directory.name.as_os_str();
+            destination_parent
+                .publish_staged_directory(staging_name, &destination_name)
+                .context("publish prepared CI artifact staging tree")?;
             return Ok(true);
         }
         if std::time::Instant::now() >= deadline {
@@ -7480,24 +7748,176 @@ fn restore_repository_artifact(
     }
 }
 
+#[derive(Debug)]
+struct PreparedArtifactEntry {
+    relative: PathBuf,
+    is_directory: bool,
+    uncompressed_size: u64,
+}
+
+fn preflight_prepared_artifact_zip<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<Vec<PreparedArtifactEntry>> {
+    let member_count = archive.len();
+    if member_count > PREPARED_ARTIFACT_MAX_ZIP_MEMBERS {
+        bail!(
+            "prepared CI artifact contains {member_count} members, exceeding the {}-member limit",
+            PREPARED_ARTIFACT_MAX_ZIP_MEMBERS
+        );
+    }
+
+    let mut entries = Vec::with_capacity(member_count);
+    let mut paths = BTreeMap::new();
+    let mut total_uncompressed = 0_u64;
+    for index in 0..member_count {
+        let file = archive
+            .by_index(index)
+            .with_context(|| format!("inspect prepared CI artifact archive member {index}"))?;
+        let relative = file
+            .enclosed_name()
+            .context("prepared CI artifact archive contains an unsafe path")?
+            .to_path_buf();
+        if relative.as_os_str().is_empty() {
+            bail!("prepared CI artifact archive contains an empty path");
+        }
+        let is_directory = file.is_dir();
+        let uncompressed_size = file.size();
+        if uncompressed_size > PREPARED_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES {
+            bail!(
+                "prepared CI artifact member {} is {} bytes, exceeding the {}-byte limit",
+                relative.display(),
+                uncompressed_size,
+                PREPARED_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES
+            );
+        }
+        total_uncompressed = total_uncompressed
+            .checked_add(uncompressed_size)
+            .context("prepared CI artifact uncompressed size overflowed")?;
+        if total_uncompressed > PREPARED_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES {
+            bail!(
+                "prepared CI artifact expands to {total_uncompressed} bytes, exceeding the {}-byte limit",
+                PREPARED_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES
+            );
+        }
+        if paths.insert(relative.clone(), is_directory).is_some() {
+            bail!(
+                "prepared CI artifact archive contains duplicate path: {}",
+                relative.display()
+            );
+        }
+        entries.push(PreparedArtifactEntry {
+            relative,
+            is_directory,
+            uncompressed_size,
+        });
+    }
+
+    for (path, is_directory) in &paths {
+        if *is_directory {
+            continue;
+        }
+        for ancestor in path.ancestors().skip(1) {
+            if paths
+                .get(ancestor)
+                .is_some_and(|ancestor_is_directory| !ancestor_is_directory)
+            {
+                bail!(
+                    "prepared CI artifact archive has a file ancestor conflict at {}",
+                    ancestor.display()
+                );
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn repository_artifact_archive_response(
+    mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
+    operation: &str,
+    max_bytes: u64,
+    temp_parent: &Path,
+) -> Result<fs::File> {
+    const MAX_ATTEMPTS: usize = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let response = match request()
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+        {
+            Ok(response) => response,
+            Err(error) if attempt < MAX_ATTEMPTS && repository_artifact_retryable(&error) => {
+                std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
+                continue;
+            }
+            Err(error) => return Err(error).with_context(|| operation.to_string()),
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes)
+        {
+            bail!("{operation} response exceeds the {max_bytes}-byte limit");
+        }
+
+        let path = temp_parent.join(format!(
+            ".velnor-repository-artifact-response-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&path)
+            .with_context(|| format!("create {operation} response staging file"))?;
+        #[cfg(unix)]
+        fs::remove_file(&path)
+            .with_context(|| format!("unlink {operation} response staging file name"))?;
+        let copied = std::io::copy(&mut response.take(max_bytes.saturating_add(1)), &mut file)
+            .with_context(|| format!("read {operation} response"))?;
+        if copied > max_bytes {
+            bail!("{operation} response exceeds the {max_bytes}-byte limit");
+        }
+        file.sync_all()
+            .with_context(|| format!("sync {operation} response"))?;
+        file.seek(SeekFrom::Start(0))
+            .with_context(|| format!("rewind {operation} response"))?;
+        return Ok(file);
+    }
+    unreachable!("repository artifact retry loop always returns")
+}
+
 fn repository_artifact_response(
     mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
     operation: &str,
+    max_bytes: u64,
 ) -> Result<Vec<u8>> {
     const MAX_ATTEMPTS: usize = 3;
     for attempt in 1..=MAX_ATTEMPTS {
-        let outcome = request()
+        let response = match request()
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
-            .and_then(reqwest::blocking::Response::bytes)
-            .map(|body| body.to_vec());
-        match outcome {
-            Ok(body) => return Ok(body),
+        {
+            Ok(response) => response,
             Err(error) if attempt < MAX_ATTEMPTS && repository_artifact_retryable(&error) => {
                 std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
+                continue;
             }
             Err(error) => return Err(error).with_context(|| operation.to_string()),
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes)
+        {
+            bail!("{operation} response exceeds the {max_bytes}-byte limit");
         }
+        let mut body = Vec::new();
+        response
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut body)
+            .with_context(|| format!("read {operation} response"))?;
+        if u64::try_from(body.len()).unwrap_or(u64::MAX) > max_bytes {
+            bail!("{operation} response exceeds the {max_bytes}-byte limit");
+        }
+        return Ok(body);
     }
     unreachable!("repository artifact retry loop always returns")
 }
@@ -7646,29 +8066,139 @@ fn artifact_paths(paths: &str) -> Vec<String> {
         .collect()
 }
 
-fn resolve_artifact_sources(state: &JobExecutionState, path: &str) -> Result<Vec<PathBuf>> {
-    if !has_glob_pattern(path) {
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ResolvedArtifactSource {
+    path: PathBuf,
+    artifact_path: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedArtifactPath<'a> {
+    value: &'a str,
+}
+
+impl<'a> ValidatedArtifactPath<'a> {
+    fn as_str(self) -> &'a str {
+        self.value
+    }
+}
+
+fn validate_artifact_input_path(path: &str) -> Result<ValidatedArtifactPath<'_>> {
+    let path = path.trim();
+    let has_glob = has_glob_pattern(path);
+    if artifact_path_has_parent_component(path)
+        || (has_glob && artifact_path_has_parent_component(&normalize_glob_pattern(path)))
+    {
+        bail!("artifact source path contains parent traversal: {path}");
+    }
+
+    let mapped_suffix = [
+        "target/",
+        "/__w/target/",
+        "/github/workspace/target/",
+        "/__w/",
+        "/github/workspace/",
+        "/__t/",
+        "/github/runner_temp/",
+        "/tmp/",
+        "/github/home/",
+    ]
+    .into_iter()
+    .find_map(|prefix| path.strip_prefix(prefix));
+    if let Some(suffix) = mapped_suffix {
+        let normalized_suffix = has_glob.then(|| normalize_glob_pattern(suffix));
+        let suffix = normalized_suffix.as_deref().unwrap_or(suffix);
+        if relative_mapped_suffix(suffix).is_none() {
+            bail!("artifact source path has absolute mapped suffix: {path}");
+        }
+    }
+
+    let mapped_absolute_root = matches!(
+        path,
+        "/__w/target"
+            | "/github/workspace/target"
+            | "/__w"
+            | "/github/workspace"
+            | "/__t"
+            | "/github/runner_temp"
+            | "/tmp"
+            | "/github/home"
+    ) || mapped_suffix.is_some();
+    if Path::new(path).is_absolute() && !mapped_absolute_root {
+        bail!("artifact source path has unmapped absolute root: {path}");
+    }
+
+    Ok(ValidatedArtifactPath { value: path })
+}
+
+fn resolve_artifact_sources(
+    state: &JobExecutionState,
+    path: ValidatedArtifactPath<'_>,
+) -> Result<Vec<ResolvedArtifactSource>> {
+    let path = path.as_str();
+    let has_glob = has_glob_pattern(path);
+    if !has_glob {
         let Some(source) = resolve_host_path(state, path) else {
             return Ok(Vec::new());
         };
         return Ok(if source.exists() {
-            vec![source]
+            let artifact_path = if source.is_dir() {
+                PathBuf::new()
+            } else {
+                PathBuf::from(source.file_name().with_context(|| {
+                    format!("artifact source has no file name: {}", source.display())
+                })?)
+            };
+            vec![ResolvedArtifactSource {
+                path: source,
+                artifact_path,
+            }]
         } else {
             Vec::new()
         });
     }
 
-    let Some((base, pattern)) = artifact_glob_base_and_pattern(state, path) else {
+    let Some((mapped_root, mapped_pattern)) = artifact_glob_base_and_pattern(state, path)? else {
         return Ok(Vec::new());
     };
-    if !base.exists() {
+    if !mapped_root.exists() {
         return Ok(Vec::new());
     }
+    let mapped_directory =
+        crate::fs_copy::NoFollowDir::open_absolute(&mapped_root).with_context(|| {
+            format!(
+                "securely open mapped artifact root for '{path}': {}",
+                mapped_root.display()
+            )
+        })?;
+    let (literal_base, pattern) = artifact_glob_literal_base_and_pattern(&mapped_pattern);
+    let base = mapped_root.join(&literal_base);
+    let Some(base_source) = mapped_directory.open_source(&literal_base)? else {
+        return Ok(Vec::new());
+    };
+    let base_directory = match base_source {
+        crate::fs_copy::NoFollowSource::Directory(directory) => directory,
+        crate::fs_copy::NoFollowSource::File(_) => {
+            bail!("artifact glob root is not a directory: {}", base.display())
+        }
+    };
     let matcher = Glob::new(&normalize_glob_pattern(&pattern))?.compile_matcher();
     let mut matches = Vec::new();
-    collect_artifact_glob_matches(&base, &base, &matcher, &mut matches)?;
-    matches.sort();
+    collect_artifact_glob_matches(
+        &base_directory,
+        &base,
+        Path::new(""),
+        &matcher,
+        &mut matches,
+    )?;
+    matches.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(matches)
+}
+
+fn artifact_path_has_parent_component(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
 fn has_glob_pattern(path: &str) -> bool {
@@ -7679,71 +8209,84 @@ fn has_glob_pattern(path: &str) -> bool {
 fn artifact_glob_base_and_pattern(
     state: &JobExecutionState,
     path: &str,
-) -> Option<(PathBuf, String)> {
+) -> Result<Option<(PathBuf, String)>> {
     let path = path.trim();
+    if artifact_path_has_parent_component(path)
+        || artifact_path_has_parent_component(&normalize_glob_pattern(path))
+    {
+        bail!("artifact source path contains parent traversal: {path}");
+    }
     if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
-        return state
+        return Ok(state
             .cargo_target_host
             .as_ref()
-            .map(|base| (base.clone(), String::new()));
+            .map(|base| (base.clone(), String::new())));
     }
     for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
+            let rest = mapped_glob_suffix(path, rest)?;
             if let Some(base) = &state.cargo_target_host {
-                return Some((base.clone(), rest.to_string()));
+                return Ok(Some((base.clone(), rest)));
             }
         }
     }
     if let Some(rest) = path.strip_prefix("/__w/") {
-        return state
+        let rest = mapped_glob_suffix(path, rest)?;
+        return Ok(state
             .workspace_host
             .as_ref()
-            .map(|base| (base.clone(), rest.to_string()));
+            .map(|base| (base.clone(), rest)));
     }
     if let Some(rest) = path.strip_prefix("/github/workspace/") {
-        return state
+        let rest = mapped_glob_suffix(path, rest)?;
+        return Ok(state
             .workspace_host
             .as_ref()
-            .map(|base| (base.clone(), rest.to_string()));
+            .map(|base| (base.clone(), rest)));
     }
     if let Some(rest) = path.strip_prefix("/__t/") {
-        return state
-            .temp_host
-            .as_ref()
-            .map(|base| (base.clone(), rest.to_string()));
+        let rest = mapped_glob_suffix(path, rest)?;
+        return Ok(state.temp_host.as_ref().map(|base| (base.clone(), rest)));
     }
     if let Some(rest) = path.strip_prefix("/github/runner_temp/") {
-        return state
-            .temp_host
-            .as_ref()
-            .map(|base| (base.clone(), rest.to_string()));
+        let rest = mapped_glob_suffix(path, rest)?;
+        return Ok(state.temp_host.as_ref().map(|base| (base.clone(), rest)));
     }
     if let Some(rest) = path.strip_prefix("/tmp/") {
-        return state
-            .temp_host
-            .as_ref()
-            .map(|base| (base.clone(), rest.to_string()));
+        let rest = mapped_glob_suffix(path, rest)?;
+        return Ok(state.temp_host.as_ref().map(|base| (base.clone(), rest)));
     }
     if Path::new(path).is_absolute() {
-        return absolute_glob_base_and_pattern(path);
+        bail!("artifact glob has unmapped absolute root: {path}");
     }
-    state
+    Ok(state
         .workspace_host
         .as_ref()
-        .map(|base| (base.clone(), path.to_string()))
+        .map(|base| (base.clone(), path.to_string())))
 }
 
-fn absolute_glob_base_and_pattern(path: &str) -> Option<(PathBuf, String)> {
-    let slash_index = path
+fn mapped_glob_suffix(path: &str, suffix: &str) -> Result<String> {
+    let suffix = normalize_glob_pattern(suffix);
+    if relative_mapped_suffix(&suffix).is_none() {
+        bail!("artifact source path has absolute mapped suffix: {path}");
+    }
+    Ok(suffix)
+}
+
+fn artifact_glob_literal_base_and_pattern(pattern: &str) -> (PathBuf, String) {
+    let pattern = normalize_glob_pattern(pattern);
+    let first_glob = pattern
         .char_indices()
-        .take_while(|(_, ch)| !matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
-        .filter_map(|(index, ch)| (ch == '/').then_some(index))
-        .last()
-        .unwrap_or(0);
-    let (base, pattern) = path.split_at(slash_index + 1);
-    let base = PathBuf::from(base);
-    let pattern = pattern.trim_start_matches('/').to_string();
-    Some((base, pattern))
+        .find_map(|(index, ch)| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}').then_some(index))
+        .unwrap_or(pattern.len());
+    let literal_end = pattern[..first_glob]
+        .rfind('/')
+        .map_or(0, |index| index + 1);
+    let (literal_base, relative_pattern) = pattern.split_at(literal_end);
+    (
+        PathBuf::from(literal_base.trim_end_matches('/')),
+        relative_pattern.trim_start_matches('/').to_string(),
+    )
 }
 
 fn normalize_glob_pattern(pattern: &str) -> String {
@@ -7751,23 +8294,28 @@ fn normalize_glob_pattern(pattern: &str) -> String {
 }
 
 fn collect_artifact_glob_matches(
+    current: &crate::fs_copy::NoFollowDir,
     root: &Path,
-    current: &Path,
+    current_relative: &Path,
     matcher: &globset::GlobMatcher,
-    matches: &mut Vec<PathBuf>,
+    matches: &mut Vec<ResolvedArtifactSource>,
 ) -> Result<()> {
-    for entry in fs::read_dir(current).with_context(|| format!("read {}", current.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        if matcher.is_match(relative) {
-            matches.push(path.clone());
-        }
-        if entry.file_type()?.is_dir() {
-            collect_artifact_glob_matches(root, &path, matcher, matches)?;
-        }
-    }
-    Ok(())
+    current.for_each_entry_filtered(
+        |_| true,
+        |entry| {
+            let relative = current_relative.join(&entry.name);
+            if matcher.is_match(&relative) {
+                matches.push(ResolvedArtifactSource {
+                    path: root.join(&relative),
+                    artifact_path: relative.clone(),
+                });
+            }
+            if let crate::fs_copy::NoFollowSource::Directory(directory) = entry.source {
+                collect_artifact_glob_matches(&directory, root, &relative, matcher, matches)?;
+            }
+            Ok(())
+        },
+    )
 }
 
 fn cache_paths(paths: &str) -> Vec<String> {
@@ -7780,7 +8328,7 @@ fn resolve_cache_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> 
         return state_home_host(state);
     }
     if let Some(rest) = path.strip_prefix("~/") {
-        return state_home_host(state).map(|home| home.join(rest));
+        return state_home_host(state).and_then(|home| join_mapped_suffix(&home, rest));
     }
     resolve_host_path(state, path)
 }
@@ -7793,9 +8341,123 @@ fn state_home_host(state: &JobExecutionState) -> Option<PathBuf> {
     Some(temp.join("home"))
 }
 
+#[derive(Debug)]
+struct TrustedJobDestination {
+    root: PathBuf,
+    relative: PathBuf,
+}
+
+impl TrustedJobDestination {
+    fn joined_relative(&self, relative: &Path) -> Result<PathBuf> {
+        normalized_destination_relative(&self.relative.join(relative))
+    }
+
+    fn joined_path(&self, relative: &Path) -> Result<PathBuf> {
+        Ok(self.root.join(self.joined_relative(relative)?))
+    }
+
+    fn open_relative_directory(
+        &self,
+        relative: &Path,
+    ) -> Result<crate::fs_copy::NoFollowDestinationDir> {
+        let rooted_relative = self.joined_relative(relative)?;
+        let destination = self.root.join(&rooted_relative);
+        crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+            &self.root,
+            &rooted_relative,
+        )
+        .with_context(|| {
+            format!(
+                "securely open workflow destination without following symlinks: {}",
+                destination.display()
+            )
+        })
+    }
+}
+
+fn trusted_job_destination(
+    state: &JobExecutionState,
+    destination: &Path,
+) -> Result<TrustedJobDestination> {
+    let home = state_home_host(state);
+    for root in [
+        state.cargo_target_host.as_deref(),
+        state.workspace_host.as_deref(),
+        home.as_deref(),
+        state.temp_host.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Ok(destination_relative) = destination.strip_prefix(root) else {
+            continue;
+        };
+        let anchor = existing_trusted_destination_anchor(root)?;
+        let configured_relative = root.strip_prefix(&anchor).with_context(|| {
+            format!(
+                "trusted workflow destination root {} is not below existing anchor {}",
+                root.display(),
+                anchor.display()
+            )
+        })?;
+        return Ok(TrustedJobDestination {
+            root: anchor,
+            relative: normalized_destination_relative(
+                &configured_relative.join(destination_relative),
+            )?,
+        });
+    }
+    bail!(
+        "workflow destination resolves outside Velnor-mapped job storage: {}",
+        destination.display()
+    )
+}
+
+fn existing_trusted_destination_anchor(configured_root: &Path) -> Result<PathBuf> {
+    let mut anchor = configured_root.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&anchor) {
+            Ok(_) => return Ok(anchor),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !anchor.pop() {
+                    bail!(
+                        "trusted workflow destination root has no existing ancestor: {}",
+                        configured_root.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect trusted workflow destination root {}",
+                        configured_root.display()
+                    )
+                });
+            }
+        }
+    }
+}
+
+fn normalized_destination_relative(relative: &Path) -> Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => normalized.push(name),
+            std::path::Component::RootDir
+            | std::path::Component::ParentDir
+            | std::path::Component::Prefix(_) => bail!(
+                "artifact destination is not a normalized relative path: {}",
+                relative.display()
+            ),
+        }
+    }
+    Ok(normalized)
+}
+
 fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     let path = path.trim();
-    if path.is_empty() {
+    if path.is_empty() || artifact_path_has_parent_component(path) {
         return None;
     }
     if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
@@ -7805,28 +8467,41 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     }
     for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
+            relative_mapped_suffix(rest)?;
             if let Some(base) = &state.cargo_target_host {
-                return Some(base.join(rest));
+                return join_mapped_suffix(base, rest);
             }
         }
     }
     if let Some(rest) = path.strip_prefix("/__w/") {
-        return state.workspace_host.as_ref().map(|base| base.join(rest));
+        return state
+            .workspace_host
+            .as_deref()
+            .and_then(|base| join_mapped_suffix(base, rest));
     }
     if path == "/__w" || path == "/github/workspace" {
         return state.workspace_host.clone();
     }
     if let Some(rest) = path.strip_prefix("/github/workspace/") {
-        return state.workspace_host.as_ref().map(|base| base.join(rest));
+        return state
+            .workspace_host
+            .as_deref()
+            .and_then(|base| join_mapped_suffix(base, rest));
     }
     if let Some(rest) = path.strip_prefix("/__t/") {
-        return state.temp_host.as_ref().map(|base| base.join(rest));
+        return state
+            .temp_host
+            .as_deref()
+            .and_then(|base| join_mapped_suffix(base, rest));
     }
     if path == "/__t" || path == "/github/runner_temp" {
         return state.temp_host.clone();
     }
     if let Some(rest) = path.strip_prefix("/github/runner_temp/") {
-        return state.temp_host.as_ref().map(|base| base.join(rest));
+        return state
+            .temp_host
+            .as_deref()
+            .and_then(|base| join_mapped_suffix(base, rest));
     }
     // The job container bind-mounts the host temp dir at /tmp (container.rs),
     // so /tmp paths written by steps (e.g. publish digest exports under
@@ -7835,19 +8510,16 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
         return state.temp_host.clone();
     }
     if let Some(rest) = path.strip_prefix("/tmp/") {
-        return state.temp_host.as_ref().map(|base| base.join(rest));
-    }
-    if path == "/tmp" {
-        return state.temp_host.clone();
-    }
-    if let Some(rest) = path.strip_prefix("/tmp/") {
-        return state.temp_host.as_ref().map(|base| base.join(rest));
+        return state
+            .temp_host
+            .as_deref()
+            .and_then(|base| join_mapped_suffix(base, rest));
     }
     if path == "/github/home" {
         return state_home_host(state);
     }
     if let Some(rest) = path.strip_prefix("/github/home/") {
-        return state_home_host(state).map(|home| home.join(rest));
+        return state_home_host(state).and_then(|home| join_mapped_suffix(&home, rest));
     }
     let candidate = PathBuf::from(path);
     if candidate.is_absolute() {
@@ -7863,6 +8535,14 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
             .as_ref()
             .map(|base| base.join(candidate))
     }
+}
+
+fn relative_mapped_suffix(suffix: &str) -> Option<&str> {
+    (!suffix.starts_with('/')).then_some(suffix)
+}
+
+fn join_mapped_suffix(base: &Path, suffix: &str) -> Option<PathBuf> {
+    Some(base.join(relative_mapped_suffix(suffix)?))
 }
 
 fn resolve_container_path(state: &JobExecutionState, path: &str) -> String {
@@ -7928,60 +8608,222 @@ fn path_has_hidden_component(path: &Path) -> bool {
     })
 }
 
-fn copy_artifact_source(source: &Path, artifact_dir: &Path, include_hidden: bool) -> Result<()> {
-    if source.is_dir() {
-        copy_dir_contents_filtered(source, artifact_dir, include_hidden)
-    } else {
-        let file_name = source
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("artifact source has no file name"))?;
-        crate::fs_copy::clone_or_copy(source, &artifact_dir.join(file_name))
-            .with_context(|| format!("copy artifact file {}", source.display()))?;
-        Ok(())
+fn copy_artifact_source(
+    source: &ResolvedArtifactSource,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    include_hidden: bool,
+) -> Result<()> {
+    let parent = source
+        .path
+        .parent()
+        .with_context(|| format!("artifact source has no parent: {}", source.path.display()))?;
+    let file_name = source.path.file_name().with_context(|| {
+        format!(
+            "artifact source has no file name: {}",
+            source.path.display()
+        )
+    })?;
+    let parent = crate::fs_copy::NoFollowDir::open_absolute(parent).with_context(|| {
+        format!(
+            "securely open artifact source parent for {}",
+            source.path.display()
+        )
+    })?;
+    let opened = parent
+        .open_source(Path::new(file_name))?
+        .with_context(|| format!("artifact source disappeared: {}", source.path.display()))?;
+    match opened {
+        crate::fs_copy::NoFollowSource::File(file) => {
+            destination_root
+                .clone_or_copy_file(&file, &source.artifact_path)
+                .with_context(|| format!("copy artifact file {}", source.path.display()))?;
+            Ok(())
+        }
+        crate::fs_copy::NoFollowSource::Directory(directory) => {
+            destination_root
+                .open_relative_directory(&source.artifact_path)
+                .with_context(|| {
+                    format!(
+                        "create artifact directory {}",
+                        source.artifact_path.display()
+                    )
+                })?;
+            copy_dir_contents_filtered(
+                &directory,
+                &source.path,
+                destination_root,
+                &source.artifact_path,
+                include_hidden,
+            )
+        }
     }
 }
 
 fn copy_cache_source(source: &Path, destination: &Path) -> Result<()> {
-    if source.is_dir() {
-        copy_dir_contents(source, destination)
-    } else {
-        let file_name = source
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("cache source has no file name"))?;
-        crate::fs_copy::clone_or_copy(source, &destination.join(file_name))
-            .with_context(|| format!("copy cache file {}", source.display()))?;
-        Ok(())
+    let parent_path = source
+        .parent()
+        .with_context(|| format!("cache source has no parent: {}", source.display()))?;
+    let file_name = source
+        .file_name()
+        .with_context(|| format!("cache source has no file name: {}", source.display()))?;
+    let parent = crate::fs_copy::NoFollowDir::open_absolute(parent_path)
+        .with_context(|| format!("securely open cache source parent for {}", source.display()))?;
+    let opened = parent
+        .open_source(Path::new(file_name))?
+        .with_context(|| format!("cache source disappeared: {}", source.display()))?;
+    match opened {
+        crate::fs_copy::NoFollowSource::Directory(directory) => {
+            let destination_root =
+                crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+                    destination,
+                    Path::new(""),
+                )?;
+            copy_dir_contents_filtered(&directory, source, &destination_root, Path::new(""), true)
+        }
+        crate::fs_copy::NoFollowSource::File(file) => {
+            let destination_root =
+                crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+                    destination,
+                    Path::new(""),
+                )?;
+            destination_root
+                .clone_or_copy_file(&file, Path::new(file_name))
+                .with_context(|| format!("copy cache file {}", source.display()))?;
+            Ok(())
+        }
     }
 }
 
-fn copy_cache_glob_dir_contents(source: &Path, destination: &Path) -> Result<()> {
-    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            continue;
+fn restore_cache_dir_contents(
+    state: &JobExecutionState,
+    source: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let source_directory = crate::fs_copy::NoFollowDir::open_absolute(source)
+        .with_context(|| format!("securely open cache directory {}", source.display()))?;
+    let destination_scope = trusted_job_destination(state, destination)?;
+    let destination_directory = destination_scope
+        .open_relative_directory(Path::new(""))
+        .with_context(|| format!("create cache restore path {}", destination.display()))?;
+    copy_cache_restore_dir_contents(
+        &source_directory,
+        source,
+        &destination_directory,
+        &destination_scope,
+        Path::new(""),
+    )
+}
+
+fn copy_opened_cache_restore_source(
+    source: crate::fs_copy::NoFollowSource,
+    source_path: &Path,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    destination_scope: &TrustedJobDestination,
+    destination_relative: &Path,
+) -> Result<()> {
+    let destination = destination_scope.joined_path(destination_relative)?;
+    match source {
+        crate::fs_copy::NoFollowSource::Directory(directory) => {
+            destination_scope
+                .open_relative_directory(destination_relative)
+                .with_context(|| format!("create cache restore path {}", destination.display()))?;
+            copy_cache_restore_dir_contents(
+                &directory,
+                source_path,
+                destination_root,
+                destination_scope,
+                destination_relative,
+            )
         }
-        if file_type.is_dir() {
-            fs::create_dir_all(&destination_path)
-                .with_context(|| format!("create {}", destination_path.display()))?;
-            copy_cache_glob_dir_contents(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
-            if let Some(parent) = destination_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-            }
-            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
-                .with_context(|| format!("copy {}", source_path.display()))?;
-        } else {
-            bail!(
-                "cache glob contains unsupported file type at {}",
-                source_path.display()
-            );
+        crate::fs_copy::NoFollowSource::File(file) => {
+            destination_root
+                .clone_or_copy_file(&file, destination_relative)
+                .with_context(|| {
+                    format!(
+                        "copy cache restore file {} to {}",
+                        source_path.display(),
+                        destination.display()
+                    )
+                })?;
+            Ok(())
         }
     }
-    Ok(())
+}
+
+fn copy_cache_restore_dir_contents(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    destination_scope: &TrustedJobDestination,
+    destination_relative: &Path,
+) -> Result<()> {
+    source.for_each_entry_filtered(
+        |_| true,
+        |entry| {
+            let entry_source_path = source_path.join(&entry.name);
+            let entry_destination_relative = destination_relative.join(&entry.name);
+            copy_opened_cache_restore_source(
+                entry.source,
+                &entry_source_path,
+                destination_root,
+                destination_scope,
+                &entry_destination_relative,
+            )
+        },
+    )
+}
+
+fn copy_opened_cache_glob_source(
+    source: crate::fs_copy::NoFollowSource,
+    source_path: &Path,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+) -> Result<()> {
+    match source {
+        crate::fs_copy::NoFollowSource::Directory(directory) => {
+            destination_root
+                .open_relative_directory(destination_relative)
+                .with_context(|| {
+                    format!(
+                        "create cache glob destination {}",
+                        destination_relative.display()
+                    )
+                })?;
+            copy_cache_glob_dir_contents(
+                &directory,
+                source_path,
+                destination_root,
+                destination_relative,
+            )
+        }
+        crate::fs_copy::NoFollowSource::File(file) => {
+            destination_root
+                .clone_or_copy_file(&file, destination_relative)
+                .with_context(|| format!("copy {}", source_path.display()))?;
+            Ok(())
+        }
+    }
+}
+
+fn copy_cache_glob_dir_contents(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+) -> Result<()> {
+    source.for_each_entry_filtered(
+        |name| cache_source_entry_is_not_symlink(source_path, name),
+        |entry| {
+            let entry_source_path = source_path.join(&entry.name);
+            let entry_destination_relative = destination_relative.join(&entry.name);
+            copy_opened_cache_glob_source(
+                entry.source,
+                &entry_source_path,
+                destination_root,
+                &entry_destination_relative,
+            )
+        },
+    )
 }
 
 /// Copy a cache tree in one traversal.
@@ -7990,101 +8832,153 @@ fn copy_cache_glob_dir_contents(source: &Path, destination: &Path) -> Result<()>
 /// copy primitive already reports a failed file operation, so a second full
 /// metadata traversal only adds warm-path latency for large Rust target trees.
 fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
-    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            fs::create_dir_all(&destination_path)
-                .with_context(|| format!("create {}", destination_path.display()))?;
-            copy_dir_contents(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
-            if let Some(parent) = destination_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-            }
-            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
-                .with_context(|| format!("copy {}", source_path.display()))?;
-        } else {
-            bail!(
-                "cache entry contains unsupported file type at {}",
-                source_path.display()
-            );
-        }
-    }
-    Ok(())
+    let source_directory = crate::fs_copy::NoFollowDir::open_absolute(source)
+        .with_context(|| format!("securely open cache directory {}", source.display()))?;
+    let destination_root = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+        destination,
+        Path::new(""),
+    )
+    .with_context(|| format!("securely open cache destination {}", destination.display()))?;
+    copy_dir_contents_filtered(
+        &source_directory,
+        source,
+        &destination_root,
+        Path::new(""),
+        true,
+    )
 }
 
-fn copy_artifact_download_contents(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .with_context(|| format!("create artifact download dir {}", destination.display()))?;
-    normalize_artifact_dir_permissions(destination)?;
-    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            copy_artifact_download_contents(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
-            if let Some(parent) = destination_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-                normalize_artifact_dir_permissions(parent)?;
-            }
-            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
-                .with_context(|| format!("copy {}", source_path.display()))?;
-            normalize_artifact_file_permissions(&destination_path)?;
-        }
+fn copy_artifact_download_contents(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    destination_scope: &TrustedJobDestination,
+    destination_relative: &Path,
+) -> Result<()> {
+    if !destination_relative.as_os_str().is_empty() {
+        let destination = destination_scope.joined_path(destination_relative)?;
+        destination_scope
+            .open_relative_directory(destination_relative)
+            .with_context(|| format!("create artifact download dir {}", destination.display()))?;
     }
-    Ok(())
+    source.for_each_entry_filtered(
+        |_| true,
+        |entry| {
+            let entry_source_path = source_path.join(&entry.name);
+            let entry_destination_relative = destination_relative.join(&entry.name);
+            match entry.source {
+                crate::fs_copy::NoFollowSource::Directory(directory) => {
+                    copy_artifact_download_contents(
+                        &directory,
+                        &entry_source_path,
+                        destination_root,
+                        destination_scope,
+                        &entry_destination_relative,
+                    )
+                }
+                crate::fs_copy::NoFollowSource::File(file) => copy_opened_artifact_download_file(
+                    &file,
+                    destination_root,
+                    destination_scope,
+                    &entry_destination_relative,
+                )
+                .with_context(|| {
+                    format!(
+                        "copy artifact download file {}",
+                        entry_source_path.display()
+                    )
+                }),
+            }
+        },
+    )
+}
+
+fn copy_opened_artifact_download_file(
+    source: &fs::File,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    destination_scope: &TrustedJobDestination,
+    destination_relative: &Path,
+) -> Result<()> {
+    let destination = destination_scope.joined_path(destination_relative)?;
+    destination_root
+        .clone_or_copy_file(source, destination_relative)
+        .with_context(|| format!("copy artifact file {}", destination.display()))?;
+    normalize_artifact_file_permissions(destination_scope, destination_relative)
 }
 
 #[cfg(unix)]
-fn normalize_artifact_file_permissions(path: &Path) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+fn normalize_artifact_file_permissions(
+    destination_scope: &TrustedJobDestination,
+    destination_relative: &Path,
+) -> Result<()> {
+    let path = destination_scope.joined_path(destination_relative)?;
+    let rooted_relative = destination_scope.joined_relative(destination_relative)?;
+    let root = crate::fs_copy::NoFollowDir::open_trusted_configured_root(&destination_scope.root)
+        .with_context(|| {
+        format!(
+            "securely open trusted artifact destination root {}",
+            destination_scope.root.display()
+        )
+    })?;
+    let opened = root
+        .open_source(&rooted_relative)?
+        .with_context(|| format!("artifact destination disappeared: {}", path.display()))?;
+    let crate::fs_copy::NoFollowSource::File(file) = opened else {
+        bail!(
+            "artifact destination is not a regular file: {}",
+            path.display()
+        );
+    };
+    file.set_permissions(fs::Permissions::from_mode(0o644))
         .with_context(|| format!("set artifact file permissions {}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn normalize_artifact_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn normalize_artifact_dir_permissions(path: &Path) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("set artifact directory permissions {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn normalize_artifact_dir_permissions(_path: &Path) -> Result<()> {
+fn normalize_artifact_file_permissions(
+    _destination_scope: &TrustedJobDestination,
+    _destination_relative: &Path,
+) -> Result<()> {
     Ok(())
 }
 
 fn copy_dir_contents_filtered(
-    source: &Path,
-    destination: &Path,
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_root: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
     include_hidden: bool,
 ) -> Result<()> {
-    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if !include_hidden && path.file_name().is_some_and(hidden_file_name) {
-            continue;
-        }
-        let target = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            fs::create_dir_all(&target)
-                .with_context(|| format!("create directory {}", target.display()))?;
-            copy_dir_contents_filtered(&path, &target, include_hidden)?;
-        } else {
-            crate::fs_copy::clone_or_copy(&path, &target)
-                .with_context(|| format!("copy {} to {}", path.display(), target.display()))?;
-        }
-    }
-    Ok(())
+    source.for_each_entry_filtered(
+        |name| include_hidden || !hidden_file_name(name),
+        |entry| {
+            let path = source_path.join(&entry.name);
+            let target_relative = destination_relative.join(&entry.name);
+            match entry.source {
+                crate::fs_copy::NoFollowSource::Directory(directory) => {
+                    destination_root
+                        .open_relative_directory(&target_relative)
+                        .with_context(|| {
+                            format!("create directory {}", target_relative.display())
+                        })?;
+                    copy_dir_contents_filtered(
+                        &directory,
+                        &path,
+                        destination_root,
+                        &target_relative,
+                        include_hidden,
+                    )?;
+                }
+                crate::fs_copy::NoFollowSource::File(file) => {
+                    destination_root
+                        .clone_or_copy_file(&file, &target_relative)
+                        .with_context(|| {
+                            format!("copy {} to {}", path.display(), target_relative.display())
+                        })?;
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 fn hidden_file_name(name: &std::ffi::OsStr) -> bool {
@@ -11191,7 +12085,9 @@ mod tests {
             .unwrap()
             .as_nanos();
         let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
+        let temp_root = std::env::temp_dir();
+        let temp_root = temp_root.canonicalize().unwrap_or(temp_root);
+        temp_root.join(format!(
             "velnor-executor-test-{}-{nonce}-{sequence}",
             std::process::id()
         ))
@@ -12218,7 +13114,12 @@ esac
         });
         let client = reqwest::blocking::Client::new();
 
-        let body = repository_artifact_response(|| client.get(&url), "test artifact").unwrap();
+        let body = repository_artifact_response(
+            || client.get(&url),
+            "test artifact",
+            PREPARED_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES,
+        )
+        .unwrap();
 
         server.join().unwrap();
         assert_eq!(body, b"ready");
@@ -12649,11 +13550,24 @@ esac
         )
         .unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            "nested.js",
-            save_workspace.join("packages/app/node_modules/link.js"),
-        )
-        .unwrap();
+        {
+            let outside = root.join("outside");
+            fs::create_dir_all(outside.join("target")).unwrap();
+            fs::create_dir_all(outside.join("modules")).unwrap();
+            fs::write(outside.join("target/secret.bin"), "outside target\n").unwrap();
+            fs::write(outside.join("modules/secret.js"), "outside modules\n").unwrap();
+            std::os::unix::fs::symlink(
+                "nested.js",
+                save_workspace.join("packages/app/node_modules/link.js"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&outside, save_workspace.join("linked-outside")).unwrap();
+            std::os::unix::fs::symlink(
+                outside.join("modules"),
+                save_workspace.join("packages/app/node_modules/escape"),
+            )
+            .unwrap();
+        }
         fs::create_dir_all(&restore_workspace).unwrap();
 
         let env = [("GITHUB_REPOSITORY", "Test/Repo")];
@@ -12703,6 +13617,11 @@ esac
             .entries
             .iter()
             .any(|entry| entry.relative == "packages/app/node_modules"));
+        #[cfg(unix)]
+        assert!(!target_manifest
+            .entries
+            .iter()
+            .any(|entry| entry.relative.starts_with("linked-outside")));
 
         let restore = vec![native_cache_step(
             Some(CacheActionKind::Restore),
@@ -12740,6 +13659,111 @@ esac
         assert!(!restore_workspace
             .join("packages/app/node_modules/link.js")
             .exists());
+        #[cfg(unix)]
+        assert!(!restore_workspace
+            .join("packages/app/node_modules/escape")
+            .exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_restore_rejects_direct_and_glob_destination_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir();
+        let direct_source = root.join("direct-cache");
+        let direct_destination = root.join("direct-work");
+        let direct_outside = root.join("direct-outside");
+        fs::create_dir_all(direct_source.join("nested")).unwrap();
+        fs::create_dir_all(&direct_destination).unwrap();
+        fs::create_dir_all(&direct_outside).unwrap();
+        fs::write(direct_source.join("nested/state.bin"), "cached\n").unwrap();
+        symlink(&direct_outside, direct_destination.join("nested")).unwrap();
+        let direct_state =
+            JobExecutionState::new_with_workspace(&[], &[], &direct_destination, &root);
+
+        let direct_error =
+            restore_cache_dir_contents(&direct_state, &direct_source, &direct_destination)
+                .unwrap_err();
+
+        assert!(format!("{direct_error:#}").contains("without following links"));
+        assert!(!direct_outside.join("state.bin").exists());
+
+        let workspace = root.join("glob-work");
+        let temp = root.join("glob-job/temp");
+        let cache_entry = root.join("glob-cache");
+        let glob_outside = root.join("glob-outside");
+        fs::create_dir_all(workspace.join("packages/app")).unwrap();
+        fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(cache_entry.join("0/payload/packages/app/target")).unwrap();
+        fs::create_dir_all(&glob_outside).unwrap();
+        fs::write(
+            cache_entry.join("0/payload/packages/app/target/state.bin"),
+            "cached\n",
+        )
+        .unwrap();
+        fs::write(
+            cache_entry.join("0").join(CACHE_GLOB_MANIFEST_FILE),
+            r#"{"version":1,"entries":[{"relative":"packages/app/target","kind":"directory"}]}"#,
+        )
+        .unwrap();
+        symlink(&glob_outside, workspace.join("packages/app/target")).unwrap();
+        let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
+        let paths = vec!["**/target".to_string()];
+
+        let glob_error =
+            restore_cache_glob_path(&state, &cache_entry, 0, "**/target", &paths).unwrap_err();
+
+        assert!(format!("{glob_error:#}").contains("symlink"));
+        assert!(!glob_outside.join("state.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_glob_restore_handles_large_manifests_without_retaining_sources() {
+        const ENTRY_COUNT: usize = 512;
+
+        let root = temp_dir();
+        let workspace = root.join("work");
+        let temp = root.join("job/temp");
+        let cache_entry = root.join("glob-cache");
+        let payload = cache_entry.join("0/payload");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(&payload).unwrap();
+
+        let mut entries = Vec::with_capacity(ENTRY_COUNT);
+        for index in 0..ENTRY_COUNT {
+            let relative = format!("entry-{index:04}.bin");
+            fs::write(payload.join(&relative), index.to_string()).unwrap();
+            entries.push(CacheGlobManifestEntry {
+                relative,
+                kind: CacheGlobEntryKind::File,
+            });
+        }
+        fs::write(
+            cache_entry.join("0").join(CACHE_GLOB_MANIFEST_FILE),
+            serde_json::to_vec(&CacheGlobManifest {
+                version: 1,
+                entries,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
+        let paths = vec!["**/*.bin".to_string()];
+        restore_cache_glob_path(&state, &cache_entry, 0, "**/*.bin", &paths).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.join("entry-0000.bin")).unwrap(),
+            "0"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("entry-0511.bin")).unwrap(),
+            "511"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -13618,16 +14642,20 @@ esac
 
     #[cfg(unix)]
     #[test]
-    fn cache_copy_rejects_unsupported_entries() {
+    fn cache_copy_rejects_symlink_traversal() {
         let root = temp_dir();
         let source = root.join("source");
         let destination = root.join("destination");
+        let outside = root.join("outside");
         fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&destination).unwrap();
-        std::os::unix::fs::symlink("missing-target", source.join("unsupported")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret"), "outside\n").unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("escape")).unwrap();
 
         let error = copy_dir_contents(&source, &destination).unwrap_err();
-        assert!(error.to_string().contains("unsupported file type"));
+        assert!(error.to_string().contains("is a symlink"), "{error:#}");
+        assert!(!destination.join("escape/secret").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -18613,6 +19641,61 @@ fi"#
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn native_download_artifact_rejects_destination_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        let workspace = temp.join("work");
+        let outside = root.join("outside");
+        let destination = workspace.join("downloaded");
+        fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, destination.join("nested")).unwrap();
+
+        let runtime_env = vec![
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "1".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+        ];
+        let state = JobExecutionState::new_with_workspace(&runtime_env, &[], &workspace, &temp);
+        let artifact_dir = artifact_store_dir(&state).unwrap().join("artifact");
+        fs::create_dir_all(artifact_dir.join("nested")).unwrap();
+        fs::write(artifact_dir.join("nested/output.txt"), "artifact\n").unwrap();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DownloadArtifact,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("name".into(), "artifact".into()),
+                ("path".into(), "/__w/downloaded".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+
+        let error = native_download_artifact(&action, &state).unwrap_err();
+
+        assert!(format!("{error:#}").contains("without following links"));
+        assert!(!outside.join("output.txt").exists());
+        assert!(fs::symlink_metadata(destination.join("nested"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(fs::read_dir(&destination).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .as_encoded_bytes()
+                .starts_with(b".velnor-copy-")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_download_artifact_reports_container_download_path() {
         let root = temp_dir();
@@ -18947,6 +20030,82 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn resolve_artifact_sources_preserves_explicit_mapped_globs() {
+        let root = temp_dir();
+        let workspace = root.join("work");
+        let target = root.join("target-store");
+        fs::create_dir_all(workspace.join("dist")).unwrap();
+        fs::create_dir_all(root.join("logs")).unwrap();
+        fs::create_dir_all(target.join("release")).unwrap();
+        fs::write(workspace.join("dist/a.txt"), "a\n").unwrap();
+        fs::write(workspace.join("dist/workspace.txt"), "workspace\n").unwrap();
+        fs::write(workspace.join("dist/z.txt"), "z\n").unwrap();
+        fs::write(root.join("logs/temp.txt"), "temp\n").unwrap();
+        fs::write(target.join("release/target.bin"), "target\n").unwrap();
+        std::os::unix::fs::symlink(root.join("logs/temp.txt"), workspace.join("unrelated-link"))
+            .unwrap();
+
+        let mut state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &root);
+        state.cargo_target_host = Some(target.clone());
+        let workspace_matches = vec![
+            workspace.join("dist/a.txt"),
+            workspace.join("dist/workspace.txt"),
+            workspace.join("dist/z.txt"),
+        ];
+        let cases = [
+            ("dist/*.txt", workspace_matches.clone()),
+            ("/__w/dist/*.txt", workspace_matches.clone()),
+            ("/github/workspace/dist/*.txt", workspace_matches),
+            ("/__t/logs/*.txt", vec![root.join("logs/temp.txt")]),
+            (
+                "/github/runner_temp/logs/*.txt",
+                vec![root.join("logs/temp.txt")],
+            ),
+            ("/tmp/logs/*.txt", vec![root.join("logs/temp.txt")]),
+            (
+                "target/release/*.bin",
+                vec![target.join("release/target.bin")],
+            ),
+            (
+                "/__w/target/release/*.bin",
+                vec![target.join("release/target.bin")],
+            ),
+            (
+                "/github/workspace/target/release/*.bin",
+                vec![target.join("release/target.bin")],
+            ),
+        ];
+
+        for (pattern, expected) in cases {
+            let pattern = validate_artifact_input_path(pattern).unwrap();
+            assert_eq!(
+                resolve_artifact_sources(&state, pattern)
+                    .unwrap()
+                    .into_iter()
+                    .map(|source| source.path)
+                    .collect::<Vec<_>>(),
+                expected,
+                "mapped glob changed: {}",
+                pattern.as_str()
+            );
+        }
+        let missing = validate_artifact_input_path("missing/*.txt").unwrap();
+        assert!(resolve_artifact_sources(&state, missing)
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn artifact_glob_literal_base_keeps_directory_pattern_relative() {
+        assert_eq!(
+            artifact_glob_literal_base_and_pattern("dist/*.txt"),
+            (PathBuf::from("dist"), "*.txt".to_string())
+        );
+    }
+
     #[test]
     fn native_upload_artifact_expands_target_release_globs() {
         assert!(artifact_store_uncompressed("0"));
@@ -19051,6 +20210,57 @@ fi"#
         assert!(!temp
             .join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/ignore.txt")
             .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_preserves_nested_glob_structure_and_other_path_semantics() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("directory")).unwrap();
+        fs::create_dir_all(workspace.join("glob/alpha")).unwrap();
+        fs::create_dir_all(workspace.join("glob/beta")).unwrap();
+        fs::write(workspace.join("direct.txt"), "direct\n").unwrap();
+        fs::write(workspace.join("directory/child.txt"), "directory\n").unwrap();
+        fs::write(workspace.join("glob/alpha/result.txt"), "alpha\n").unwrap();
+        fs::write(workspace.join("glob/beta/result.txt"), "beta\n").unwrap();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::UploadArtifact,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("name".into(), "path-semantics".into()),
+                ("path".into(), "direct.txt\ndirectory\nglob/**/*.txt".into()),
+                ("if-no-files-found".into(), "error".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
+
+        let result = native_upload_artifact(&action, &state).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let artifact = temp.join("_velnor_artifacts/local-1/path-semantics");
+        assert_eq!(
+            fs::read_to_string(artifact.join("direct.txt")).unwrap(),
+            "direct\n"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact.join("child.txt")).unwrap(),
+            "directory\n"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact.join("alpha/result.txt")).unwrap(),
+            "alpha\n"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact.join("beta/result.txt")).unwrap(),
+            "beta\n"
+        );
+        assert!(!artifact.join("directory/child.txt").exists());
+        assert!(!artifact.join("result.txt").exists());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -19170,6 +20380,168 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn native_upload_artifact_rejects_unconfined_sources_before_create() {
+        use std::io::{ErrorKind, Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::fs::symlink;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = temp_dir();
+        let workspace = root.join("work");
+        fs::create_dir_all(workspace.join("normal-dir/nested")).unwrap();
+        fs::write(workspace.join("normal.txt"), "normal file\n").unwrap();
+        fs::write(
+            workspace.join("normal-dir/nested/child.txt"),
+            "normal directory\n",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join("glob-root")).unwrap();
+        fs::write(workspace.join("glob-root/inside.txt"), "inside\n").unwrap();
+        fs::create_dir_all(root.join("outside-dir")).unwrap();
+        fs::write(root.join("outside-dir/secret.txt"), "secret\n").unwrap();
+        fs::write(root.join("outside.txt"), "outside\n").unwrap();
+
+        let upload = |path: &str, name: &str| NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::UploadArtifact,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("name".into(), name.into()),
+                ("path".into(), path.into()),
+                ("if-no-files-found".into(), "error".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let normal_state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &root);
+        native_upload_artifact(&upload("normal.txt", "normal-file"), &normal_state).unwrap();
+        native_upload_artifact(&upload("normal-dir", "normal-directory"), &normal_state).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("_velnor_artifacts/local-1/normal-file/normal.txt"))
+                .unwrap(),
+            "normal file\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                root.join("_velnor_artifacts/local-1/normal-directory/nested/child.txt")
+            )
+            .unwrap(),
+            "normal directory\n"
+        );
+
+        symlink("normal.txt", workspace.join("file-link.txt")).unwrap();
+        symlink("normal-dir", workspace.join("directory-link")).unwrap();
+        symlink("normal-dir", workspace.join("ancestor-link")).unwrap();
+        symlink(root.join("outside-dir"), workspace.join("glob-root/escape")).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let results_url = format!("http://{}", listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests += 1;
+                        let mut request = [0_u8; 4096];
+                        let _ = stream.read(&mut request);
+                        write!(
+                            stream,
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .unwrap();
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if stop_rx.recv_timeout(Duration::from_millis(10)).is_ok() {
+                            break;
+                        }
+                    }
+                    Err(error) => panic!("artifact test server failed: {error}"),
+                }
+            }
+            requests
+        });
+        let secure_state = JobExecutionState::new_with_workspace(
+            &[
+                ("ACTIONS_RESULTS_URL".into(), results_url),
+                (
+                    "ACTIONS_RUNTIME_TOKEN".into(),
+                    runtime_token_with_results_scope("plan-1", "job-1"),
+                ),
+            ],
+            &[],
+            &workspace,
+            &root,
+        );
+
+        let cases = [
+            ("file-link.txt", "file-symlink", "symlink"),
+            ("directory-link", "directory-symlink", "symlink"),
+            (
+                "ancestor-link/nested/child.txt",
+                "directory-symlink-ancestor",
+                "symlink",
+            ),
+            (
+                "ancestor-link/**/*.txt",
+                "glob-directory-symlink-ancestor",
+                "symlink",
+            ),
+            ("glob-root/**/*.txt", "glob-directory-symlink", "symlink"),
+            (
+                "glob-root/escape/**/*.txt\n/etc/passwd",
+                "preflight-before-enumeration",
+                "unmapped absolute root",
+            ),
+            (
+                "/etc/passwd",
+                "unmapped-absolute-file",
+                "unmapped absolute root",
+            ),
+            (
+                "/__w//etc/passwd",
+                "absolute-mapped-suffix",
+                "absolute mapped suffix",
+            ),
+            ("../outside.txt", "parent-traversal", "parent traversal"),
+            ("/etc/*", "unmapped-absolute-glob", "unmapped absolute root"),
+        ];
+        let mut errors = Vec::new();
+        let mut staging_empty = Vec::new();
+        for (path, name, expected_error) in cases {
+            let error = match native_upload_artifact(&upload(path, name), &secure_state) {
+                Ok(result) => format!(
+                    "unexpected upload result: exit={}, stderr={}",
+                    result.exit_code, result.stderr
+                ),
+                Err(error) => format!("{error:#}"),
+            };
+            errors.push((path, expected_error, error));
+            let artifact_dir = root.join("_velnor_artifacts/local-1").join(name);
+            staging_empty.push(
+                !artifact_dir.exists() || fs::read_dir(artifact_dir).unwrap().next().is_none(),
+            );
+        }
+
+        stop_tx.send(()).unwrap();
+        let create_requests = server.join().unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        for (path, expected, error) in &errors {
+            assert!(
+                error.contains(expected),
+                "unexpected error for {path}: {error}"
+            );
+        }
+        assert!(staging_empty.iter().all(|empty| *empty));
+        assert_eq!(create_requests, 0, "CreateArtifact must not be called");
+    }
+
     #[test]
     fn native_upload_pages_artifact_uploads_single_dereferenced_tar() {
         let temp = temp_dir();
@@ -19235,6 +20607,142 @@ fi"#
         assert!(!archived.contains_key(Path::new(".github/workflow.yml")));
         assert!(!archived.contains_key(Path::new(".well-known/security.txt")));
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn create_pages_archive_streams_large_directory() {
+        const FILE_COUNT: usize = 1_024;
+
+        let temp = temp_dir();
+        let site = temp.join("site");
+        let archive_path = temp.join("artifact.tar");
+        fs::create_dir_all(&site).unwrap();
+        for index in 0..FILE_COUNT {
+            fs::write(site.join(format!("page-{index:04}.html")), "page\n").unwrap();
+        }
+
+        create_pages_archive(&site, &temp, Path::new("artifact.tar")).unwrap();
+
+        let file = fs::File::open(&archive_path).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let archived_files = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.header().entry_type().is_file())
+            .count();
+        assert_eq!(archived_files, FILE_COUNT);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn pages_archive_staging_files_are_unique_siblings() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+
+        let (first_file, first_path) = create_pages_archive_staging_file(&temp).unwrap();
+        let (second_file, second_path) = create_pages_archive_staging_file(&temp).unwrap();
+
+        assert_eq!(first_path.0.parent(), Some(temp.as_path()));
+        assert_eq!(second_path.0.parent(), Some(temp.as_path()));
+        assert_ne!(first_path.0, second_path.0);
+        drop(first_file);
+        drop(second_file);
+        drop(first_path);
+        drop(second_path);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_pages_archive_rejects_destination_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let site = temp.join("site");
+        let archive_path = temp.join("artifact.tar");
+        let outside = temp.join("outside.tar");
+        fs::create_dir_all(&site).unwrap();
+        fs::write(site.join("index.html"), "pages\n").unwrap();
+        fs::write(&outside, "outside\n").unwrap();
+        symlink(&outside, &archive_path).unwrap();
+
+        let error = create_pages_archive(&site, &temp, Path::new("artifact.tar")).unwrap_err();
+
+        assert!(format!("{error:#}").contains("destination is a symlink"));
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "outside\n");
+        assert!(fs::symlink_metadata(&archive_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_pages_archive_failure_does_not_publish_partial_archive() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let site = temp.join("site");
+        let archive_path = temp.join("artifact.tar");
+        fs::create_dir_all(&site).unwrap();
+        fs::write(site.join("a.html"), "written before failure\n").unwrap();
+        symlink(".", site.join("z-cycle")).unwrap();
+        fs::write(&archive_path, "previous archive\n").unwrap();
+
+        let error = create_pages_archive(&site, &temp, Path::new("artifact.tar")).unwrap_err();
+
+        assert!(format!("{error:#}").contains("symlink cycle"));
+        assert_eq!(
+            fs::read_to_string(&archive_path).unwrap(),
+            "previous archive\n"
+        );
+        let staging_files = fs::read_dir(&temp)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".velnor-pages-archive-"))
+            .collect::<Vec<_>>();
+        assert!(staging_files.is_empty(), "{staging_files:?}");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn create_pages_archive_orders_sources_deterministically() {
+        let temp = temp_dir();
+        let site = temp.join("site");
+        let archive_path = temp.join("artifact.tar");
+        fs::create_dir_all(site.join("z-dir")).unwrap();
+        fs::create_dir_all(site.join("a-dir")).unwrap();
+        fs::write(site.join("z-last.html"), "z\n").unwrap();
+        fs::write(site.join("middle.html"), "middle\n").unwrap();
+        fs::write(site.join("a-dir/z.html"), "z\n").unwrap();
+        fs::write(site.join("a-dir/a.html"), "a\n").unwrap();
+        fs::write(site.join("z-dir/a.html"), "a\n").unwrap();
+
+        create_pages_archive(&site, &temp, Path::new("artifact.tar")).unwrap();
+
+        let file = fs::File::open(&archive_path).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let paths = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.header().entry_type().is_file())
+            .map(|entry| entry.path().unwrap().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "a-dir/a.html",
+                "a-dir/z.html",
+                "middle.html",
+                "z-dir/a.html",
+                "z-last.html",
+            ]
+            .map(PathBuf::from)
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -21825,6 +23333,54 @@ bitcoin-processor-app.push=true")
             resolve_host_path(&state, "/__t/x"),
             Some(PathBuf::from("/host/temp/x"))
         );
+        assert_eq!(resolve_host_path(&state, "../outside"), None);
+        assert_eq!(resolve_host_path(&state, "/__w/../outside"), None);
+    }
+
+    #[test]
+    fn mapped_paths_reject_absolute_suffixes() {
+        let mut state = JobExecutionState::new_with_workspace(
+            &[],
+            &[],
+            Path::new("/host/work"),
+            Path::new("/host/temp"),
+        );
+        state.cargo_target_host = Some(PathBuf::from("/host/target"));
+
+        for path in [
+            "target//escape",
+            "/__w/target//escape",
+            "/github/workspace/target//escape",
+            "/__w//escape",
+            "/github/workspace//escape",
+            "/__t//escape",
+            "/github/runner_temp//escape",
+            "/tmp//escape",
+            "/github/home//escape",
+        ] {
+            assert_eq!(
+                resolve_host_path(&state, path),
+                None,
+                "mapped path escaped: {path}"
+            );
+        }
+        assert_eq!(resolve_cache_path(&state, "~//escape"), None);
+
+        for path in [
+            "target//*.txt",
+            "/__w/target//*.txt",
+            "/github/workspace/target//*.txt",
+            "/__w//*.txt",
+            "/github/workspace//*.txt",
+            "/__t//*.txt",
+            "/github/runner_temp//*.txt",
+            "/tmp//*.txt",
+        ] {
+            assert!(
+                artifact_glob_base_and_pattern(&state, path).is_err(),
+                "mapped glob accepted absolute suffix: {path}"
+            );
+        }
     }
 
     #[test]
