@@ -13,6 +13,8 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
+const MAX_SECURE_CLEANUP_DEPTH: usize = 256;
+
 #[derive(Debug)]
 pub(crate) enum NoFollowSource {
     File(fs::File),
@@ -372,8 +374,21 @@ impl NoFollowDestinationDir {
     /// An existing destination is moved aside first, and is removed only after
     /// the staged tree is visible. Any failed publication attempts to restore
     /// the original destination.
+    #[cfg(test)]
     pub fn publish_staged_directory(
         &self,
+        staging_name: &OsStr,
+        destination_name: &OsStr,
+    ) -> Result<()> {
+        self.publish_staged_directory_from(self, staging_name, destination_name)
+    }
+
+    /// Atomically publishes a private staging directory from another already-open
+    /// parent directory. The source and destination parents stay descriptor-bound
+    /// for the entire exchange; no path is re-resolved during publication.
+    pub fn publish_staged_directory_from(
+        &self,
+        staging_parent: &Self,
         staging_name: &OsStr,
         destination_name: &OsStr,
     ) -> Result<()> {
@@ -381,7 +396,7 @@ impl NoFollowDestinationDir {
         validate_single_component(destination_name, "destination directory")?;
 
         let staging_stat = rustix::fs::statat(
-            &self.file,
+            &staging_parent.file,
             staging_name,
             rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
         )
@@ -389,7 +404,7 @@ impl NoFollowDestinationDir {
         .with_context(|| {
             format!(
                 "inspect staged artifact directory {}",
-                self.display_path.join(staging_name).display()
+                staging_parent.display_path.join(staging_name).display()
             )
         })?;
         if rustix::fs::FileType::from_raw_mode(staging_stat.st_mode)
@@ -397,99 +412,79 @@ impl NoFollowDestinationDir {
         {
             bail!(
                 "staged artifact is not a directory: {}",
-                self.display_path.join(staging_name).display()
+                staging_parent.display_path.join(staging_name).display()
             );
         }
 
-        let destination_exists = match rustix::fs::statat(
-            &self.file,
-            destination_name,
-            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-        ) {
-            Ok(stat) => {
-                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                    != rustix::fs::FileType::Directory
-                {
-                    bail!(
-                        "artifact destination is not a directory: {}",
-                        self.display_path.join(destination_name).display()
-                    );
-                }
-                true
-            }
-            Err(rustix::io::Errno::NOENT) => false,
-            Err(error) => {
-                return Err(std::io::Error::from(error)).with_context(|| {
-                    format!(
-                        "inspect artifact destination {}",
-                        self.display_path.join(destination_name).display()
-                    )
-                });
-            }
-        };
-
-        if !destination_exists {
-            rustix::fs::renameat(&self.file, staging_name, &self.file, destination_name)
-                .map_err(std::io::Error::from)
-                .with_context(|| {
-                    format!(
-                        "publish staged artifact directory {}",
-                        self.display_path.join(destination_name).display()
-                    )
-                })?;
-            return Ok(());
-        }
-
         for _ in 0..16 {
-            let backup_name = OsString::from(format!(
-                ".velnor-replaced-artifact-{}",
-                uuid::Uuid::new_v4()
-            ));
-            match rustix::fs::renameat(&self.file, destination_name, &self.file, &backup_name) {
-                Ok(()) => {
-                    if let Err(error) =
-                        rustix::fs::renameat(&self.file, staging_name, &self.file, destination_name)
+            let destination_exists = match rustix::fs::statat(
+                &self.file,
+                destination_name,
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+            ) {
+                Ok(stat) => {
+                    if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                        != rustix::fs::FileType::Directory
                     {
-                        let rollback = rustix::fs::renameat(
-                            &self.file,
-                            &backup_name,
-                            &self.file,
-                            destination_name,
+                        bail!(
+                            "artifact destination is not a directory: {}",
+                            self.display_path.join(destination_name).display()
                         );
-                        let error = std::io::Error::from(error);
-                        return match rollback {
-                            Ok(()) => Err(error).context("publish staged artifact directory"),
-                            Err(rollback_error) => Err(anyhow::anyhow!(
-                                "publish staged artifact directory failed: {error}; rollback failed: {}",
-                                std::io::Error::from(rollback_error)
-                            )),
-                        };
                     }
-                    remove_tree_at(&self.file, &backup_name).with_context(|| {
-                        format!(
-                            "remove replaced artifact directory {}",
-                            self.display_path.join(&backup_name).display()
-                        )
-                    })?;
-                    return Ok(());
+                    true
                 }
-                Err(rustix::io::Errno::EXIST) => continue,
-                Err(rustix::io::Errno::NOENT) => {
-                    // The destination changed between inspection and rename.
-                    // Re-inspect it and repeat the fail-closed decision.
-                    continue;
-                }
+                Err(rustix::io::Errno::NOENT) => false,
                 Err(error) => {
                     return Err(std::io::Error::from(error)).with_context(|| {
                         format!(
-                            "move existing artifact destination aside: {}",
+                            "inspect artifact destination {}",
+                            self.display_path.join(destination_name).display()
+                        )
+                    });
+                }
+            };
+
+            let result = if destination_exists {
+                rustix::fs::renameat_with(
+                    &staging_parent.file,
+                    staging_name,
+                    &self.file,
+                    destination_name,
+                    rustix::fs::RenameFlags::EXCHANGE,
+                )
+            } else {
+                rustix::fs::renameat_with(
+                    &staging_parent.file,
+                    staging_name,
+                    &self.file,
+                    destination_name,
+                    rustix::fs::RenameFlags::NOREPLACE,
+                )
+            };
+            match result {
+                Ok(()) => {
+                    if destination_exists {
+                        remove_tree_at(&staging_parent.file, staging_name).with_context(|| {
+                            format!(
+                                "remove replaced artifact directory {}",
+                                staging_parent.display_path.join(staging_name).display()
+                            )
+                        })?;
+                    }
+                    return Ok(());
+                }
+                Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOENT) => continue,
+                Err(error) => {
+                    return Err(std::io::Error::from(error)).with_context(|| {
+                        format!(
+                            "atomically publish staged artifact directory {}",
                             self.display_path.join(destination_name).display()
                         )
                     });
                 }
             }
         }
-        bail!("could not allocate a unique replaced artifact directory name")
+        bail!("could not atomically publish staged artifact directory")
     }
 
     pub(crate) fn remove_tree_entry(&self, name: &OsStr) -> Result<()> {
@@ -519,6 +514,68 @@ impl NoFollowDestinationDir {
         Ok(current)
     }
 
+    pub fn open_relative_file(&self, relative: &Path) -> Result<fs::File> {
+        self.open_relative_file_if_exists(relative)?
+            .with_context(|| format!("artifact file does not exist: {}", relative.display()))
+    }
+
+    pub fn open_relative_file_if_exists(&self, relative: &Path) -> Result<Option<fs::File>> {
+        let mut components = relative
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .peekable();
+        let mut parent = self.try_clone()?;
+        let file_name = loop {
+            let Some(component) = components.next() else {
+                bail!(
+                    "artifact file path has no file name: {}",
+                    relative.display()
+                );
+            };
+            let Component::Normal(name) = component else {
+                bail!(
+                    "artifact file path is not a normalized relative path: {}",
+                    relative.display()
+                );
+            };
+            if components.peek().is_none() {
+                break name.to_os_string();
+            }
+            parent = parent.open_existing_directory(name)?;
+        };
+        let stat = match rustix::fs::statat(
+            &parent.file,
+            &file_name,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => {
+                return Err(std::io::Error::from(error))
+                    .with_context(|| format!("inspect artifact file {}", relative.display()))
+            }
+        };
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+            bail!(
+                "artifact file is not a regular file: {}",
+                relative.display()
+            );
+        }
+        let file = open_source_file_nonblocking_no_follow_at(&parent.file, Path::new(&file_name))
+            .with_context(|| format!("open artifact file {}", relative.display()))?;
+        if !file
+            .metadata()
+            .with_context(|| format!("inspect opened artifact file {}", relative.display()))?
+            .is_file()
+        {
+            bail!(
+                "artifact file changed type during secure open: {}",
+                relative.display()
+            );
+        }
+        Ok(Some(file))
+    }
+
     pub fn create_unique_directory(&self, prefix: &str) -> Result<(Self, OsString)> {
         for _ in 0..16 {
             let name = OsString::from(format!("{prefix}-{}", uuid::Uuid::new_v4()));
@@ -536,6 +593,78 @@ impl NoFollowDestinationDir {
             }
         }
         bail!("could not allocate a unique secure temporary directory")
+    }
+
+    pub fn create_unlinked_temporary_file(&self, prefix: &str) -> Result<fs::File> {
+        for _ in 0..16 {
+            let name = OsString::from(format!("{prefix}-{}.tmp", uuid::Uuid::new_v4()));
+            let file = match rustix::fs::openat(
+                &self.file,
+                &name,
+                rustix::fs::OFlags::RDWR
+                    | rustix::fs::OFlags::CREATE
+                    | rustix::fs::OFlags::EXCL
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::from_raw_mode(0o600),
+            ) {
+                Ok(file) => file,
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(error) => {
+                    return Err(std::io::Error::from(error))
+                        .with_context(|| format!("create secure temporary file {name:?}"))
+                }
+            };
+            rustix::fs::unlinkat(&self.file, &name, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from)
+                .context("unlink secure temporary file name")?;
+            return Ok(file.into());
+        }
+        bail!("could not allocate a unique secure temporary file")
+    }
+
+    pub fn create_temporary_file(&self, prefix: &str) -> Result<(fs::File, OsString)> {
+        for _ in 0..16 {
+            let name = OsString::from(format!("{prefix}-{}.tmp", uuid::Uuid::new_v4()));
+            match create_temporary_file(&self.file, &name) {
+                Ok(file) => return Ok((file, name)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("create secure temporary file {name:?}"))
+                }
+            }
+        }
+        bail!("could not allocate a unique named temporary file")
+    }
+
+    pub fn publish_temporary_file(
+        &self,
+        staging_name: &OsStr,
+        destination_name: &OsStr,
+    ) -> Result<()> {
+        validate_single_component(staging_name, "staging file")?;
+        validate_single_component(destination_name, "destination file")?;
+        self.validate_destination_file(destination_name)?;
+        rustix::fs::renameat(&self.file, staging_name, &self.file, destination_name)
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "publish temporary artifact file {}",
+                    self.display_path.join(destination_name).display()
+                )
+            })
+    }
+
+    pub(crate) fn set_mode(&self, mode: u16) -> Result<()> {
+        rustix::fs::fchmod(&self.file, rustix::fs::Mode::from_raw_mode(mode))
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "set artifact directory mode {}",
+                    self.display_path.display()
+                )
+            })
     }
 
     pub fn write_file_from_reader(
@@ -822,14 +951,47 @@ impl NoFollowDestinationDir {
                         });
                     }
                 }
-                open().map_err(std::io::Error::from).with_context(|| {
-                    format!(
-                        "open created artifact destination directory without following links: {}",
-                        display_path.display()
-                    )
-                })?
+                match open() {
+                    Ok(file) => file,
+                    Err(rustix::io::Errno::LOOP) => {
+                        bail!(
+                            "artifact destination is a symlink: {}",
+                            display_path.display()
+                        )
+                    }
+                    Err(error) => {
+                        if matches!(error, rustix::io::Errno::NOTDIR)
+                            && destination_entry_is_symlink(&self.file, name)
+                        {
+                            bail!(
+                                "artifact destination is a symlink: {}",
+                                display_path.display()
+                            );
+                        }
+                        return Err(std::io::Error::from(error)).with_context(|| {
+                            format!(
+                                "open created artifact destination directory without following links: {}",
+                                display_path.display()
+                            )
+                        });
+                    }
+                }
+            }
+            Err(rustix::io::Errno::LOOP) => {
+                bail!(
+                    "artifact destination is a symlink: {}",
+                    display_path.display()
+                )
             }
             Err(error) => {
+                if matches!(error, rustix::io::Errno::NOTDIR)
+                    && destination_entry_is_symlink(&self.file, name)
+                {
+                    bail!(
+                        "artifact destination is a symlink: {}",
+                        display_path.display()
+                    );
+                }
                 return Err(std::io::Error::from(error)).with_context(|| {
                     format!(
                         "open artifact destination directory without following links: {}",
@@ -838,6 +1000,37 @@ impl NoFollowDestinationDir {
                 });
             }
         };
+        Ok(Self {
+            file: file.into(),
+            display_path,
+        })
+    }
+
+    fn open_existing_directory(&self, name: &OsStr) -> Result<Self> {
+        let display_path = self.display_path.join(name);
+        let file = rustix::fs::openat(
+            &self.file,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::LOOP {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "artifact destination is a symlink: {}",
+                        display_path.display()
+                    ),
+                )
+            } else {
+                std::io::Error::from(error)
+            }
+        })
+        .with_context(|| format!("open artifact directory {}", display_path.display()))?;
         Ok(Self {
             file: file.into(),
             display_path,
@@ -855,7 +1048,27 @@ fn validate_single_component(name: &OsStr, label: &str) -> Result<()> {
 }
 
 #[cfg(unix)]
+fn destination_entry_is_symlink(parent: &fs::File, name: &OsStr) -> bool {
+    rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map(|stat| {
+            rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Symlink
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
 fn remove_tree_at(parent: &fs::File, name: &OsStr) -> Result<()> {
+    remove_tree_at_depth(parent, name, 0)
+}
+
+#[cfg(unix)]
+fn remove_tree_at_depth(parent: &fs::File, name: &OsStr, depth: usize) -> Result<()> {
+    if depth > MAX_SECURE_CLEANUP_DEPTH {
+        bail!(
+            "artifact tree exceeds the {}-component secure cleanup depth",
+            MAX_SECURE_CLEANUP_DEPTH
+        );
+    }
     let stat = match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => stat,
         Err(rustix::io::Errno::NOENT) => return Ok(()),
@@ -888,7 +1101,7 @@ fn remove_tree_at(parent: &fs::File, name: &OsStr) -> Result<()> {
         if entry_name == "." || entry_name == ".." {
             continue;
         }
-        remove_tree_at(&directory, &entry_name)?;
+        remove_tree_at_depth(&directory, &entry_name, depth + 1)?;
     }
     match rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
@@ -1023,8 +1236,45 @@ impl NoFollowDestinationDir {
         )
     }
 
+    pub fn open_relative_file(&self, relative: &Path) -> Result<fs::File> {
+        bail!(
+            "secure artifact destination copying is unsupported on this platform for {}",
+            relative.display()
+        )
+    }
+
+    pub fn open_relative_file_if_exists(&self, relative: &Path) -> Result<Option<fs::File>> {
+        bail!(
+            "secure artifact destination copying is unsupported on this platform for {}",
+            relative.display()
+        )
+    }
+
     pub fn create_unique_directory(&self, prefix: &str) -> Result<(Self, OsString)> {
         bail!("secure artifact destination copying is unsupported on this platform for {prefix}")
+    }
+
+    pub fn create_unlinked_temporary_file(&self, prefix: &str) -> Result<fs::File> {
+        bail!("secure artifact destination copying is unsupported on this platform for {prefix}")
+    }
+
+    pub fn create_temporary_file(&self, prefix: &str) -> Result<(fs::File, OsString)> {
+        bail!("secure artifact destination copying is unsupported on this platform for {prefix}")
+    }
+
+    pub fn publish_temporary_file(
+        &self,
+        _staging_name: &OsStr,
+        destination_name: &OsStr,
+    ) -> Result<()> {
+        bail!(
+            "secure artifact destination copying is unsupported on this platform for {}",
+            destination_name.to_string_lossy()
+        )
+    }
+
+    pub(crate) fn set_mode(&self, _mode: u16) -> Result<()> {
+        bail!("secure artifact destination copying is unsupported on this platform")
     }
 
     pub fn write_file_from_reader(
@@ -1040,8 +1290,21 @@ impl NoFollowDestinationDir {
         )
     }
 
+    #[cfg(test)]
     pub fn publish_staged_directory(
         &self,
+        _staging_name: &OsStr,
+        destination_name: &OsStr,
+    ) -> Result<()> {
+        bail!(
+            "secure artifact destination publishing is unsupported on this platform for {}",
+            destination_name.to_string_lossy()
+        )
+    }
+
+    pub fn publish_staged_directory_from(
+        &self,
+        _staging_parent: &Self,
         _staging_name: &OsStr,
         destination_name: &OsStr,
     ) -> Result<()> {
@@ -1324,6 +1587,39 @@ mod tests {
                 .as_encoded_bytes()
                 .starts_with(b".velnor-replaced-artifact-")
         }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_destination_atomically_publishes_from_private_parent() {
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let private_path = root.join("private");
+        let destination_path = root.join("artifact");
+        fs::create_dir_all(&destination_path).unwrap();
+        fs::create_dir_all(&private_path).unwrap();
+        fs::write(destination_path.join("stale"), b"stale").unwrap();
+
+        let destination_parent =
+            NoFollowDestinationDir::open_trusted_rooted_destination(&root, Path::new("")).unwrap();
+        let private_parent =
+            NoFollowDestinationDir::open_trusted_rooted_destination(&root, Path::new("private"))
+                .unwrap();
+        let (staged, staging_name) = private_parent.create_unique_directory(".staged").unwrap();
+        staged
+            .write_file_from_reader(&mut &b"published"[..], Path::new("new/file"), 9, 0o644)
+            .unwrap();
+
+        destination_parent
+            .publish_staged_directory_from(&private_parent, &staging_name, OsStr::new("artifact"))
+            .unwrap();
+
+        assert_eq!(
+            fs::read(destination_path.join("new/file")).unwrap(),
+            b"published"
+        );
+        assert!(!destination_path.join("stale").exists());
+        assert!(fs::read_dir(&private_path).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
