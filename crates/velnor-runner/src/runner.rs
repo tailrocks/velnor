@@ -523,6 +523,19 @@ fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTree
     ])
 }
 
+fn no_progress_telemetry_fields(
+    window_ms: u64,
+    last_event: &'static str,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "window_ms".to_owned(),
+            Value::from(window_ms.min(MAX_TELEMETRY_DURATION_MS)),
+        ),
+        ("last_event".to_owned(), Value::from(last_event)),
+    ])
+}
+
 fn bounded_telemetry_count(count: usize) -> (u64, bool) {
     let count = u64::try_from(count).unwrap_or(u64::MAX);
     (
@@ -4924,6 +4937,7 @@ async fn handle_job_request(
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let ops_job_uid = crate::ops::global().map(|_| job.job_id.clone());
         let mut emitted_pressure = false;
+        let mut emitted_no_progress = false;
         let job_peak_reservation = loop {
             let reserve_result = reserve_job_peak_capacity(storage_layout, config_dir, args);
             let last_error = reserve_result
@@ -4975,6 +4989,21 @@ async fn handle_job_request(
                                 TelemetryEvent::PassiveWait,
                                 fields,
                             );
+                        }
+                    }
+                    let no_progress_ms = duration_ms(capacity_wait_started.elapsed());
+                    if no_progress_ms >= 1_000 && !emitted_no_progress {
+                        if let (Some(sink), Some(admission)) =
+                            (crate::ops::global(), telemetry_admission.as_ref())
+                        {
+                            let fields =
+                                no_progress_telemetry_fields(no_progress_ms, "passive_wait");
+                            let _ = sink.emit_telemetry_for_admission(
+                                admission,
+                                TelemetryEvent::NoProgress,
+                                fields,
+                            );
+                            emitted_no_progress = true;
                         }
                     }
                     eprintln!(
@@ -13159,6 +13188,15 @@ jobs:
         assert!(!serde_json::to_string(&fields)
             .unwrap()
             .contains("timestamp"));
+    }
+
+    #[test]
+    fn no_progress_telemetry_fields_are_bounded_and_secret_free() {
+        let fields = no_progress_telemetry_fields(u64::MAX, "passive_wait");
+
+        assert_eq!(fields["window_ms"], Value::from(MAX_TELEMETRY_DURATION_MS));
+        assert_eq!(fields["last_event"], Value::from("passive_wait"));
+        assert!(!serde_json::to_string(&fields).unwrap().contains("secret"));
     }
 
     #[test]
