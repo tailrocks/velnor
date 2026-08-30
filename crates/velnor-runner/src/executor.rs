@@ -674,6 +674,10 @@ impl std::error::Error for StepLogicFailure {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobExecutionSummary {
     pub step_results: Vec<StepExecutionResult>,
+    /// Number of physical actions that returned an execution result. This is
+    /// separate from `step_logs`, which also contains presentation and
+    /// synthetic lifecycle rows.
+    pub executed_physical_actions: usize,
     pub job_outputs: BTreeMap<String, String>,
     pub environment_url: Option<String>,
     pub step_logs: Vec<StepLog>,
@@ -1436,6 +1440,7 @@ where
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
         let mut results = Vec::new();
+        let mut executed_physical_actions = 0;
         let mut step_logs = Vec::new();
         let mut effective_base_env = container_runtime_env(container);
         effective_base_env.extend_from_slice(base_env);
@@ -1656,6 +1661,7 @@ where
                             step_logs.push(log);
                         }
                         state.apply(step_id, &result);
+                        executed_physical_actions += 1;
                         results.push(result);
                         if failed {
                             continue;
@@ -1890,6 +1896,9 @@ where
                         step_logs.push(log);
                     }
                     state.apply(&step_context_id, &result);
+                    if step.reports_timeline_start() {
+                        executed_physical_actions += 1;
+                    }
                     results.push(result);
                 }
                 Err(error) => {
@@ -1995,6 +2004,7 @@ where
                         combined.failure_ignored |= result.failure_ignored;
                         combined.state.merge(result.state.clone());
                         state.apply(&post_step_id, &result);
+                        executed_physical_actions += 1;
                         results.push(result);
                     }
                     Err(error) => {
@@ -2068,6 +2078,7 @@ where
                     self.emit_step_log(&log);
                     step_logs.push(log);
                     state.apply(&js_post_step_id, &result);
+                    executed_physical_actions += 1;
                     results.push(result);
                 }
                 Err(error) => {
@@ -2098,6 +2109,7 @@ where
             job_outputs: evaluate_job_outputs(job_outputs, &state),
             environment_url: evaluate_environment_url(environment_url, &state),
             step_results: results,
+            executed_physical_actions,
             step_logs,
         })
     }

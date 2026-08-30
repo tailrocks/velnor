@@ -10,7 +10,9 @@ use sha2::{Digest, Sha256};
 use crate::job_summary::JobConclusion;
 
 /// Protocol version. Mismatch fails closed.
-pub const PROTOCOL_VERSION: u16 = 4;
+///
+/// Version 5 adds the required `skipped` bit to `StepCompleted` frames.
+pub const PROTOCOL_VERSION: u16 = 5;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
 /// stdout stream tag in [`VsockMessage::Stdio`].
@@ -83,6 +85,7 @@ pub enum VsockMessage {
     StepCompleted {
         step_id: String,
         exit_code: i32,
+        skipped: bool,
     },
     Stdio {
         stream: u8,
@@ -298,9 +301,14 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             write_bytes(&mut payload, bytes)?;
         }
         VsockMessage::StepStarted { step_id } => write_string(&mut payload, step_id)?,
-        VsockMessage::StepCompleted { step_id, exit_code } => {
+        VsockMessage::StepCompleted {
+            step_id,
+            exit_code,
+            skipped,
+        } => {
             write_string(&mut payload, step_id)?;
             payload.extend_from_slice(&exit_code.to_be_bytes());
+            payload.push(u8::from(*skipped));
         }
         VsockMessage::Stdio { stream, bytes } => {
             payload.push(*stream);
@@ -357,7 +365,7 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         14 => {
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
-            let restored = read_u8(&mut cur)? != 0;
+            let restored = read_bool(&mut cur)?;
             VsockMessage::GuestIdentity {
                 isolation_id,
                 generation,
@@ -367,8 +375,8 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         1 => {
             let isolation_id = read_string(&mut cur)?;
             let generation = read_u64(&mut cur)?;
-            let docker_healthy = read_u8(&mut cur)? != 0;
-            let job_credentials_absent = read_u8(&mut cur)? != 0;
+            let docker_healthy = read_bool(&mut cur)?;
+            let job_credentials_absent = read_bool(&mut cur)?;
             let session_challenge = read_string(&mut cur)?;
             VsockMessage::GuestReady {
                 isolation_id,
@@ -408,7 +416,12 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
         5 => {
             let step_id = read_string(&mut cur)?;
             let exit_code = read_i32(&mut cur)?;
-            VsockMessage::StepCompleted { step_id, exit_code }
+            let skipped = read_bool(&mut cur)?;
+            VsockMessage::StepCompleted {
+                step_id,
+                exit_code,
+                skipped,
+            }
         }
         6 => {
             let stream = read_u8(&mut cur)?;
@@ -509,6 +522,14 @@ fn read_u8(cur: &mut &[u8]) -> Result<u8, VsockCodecError> {
     Ok(value)
 }
 
+fn read_bool(cur: &mut &[u8]) -> Result<bool, VsockCodecError> {
+    match read_u8(cur)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(VsockCodecError::InvalidBoolean { value }),
+    }
+}
+
 fn read_u32(cur: &mut &[u8]) -> Result<u32, VsockCodecError> {
     if cur.len() < 4 {
         return Err(VsockCodecError::Truncated { len: cur.len() });
@@ -561,6 +582,7 @@ pub enum VsockCodecError {
     Io { detail: String },
     InvalidConclusion { value: String },
     InvalidStream { value: u8 },
+    InvalidBoolean { value: u8 },
 }
 
 impl std::fmt::Display for VsockCodecError {
@@ -586,6 +608,9 @@ impl std::fmt::Display for VsockCodecError {
                     f,
                     "vsock unknown stdio stream {value}; expected {STDOUT_STREAM} or {STDERR_STREAM}"
                 )
+            }
+            Self::InvalidBoolean { value } => {
+                write!(f, "vsock invalid boolean value {value}; expected 0 or 1")
             }
         }
     }
@@ -628,6 +653,15 @@ mod tests {
         };
         let bytes = completed.encode().unwrap();
         assert_eq!(VsockMessage::decode(&bytes).unwrap(), completed);
+        for skipped in [false, true] {
+            let step_completed = VsockMessage::StepCompleted {
+                step_id: "step-1".into(),
+                exit_code: 0,
+                skipped,
+            };
+            let bytes = step_completed.encode().unwrap();
+            assert_eq!(VsockMessage::decode(&bytes).unwrap(), step_completed);
+        }
     }
 
     #[test]
@@ -649,6 +683,10 @@ mod tests {
         assert_eq!(
             VsockMessage::decode(&bad),
             Err(VsockCodecError::ChecksumMismatch)
+        );
+        assert_eq!(
+            decode_payload(5, &[0, 0, 0, 0, 0, 0, 0, 0, 2]),
+            Err(VsockCodecError::InvalidBoolean { value: 2 })
         );
     }
 

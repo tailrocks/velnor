@@ -1,5 +1,6 @@
 //! Jailed Firecracker backend. Guest-local Docker; no host docker.sock.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -899,6 +900,10 @@ fn drive_vsock(
         .send(message)
         .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?;
     let mut completed = false;
+    let expected_step_ids: BTreeSet<String> =
+        expected.steps.iter().map(|step| step.id.clone()).collect();
+    let mut started_step_ids = BTreeSet::new();
+    let mut completed_step_ids = BTreeSet::new();
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -928,6 +933,13 @@ fn drive_vsock(
                 return Err(MicroVmPreflightFailure::new("vsock", detail).into());
             }
         };
+        if completed && !matches!(received, VsockMessage::TeardownAck { .. }) {
+            return Err(MicroVmPreflightFailure::new(
+                "vsock.job_completed",
+                "frame arrived after terminal completion (replay)",
+            )
+            .into());
+        }
         match received {
             VsockMessage::TeardownAck {
                 job_id,
@@ -981,10 +993,46 @@ fn drive_vsock(
                 events.push(ExecutionEvent::CommandFile { path, bytes });
             }
             VsockMessage::StepStarted { step_id } => {
+                if !expected_step_ids.contains(&step_id) {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.step_started",
+                        "step identity is not present in the delivered plan",
+                    )
+                    .into());
+                }
+                if !started_step_ids.insert(step_id.clone()) {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.step_started",
+                        "duplicate step start message (replay)",
+                    )
+                    .into());
+                }
                 events.push(ExecutionEvent::StepStarted { step_id });
             }
-            VsockMessage::StepCompleted { step_id, exit_code } => {
-                events.push(ExecutionEvent::StepCompleted { step_id, exit_code });
+            VsockMessage::StepCompleted {
+                step_id,
+                exit_code,
+                skipped,
+            } => {
+                if !started_step_ids.contains(&step_id) {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.step_completed",
+                        "step completion arrived without a matching step start",
+                    )
+                    .into());
+                }
+                if !completed_step_ids.insert(step_id.clone()) {
+                    return Err(MicroVmPreflightFailure::new(
+                        "vsock.step_completed",
+                        "duplicate step completion message (replay)",
+                    )
+                    .into());
+                }
+                events.push(ExecutionEvent::StepCompleted {
+                    step_id,
+                    exit_code,
+                    skipped,
+                });
             }
             VsockMessage::ResultExport {
                 digest_sha256,

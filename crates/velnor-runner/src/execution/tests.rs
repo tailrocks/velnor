@@ -1250,7 +1250,8 @@ fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
     };
     let mut api = RecordingFirecracker::default();
     let kvm = PathBuf::from("/dev/kvm");
-    let mut vsock = LoopbackVsock::with_ready("job-bridge", 1);
+    let mut vsock = LoopbackVsock::with_ready("job-bridge", 1)
+        .with_step_completions([("run".into(), true), ("executed".into(), false)]);
     let outcome = {
         let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
         world.allow_inline_guest_plan = false;
@@ -1265,12 +1266,16 @@ fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
         plan.artifacts.clear();
         plan.annotations.clear();
         plan.summary.clear();
+        let mut executed_step = plan.steps[0].clone();
+        executed_step.id = "executed".into();
+        plan.steps.push(executed_step);
         session.prepare(&plan, &mut world).unwrap();
         session.start(&mut world).unwrap();
         session.execute(&plan, &mut world).unwrap();
         session.collect().unwrap()
     };
     assert_eq!(outcome.conclusion, "success");
+    assert_eq!(outcome.executed_physical_actions, Some(1));
     assert!(
         outcome
             .command_file_bytes
@@ -1291,6 +1296,88 @@ fn microvm_result_bridge_collects_command_files_outputs_logs_and_teardown() {
         .log_lines
         .iter()
         .any(|line| line.contains("result-bridge")));
+}
+
+#[test]
+fn microvm_rejects_replayed_step_frames() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-replay-step", 1)
+        .with_step_completions([("run".into(), false), ("run".into(), false)]);
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    world.allow_inline_guest_plan = false;
+    world.vsock = Some(&mut vsock);
+    let mut session = open_session(
+        &file,
+        IsolationIdentity::new("job-replay-step", 1),
+        &mut world,
+    )
+    .unwrap();
+    session.reserve(&mut world).unwrap();
+    let plan = ValidatedPlan::example_success("job-replay-step");
+    session.prepare(&plan, &mut world).unwrap();
+    session.start(&mut world).unwrap();
+    let error = session.execute(&plan, &mut world).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate step start"),
+        "{error}"
+    );
+}
+
+#[test]
+fn microvm_rejects_frames_after_job_completion() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = socket_for(ExecutionBackendKind::MicroVm);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::with_ready("job-terminal-replay", 1)
+        .with_post_completion_frames([velnor_model::VsockMessage::StepStarted {
+            step_id: "run".into(),
+        }]);
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    world.allow_inline_guest_plan = false;
+    world.vsock = Some(&mut vsock);
+    let mut session = open_session(
+        &file,
+        IsolationIdentity::new("job-terminal-replay", 1),
+        &mut world,
+    )
+    .unwrap();
+    session.reserve(&mut world).unwrap();
+    let plan = ValidatedPlan::example_success("job-terminal-replay");
+    session.prepare(&plan, &mut world).unwrap();
+    session.start(&mut world).unwrap();
+    let error = session.execute(&plan, &mut world).unwrap_err();
+    assert!(
+        error.to_string().contains("after terminal completion"),
+        "{error}"
+    );
 }
 
 #[test]
