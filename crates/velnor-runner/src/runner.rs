@@ -4701,22 +4701,6 @@ async fn handle_job_request(
         bail!("{REASON}");
     };
 
-    let event_name = crate::github_adapter::job_variable(&job, "github.event_name").unwrap_or("");
-    if !crate::capacity::trusted_fleet_accepts_github_event(event_name) {
-        let identity = AcquiredJobIdentity::from_job(&job);
-        let reason = "post-merge push must not occupy velnor-trusted while open pull_request jobs wait; generated callers route push to the GitHub lane";
-        let completion = complete_acquired_job_failure(
-            &run_service_job,
-            &identity,
-            Some(&job),
-            Some("merged_push_occupancy".to_string()),
-            reason,
-        )
-        .await;
-        completion?;
-        clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
-        bail!("{reason}");
-    }
     apply_workflow_script_step_names(&mut job, &early_context).await;
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
@@ -11600,31 +11584,6 @@ mod tests {
             ),
         }];
         assert!(queued_jobs_to_cancel(&github_hosted, SystemTime::now(), timeout).is_empty());
-    }
-
-    #[test]
-    fn merged_push_occupancy_completion_is_failed_not_success() {
-        let completion = fail_closed_pre_execution_completion(failed_acquired_job_completion(
-            &AcquiredJobIdentity {
-                plan_id: "plan".into(),
-                job_id: "job".into(),
-            },
-            None,
-            Some("merged_push_occupancy".into()),
-            "post-merge push must not occupy velnor-trusted while open pull_request jobs wait; generated callers route push to the GitHub lane",
-        ))
-        .unwrap();
-        assert_eq!(completion.conclusion, TaskResult::Failed);
-        assert_ne!(completion.conclusion, TaskResult::Succeeded);
-        assert_eq!(
-            completion.infrastructure_failure_category.as_deref(),
-            Some("merged_push_occupancy")
-        );
-        assert!(!completion.step_results.is_empty());
-        assert!(crate::capacity::trusted_fleet_accepts_github_event(
-            "pull_request"
-        ));
-        assert!(!crate::capacity::trusted_fleet_accepts_github_event("push"));
     }
 
     #[test]
