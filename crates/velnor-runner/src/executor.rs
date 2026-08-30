@@ -134,6 +134,33 @@ fn compile_command_kind(script: &str) -> Option<&'static str> {
         .next()
 }
 
+/// Return a stable linker label only when a shell segment starts with an
+/// explicit command whose successful completion includes linking. Do not
+/// infer a link boundary from test or check commands.
+fn link_command_kind(script: &str) -> Option<&'static str> {
+    script
+        .lines()
+        .flat_map(|line| line.split([';', '|', '&']))
+        .filter_map(|line| {
+            let mut tokens = line.split_whitespace().peekable();
+            while let Some(token) = tokens.peek().copied() {
+                if matches!(token, "env" | "sudo") || token.contains('=') {
+                    tokens.next();
+                } else {
+                    break;
+                }
+            }
+            let first = tokens.next()?;
+            let second = tokens.next()?;
+            match (first, second) {
+                ("cargo", "build" | "rustc") => Some("cargo"),
+                ("go", "build") => Some("go"),
+                _ => None,
+            }
+        })
+        .next()
+}
+
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
     let run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
@@ -1138,6 +1165,23 @@ impl LifecycleTelemetry {
             fields,
         );
     }
+
+    fn emit_link_end(&self, runner_kind: &'static str, exit_code: i32, elapsed: Duration) {
+        let elapsed_ms = u64::try_from(elapsed.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_COMPILE_TELEMETRY_MS);
+        let fields = BTreeMap::from([
+            ("elapsed_ms".to_owned(), Value::from(elapsed_ms)),
+            ("exit_code".to_owned(), Value::from(exit_code)),
+            ("runner_kind".to_owned(), Value::from(runner_kind)),
+            ("success".to_owned(), Value::from(exit_code == 0)),
+        ]);
+        let _ = self.sink.emit_telemetry_for_admission(
+            &self.admission,
+            velnor_model::TelemetryEvent::LinkEnd,
+            fields,
+        );
+    }
 }
 
 /// Host-Docker step engine owned by the docker backend.
@@ -1778,6 +1822,7 @@ where
                     let test_runner = test_command_kind(&step.script);
                     let test_started = test_runner.map(|_| Instant::now());
                     let compiler = compile_command_kind(&step.script);
+                    let linker = link_command_kind(&step.script);
                     let plan =
                         ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
                     let mut env = step_state.step_env(&[]);
@@ -1812,6 +1857,10 @@ where
                         }
                         _ => None,
                     };
+                    let link_started = match (linker, self.lifecycle_telemetry.as_ref()) {
+                        (Some(_), Some(_)) => Some(Instant::now()),
+                        _ => None,
+                    };
                     let step_result = self.runner.run_streaming_timeout_with_env(
                         "docker",
                         exec_args.args(),
@@ -1826,6 +1875,15 @@ where
                             compiler,
                             step_result.code,
                             compile_started.elapsed(),
+                        );
+                    }
+                    if let (Some(runner_kind), Some(link_started), Some(telemetry)) =
+                        (linker, link_started, self.lifecycle_telemetry.as_ref())
+                    {
+                        telemetry.emit_link_end(
+                            runner_kind,
+                            step_result.code,
+                            link_started.elapsed(),
                         );
                     }
                     if let (Some(test_runner), Some(test_started), Some(telemetry)) =
@@ -14059,6 +14117,11 @@ esac
         assert_eq!(compile_command_kind("go build ./..."), Some("go"));
         assert_eq!(compile_command_kind("echo cargo build"), None);
         assert_eq!(compile_command_kind("cargo test -p private"), None);
+        assert_eq!(link_command_kind("cargo build -p private"), Some("cargo"));
+        assert_eq!(link_command_kind("cargo rustc -p private"), Some("cargo"));
+        assert_eq!(link_command_kind("go build ./..."), Some("go"));
+        assert_eq!(link_command_kind("cargo check -p private"), None);
+        assert_eq!(link_command_kind("echo cargo build"), None);
     }
 
     #[test]
@@ -14113,14 +14176,15 @@ esac
             .filter(|record| {
                 matches!(
                     record["event"].as_str(),
-                    Some("compile_start" | "compile_end")
+                    Some("compile_start" | "compile_end" | "link_end")
                 )
             })
             .collect();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         assert_eq!(records[0]["event"], "compile_start");
         assert_eq!(records[1]["event"], "compile_end");
-        for record in &records {
+        assert_eq!(records[2]["event"], "link_end");
+        for record in &records[..2] {
             let fields = record["fields"].as_object().expect("compile fields");
             assert_eq!(fields["compiler"], "cargo");
             assert_eq!(fields["metrics_known"], false);
@@ -14132,6 +14196,13 @@ esac
         let end_fields = records[1]["fields"].as_object().unwrap();
         assert_eq!(end_fields["exit_code"], 0);
         assert!(end_fields["ms"]
+            .as_u64()
+            .is_some_and(|value| value <= MAX_COMPILE_TELEMETRY_MS));
+        let link_fields = records[2]["fields"].as_object().unwrap();
+        assert_eq!(link_fields["exit_code"], 0);
+        assert_eq!(link_fields["runner_kind"], "cargo");
+        assert_eq!(link_fields["success"], true);
+        assert!(link_fields["elapsed_ms"]
             .as_u64()
             .is_some_and(|value| value <= MAX_COMPILE_TELEMETRY_MS));
         assert!(!telemetry.contains("private"));
