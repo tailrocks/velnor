@@ -55,6 +55,7 @@ const PREPARED_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const PREPARED_ARTIFACT_MAX_ZIP_MEMBERS: usize = 100_000;
 const PREPARED_ARTIFACT_MAX_ZIP_UNCOMPRESSED_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
@@ -978,6 +979,25 @@ impl LifecycleTelemetry {
         let _ = self.sink.emit_telemetry_for_admission(
             &self.admission,
             velnor_model::TelemetryEvent::CacheLookup,
+            fields,
+        );
+    }
+
+    fn emit_artifact_materialize(&self, result: &StepExecutionResult, elapsed: Duration) {
+        let Some(digest) = result.state.outputs.get("artifact-digest") else {
+            return;
+        };
+        let elapsed_ms = u64::try_from(elapsed.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS);
+        let fields = BTreeMap::from([
+            ("digest".to_owned(), Value::from(digest.as_str())),
+            ("ms".to_owned(), Value::from(elapsed_ms)),
+            ("subset".to_owned(), Value::from("artifact")),
+        ]);
+        let _ = self.sink.emit_telemetry_for_admission(
+            &self.admission,
+            velnor_model::TelemetryEvent::ArtifactMaterialize,
             fields,
         );
     }
@@ -2245,6 +2265,8 @@ where
             _ => None,
         };
         let lookup_started = cache_store.map(|_| Instant::now());
+        let artifact_started =
+            (action.adapter == NativeActionAdapter::UploadArtifact).then(Instant::now);
         let result = match action.adapter {
             NativeActionAdapter::Cache => native_cache(action, state),
             NativeActionAdapter::UploadArtifact => native_upload_artifact(action, state),
@@ -2315,6 +2337,13 @@ where
                 result.is_err(),
                 started.elapsed(),
             );
+        }
+        if let (Some(started), Some(telemetry), Ok(result)) = (
+            artifact_started,
+            self.lifecycle_telemetry.as_ref(),
+            result.as_ref(),
+        ) {
+            telemetry.emit_artifact_materialize(result, started.elapsed());
         }
         result
     }
@@ -20094,6 +20123,28 @@ fi"#
         )
         .unwrap();
         fs::write(temp.join("work/ignore.txt"), "no\n").unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(temp.join("state.db"), "test-instance".to_owned()).unwrap(),
+        );
+        let admission = crate::ops::JobAdmission {
+            instance_slug: "test-instance".to_owned(),
+            job_uid: "job-artifact-materialize".to_owned(),
+            repository_full_name: "tailrocks/velnor".to_owned(),
+            workflow: "control-plane".to_owned(),
+            job_name: "artifact-materialize".to_owned(),
+            run_id: Some(44),
+            attempt: Some(1),
+            head_ref: Some("refs/heads/main".to_owned()),
+            head_sha: Some("deadbeef".to_owned()),
+            trigger_event: Some("workflow_dispatch".to_owned()),
+            queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
+            runner_name: Some("runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            masks: vec!["secret-marker".to_owned()],
+        };
+        assert!(sink.record_admission(&admission));
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
             display_name: String::new(),
@@ -20119,10 +20170,29 @@ fi"#
         }];
 
         let results = DockerJobEngine::new(RecordingRunner::default())
+            .with_tool_prep_telemetry(Arc::clone(&sink), admission)
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
         assert_eq!(results[0].exit_code, 0);
+        let telemetry = fs::read_to_string(temp.join("state.test-instance.telemetry.jsonl"))
+            .expect("artifact materialization telemetry");
+        let record = telemetry
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|record| record["event"] == "artifact_materialize")
+            .expect("artifact_materialize event");
+        let fields = record["fields"].as_object().expect("artifact fields");
+        assert_eq!(
+            fields["digest"],
+            results[0].state.outputs["artifact-digest"]
+        );
+        assert_eq!(fields["subset"], "artifact");
+        assert!(fields["ms"]
+            .as_u64()
+            .is_some_and(|value| { value <= MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS }));
+        assert!(!telemetry.contains("jackin-x86_64-unknown-linux-gnu"));
+        assert!(!telemetry.contains("/work"));
         assert_eq!(
             fs::read_to_string(
                 temp.join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/jackin-1.2.3-x86_64.tar.gz")
