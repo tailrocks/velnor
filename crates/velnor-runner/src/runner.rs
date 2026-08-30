@@ -534,6 +534,7 @@ fn plan_summary_telemetry_fields_from_counts(
     physical_actions: usize,
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([
+        ("counts_scope".to_owned(), Value::from("runner_execution")),
         (
             "logical_tasks".to_owned(),
             Value::from(bounded_telemetry_count(logical_tasks)),
@@ -547,25 +548,27 @@ fn plan_summary_telemetry_fields_from_counts(
 
 fn plan_summary_telemetry_fields(
     job: &AgentJobRequestMessage,
-    step_logs: &[StepLog],
-) -> BTreeMap<String, Value> {
-    plan_summary_telemetry_fields_from_counts(
-        job.steps.iter().filter(|step| step.enabled).count(),
-        step_logs.iter().filter(|log| !log.skipped).count(),
-    )
+    physical_actions: Option<usize>,
+) -> Option<BTreeMap<String, Value>> {
+    // TASK-021/planner does not yet expose duplicate suppression or selection
+    // reasons. Keep those fields absent until a truthful source exists.
+    physical_actions.map(|physical_actions| {
+        plan_summary_telemetry_fields_from_counts(
+            job.steps.iter().filter(|step| step.enabled).count(),
+            physical_actions,
+        )
+    })
 }
 
 fn emit_plan_summary_telemetry(
     sink: &crate::ops::OpsSink,
     admission: &crate::ops::JobAdmission,
     job: &AgentJobRequestMessage,
-    step_logs: &[StepLog],
+    physical_actions: Option<usize>,
 ) {
-    let _ = sink.emit_telemetry_for_admission(
-        admission,
-        TelemetryEvent::PlanSummary,
-        plan_summary_telemetry_fields(job, step_logs),
-    );
+    if let Some(fields) = plan_summary_telemetry_fields(job, physical_actions) {
+        let _ = sink.emit_telemetry_for_admission(admission, TelemetryEvent::PlanSummary, fields);
+    }
 }
 
 /// Instance slug naming this daemon in the shared operational store:
@@ -5169,6 +5172,7 @@ async fn handle_job_request(
             Ok(mut job_result) => {
                 if canceled.load(Ordering::SeqCst) {
                     job_result.result = TaskResult::Canceled;
+                    job_result.executed_physical_actions = None;
                 }
                 job_result
             }
@@ -5181,6 +5185,7 @@ async fn handle_job_request(
                         step_logs: Vec::new(),
                         teardown: None,
                         timings: ExecutionTimings::default(),
+                        executed_physical_actions: None,
                     }
                 } else {
                     let infrastructure_failure_category =
@@ -5209,7 +5214,12 @@ async fn handle_job_request(
         {
             // This is deliberately adjacent to the returned ScriptJobResult
             // and precedes run-service completion for both execution backends.
-            emit_plan_summary_telemetry(sink, admission, &job, &job_result.step_logs);
+            emit_plan_summary_telemetry(
+                sink,
+                admission,
+                &job,
+                job_result.executed_physical_actions,
+            );
         }
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
@@ -6741,6 +6751,7 @@ fn script_job_result_from_outcome(
         result,
         outputs: outcome.outputs.into_iter().collect(),
         environment_url: outcome.environment_url,
+        executed_physical_actions: outcome.executed_physical_actions,
         step_logs,
         teardown: None,
         timings: ExecutionTimings {
@@ -7523,6 +7534,11 @@ fn execute_script_job_inner(
         result,
         outputs: summary.job_outputs,
         environment_url,
+        executed_physical_actions: Some(
+            summary
+                .executed_physical_actions
+                .saturating_add(eager_checkout_plans.len()),
+        ),
         step_logs: all_step_logs,
         teardown: Some(TeardownHandle {
             container: plan.execution.job_container,
@@ -7620,6 +7636,7 @@ struct ScriptJobResult {
     result: TaskResult,
     outputs: BTreeMap<String, String>,
     environment_url: Option<String>,
+    executed_physical_actions: Option<usize>,
     step_logs: Vec<StepLog>,
     teardown: Option<TeardownHandle>,
     timings: ExecutionTimings,
@@ -13180,7 +13197,7 @@ jobs:
     }
 
     #[test]
-    fn plan_summary_telemetry_counts_are_bounded_and_secret_free() {
+    fn plan_summary_telemetry_uses_backend_count_not_synthetic_logs() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -13195,34 +13212,11 @@ jobs:
             ]
         }))
         .unwrap();
-        let step_log = |step_id: &str, skipped: bool| StepLog {
-            step_id: step_id.to_owned(),
-            display_name: "step".to_owned(),
-            order: 1,
-            started_at: String::new(),
-            completed_at: String::new(),
-            lines: vec!["secret-marker".to_owned()],
-            masks: Vec::new(),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: 0,
-            skipped,
-            failure_ignored: false,
-            error_count: 0,
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        };
-        let fields = plan_summary_telemetry_fields(
-            &job,
-            &[
-                step_log("physical-secret-marker", false),
-                step_log("skipped", true),
-            ],
-        );
+        let fields = plan_summary_telemetry_fields(&job, Some(1)).unwrap();
 
         assert_eq!(fields["logical_tasks"], Value::from(2_u64));
         assert_eq!(fields["physical_actions"], Value::from(1_u64));
+        assert_eq!(fields["counts_scope"], Value::from("runner_execution"));
         assert!(!serde_json::to_string(&fields)
             .unwrap()
             .contains("secret-marker"));
@@ -13238,6 +13232,39 @@ jobs:
             bounded["physical_actions"],
             Value::from(MAX_TELEMETRY_PLAN_ITEMS)
         );
+    }
+
+    #[test]
+    fn plan_summary_telemetry_suppresses_unknown_execution_count() {
+        let base = unique_temp_dir("plan-summary-telemetry-unknown");
+        fs::create_dir_all(&base).unwrap();
+        let sink =
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap();
+        let admission = blocking_admission_test_input("job-plan-summary-unknown");
+        assert!(sink.record_admission(&admission));
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job-plan-summary-unknown",
+            "jobDisplayName": "job",
+            "requestId": 1,
+            "steps": [{ "id": "step", "enabled": true }]
+        }))
+        .unwrap();
+
+        emit_plan_summary_telemetry(&sink, &admission, &job, None);
+
+        let telemetry =
+            fs::read_to_string(base.join("state.test-instance.telemetry.jsonl")).unwrap();
+        let records: Vec<serde_json::Value> = telemetry
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["event"], "run_admitted");
+        assert!(!telemetry.contains("plan_summary"));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -13258,26 +13285,8 @@ jobs:
             "steps": [{ "id": "step", "enabled": true }]
         }))
         .unwrap();
-        let logs = vec![StepLog {
-            step_id: "step".to_owned(),
-            display_name: "step".to_owned(),
-            order: 1,
-            started_at: String::new(),
-            completed_at: String::new(),
-            lines: Vec::new(),
-            masks: Vec::new(),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: 0,
-            skipped: false,
-            failure_ignored: false,
-            error_count: 0,
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        }];
 
-        emit_plan_summary_telemetry(&sink, &admission, &job, &logs);
+        emit_plan_summary_telemetry(&sink, &admission, &job, Some(1));
 
         let telemetry =
             fs::read_to_string(base.join("state.test-instance.telemetry.jsonl")).unwrap();

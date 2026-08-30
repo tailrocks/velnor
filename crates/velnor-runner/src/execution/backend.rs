@@ -540,6 +540,9 @@ fn executable_action(step: &crate::executor::ExecutableStep) -> Option<String> {
 pub struct ExecutionOutcome {
     pub conclusion: &'static str,
     pub exit_code: i32,
+    /// Backend execution results, independent of presentation logs. `None`
+    /// means this outcome was produced after teardown without execution data.
+    pub executed_physical_actions: Option<usize>,
     pub log_lines: Vec<String>,
     pub masked: bool,
     pub command_file: Option<String>,
@@ -873,6 +876,11 @@ impl BackendSession {
                 _ => None,
             })
             .unwrap_or((JobConclusion::Failure, 1));
+        let executed_physical_actions = self
+            .events
+            .iter()
+            .filter(|event| matches!(event, ExecutionEvent::StepCompleted { .. }))
+            .count();
         let logs: Vec<String> = self
             .events
             .iter()
@@ -936,6 +944,7 @@ impl BackendSession {
         Ok(ExecutionOutcome {
             conclusion: conclusion.as_str(),
             exit_code,
+            executed_physical_actions: Some(executed_physical_actions),
             log_lines: logs,
             masked: self.events.iter().any(
                 |event| matches!(event, ExecutionEvent::Log { line, .. } if line.contains("***")),
@@ -986,6 +995,7 @@ impl BackendSession {
         ExecutionOutcome {
             conclusion: "success",
             exit_code: 0,
+            executed_physical_actions: None,
             log_lines: Vec::new(),
             masked: false,
             command_file: self.plan_command_files.first().cloned(),
