@@ -1049,10 +1049,11 @@ fn step_verdict(
     }
     let gh_expandable = github_html.get(&github.number).map(|step| step.expandable);
     let vl_expandable = velnor_html.get(&velnor.number).map(|step| step.expandable);
-    if executed(github) && executed(velnor) {
-        if let (Some(true), Some(false)) = (gh_expandable, vl_expandable) {
-            worse.push("not expandable".to_string());
-        }
+    if executed(github)
+        && executed(velnor)
+        && let (Some(true), Some(false)) = (gh_expandable, vl_expandable)
+    {
+        worse.push("not expandable".to_string());
     }
     if worse.is_empty() {
         ("ok".to_string(), false)

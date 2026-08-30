@@ -248,15 +248,14 @@ impl ActionJournal {
     /// Open or create a journal. `:memory:` is supported for unit tests.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let path = path.as_ref().to_path_buf();
-        if path.as_os_str() != ":memory:" {
-            if let Some(parent) = path
+        if path.as_os_str() != ":memory:"
+            && let Some(parent) = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    JournalError::InvalidState(format!("create journal parent: {error}"))
-                })?;
-            }
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                JournalError::InvalidState(format!("create journal parent: {error}"))
+            })?;
         }
         let connection = Connection::open(&path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;

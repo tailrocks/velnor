@@ -6249,7 +6249,8 @@ mod tests {
     #[tokio::test]
     async fn public_github_requests_validate_transport_before_io() {
         let _transport_guard = crate::test_support::github_http_transport_env().await;
-        std::env::remove_var(GITHUB_HTTP_TRANSPORT_ENV);
+        // SAFETY: the test holds the process-wide environment guard.
+        unsafe { std::env::remove_var(GITHUB_HTTP_TRANSPORT_ENV) };
 
         let error = github_json_request("INVALID", "not a URL", "token", None, 1)
             .await
@@ -6266,7 +6267,8 @@ mod tests {
             "{error:#}"
         );
 
-        std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "unsupported");
+        // SAFETY: the test holds the process-wide environment guard.
+        unsafe { std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "unsupported") };
         let error = github_json_request("INVALID", "not a URL", "token", None, 1)
             .await
             .unwrap_err();

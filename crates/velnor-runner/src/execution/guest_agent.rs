@@ -245,10 +245,10 @@ where
                 require_identity("guest.plan.isolation_id", &plan.isolation_id, &isolation_id)?;
                 require_generation(plan.generation, generation)?;
                 for cache in &mut plan.cache {
-                    if cache.bytes.is_empty() {
-                        if let Some(bytes) = imported.get(&cache.digest) {
-                            cache.bytes = bytes.clone();
-                        }
+                    if cache.bytes.is_empty()
+                        && let Some(bytes) = imported.get(&cache.digest)
+                    {
+                        cache.bytes = bytes.clone();
                     }
                 }
                 validate_guest_plan(&plan)?;
