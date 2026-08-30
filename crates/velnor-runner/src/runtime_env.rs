@@ -7,6 +7,9 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     let mut env = vec![
         ("CI".to_string(), "true".to_string()),
         ("GITHUB_ACTIONS".to_string(), "true".to_string()),
+        ("MISE_LOCKFILE".to_string(), "1".to_string()),
+        ("MISE_LOCKED".to_string(), "1".to_string()),
+        ("MISE_LOCKED_VERIFY_PROVENANCE".to_string(), "1".to_string()),
         ("HOME".to_string(), "/github/home".to_string()),
         ("GITHUB_JOB".to_string(), job.job_name()),
         ("GITHUB_WORKSPACE".to_string(), "/__w".to_string()),
@@ -438,6 +441,10 @@ fn is_protected_default_env(name: &str) -> bool {
         || name.starts_with("RUNNER_")
         || name.starts_with("ACTIONS_")
         || name == "AGENT_TOOLSDIRECTORY"
+        || matches!(
+            name,
+            "MISE_LOCKFILE" | "MISE_LOCKED" | "MISE_LOCKED_VERIFY_PROVENANCE"
+        )
         || name == "SCCACHE_BASEDIRS"
 }
 
@@ -648,6 +655,9 @@ mod tests {
                     "GITHUB_REF": "refs/heads/evil",
                     "ACTIONS_RUNTIME_URL": "https://evil.actions.example",
                     "ACTIONS_CACHE_SERVICE_V2": "false",
+                    "MISE_LOCKFILE": "0",
+                    "MISE_LOCKED": "0",
+                    "MISE_LOCKED_VERIFY_PROVENANCE": "false",
                     "SCCACHE_BASEDIRS": "/untrusted/override"
                 },
                 {
@@ -678,6 +688,12 @@ mod tests {
         let env = job_runtime_env(&job);
 
         assert!(env.contains(&("GITHUB_ACTIONS".into(), "true".into())));
+        assert!(env.contains(&("MISE_LOCKFILE".into(), "1".into())));
+        assert!(env.contains(&("MISE_LOCKED".into(), "1".into())));
+        assert!(env.contains(&("MISE_LOCKED_VERIFY_PROVENANCE".into(), "1".into())));
+        assert!(!env.contains(&("MISE_LOCKFILE".into(), "0".into())));
+        assert!(!env.contains(&("MISE_LOCKED".into(), "0".into())));
+        assert!(!env.contains(&("MISE_LOCKED_VERIFY_PROVENANCE".into(), "false".into())));
         assert!(env.contains(&("HOME".into(), "/github/home".into())));
         assert!(env.contains(&("RUNNER_ARCH".into(), runner_arch().into())));
         assert!(env.contains(&("RUNNER_NAME".into(), runner_name())));
