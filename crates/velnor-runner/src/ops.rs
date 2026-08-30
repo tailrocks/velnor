@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use velnor_control::store::{
     EventRow, InstanceRow, PhysicalBudgetStatus, RetentionBudget, RetentionLease,
-    RetentionMaintenanceBudget, SlotIdentity, SlotTransition, Store, StoreError, Transition,
-    DEFAULT_STATE_DB_PATH,
+    RetentionMaintenanceBudget, SlotIdentity, SlotTransitionRequest, SlotTransitionRequestKey,
+    Store, StoreError, Transition, DEFAULT_STATE_DB_PATH,
 };
 #[cfg(test)]
 use velnor_model::ExitClass;
@@ -517,15 +517,11 @@ impl OpsSink {
         slot_id: &SlotId,
         slot_index: u32,
         generation: Generation,
-        sequence: u64,
+        request_key: &str,
         target: SlotPhase,
         message: Option<String>,
     ) -> bool {
         let Some(masks) = self.event_masks() else {
-            return false;
-        };
-        let token = format!("slot-g{}-s{}-{}", generation.0, sequence, target.as_str());
-        let Ok(correlation_id) = Slug::validate("correlation_id", &format!("corr-{token}")) else {
             return false;
         };
         let identity = SlotIdentity {
@@ -535,25 +531,43 @@ impl OpsSink {
             slot_index,
             slot_kind: SlotKind::Stable,
         };
-        let transition = SlotTransition {
-            token,
-            correlation_id,
+        if let Err(error) = self.before_store_write() {
+            self.absorb("store.slot.transition", &error.to_string());
+            return false;
+        }
+        let request = SlotTransitionRequest {
+            request_key: request_key.to_owned(),
             generation,
-            sequence,
             target,
             job_name: None,
             message: message.map(|value| sanitize_event_detail(&value, &masks)),
             transition_time: Timestamp::now(),
         };
-        if let Err(error) = self.before_store_write() {
-            self.absorb("store.slot.transition", &error.to_string());
-            return false;
+        match self.store.record_next_slot_transition(&identity, &request) {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.absorb("store.slot.transition", &error.to_string());
+                false
+            }
         }
-        if let Err(error) = self.store.record_slot_transition(&identity, &transition) {
-            self.absorb("store.slot.transition", &error.to_string());
-            return false;
-        }
-        true
+    }
+
+    pub(crate) fn latest_slot_transition_request_key(
+        &self,
+        slot_id: &SlotId,
+        slot_index: u32,
+        generation: Generation,
+    ) -> Result<Option<SlotTransitionRequestKey>, StoreError> {
+        self.store.latest_slot_transition_request_key(
+            &SlotIdentity {
+                instance_slug: self.instance_slug.clone(),
+                slot_id: slot_id.clone(),
+                host: self.instance_slug.clone(),
+                slot_index,
+                slot_kind: SlotKind::Stable,
+            },
+            generation,
+        )
     }
 
     /// Best-effort idempotent job transition; replaying `(job, token)` is a
@@ -931,8 +945,12 @@ impl OpsSink {
             .replace(StoreError::new(class, reason));
     }
 
+    pub(crate) fn record_slot_transition_lookup_failure(&self, error: &StoreError) {
+        self.absorb("store.slot.transition.lookup", &error.to_string());
+    }
+
     #[cfg(test)]
-    fn forensic_failures(&self) -> Vec<String> {
+    pub(crate) fn forensic_failures(&self) -> Vec<String> {
         self.forensic_failures.lock().unwrap().clone()
     }
 
