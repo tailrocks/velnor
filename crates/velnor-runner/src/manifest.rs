@@ -1881,6 +1881,52 @@ mod tests {
     }
 
     #[test]
+    fn deb_staging_binds_package_runner_to_build_and_binary_sidecar() {
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
+                .expect("release workflow must parse");
+        let steps = workflow["jobs"]["build"]["steps"]
+            .as_sequence()
+            .expect("build job steps");
+        let guard = steps
+            .iter()
+            .find(|step| {
+                step.get("name")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|name| name == "Stage .deb with the empty-deb-incident guards")
+            })
+            .and_then(|step| step.get("run"))
+            .and_then(serde_yaml::Value::as_str)
+            .expect("build job must stage the deb with its guards");
+
+        for required in [
+            "package_root=\"$(mktemp -d)\"",
+            "dpkg-deb --extract \"$src\" \"$package_root\"",
+            "build_binary=\"target/${{ matrix.target }}/release/velnor-runner\"",
+            "velnor-runner-${{ matrix.arch }}.bin.sha256",
+            "sha256sum \"$build_binary\"",
+            "sha256sum \"$packaged_binary\"",
+            "[ \"$packaged_binary_sha\" = \"$build_binary_sha\" ]",
+            "[ \"$packaged_binary_sha\" = \"$recorded_binary_sha\" ]",
+        ] {
+            assert!(guard.contains(required), "deb guard missing: {required}");
+        }
+
+        let copy = guard.find("cp \"$src\" \"$dst\"").expect("deb copy guard");
+        assert!(
+            guard.find("dpkg-deb --extract").expect("deb extraction") < copy,
+            "deb provenance must be checked before copying the package"
+        );
+        assert!(
+            guard
+                .find("$build_binary_sha\" = \"$recorded_binary_sha")
+                .expect("build binary must bind to its sidecar")
+                < copy,
+            "binary sidecar must be checked before copying the package"
+        );
+    }
+
+    #[test]
     fn release_record_derives_manifest_version_from_compiled_artifact() {
         let workflow = include_str!("../../../.github/workflows/release.yml");
         assert!(
