@@ -657,14 +657,17 @@ impl NoFollowDestinationDir {
     }
 
     pub(crate) fn set_mode(&self, mode: u16) -> Result<()> {
-        rustix::fs::fchmod(&self.file, rustix::fs::Mode::from_raw_mode(mode))
-            .map_err(std::io::Error::from)
-            .with_context(|| {
-                format!(
-                    "set artifact directory mode {}",
-                    self.display_path.display()
-                )
-            })
+        rustix::fs::fchmod(
+            &self.file,
+            rustix::fs::Mode::from_raw_mode(rustix::fs::RawMode::from(mode)),
+        )
+        .map_err(std::io::Error::from)
+        .with_context(|| {
+            format!(
+                "set artifact directory mode {}",
+                self.display_path.display()
+            )
+        })
     }
 
     pub fn write_file_from_reader(
