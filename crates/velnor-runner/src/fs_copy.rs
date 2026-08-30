@@ -445,6 +445,12 @@ impl NoFollowDestinationDir {
             };
 
             let result = if destination_exists {
+                preflight_tree_removal(&self.file, destination_name).with_context(|| {
+                    format!(
+                        "preflight displaced artifact tree removal {}",
+                        self.display_path.join(destination_name).display()
+                    )
+                })?;
                 rustix::fs::renameat_with(
                     &staging_parent.file,
                     staging_name,
@@ -464,12 +470,52 @@ impl NoFollowDestinationDir {
             match result {
                 Ok(()) => {
                     if destination_exists {
-                        remove_tree_at(&staging_parent.file, staging_name).with_context(|| {
-                            format!(
-                                "remove replaced artifact directory {}",
-                                staging_parent.display_path.join(staging_name).display()
-                            )
-                        })?;
+                        if let Err(cleanup_error) =
+                            remove_tree_at(&staging_parent.file, staging_name)
+                        {
+                            let rollback = rustix::fs::renameat_with(
+                                &staging_parent.file,
+                                staging_name,
+                                &self.file,
+                                destination_name,
+                                rustix::fs::RenameFlags::EXCHANGE,
+                            );
+                            match rollback {
+                                Ok(()) => {
+                                    if let Err(quarantine_error) =
+                                        remove_tree_at(&staging_parent.file, staging_name)
+                                    {
+                                        bail!(
+                                            "artifact directory publication rolled back after replaced-tree cleanup failed ({cleanup_error}); new tree remains quarantined at {} because cleanup also failed ({quarantine_error})",
+                                            staging_parent
+                                                .display_path
+                                                .join(staging_name)
+                                                .display()
+                                        );
+                                    }
+                                    return Err(cleanup_error).with_context(|| {
+                                        format!(
+                                            "artifact directory publication rolled back after replaced-tree cleanup failed at {}",
+                                            staging_parent
+                                                .display_path
+                                                .join(staging_name)
+                                                .display()
+                                        )
+                                    });
+                                }
+                                Err(rollback_error) => {
+                                    bail!(
+                                        "artifact directory publication committed-partial: new tree is published at {}; previous tree remains quarantined at {}; cleanup failed ({cleanup_error}) and rollback failed ({})",
+                                        self.display_path.join(destination_name).display(),
+                                        staging_parent
+                                            .display_path
+                                            .join(staging_name)
+                                            .display(),
+                                        std::io::Error::from(rollback_error)
+                                    );
+                                }
+                            }
+                        }
                     }
                     return Ok(());
                 }
@@ -1059,6 +1105,66 @@ fn destination_entry_is_symlink(parent: &fs::File, name: &OsStr) -> bool {
         .unwrap_or(false)
 }
 
+/// Validate every operation required by `remove_tree_at` before a directory
+/// exchange makes the tree the rollback target. Cleanup is destructive and
+/// cannot be used as its own preflight. A concurrent mutation can still
+/// invalidate this result; runtime rollback/quarantine handles that case.
+#[cfg(unix)]
+fn preflight_tree_removal(parent: &fs::File, name: &OsStr) -> Result<()> {
+    preflight_tree_removal_at(parent, name, 0)
+}
+
+#[cfg(unix)]
+fn preflight_tree_removal_at(parent: &fs::File, name: &OsStr, depth: usize) -> Result<()> {
+    if depth > MAX_SECURE_CLEANUP_DEPTH {
+        bail!(
+            "artifact tree exceeds the {}-component secure cleanup depth",
+            MAX_SECURE_CLEANUP_DEPTH
+        );
+    }
+
+    rustix::fs::accessat(
+        parent,
+        Path::new("."),
+        rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+        rustix::fs::AtFlags::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .context("verify artifact tree removal permissions")?;
+
+    let stat = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(std::io::Error::from)
+        .context("inspect artifact tree entry for removal preflight")?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
+        return Ok(());
+    }
+
+    let directory = rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .context("open artifact tree for removal preflight")?;
+    let directory: fs::File = directory.into();
+    let entries = rustix::fs::Dir::read_from(&directory)
+        .map_err(std::io::Error::from)
+        .context("read artifact tree for removal preflight")?;
+    for entry in entries {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let entry_name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+        if entry_name == "." || entry_name == ".." {
+            continue;
+        }
+        preflight_tree_removal_at(&directory, &entry_name, depth + 1)?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn remove_tree_at(parent: &fs::File, name: &OsStr) -> Result<()> {
     remove_tree_at_depth(parent, name, 0)
@@ -1306,6 +1412,18 @@ impl NoFollowDestinationDir {
     }
 
     pub fn publish_staged_directory_from(
+        &self,
+        _staging_parent: &Self,
+        _staging_name: &OsStr,
+        destination_name: &OsStr,
+    ) -> Result<()> {
+        bail!(
+            "secure artifact destination publishing is unsupported on this platform for {}",
+            destination_name.to_string_lossy()
+        )
+    }
+
+    pub fn publish_staged_directory_noreplace_from(
         &self,
         _staging_parent: &Self,
         _staging_name: &OsStr,
