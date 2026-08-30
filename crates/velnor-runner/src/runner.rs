@@ -3568,9 +3568,9 @@ fn maybe_startup_host_docker_reclaim_with(
 /// job network + container leak; enough leaked `velnor-net-*` networks exhaust
 /// Docker's address pool and then EVERY new job fails to create its network
 /// ("all predefined address pools have been fully subnetted"). Pruning on
-/// startup makes a crash self-healing. Best-effort — never fails startup. Safe
-/// because a daemon restart already orphans any in-flight job (JIT runners are
-/// per-job), so anything matching here is dead.
+/// startup makes a crash self-healing. Best-effort — never fails startup. Use
+/// non-force removal so Docker refuses a container that is still live while
+/// stopped stale containers can be cleaned.
 fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     let docker = |args: &[&str]| {
         std::process::Command::new("docker")
@@ -3611,7 +3611,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         })
         .collect::<Vec<_>>();
     if !containers.is_empty() {
-        let mut args = vec!["rm".to_string(), "-f".to_string()];
+        let mut args = vec!["rm".to_string()];
         args.extend(containers.iter().cloned());
         let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
         eprintln!(
