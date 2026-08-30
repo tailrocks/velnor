@@ -23,11 +23,15 @@ struct Cli {
     /// Target triple or custom target path supplied by the Cargo invocation.
     #[arg(long)]
     target: Option<String>,
+    /// Structured Cargo version, such as 1.98.0; omitted values are unknown.
+    #[arg(long)]
+    cargo_version: Option<String>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let options = CollectOptions::new(cli.mode, cli.target.as_deref());
+    let options = CollectOptions::new(cli.mode, cli.target.as_deref())
+        .with_cargo_version(cli.cargo_version.as_deref());
     let records = collect_messages(io::BufReader::new(io::stdin().lock()), &options)
         .context("collect structured Cargo messages from stdin")?;
 

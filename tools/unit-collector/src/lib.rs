@@ -6,6 +6,12 @@
 //! source of unit records. Cargo versions that do not provide timing fields
 //! produce zero durations, which is explicit in the generated summary.
 
+pub mod evidence;
+
+pub use evidence::{
+    CargoVersion, DeclaredOutputEvidence, OutputChange, OutputEvidence, OutputEvidenceManifest,
+    OutputSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fmt, io, io::BufRead, str::FromStr};
@@ -116,6 +122,8 @@ impl fmt::Display for Freshness {
 pub struct CollectOptions {
     mode: BuildMode,
     target: Option<String>,
+    cargo_version: CargoVersion,
+    output_evidence: OutputEvidenceManifest,
 }
 
 impl CollectOptions {
@@ -127,7 +135,24 @@ impl CollectOptions {
         Self {
             mode,
             target: target.map(redact_absolute_paths),
+            cargo_version: CargoVersion::Unknown,
+            output_evidence: OutputEvidenceManifest::default(),
         }
+    }
+
+    /// Set the explicit structured Cargo version used for evidence checks.
+    ///
+    /// Missing or malformed versions remain [`CargoVersion::Unknown`]. The
+    /// collector never derives a version from human-readable diagnostics.
+    pub fn with_cargo_version(mut self, version: Option<&str>) -> Self {
+        self.cargo_version = CargoVersion::parse(version);
+        self
+    }
+
+    /// Supply before/after snapshots for declared compiler outputs.
+    pub fn with_output_evidence(mut self, evidence: OutputEvidenceManifest) -> Self {
+        self.output_evidence = evidence;
+        self
     }
 
     /// Return the selected Cargo profile.
@@ -138,6 +163,11 @@ impl CollectOptions {
     /// Return the sanitized target override, if one was supplied.
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
+    }
+
+    /// Return the explicit Cargo version, or unknown when it was not supplied.
+    pub fn cargo_version(&self) -> &CargoVersion {
+        &self.cargo_version
     }
 }
 
@@ -162,6 +192,10 @@ pub struct UnitRecord {
     pub cpu_ms: u64,
     /// Explicit Cargo freshness decision, or `unknown`.
     pub freshness: Freshness,
+    /// Explicit Cargo version used for output evidence, or `unknown`.
+    pub cargo_version: CargoVersion,
+    /// Path-free declared-output evidence and its fail-closed classification.
+    pub output_evidence: OutputEvidence,
     /// Structured rustc flags supplied under the additive `rwd_flags` field.
     pub rwd_flags: Vec<String>,
     /// Features reported by Cargo for this artifact.
@@ -330,13 +364,21 @@ fn parse_compiler_artifact(
         .filter(|name| !name.is_empty())
         .or_else(|| package_name(object.get("package_id")))?;
 
+    let freshness = classify_freshness(object.get("fresh").and_then(Value::as_bool));
     Some(UnitRecord {
         unit_name,
         kind: artifact_kind(object, target),
         mode: options.mode,
         wall_ms: timing_ms(object, "wall_ms"),
         cpu_ms: timing_ms(object, "cpu_ms"),
-        freshness: classify_freshness(object.get("fresh").and_then(Value::as_bool)),
+        freshness,
+        cargo_version: options.cargo_version.clone(),
+        output_evidence: OutputEvidence::from_paths(
+            &artifact_output_paths(object),
+            &options.output_evidence,
+            &options.cargo_version,
+            freshness,
+        ),
         rwd_flags: string_values(object.get("rwd_flags")),
         features: string_values(object.get("features")),
         target: target_name(object, options),
@@ -347,13 +389,21 @@ fn parse_build_script(
     object: &serde_json::Map<String, Value>,
     options: &CollectOptions,
 ) -> Option<UnitRecord> {
+    let freshness = classify_freshness(object.get("fresh").and_then(Value::as_bool));
     Some(UnitRecord {
         unit_name: package_name(object.get("package_id"))?,
         kind: UnitKind::BuildScript,
         mode: options.mode,
         wall_ms: timing_ms(object, "wall_ms"),
         cpu_ms: timing_ms(object, "cpu_ms"),
-        freshness: classify_freshness(object.get("fresh").and_then(Value::as_bool)),
+        freshness,
+        cargo_version: options.cargo_version.clone(),
+        output_evidence: OutputEvidence::from_paths(
+            &[],
+            &options.output_evidence,
+            &options.cargo_version,
+            freshness,
+        ),
         rwd_flags: string_values(object.get("rwd_flags")),
         features: string_values(object.get("features")),
         target: target_name(object, options),
@@ -386,6 +436,23 @@ fn classify_freshness(fresh: Option<bool>) -> Freshness {
         Some(false) => Freshness::Actual,
         None => Freshness::Unknown,
     }
+}
+
+fn artifact_output_paths(object: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut paths: Vec<String> = object
+        .get("filenames")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect();
+    if let Some(executable) = object.get("executable").and_then(Value::as_str) {
+        paths.push(executable.to_owned());
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    paths
 }
 
 fn timing_ms(object: &serde_json::Map<String, Value>, field: &str) -> u64 {
@@ -589,6 +656,42 @@ mod tests {
     }
 
     #[test]
+    fn compiler_artifact_outputs_feed_path_free_evidence() {
+        let output_path = "/Users/alice/target/debug/deps/libdemo.rlib";
+        let mut manifest = OutputEvidenceManifest::new();
+        manifest.insert_path(
+            output_path,
+            OutputSnapshot::present(b"old", 7),
+            OutputSnapshot::present(b"old", 8),
+        );
+        let options = CollectOptions::default()
+            .with_cargo_version(Some("1.98.0"))
+            .with_output_evidence(manifest);
+        let message = serde_json::json!({
+            "reason": "compiler-artifact",
+            "package_id": "demo 0.1.0 (path+file:///Users/alice/demo)",
+            "target": {"name": "demo", "kind": ["lib"], "crate_types": ["lib"]},
+            "filenames": [output_path],
+            "executable": output_path,
+            "fresh": false
+        });
+
+        let record = parse_cargo_message(&message, &options).expect("artifact record");
+        assert_eq!(
+            record.cargo_version,
+            CargoVersion::Known("1.98.0".to_owned())
+        );
+        assert_eq!(record.output_evidence.declared_outputs.len(), 1);
+        assert_eq!(
+            record.output_evidence.declared_outputs[0].change,
+            OutputChange::MtimeOnly
+        );
+        assert_eq!(record.output_evidence.freshness, Freshness::Actual);
+        let serialized = serde_json::to_string(&record).expect("serialize record");
+        assert!(!serialized.contains("/Users/alice"));
+    }
+
+    #[test]
     fn summary_ranks_only_top_ten_by_wall_time() {
         let records: Vec<UnitRecord> = (0_u64..12)
             .map(|index| UnitRecord {
@@ -598,6 +701,11 @@ mod tests {
                 wall_ms: index,
                 cpu_ms: index,
                 freshness: Freshness::Actual,
+                cargo_version: CargoVersion::Unknown,
+                output_evidence: OutputEvidence {
+                    declared_outputs: Vec::new(),
+                    freshness: Freshness::Unknown,
+                },
                 rwd_flags: Vec::new(),
                 features: Vec::new(),
                 target: UNKNOWN.to_owned(),
