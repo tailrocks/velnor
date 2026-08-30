@@ -27,6 +27,7 @@ pub mod scheduler;
 pub mod since;
 pub mod source;
 pub mod storage;
+pub mod telemetry;
 pub mod time;
 pub mod vsock_protocol;
 
@@ -74,6 +75,10 @@ pub use scheduler::{
 pub use since::{InvalidSince, Since};
 pub use source::Source;
 pub use storage::{GcCandidate, GcPlan, StorageClass, StorageObject, StorageSnapshot};
+pub use telemetry::{
+    InvalidTelemetry, TelemetryEnvelope, TelemetryEnvelopeInput, TelemetryEvent, TelemetryFields,
+    TelemetryLane, TELEMETRY_SCHEMA,
+};
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};
 pub use vsock_protocol::{
     derive_execution_nonce, VsockCodecError, VsockMessage, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.dev/schemas/velnor.telemetry.v1.json",
+  "title": "Velnor telemetry envelope v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "lane",
+    "repo",
+    "trust_domain",
+    "event",
+    "ts_logical",
+    "ts_wall",
+    "fields"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "velnor.telemetry.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "action_key_digest": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{64}$"
+    },
+    "lane": {
+      "enum": ["github", "velnor"]
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "trust_domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "event": {
+      "enum": [
+        "run_queued",
+        "run_admitted",
+        "tool_prep",
+        "cache_lookup",
+        "compile_start",
+        "compile_end",
+        "link_end",
+        "test_end",
+        "artifact_materialize",
+        "passive_wait",
+        "critical_path",
+        "plan_summary",
+        "no_progress"
+      ]
+    },
+    "ts_logical": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ts_wall": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "fields": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
