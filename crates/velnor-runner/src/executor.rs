@@ -28,7 +28,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Mutex, OnceLock,
+        mpsc, Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -48,6 +48,7 @@ const SETUP_QEMU_BINFMT_IMAGE: &str =
 const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
 const RESULTS_ARTIFACT_MAX_UPLOAD_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_UPLOAD_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const MAX_TOOL_PREP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
@@ -918,6 +919,29 @@ impl ExecutableStep {
     }
 }
 
+#[derive(Clone)]
+struct ToolPrepTelemetry {
+    sink: Arc<crate::ops::OpsSink>,
+    admission: crate::ops::JobAdmission,
+}
+
+impl ToolPrepTelemetry {
+    fn emit(&self, elapsed: Duration) {
+        let elapsed_ms = u64::try_from(elapsed.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_TOOL_PREP_TELEMETRY_MS);
+        let fields = BTreeMap::from([
+            ("ms".to_owned(), Value::from(elapsed_ms)),
+            ("tool".to_owned(), Value::from("mise")),
+        ]);
+        let _ = self.sink.emit_telemetry_for_admission(
+            &self.admission,
+            velnor_model::TelemetryEvent::ToolPrep,
+            fields,
+        );
+    }
+}
+
 /// Host-Docker step engine owned by the docker backend.
 ///
 /// Jobs enter through [`crate::execution::run_validated_job`]. This type is not
@@ -944,6 +968,7 @@ pub(crate) struct DockerJobEngine<R> {
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
     docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
+    tool_prep_telemetry: Option<ToolPrepTelemetry>,
 }
 
 #[derive(Debug, Clone)]
@@ -972,6 +997,7 @@ where
             live_step: None,
             job_environment_started: false,
             docker_lease: None,
+            tool_prep_telemetry: None,
         }
     }
 
@@ -1017,6 +1043,15 @@ where
 
     pub fn with_job_environment_started(mut self, started: bool) -> Self {
         self.job_environment_started = started;
+        self
+    }
+
+    pub(crate) fn with_tool_prep_telemetry(
+        mut self,
+        sink: Arc<crate::ops::OpsSink>,
+        admission: crate::ops::JobAdmission,
+    ) -> Self {
+        self.tool_prep_telemetry = Some(ToolPrepTelemetry { sink, admission });
         self
     }
 
@@ -2299,6 +2334,21 @@ where
     }
 
     fn native_mise(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+        timeout: Duration,
+    ) -> Result<StepExecutionResult> {
+        let prep_started = Instant::now();
+        let result = self.native_mise_inner(container, action, state, timeout);
+        if let Some(telemetry) = &self.tool_prep_telemetry {
+            telemetry.emit(prep_started.elapsed());
+        }
+        result
+    }
+
+    fn native_mise_inner(
         &mut self,
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
@@ -10284,11 +10334,93 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn native_mise_emits_bounded_tool_prep_telemetry() {
+        let temp = temp_dir();
+        let mise_env_dir = temp.join("_velnor");
+        fs::create_dir_all(&mise_env_dir).unwrap();
+        fs::write(mise_env_dir.join("mise-env.json"), "{}").unwrap();
+        fs::write(mise_env_dir.join("mise-env-redacted.json"), "{}").unwrap();
+
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(temp.join("state.db"), "test-instance".to_owned()).unwrap(),
+        );
+        let admission = crate::ops::JobAdmission {
+            instance_slug: "test-instance".to_owned(),
+            job_uid: "job-tool-prep".to_owned(),
+            repository_full_name: "tailrocks/velnor".to_owned(),
+            workflow: "control-plane".to_owned(),
+            job_name: "tool-prep".to_owned(),
+            run_id: Some(42),
+            attempt: Some(1),
+            head_ref: Some("refs/heads/main".to_owned()),
+            head_sha: Some("deadbeef".to_owned()),
+            trigger_event: Some("workflow_dispatch".to_owned()),
+            queued_at_rfc3339: None,
+            slot_name: Some("slot-0".to_owned()),
+            runner_name: Some("runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: Some("standard".to_owned()),
+            masks: vec!["secret-marker".to_owned()],
+        };
+        assert!(sink.record_admission(&admission));
+
+        let steps = vec![ExecutableStep::Native {
+            step_id: "mise".to_owned(),
+            display_name: "mise".to_owned(),
+            invocation: NativeActionInvocation {
+                git_ref: "v4".to_owned(),
+                adapter: NativeActionAdapter::Mise,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("install".to_owned(), "false".to_owned()),
+                    ("cache_save".to_owned(), "false".to_owned()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::new(RecordingRunner::default())
+            .with_job_environment_started(true)
+            .with_tool_prep_telemetry(Arc::clone(&sink), admission);
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 0);
+
+        let telemetry = fs::read_to_string(temp.join("state.test-instance.telemetry.jsonl"))
+            .expect("tool preparation telemetry");
+        let record = telemetry
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|record| record["event"] == "tool_prep")
+            .expect("tool_prep event");
+        let fields = record["fields"].as_object().expect("tool_prep fields");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields["tool"], "mise");
+        assert!(fields["ms"]
+            .as_u64()
+            .is_some_and(|value| value <= MAX_TOOL_PREP_TELEMETRY_MS));
+        assert!(!telemetry.contains("secret-marker"));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     use crate::container::{ServiceContainerSpec, Shell};
     use std::{
         fs,
         path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 

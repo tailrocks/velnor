@@ -24,7 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::Timestamp;
+use velnor_model::{TelemetryEvent, Timestamp};
 
 use crate::{
     action::{
@@ -4525,7 +4525,7 @@ async fn handle_job_request(
     // before the job is accepted. When it cannot, fail this job closed
     // explicitly as infrastructure rejection instead of executing
     // unrecorded work.
-    if let Some(sink) = crate::ops::global() {
+    let telemetry_admission = if let Some(sink) = crate::ops::global() {
         let admission = crate::ops::JobAdmission {
             instance_slug: sink.instance_slug().to_owned(),
             job_uid: job.job_id.clone(),
@@ -4560,6 +4560,7 @@ async fn handle_job_request(
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
         };
+        let telemetry_admission = admission.clone();
         let admission_outcome =
             persist_admission_on_blocking_pool(Arc::clone(sink), admission).await;
         if admission_outcome != AdmissionPersistenceOutcome::Accepted {
@@ -4587,6 +4588,7 @@ async fn handle_job_request(
             clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
             bail!("{reason}");
         }
+        Some(telemetry_admission)
     } else {
         const REASON: &str = "operational store is unavailable; job failed closed before execution";
         let completion = complete_acquired_job_failure(
@@ -4600,7 +4602,7 @@ async fn handle_job_request(
         completion.context("failed to complete the job rejected for store unavailability")?;
         clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
         bail!("{REASON}");
-    }
+    };
 
     let event_name = crate::github_adapter::job_variable(&job, "github.event_name").unwrap_or("");
     if !crate::capacity::trusted_fleet_accepts_github_event(event_name) {
@@ -4859,6 +4861,25 @@ async fn handle_job_request(
                         );
                         emitted_pressure = true;
                     }
+                    let wait_ms = u64::try_from(sleep.as_millis()).unwrap_or(u64::MAX);
+                    if wait_ms >= 1_000 {
+                        if let (Some(sink), Some(admission)) =
+                            (crate::ops::global(), telemetry_admission.as_ref())
+                        {
+                            let fields = BTreeMap::from([
+                                (
+                                    "cause".to_owned(),
+                                    Value::String("host_capacity".to_owned()),
+                                ),
+                                ("ms".to_owned(), Value::from(wait_ms)),
+                            ]);
+                            let _ = sink.emit_telemetry_for_admission(
+                                admission,
+                                TelemetryEvent::PassiveWait,
+                                fields,
+                            );
+                        }
+                    }
                     eprintln!(
                         "Job {} waiting for host capacity: {}. Retrying in {}s.",
                         job.job_id,
@@ -5031,6 +5052,7 @@ async fn handle_job_request(
                 Some(step_log_sender),
                 daemon_id,
                 reserved_bytes,
+                telemetry_admission,
             )
         })
         .await;
@@ -6307,6 +6329,7 @@ fn execute_script_job(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
+    telemetry_admission: Option<crate::ops::JobAdmission>,
 ) -> Result<ScriptJobResult> {
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -6328,6 +6351,7 @@ fn execute_script_job(
         step_log_sender,
         daemon_id,
         reserved_bytes,
+        telemetry_admission,
         execution_backend,
     );
     if result.is_err() {
@@ -6817,6 +6841,7 @@ fn execute_script_job_inner(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
+    telemetry_admission: Option<crate::ops::JobAdmission>,
     execution_backend: velnor_model::ExecutionBackendKind,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
@@ -7165,6 +7190,9 @@ fn execute_script_job_inner(
     }
     if let Some(sender) = step_log_sender {
         executor = executor.with_step_log_sender(sender);
+    }
+    if let (Some(sink), Some(admission)) = (crate::ops::global().cloned(), telemetry_admission) {
+        executor = executor.with_tool_prep_telemetry(sink, admission);
     }
     let steps_started = Instant::now();
     let first_step_ms = duration_ms(execution_started.elapsed());

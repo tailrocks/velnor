@@ -200,6 +200,7 @@ fn cli_c005_directory_mode_writes_a_complete_deterministic_0644_page_set() {
             "storage-reservations.1",
             "storage-status.1",
             "storage.1",
+            "telemetry.1",
             "top.1",
             "uncordon.1",
             "velnorctl.1",

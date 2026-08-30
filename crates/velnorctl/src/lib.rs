@@ -212,6 +212,8 @@ pub enum Command {
     Describe(commands::DescribeArgs),
     /// Read one resource log stream.
     Logs(commands::LogsArgs),
+    /// Read daemon-shared performance telemetry.
+    Telemetry(commands::TelemetryArgs),
     /// Read normalized control events.
     Events(commands::EventsArgs),
     /// Read live metrics.
@@ -481,6 +483,7 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
         Command::Get(args) => execute_get(&globals, args).await,
         Command::Describe(args) => execute_describe(&globals, args).await,
         Command::Logs(args) => execute_logs(&globals, args).await,
+        Command::Telemetry(args) => execute_telemetry(&globals, args).await,
         Command::Events(args) => execute_events(&globals, args).await,
         Command::Top(args) => execute_top(&globals, args).await,
         Command::Wait(args) => execute_wait(&globals, args).await,
@@ -894,6 +897,16 @@ async fn execute_logs(globals: &GlobalArgs, args: commands::LogsArgs) -> Result<
         }
         Ok(())
     }
+}
+
+async fn execute_telemetry(
+    globals: &GlobalArgs,
+    args: commands::TelemetryArgs,
+) -> Result<(), CommandError> {
+    let page = client_for(globals)?
+        .telemetry(args.after.as_deref(), args.limit)
+        .await?;
+    print_json(page)
 }
 
 async fn execute_reconcile(
