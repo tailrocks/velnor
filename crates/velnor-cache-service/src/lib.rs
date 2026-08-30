@@ -286,6 +286,17 @@ pub struct RestorePathProbe {
     pub regular_round_trip: bool,
 }
 
+/// Snapshot of compiler-cache lookup outcomes for one service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompilerCacheTelemetry {
+    /// Number of validated cache hits.
+    pub hits: u64,
+    /// Number of clean cache misses.
+    pub misses: u64,
+    /// Number of lookups passed through because caching is disabled.
+    pub passthroughs: u64,
+}
+
 /// Durable compiler-cache service backed by CAS and the action journal.
 pub struct CompilerCacheService<C: Clock> {
     backend: CompilerCacheBackend,
@@ -297,6 +308,7 @@ pub struct CompilerCacheService<C: Clock> {
     cas: CasStore,
     metadata: Mutex<Connection>,
     journal: Mutex<LeaseManager<C>>,
+    telemetry: Mutex<CompilerCacheTelemetry>,
 }
 
 impl<C: Clock> CompilerCacheService<C> {
@@ -329,6 +341,7 @@ impl<C: Clock> CompilerCacheService<C> {
             cas,
             metadata: Mutex::new(metadata),
             journal: Mutex::new(journal),
+            telemetry: Mutex::new(CompilerCacheTelemetry::default()),
         })
     }
 
@@ -342,6 +355,12 @@ impl<C: Clock> CompilerCacheService<C> {
     #[must_use]
     pub fn storage_root(&self) -> &Path {
         &self.storage_root
+    }
+
+    /// Return a snapshot of this service's compiler-cache lookup outcomes.
+    #[must_use]
+    pub fn telemetry(&self) -> CompilerCacheTelemetry {
+        *self.lock_telemetry()
     }
 
     /// Return daemon-owned wrapper variables for one job.
@@ -411,6 +430,7 @@ impl CompilerCacheService<velnor_action_journal::TokioClock> {
 impl<C: Clock> CompilerCache for CompilerCacheService<C> {
     async fn lookup(&self, key: &CompilerActionKey) -> Result<Option<CompilerResult>, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
+            self.record_passthrough();
             return Ok(None);
         }
         self.ensure_trust_scope(key)?;
@@ -418,9 +438,11 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         let record = {
             let journal = self.lock_journal()?;
             let Some(record) = journal.latest_action(key)? else {
+                self.record_miss();
                 return Ok(None);
             };
             if record.state != ActionState::Complete {
+                self.record_miss();
                 return Ok(None);
             }
             if record.trust_class != key.execution_policy.trust_class {
@@ -430,6 +452,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         };
         let key_digest = key.digest()?.to_string();
         let Some(result_digest) = record.output_digests.get(RESULT_DIGEST) else {
+            self.record_miss();
             return Ok(None);
         };
         let result_digest = result_digest.clone();
@@ -475,6 +498,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
                 "published compiler result does not match its metadata".into(),
             ));
         }
+        self.record_hit();
         Ok(Some(result))
     }
 
@@ -834,6 +858,27 @@ impl<C: Clock> CompilerCacheService<C> {
     fn lock_metadata(&self) -> Result<MutexGuard<'_, Connection>, CacheError> {
         self.metadata.lock().map_err(|_| CacheError::LockPoisoned)
     }
+
+    fn lock_telemetry(&self) -> MutexGuard<'_, CompilerCacheTelemetry> {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn record_hit(&self) {
+        let mut telemetry = self.lock_telemetry();
+        telemetry.hits = telemetry.hits.saturating_add(1);
+    }
+
+    fn record_miss(&self) {
+        let mut telemetry = self.lock_telemetry();
+        telemetry.misses = telemetry.misses.saturating_add(1);
+    }
+
+    fn record_passthrough(&self) {
+        let mut telemetry = self.lock_telemetry();
+        telemetry.passthroughs = telemetry.passthroughs.saturating_add(1);
+    }
 }
 
 #[cfg(test)]
@@ -936,6 +981,14 @@ mod tests {
             WrapperDeclaration::default(),
         );
         assert!(cache.lookup(&key(1)).await.expect("lookup").is_none());
+        assert_eq!(
+            cache.telemetry(),
+            CompilerCacheTelemetry {
+                hits: 0,
+                misses: 1,
+                passthroughs: 0,
+            }
+        );
     }
 
     #[tokio::test]
@@ -956,6 +1009,14 @@ mod tests {
             assert_eq!(
                 cache.lookup(&action_key).await.expect("lookup"),
                 Some(expected)
+            );
+            assert_eq!(
+                cache.telemetry(),
+                CompilerCacheTelemetry {
+                    hits: 1,
+                    misses: 0,
+                    passthroughs: 0,
+                }
             );
         }
     }
@@ -1127,6 +1188,23 @@ mod tests {
         assert_eq!(
             cache.lookup(&action_key).await.expect("lookup"),
             Some(expected)
+        );
+    }
+    async fn disabled_lookup_is_a_passthrough() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Off,
+            WrapperDeclaration::default(),
+        );
+        assert!(cache.lookup(&key(7)).await.expect("lookup").is_none());
+        assert_eq!(
+            cache.telemetry(),
+            CompilerCacheTelemetry {
+                hits: 0,
+                misses: 0,
+                passthroughs: 1,
+            }
         );
     }
 
