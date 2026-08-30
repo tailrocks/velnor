@@ -1555,7 +1555,6 @@ impl Store {
     ) -> StoreResult<PruneCounts> {
         let cutoff = budget.max_event_age.map(|age| minus_age(now, age));
         if let Some(cutoff) = cutoff {
-            reject_malformed_timestamp_rows(conn, "events", "occurred_at")?;
             let ids = select_expired_event_ids(conn, cutoff, prune_batch_size(budget))?;
             Self::require_retention_lease_connection(conn, lease)?;
             return Ok(PruneCounts {
@@ -1594,8 +1593,7 @@ impl Store {
             return Ok(PruneCounts::default());
         };
         let cutoff = minus_age(now, max_age);
-        reject_malformed_timestamp_rows(conn, "jobs", "updated_at")?;
-        let ids = select_expired_terminal_job_ids(conn, cutoff)?;
+        let ids = select_expired_terminal_job_ids(conn, cutoff, prune_batch_size(budget))?;
         let Some(id) = ids.first().copied() else {
             return Ok(PruneCounts::default());
         };
@@ -1950,25 +1948,14 @@ fn read_retention_snapshot(
     })
 }
 
-/// Find the oldest retained event/transition using v9's normalized expression
-/// indexes. RFC 3339 text is not ordered safely, so SQLite orders by Julian
-/// day and Rust returns the original timestamp. Malformed rows produce an
-/// explicit incomplete result; accounting never labels a partial result as
-/// complete and never turns post-commit reporting into a retry signal.
+/// Find the oldest retained event/transition using the indexed SQLite ordering
+/// and Rust's parsed timestamp. RFC 3339 text is not ordered safely, and
+/// SQLite accepts timestamp spellings that are not canonical `Timestamp`
+/// values. The SQL query selects one bounded candidate per table; an invalid
+/// selected row produces an explicit incomplete result. Accounting never
+/// labels a partial result as complete and never turns post-commit reporting
+/// into a retry signal.
 fn oldest_retained_at(conn: &rusqlite::Connection) -> StoreResult<(Option<String>, bool)> {
-    let malformed: bool = conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM events WHERE julianday(occurred_at) IS NULL LIMIT 1
-         ) OR EXISTS(
-             SELECT 1 FROM job_transitions
-             WHERE julianday(transition_time) IS NULL LIMIT 1
-         )",
-        [],
-        |row| row.get(0),
-    )?;
-    if malformed {
-        return Ok((None, false));
-    }
     let mut oldest: Option<Timestamp> = None;
     for (table, column) in [
         ("events", "occurred_at"),
@@ -1976,12 +1963,11 @@ fn oldest_retained_at(conn: &rusqlite::Connection) -> StoreResult<(Option<String
     ] {
         let sql = format!(
             "SELECT {column} FROM {table}
-             WHERE julianday({column}) IS NOT NULL
              ORDER BY julianday({column}) ASC, id ASC LIMIT 1"
         );
         let raw: Option<String> = conn.query_row(&sql, [], |row| row.get(0)).optional()?;
         let Some(raw) = raw else { continue };
-        let Ok(timestamp) = Timestamp::parse(&raw) else {
+        let Some(timestamp) = parse_canonical_timestamp(&raw) else {
             return Ok((None, false));
         };
         if oldest.is_none_or(|current| timestamp < current) {
@@ -2220,24 +2206,10 @@ fn delete_transition_rows_by_ids(
     )? as u64)
 }
 
-fn reject_malformed_timestamp_rows(
-    conn: &rusqlite::Connection,
-    table: &str,
-    column: &str,
-) -> StoreResult<()> {
-    let sql = format!(
-        "SELECT 1 FROM {table}
-         WHERE julianday({column}) IS NULL
-         LIMIT 1"
-    );
-    if conn
-        .query_row(&sql, [], |row| row.get::<_, i64>(0))
-        .optional()?
-        .is_some()
-    {
-        return Err(stale_timestamp_error());
-    }
-    Ok(())
+fn parse_canonical_timestamp(raw: &str) -> Option<Timestamp> {
+    let timestamp = Timestamp::parse(raw).ok()?;
+    let canonical = timestamp.to_rfc3339().ok()?;
+    (canonical == raw).then_some(timestamp)
 }
 
 fn select_expired_event_ids(
@@ -2245,9 +2217,11 @@ fn select_expired_event_ids(
     cutoff: Timestamp,
     batch: u64,
 ) -> StoreResult<Vec<i64>> {
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
     let mut statement = conn.prepare_cached(&format!(
-        "SELECT id FROM events
-         WHERE julianday(occurred_at) < julianday(?1)
+        "SELECT id, occurred_at FROM events
+         WHERE (julianday(occurred_at) < julianday(?1)
+                OR julianday(occurred_at) IS NULL)
            AND {EXACT_EVENT_OWNERSHIP}
            AND NOT EXISTS (
                SELECT 1 FROM jobs j
@@ -2260,16 +2234,23 @@ fn select_expired_event_ids(
                WHERE r.instance_slug = events.instance_slug
                  AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
            )
-         ORDER BY julianday(occurred_at) ASC, id ASC LIMIT ?2"
+         ORDER BY CASE WHEN substr(occurred_at, 11, 1) = 'T' THEN 1 ELSE 0 END,
+                  julianday(occurred_at) ASC, id ASC LIMIT ?2"
     ))?;
     let mut rows = statement.query(params![
         rfc3339(cutoff),
-        i64::try_from(batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE))
-            .unwrap_or(i64::MAX),
+        i64::try_from(batch).unwrap_or(i64::MAX)
     ])?;
-    let mut ids = Vec::new();
+    let mut ids = Vec::with_capacity(batch as usize);
     while let Some(row) = rows.next()? {
-        ids.push(row.get(0)?);
+        let id = row.get(0)?;
+        let raw = row
+            .get::<_, String>(1)
+            .map_err(|_| stale_timestamp_error())?;
+        let timestamp = parse_canonical_timestamp(&raw).ok_or_else(stale_timestamp_error)?;
+        if timestamp < cutoff {
+            ids.push(id);
+        }
     }
     Ok(ids)
 }
@@ -2277,22 +2258,36 @@ fn select_expired_event_ids(
 fn select_expired_terminal_job_ids(
     conn: &rusqlite::Connection,
     cutoff: Timestamp,
+    batch: u64,
 ) -> StoreResult<Vec<i64>> {
+    let batch = batch.clamp(MIN_EFFECTIVE_BATCH_SIZE, MAX_PRUNE_BATCH_SIZE);
     let mut statement = conn.prepare_cached(&format!(
-        "SELECT id FROM jobs
+        "SELECT id, updated_at FROM jobs
          WHERE phase IN {CANONICAL_TERMINAL_PHASES}
-           AND julianday(updated_at) < julianday(?1)
+           AND (julianday(updated_at) < julianday(?1)
+                OR julianday(updated_at) IS NULL)
            AND NOT EXISTS (
                SELECT 1 FROM reconciliations r
                WHERE r.instance_slug = jobs.instance_slug
                  AND r.status NOT IN {CLOSED_RECONCILIATION_STATUSES}
            )
-         ORDER BY julianday(updated_at) ASC, id ASC LIMIT 1"
+         ORDER BY CASE WHEN substr(updated_at, 11, 1) = 'T' THEN 1 ELSE 0 END,
+                  julianday(updated_at) ASC, id ASC LIMIT ?2"
     ))?;
-    let mut rows = statement.query([rfc3339(cutoff)])?;
-    let mut ids = Vec::new();
+    let mut rows = statement.query(params![
+        rfc3339(cutoff),
+        i64::try_from(batch).unwrap_or(i64::MAX)
+    ])?;
+    let mut ids = Vec::with_capacity(batch as usize);
     while let Some(row) = rows.next()? {
-        ids.push(row.get(0)?);
+        let id = row.get(0)?;
+        let raw = row
+            .get::<_, String>(1)
+            .map_err(|_| stale_timestamp_error())?;
+        let timestamp = parse_canonical_timestamp(&raw).ok_or_else(stale_timestamp_error)?;
+        if timestamp < cutoff {
+            ids.push(id);
+        }
     }
     Ok(ids)
 }
@@ -2918,6 +2913,37 @@ mod tests {
     }
 
     #[test]
+    fn accounting_reports_noncanonical_timestamps_as_incomplete() {
+        let (_dir, store) = temp_store("oldest-noncanonical");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at)
+                 VALUES ('noncanonical', 'capacity.pressure', 'host',
+                         '2024-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO job_transitions
+                 (instance_slug, job_uid, transition_token, correlation_id, reason,
+                  transition_time)
+                 VALUES ('noncanonical', 'job-1', 'token-1', 'corr-1', 'job.started',
+                         '2020-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let accounting = store.accounting().unwrap();
+
+        assert!(!accounting.oldest_retained_at_complete);
+        assert!(accounting.oldest_retained_at.is_none());
+    }
+
+    #[test]
     fn state_machine_event_keeps_exact_transition_identity() {
         let (_dir, store) = temp_store("exact-transition-event");
         let connection = test_connection(&store);
@@ -2992,6 +3018,230 @@ mod tests {
 
         assert_eq!(error.envelope.reason, "store.retention.timestamp");
         assert_eq!(store.accounting().unwrap().event_rows, 1);
+    }
+
+    #[test]
+    fn canonical_event_timestamp_prunes_and_commits() {
+        let (_dir, store) = temp_store("canonical-event-candidate");
+        seed_expired_events(&store, 1);
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let report = store.prune_history(&budget).unwrap();
+
+        assert_eq!(report.deleted_events, 1);
+        assert_eq!(store.accounting().unwrap().event_rows, 0);
+    }
+
+    #[test]
+    fn valid_rfc3339_offset_event_prunes_without_sqlite_date_coercion() {
+        let (_dir, store) = temp_store("offset-event-candidate");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at)
+                 VALUES ('offset', 'gc.completed', 'host',
+                         '2000-01-01T00:00:00+23:59')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let report = store.prune_history(&budget).unwrap();
+
+        assert_eq!(report.deleted_events, 1);
+        assert_eq!(store.accounting().unwrap().event_rows, 0);
+    }
+
+    #[test]
+    fn noncanonical_event_timestamp_rolls_back_before_commit() {
+        let (_dir, store) = temp_store("noncanonical-event-candidate");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at)
+                 VALUES ('noncanonical', 'gc.completed', 'host',
+                         '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at)
+                 VALUES ('noncanonical', 'gc.completed', 'host',
+                         '2000-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+        let error = store
+            .prune_history(&budget)
+            .expect_err("noncanonical event timestamp must fail closed");
+
+        assert_eq!(error.envelope.reason, "store.retention.timestamp");
+        assert_eq!(store.accounting().unwrap().event_rows, 2);
+    }
+
+    #[test]
+    fn malformed_terminal_job_timestamp_rolls_back_before_commit() {
+        let (_dir, store) = temp_store("malformed-terminal-job");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO jobs
+                 (instance_slug, job_uid, repository, workflow, job_name, phase, updated_at)
+                 VALUES ('malformed', 'job-1', 'repo', 'workflow', 'job', 'completed',
+                         'not-a-timestamp')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: None,
+            max_event_rows: 0,
+            max_terminal_job_age: Some(Duration::from_secs(1)),
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+        let error = store
+            .prune_history(&budget)
+            .expect_err("malformed terminal-job timestamp must fail closed");
+
+        assert_eq!(error.envelope.reason, "store.retention.timestamp");
+        assert_eq!(store.accounting().unwrap().job_rows, 1);
+    }
+
+    #[test]
+    fn canonical_terminal_job_timestamp_prunes_and_commits() {
+        let (_dir, store) = temp_store("canonical-terminal-job");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO jobs
+                 (instance_slug, job_uid, repository, workflow, job_name, phase, updated_at)
+                 VALUES ('canonical', 'job-1', 'repo', 'workflow', 'job', 'completed',
+                         '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: None,
+            max_event_rows: 0,
+            max_terminal_job_age: Some(Duration::from_secs(1)),
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let report = store.prune_history(&budget).unwrap();
+
+        assert_eq!(report.deleted_jobs, 1);
+        assert_eq!(store.accounting().unwrap().job_rows, 0);
+    }
+
+    #[test]
+    fn noncanonical_terminal_job_timestamp_rolls_back_before_commit() {
+        let (_dir, store) = temp_store("noncanonical-terminal-job");
+        let connection = test_connection(&store);
+        for (job_uid, updated_at) in [
+            ("job-1", "2000-01-01T00:00:00Z"),
+            ("job-2", "2000-01-01 00:00:00"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO jobs
+                     (instance_slug, job_uid, repository, workflow, job_name, phase, updated_at)
+                     VALUES ('noncanonical', ?1, 'repo', 'workflow', 'job', 'completed', ?2)",
+                    params![job_uid, updated_at],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: None,
+            max_event_rows: 0,
+            max_terminal_job_age: Some(Duration::from_secs(1)),
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+        let error = store
+            .prune_history(&budget)
+            .expect_err("noncanonical terminal-job timestamp must fail closed");
+
+        assert_eq!(error.envelope.reason, "store.retention.timestamp");
+        assert_eq!(store.accounting().unwrap().job_rows, 2);
+    }
+
+    #[test]
+    fn malformed_active_event_is_preserved_without_blocking_prune() {
+        let (_dir, store) = temp_store("malformed-active-event");
+        let connection = test_connection(&store);
+        connection
+            .execute(
+                "INSERT INTO jobs
+                 (instance_slug, job_uid, repository, workflow, job_name, phase, updated_at)
+                 VALUES ('active', 'job-1', 'repo', 'workflow', 'job', 'running',
+                         '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events
+                 (instance_slug, event_kind, subject, occurred_at)
+                 VALUES ('active', 'job.updated', 'job-1', '2000-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let budget = RetentionBudget {
+            max_event_age: Some(Duration::from_secs(1)),
+            max_event_rows: 0,
+            max_terminal_job_age: None,
+            max_terminal_job_rows: 0,
+            max_database_bytes: 0,
+            batch_size: 1,
+        };
+
+        let report = store.prune_history(&budget).unwrap();
+
+        assert_eq!(report.deleted_events, 0);
+        assert_eq!(store.accounting().unwrap().event_rows, 1);
+        assert_eq!(store.accounting().unwrap().job_rows, 1);
     }
 
     #[test]
