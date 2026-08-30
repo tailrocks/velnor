@@ -1483,7 +1483,7 @@ struct GeneratedOwnerLaneContract {
 const GENERATED_OWNER_LANE_CONTRACTS: [GeneratedOwnerLaneContract; 3] = [
     GeneratedOwnerLaneContract {
         owner: "jackin-project",
-        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'github' }}",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
     },
     GeneratedOwnerLaneContract {
         owner: "tailrocks",
@@ -1494,7 +1494,7 @@ const GENERATED_OWNER_LANE_CONTRACTS: [GeneratedOwnerLaneContract; 3] = [
         lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}",
     },
 ];
-const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.repository_owner == 'jackin-project' && github.event_name != 'workflow_dispatch')) && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
+const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
 
 fn audit_generated_caller(
     file: &str,
@@ -2469,7 +2469,7 @@ jobs:
   jackin-project:
     uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'github' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}
   tailrocks:
     uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
@@ -2480,7 +2480,7 @@ jobs:
       lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'github' || 'velnor' }}
   ci-required:
     timeout-minutes: 10
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.repository_owner == 'jackin-project' && github.event_name != 'workflow_dispatch')) && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     steps:
       - run: |
           if [ "${sel_result}" != "success" ]; then
@@ -2561,12 +2561,12 @@ jobs:
             "generated-caller"
         ));
 
-        let jackin_velnor_default = GENERATED_CALLER.replacen(
+        let jackin_legacy_default = GENERATED_CALLER.replacen(
             GENERATED_OWNER_LANE_CONTRACTS[0].lane_expression,
-            GENERATED_OWNER_LANE_CONTRACTS[1].lane_expression,
+            "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'github' }}",
             1,
         );
-        assert!(has_rule(&audit(&jackin_velnor_default), "generated-caller"));
+        assert!(has_rule(&audit(&jackin_legacy_default), "generated-caller"));
 
         let missing_public_trust_override = GENERATED_CALLER.replacen(
             GENERATED_OWNER_LANE_CONTRACTS[2].lane_expression,

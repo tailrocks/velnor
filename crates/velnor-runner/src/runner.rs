@@ -5052,6 +5052,7 @@ async fn handle_job_request(
                 Some(step_log_sender),
                 daemon_id,
                 reserved_bytes,
+                telemetry_admission,
             )
         })
         .await;
@@ -6328,6 +6329,7 @@ fn execute_script_job(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
+    telemetry_admission: Option<crate::ops::JobAdmission>,
 ) -> Result<ScriptJobResult> {
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -6349,6 +6351,7 @@ fn execute_script_job(
         step_log_sender,
         daemon_id,
         reserved_bytes,
+        telemetry_admission,
         execution_backend,
     );
     if result.is_err() {
@@ -6838,6 +6841,7 @@ fn execute_script_job_inner(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
+    telemetry_admission: Option<crate::ops::JobAdmission>,
     execution_backend: velnor_model::ExecutionBackendKind,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
@@ -7186,6 +7190,9 @@ fn execute_script_job_inner(
     }
     if let Some(sender) = step_log_sender {
         executor = executor.with_step_log_sender(sender);
+    }
+    if let (Some(sink), Some(admission)) = (crate::ops::global().cloned(), telemetry_admission) {
+        executor = executor.with_tool_prep_telemetry(sink, admission);
     }
     let steps_started = Instant::now();
     let first_step_ms = duration_ms(execution_started.elapsed());
