@@ -55,6 +55,8 @@ pub struct ValidatedService {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedPlan {
     pub job_id: String,
+    /// Owning daemon identity propagated to guest Docker ownership labels.
+    pub daemon_id: String,
     pub steps: Vec<ValidatedStep>,
     pub job_container_image: String,
     pub services: Vec<ValidatedService>,
@@ -84,6 +86,7 @@ impl ValidatedPlan {
             isolation_id: isolation_id.to_string(),
             generation,
             job_id: self.job_id.clone(),
+            daemon_id: self.daemon_id.clone(),
             image: self.job_container_image.clone(),
             services: self
                 .services
@@ -158,6 +161,7 @@ impl ValidatedPlan {
     pub fn example_success(job_id: impl Into<String>) -> Self {
         Self {
             job_id: job_id.into(),
+            daemon_id: "test-daemon".into(),
             steps: vec![ValidatedStep {
                 id: "run".into(),
                 script: "echo run".into(),
@@ -221,6 +225,7 @@ impl ValidatedPlan {
         }
         Self {
             job_id: plan.identity.job_id.clone(),
+            daemon_id: plan.execution.job_container.daemon_id.clone(),
             steps: plan.steps.iter().map(validated_step).collect(),
             job_container_image: plan.execution.job_container.image.clone(),
             services: plan
@@ -277,6 +282,7 @@ impl ValidatedPlan {
     ) -> Self {
         Self {
             job_id: job_id.into(),
+            daemon_id: "test-daemon".into(),
             steps: script_steps
                 .iter()
                 .map(|step| ValidatedStep {
