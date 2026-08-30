@@ -66,9 +66,10 @@ campaign branch directive above. It is non-executable.
 - **2026-08-30 static campaign branch decision**: the one campaign branch for
   the whole active goal and plan is the static generic
   `codex/velnor-project-goal`. Keep one pull request for the campaign; do not
-  use plan/task names for the branch. A separately merged task branch is
-  allowed only when the operator explicitly changes the topology for that
-  task.
+  use plan/task names for the branch. No per-task branch or pull request is
+  permitted under the current topology; a future topology change requires a
+  new explicit operator decision recorded in the governing prompt and plan
+  before any branch is created.
 
 - **2026-08-24 branch-merge directive executed; campaign work recovered**
   (ox-alpha session C): operator ordered all branches merged to `main` via

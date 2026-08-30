@@ -1,31 +1,35 @@
-# Production-readiness checkpoint resume
+# Historical production-readiness checkpoint snapshot (non-executable)
 
 Snapshot recorded before the checkpoint commit and push.
 
+> This file is historical evidence only. Do not resume, execute, push, merge,
+> deploy, or install from any instruction below. The active authority is
+> docs/prompt.md and the static campaign branch codex/velnor-project-goal with
+> its sole PR.
+
 ## Objective
 
-Resume the stalled `fix/watchdog-registration-deadline` operator checkpoint,
-preserve the intended production-readiness model enum changes, and checkpoint
-them on the matching remote branch. This does not authorize merge, deploy, or
-claim completion of PRD-001.
+The former watchdog-registration operator checkpoint was not resumed here.
+This snapshot preserves its intended production-readiness model enum context
+without authorizing merge, deploy, or claim completion of PRD-001.
 
 ## Governing rules
 
 - `docs/prompt.md` is the active execution prompt; the marked unified-CI
   contract and tracked execution graph remain authoritative.
-- Intended working-tree scope is the two model enum files plus this resume
-  file. Stop on any other change.
+- Intended historical working-tree scope was the two model enum files plus this
+  snapshot. Do not apply that scope to the active campaign.
 - Rust verification uses `cargo nextest run`, not `cargo test`.
 - Commit with `git commit -s` and retain the required Codex co-author trailer.
-- Push only `fix/watchdog-registration-deadline` to `origin`.
+- Do not push this historical checkpoint or recreate its deleted branch.
 - Do not merge, deploy, or mark PRD-001 complete.
 
 ## Operator state
 
-- Branch: `fix/watchdog-registration-deadline`
+- Branch: former watchdog-registration checkpoint branch (historical/deleted)
 - HEAD at snapshot: `0dd27f5ac8a0a51a32d3ac9d29817f7fb61e98ef`
 - Last pushed commit at snapshot: `0dd27f5ac8a0a51a32d3ac9d29817f7fb61e98ef`
-- Upstream: `origin/fix/watchdog-registration-deadline`
+- Upstream: former checkpoint remote ref (historical/deleted)
 
 ## Completed and verified
 

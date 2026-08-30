@@ -67,7 +67,8 @@ signature, lock, health, lane, rollback, and ledger proofs remain mandatory.
 
 2026-08-30 decision: the active goal and plan use the static generic campaign
 branch `codex/velnor-project-goal` and one pull request. Do not use the former
-plan-named branch or create per-task branches unless the operator explicitly
-changes the delivery topology.
+plan-named branch or create per-task branches. A future topology change needs
+an explicit operator decision recorded in the governing prompt and plan before
+any branch is created.
 
 Full history: `git log -p -- AGENTS.md`; entries predating the marked contract that conflict with it are historical and non-executable.
