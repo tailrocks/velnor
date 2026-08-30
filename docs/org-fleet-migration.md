@@ -63,6 +63,7 @@ sequentially:
    ```sh
    rtk cargo run -p velnor-tools --locked -- fleet-policy audit \
      --policy fleet/policies/<org>-desired-policy.json \
+     --ledger fleet/release-refs.toml \
      --organization <org>
    ```
 
@@ -175,8 +176,9 @@ fleet-generate` regenerates the per-org policy JSONs under `fleet/policies/`,
    With explicit approval of the unchanged digest, run `fleet-policy apply` for
    `tailrocks` only. It applies the complete workflow restriction, replaces the
    exact generated repository set, and performs final readback.
-4. Run `fleet-policy audit` for `tailrocks`; resume only after exact semantic
-   equality. Then start the organization daemon with `--pool-name
+4. Run `fleet-policy audit --policy fleet/policies/tailrocks-desired-policy.json
+   --ledger fleet/release-refs.toml --organization tailrocks`; resume only
+   after exact semantic equality. Then start the organization daemon with `--pool-name
    velnor-trusted`, run `velnor-runner doctor`, and collect the pending runner-
    state, full guard-state, routing/denial, and warm-run acceptance evidence.
 5. Cancel every older active verification run before smoke. Dispatch one
@@ -220,8 +222,9 @@ The authoritative allowlist is the `selected_repositories` field of
 `fleet/release-refs.toml`, digest-reported by `rtk mise run fleet-digests`, and
 byte-compared against the ledger by the audit-ci `fleet-policy-current` rule.
 Do not mirror it as a hand-maintained table here; obtain live policy state
-through `fleet-policy plan`/`audit` and treat runner-state and full guard-state
-as pending acceptance evidence:
+through `fleet-policy plan`/`fleet-policy audit` with `--ledger
+fleet/release-refs.toml` and treat runner-state and full guard-state as pending
+acceptance evidence:
 
 ```sh
 jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json

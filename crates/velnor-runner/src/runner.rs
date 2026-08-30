@@ -2032,7 +2032,9 @@ async fn retention_lifecycle_with_sink(
         return;
     }
     let Some(sink) = injected_sink.or_else(|| crate::ops::global().cloned()) else {
-        eprintln!("forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness");
+        eprintln!(
+            "forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness"
+        );
         return;
     };
     loop {
@@ -2453,7 +2455,9 @@ pub(crate) async fn run_daemon_slot(
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
+                &format!(
+                    "slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"
+                ),
             );
             reconfigure_daemon_slot_forever(
                 &args,
@@ -6075,7 +6079,7 @@ fn start_broker_cancellation_poll(
                                     Ok(refreshed) => {
                                         broker = refreshed;
                                         println!(
-                                        "Cancellation poller refreshed broker credentials mid-job."
+                                            "Cancellation poller refreshed broker credentials mid-job."
                                         );
                                     }
                                     Err(error) => eprintln!(
@@ -10956,7 +10960,10 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
 
     println!(
         "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy, {stale_busy} offline+busy) for prefix '{}'",
-        args.url, args.slots, mine.len(), args.name
+        args.url,
+        args.slots,
+        mine.len(),
+        args.name
     );
     println!(
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
