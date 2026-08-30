@@ -50,7 +50,9 @@ pub struct JobContainerSpec {
     pub cargo_target_host: Option<PathBuf>,
     /// Exactly one compiler-cache store is exposed to a job.
     pub compiler_cache_backend: CompilerCacheBackend,
-    /// Trust namespace admitted for compiler-cache entries.
+    /// Trust namespace admitted for compiler-cache entries. The selected
+    /// namespace remains below the daemon-shared Plan 066 cache root, so slots
+    /// share warm entries without crossing trust boundaries.
     pub compiler_cache_trust_class: GuestCompilerCacheTrustClass,
 }
 

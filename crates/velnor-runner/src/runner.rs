@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
@@ -24,7 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
+use velnor_model::{Generation, SlotId, SlotPhase, Slug, TelemetryEvent, Timestamp};
 
 use crate::{
     action::{
@@ -2032,7 +2032,9 @@ async fn retention_lifecycle_with_sink(
         return;
     }
     let Some(sink) = injected_sink.or_else(|| crate::ops::global().cloned()) else {
-        eprintln!("forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness");
+        eprintln!(
+            "forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness"
+        );
         return;
     };
     loop {
@@ -2166,6 +2168,16 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     for root in roots {
         if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
+                let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
+                let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
+                if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
+                    eprintln!(
+                            "disk-pressure cache reclaim freed {} bytes across {} entries ({} failures)",
+                            cache_report.freed_bytes,
+                            cache_report.deleted.len(),
+                            cache_report.failures.len()
+                        );
+                }
                 let backend = crate::execution::load_execution_file(config_base, None)
                     .ok()
                     .map(|file| file.backend())
@@ -2248,12 +2260,18 @@ pub(crate) async fn run_daemon_slot(
     slot_id: SlotId,
     generation: Generation,
 ) -> Result<()> {
-    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation)?;
     let storage_mode = daemon_storage_mode(&args);
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         return run_with_jit_prewarmer(slot_args, None, storage_mode).await;
     }
+
+    let slot_config_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
+    // Let the normal job-runner preflight classify missing, corrupt, or
+    // incomplete runner.json as LocalRunnerIdentityUnavailable. That error is
+    // handled below by the existing JIT reconfiguration loop. Loading the
+    // config here would bypass that recovery path before the loop exists.
+    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation, slot_config_dir)?;
 
     // The controller launches this loop in a separate job-worker process. A
     // signal listener in the controller alone cannot cancel that process's
@@ -2327,6 +2345,33 @@ pub(crate) async fn run_daemon_slot(
             }
         }
         if let Err(error) = run_result {
+            let error_detail = sanitized_retry_error(&error);
+            if error
+                .downcast_ref::<LocalRunnerIdentityUnavailable>()
+                .is_some()
+            {
+                local_failure_streak = 0;
+                eprintln!(
+                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error_detail}"
+                );
+                daemon_forensic_log(
+                    &config_base,
+                    &format!(
+                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error_detail}"
+                    ),
+                );
+                reconfigure_daemon_slot_forever(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
+                cycle += 1;
+                continue;
+            }
             if args.once {
                 cleanup_failed_daemon_slot(
                     &args,
@@ -2339,7 +2384,6 @@ pub(crate) async fn run_daemon_slot(
                 .await;
                 return Err(error);
             }
-            let error_detail = sanitized_retry_error(&error);
             if registration_was_deleted(&error) {
                 local_failure_streak = 0;
                 cleanup_failed_daemon_slot(
@@ -2373,32 +2417,6 @@ pub(crate) async fn run_daemon_slot(
                 if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
                     continue;
                 }
-                continue;
-            }
-            if error
-                .downcast_ref::<LocalRunnerIdentityUnavailable>()
-                .is_some()
-            {
-                local_failure_streak = 0;
-                eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error_detail}"
-                );
-                daemon_forensic_log(
-                    &config_base,
-                    &format!(
-                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error_detail}"
-                    ),
-                );
-                reconfigure_daemon_slot_forever(
-                    &args,
-                    &config_base,
-                    slot_index,
-                    slots,
-                    cycle,
-                    &durable_slot,
-                )
-                .await;
-                cycle += 1;
                 continue;
             }
             if error.downcast_ref::<LocalRunnerFailure>().is_some() {
@@ -2437,7 +2455,9 @@ pub(crate) async fn run_daemon_slot(
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
+                &format!(
+                    "slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"
+                ),
             );
             reconfigure_daemon_slot_forever(
                 &args,
@@ -2508,10 +2528,25 @@ struct DurableSlotLifecycle {
     slot_id: SlotId,
     slot_index: u32,
     generation: Generation,
+    config_dir: PathBuf,
+    agent_id: Arc<AtomicI64>,
+    agent_id_available: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerIdentityState {
+    Available(i64),
+    Configless,
+    Unavailable,
 }
 
 impl DurableSlotLifecycle {
-    fn new(slot_id: SlotId, one_based_index: usize, generation: Generation) -> Result<Self> {
+    fn new(
+        slot_id: SlotId,
+        one_based_index: usize,
+        generation: Generation,
+        config_dir: PathBuf,
+    ) -> Result<Self> {
         let zero_based_index = one_based_index.checked_sub(1).ok_or_else(|| {
             anyhow::anyhow!("durable slot index must be one-based at the runner boundary")
         })?;
@@ -2521,16 +2556,101 @@ impl DurableSlotLifecycle {
             slot_id,
             slot_index,
             generation,
+            config_dir,
+            agent_id: Arc::new(AtomicI64::new(0)),
+            agent_id_available: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    fn transition(&self, cycle: u64, target: SlotPhase, message: impl Into<String>) -> bool {
-        let Some(sequence) = daemon_slot_transition_sequence(cycle, target) else {
+    /// Refresh the registration identity used for durable transition keys.
+    ///
+    /// A missing runner.json is the expected configless gap while a consumed
+    /// JIT registration is being torn down. Preserve the prior identity only
+    /// for that gap. Existing-but-invalid JSON and valid config without an
+    /// agent id clear the identity and fail closed.
+    fn refresh_agent_id(&self) -> RunnerIdentityState {
+        let config_path = self.config_dir.join("runner.json");
+        // Teardown temporarily removes runner.json. Keep the prior identity
+        // for that boundary, then adopt the replacement as soon as configure
+        // or promotion makes the live config available again.
+        match config::load(&self.config_dir) {
+            Ok(stored) => {
+                if let Some(agent_id) = stored.settings.agent_id {
+                    self.agent_id.store(agent_id, Ordering::Release);
+                    self.agent_id_available.store(true, Ordering::Release);
+                    RunnerIdentityState::Available(agent_id)
+                } else {
+                    self.agent_id_available.store(false, Ordering::Release);
+                    RunnerIdentityState::Unavailable
+                }
+            }
+            Err(_) => {
+                let configless = fs::symlink_metadata(&config_path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+                if configless {
+                    if self.agent_id_available.load(Ordering::Acquire) {
+                        RunnerIdentityState::Available(self.agent_id.load(Ordering::Acquire))
+                    } else {
+                        RunnerIdentityState::Configless
+                    }
+                } else {
+                    self.agent_id_available.store(false, Ordering::Release);
+                    RunnerIdentityState::Unavailable
+                }
+            }
+        }
+    }
+
+    fn request_key(&self, target: SlotPhase) -> Option<String> {
+        self.request_key_with_sink(crate::ops::global().map(AsRef::as_ref), target)
+    }
+
+    fn request_key_with_sink(
+        &self,
+        sink: Option<&crate::ops::OpsSink>,
+        target: SlotPhase,
+    ) -> Option<String> {
+        match self.refresh_agent_id() {
+            RunnerIdentityState::Available(agent_id) => Some(format!(
+                "jit-agent-{agent_id}-generation-{}-{}",
+                self.generation.0,
+                target.as_str()
+            )),
+            RunnerIdentityState::Configless => {
+                let sink = sink?;
+                let intent = match sink.latest_slot_transition_request_key(
+                    &self.slot_id,
+                    self.slot_index,
+                    self.generation,
+                ) {
+                    Ok(Some(intent)) => intent,
+                    Ok(None) => return None,
+                    Err(error) => {
+                        sink.record_slot_transition_lookup_failure(&error);
+                        eprintln!(
+                            "forensics.ops event=slot-transition-rejected reason=store-request-ledger-unavailable slot={} generation={} phase={}",
+                            self.slot_id.0,
+                            self.generation.0,
+                            target.as_str()
+                        );
+                        return None;
+                    }
+                };
+                if intent.target == target {
+                    return Some(intent.request_key);
+                }
+                recover_following_request_key(&intent.request_key, intent.target, target)
+            }
+            RunnerIdentityState::Unavailable => None,
+        }
+    }
+
+    fn transition(&self, target: SlotPhase, message: impl Into<String>) -> bool {
+        let Some(request_key) = self.request_key(target) else {
             eprintln!(
-                "forensics.ops event=slot-transition-rejected reason=invalid-boundary-sequence slot={} generation={} cycle={} phase={}",
+                "forensics.ops event=slot-transition-rejected reason=runner-identity-unavailable slot={} generation={} phase={}",
                 self.slot_id.0,
                 self.generation.0,
-                cycle,
                 target.as_str()
             );
             return false;
@@ -2540,7 +2660,7 @@ impl DurableSlotLifecycle {
                 &self.slot_id,
                 self.slot_index,
                 self.generation,
-                sequence,
+                &request_key,
                 target,
                 Some(message.into()),
             )
@@ -2548,14 +2668,21 @@ impl DurableSlotLifecycle {
     }
 }
 
-fn daemon_slot_transition_sequence(cycle: u64, target: SlotPhase) -> Option<u64> {
-    let offset = match target {
-        SlotPhase::Teardown => 1,
-        SlotPhase::Recycling => 2,
-        SlotPhase::Idle => 3,
+fn recover_following_request_key(
+    previous_key: &str,
+    previous_target: SlotPhase,
+    target: SlotPhase,
+) -> Option<String> {
+    let expected_target = match (previous_target, target) {
+        (SlotPhase::Teardown, SlotPhase::Recycling) | (SlotPhase::Recycling, SlotPhase::Idle) => {
+            target
+        }
         _ => return None,
     };
-    cycle.checked_sub(1)?.checked_mul(3)?.checked_add(offset)
+    let suffix = format!("-{}", previous_target.as_str());
+    let prefix = previous_key.strip_suffix(&suffix)?;
+    let key = format!("{prefix}-{}", expected_target.as_str());
+    Slug::validate("request_key", &key).ok().map(|_| key)
 }
 
 /// Re-create this slot's JIT config, retrying forever with capped backoff.
@@ -2571,7 +2698,6 @@ async fn reconfigure_daemon_slot_forever(
     durable_slot: &DurableSlotLifecycle,
 ) {
     let _ = durable_slot.transition(
-        cycle,
         SlotPhase::Recycling,
         format!("reconfiguring JIT identity after cycle {cycle}"),
     );
@@ -2581,7 +2707,6 @@ async fn reconfigure_daemon_slot_forever(
         match retry_daemon_slot_jit_config(args, config_base, slot_index, slots, cycle).await {
             Ok(()) => {
                 let _ = durable_slot.transition(
-                    cycle,
                     SlotPhase::Idle,
                     format!("JIT identity ready after cycle {cycle}"),
                 );
@@ -2685,7 +2810,6 @@ async fn recycle_daemon_slot(
     durable_slot: &DurableSlotLifecycle,
 ) -> Result<()> {
     let _ = durable_slot.transition(
-        cycle,
         SlotPhase::Teardown,
         format!("tearing down consumed JIT identity after cycle {cycle}"),
     );
@@ -2711,7 +2835,6 @@ async fn recycle_daemon_slot(
             .with_context(|| format!("promote successor JIT config for daemon slot-{slot_index}"))?
     };
     let _ = durable_slot.transition(
-        cycle,
         SlotPhase::Recycling,
         format!("recycling JIT identity after cycle {cycle}"),
     );
@@ -2721,7 +2844,6 @@ async fn recycle_daemon_slot(
             daemon_slot_name(slot_index)
         );
         let _ = durable_slot.transition(
-            cycle,
             SlotPhase::Idle,
             format!("promoted prewarmed JIT identity after cycle {cycle}"),
         );
@@ -2740,7 +2862,6 @@ async fn recycle_daemon_slot(
         unix_now_iso8601()
     );
     let _ = durable_slot.transition(
-        cycle,
         SlotPhase::Idle,
         format!("recycled JIT identity after cycle {cycle}"),
     );
@@ -2796,7 +2917,6 @@ async fn cleanup_failed_daemon_slot(
     durable_slot: &DurableSlotLifecycle,
 ) {
     let _ = durable_slot.transition(
-        cycle,
         SlotPhase::Teardown,
         format!("cleaning failed JIT identity after cycle {cycle}"),
     );
@@ -3521,12 +3641,20 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}",
+                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
                 id,
             ])
             .filter(|output| output.status.success())
             .is_some_and(|output| {
-                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut parts = text.trim().split('\t');
+                let owner = parts.next().unwrap_or("");
+                // Unknown endpoint count stays conservative: never removed.
+                let endpoints = parts
+                    .next()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(1);
+                stale_network_prunable(owner, endpoints, daemon_id)
             })
         })
         .collect::<Vec<_>>();
@@ -3543,6 +3671,19 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
     crate::docker_lease::daemon_owns_label(owner, daemon_id)
+}
+
+/// True when a `velnor-net-*` network is safe to remove at startup. Networks
+/// carrying THIS daemon's ownership label are stale by definition (a daemon
+/// restart orphans any in-flight job). Networks with no ownership label at
+/// all predate the guest-plan ownership labels; the `velnor-net-` prefix is
+/// Velnor-owned, so an endpoint-less one is dead weight and is reclaimed as a
+/// backstop. A foreign daemon's labeled network is never touched.
+fn stale_network_prunable(owner: &str, connected_endpoints: usize, daemon_id: &str) -> bool {
+    if daemon_owns_resource(owner, daemon_id) {
+        return true;
+    }
+    owner.is_empty() && connected_endpoints == 0
 }
 
 fn daemon_slot_configure_args(
@@ -5938,8 +6079,8 @@ fn start_broker_cancellation_poll(
                                     Ok(refreshed) => {
                                         broker = refreshed;
                                         println!(
-                                        "Cancellation poller refreshed broker credentials mid-job."
-                                    );
+                                            "Cancellation poller refreshed broker credentials mid-job."
+                                        );
                                     }
                                     Err(error) => eprintln!(
                                         "Cancellation poller failed to rebuild broker client: {}",
@@ -10819,7 +10960,10 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
 
     println!(
         "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy, {stale_busy} offline+busy) for prefix '{}'",
-        args.url, args.slots, mine.len(), args.name
+        args.url,
+        args.slots,
+        mine.len(),
+        args.name
     );
     println!(
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
@@ -12346,6 +12490,28 @@ jobs:
     }
 
     #[test]
+    fn stale_network_prunable_removes_owned_and_unlabeled_endpointless() {
+        // This daemon's own label (or a direct slot child) is stale at startup.
+        assert!(stale_network_prunable("/daemon/work", 3, "/daemon/work"));
+        assert!(stale_network_prunable(
+            "/daemon/work/slot-2",
+            1,
+            "/daemon/work"
+        ));
+        // Unlabeled guest-plan leak with no endpoints is reclaimed as a backstop.
+        assert!(stale_network_prunable("", 0, "/daemon/work"));
+        // Unlabeled but still connected: left alone.
+        assert!(!stale_network_prunable("", 2, "/daemon/work"));
+        // A foreign daemon's labeled network is never touched, even endpoint-less.
+        assert!(!stale_network_prunable("/other/work", 0, "/daemon/work"));
+        assert!(!stale_network_prunable(
+            "/other/work/slot-1",
+            0,
+            "/daemon/work"
+        ));
+    }
+
+    #[test]
     fn doctor_host_docker_reclaim_skips_socket_when_microvm_or_unselected() {
         for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
             doctor_host_docker_reclaim(backend, |_| {
@@ -12857,24 +13023,6 @@ jobs:
         assert!(!detail.contains("cleaned failed slot"));
 
         assert!(daemon_slot_cleanup_degradation(1, 7, true, true).is_none());
-    }
-
-    #[test]
-    fn daemon_slot_boundary_sequences_are_monotonic_and_typed() {
-        assert_eq!(
-            daemon_slot_transition_sequence(1, SlotPhase::Teardown),
-            Some(1)
-        );
-        assert_eq!(
-            daemon_slot_transition_sequence(1, SlotPhase::Recycling),
-            Some(2)
-        );
-        assert_eq!(daemon_slot_transition_sequence(1, SlotPhase::Idle), Some(3));
-        assert_eq!(
-            daemon_slot_transition_sequence(2, SlotPhase::Teardown),
-            Some(4)
-        );
-        assert_eq!(daemon_slot_transition_sequence(1, SlotPhase::Running), None);
     }
 
     #[test]
@@ -14541,6 +14689,231 @@ jobs:
             },
             credentials: None,
         }
+    }
+
+    #[test]
+    fn durable_slot_request_key_tracks_live_jit_agent_identity() {
+        let config_dir = unique_temp_dir("durable-slot-request-key");
+        let mut stored = stored_config();
+        stored.settings.agent_id = Some(42);
+        config::save(&config_dir, &stored).unwrap();
+
+        let lifecycle = DurableSlotLifecycle::new(
+            SlotId("slot-1".to_owned()),
+            1,
+            Generation(7),
+            config_dir.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
+            Some("jit-agent-42-generation-7-recycling")
+        );
+
+        stored.settings.agent_id = Some(43);
+        config::save(&config_dir, &stored).unwrap();
+        assert_eq!(
+            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
+            Some("jit-agent-43-generation-7-recycling")
+        );
+
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn durable_slot_request_key_rejects_invalid_identity_but_keeps_gap_identity() {
+        let config_dir = unique_temp_dir("durable-slot-request-key-invalid");
+        let mut stored = stored_config();
+        stored.settings.agent_id = Some(42);
+        config::save(&config_dir, &stored).unwrap();
+        let lifecycle = DurableSlotLifecycle::new(
+            SlotId("slot-1".to_owned()),
+            1,
+            Generation(7),
+            config_dir.clone(),
+        )
+        .unwrap();
+
+        assert!(lifecycle.request_key(SlotPhase::Teardown).is_some());
+        fs::remove_file(config_dir.join("runner.json")).unwrap();
+        assert_eq!(
+            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
+            Some("jit-agent-42-generation-7-recycling")
+        );
+
+        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
+        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
+
+        config::save(&config_dir, &stored).unwrap();
+        stored.settings.agent_id = None;
+        config::save(&config_dir, &stored).unwrap();
+        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
+
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn configless_request_key_reports_request_ledger_read_failure() {
+        let root = unique_temp_dir("configless-request-ledger-read-failure");
+        fs::create_dir_all(&root).unwrap();
+        let sink =
+            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
+        assert!(sink.transition_slot(
+            &SlotId("slot-1".into()),
+            0,
+            Generation(7),
+            "jit-agent-42-generation-7-teardown",
+            SlotPhase::Teardown,
+            None,
+        ));
+
+        let connection = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        connection
+            .execute_batch("DROP TABLE slot_transition_requests;")
+            .unwrap();
+        let lifecycle = DurableSlotLifecycle::new(
+            SlotId("slot-1".into()),
+            1,
+            Generation(7),
+            root.join("config"),
+        )
+        .unwrap();
+
+        assert!(lifecycle
+            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
+            .is_none());
+        assert!(sink.degraded());
+        assert!(sink
+            .forensic_failures()
+            .iter()
+            .any(|line| line.contains("store.slot.transition.lookup")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fresh_process_configless_recycling_to_idle_recovers_durable_key() {
+        let root = unique_temp_dir("fresh-process-slot-recovery");
+        let config_dir = root.join("config");
+        fs::create_dir_all(&root).unwrap();
+        let sink =
+            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
+        let mut stored = stored_config();
+        stored.settings.agent_id = Some(42);
+        config::save(&config_dir, &stored).unwrap();
+
+        assert!(sink.transition_slot(
+            &SlotId("slot-1".into()),
+            0,
+            Generation(7),
+            "jit-agent-42-generation-7-teardown",
+            SlotPhase::Teardown,
+            None,
+        ));
+        fs::remove_file(config_dir.join("runner.json")).unwrap();
+
+        let restarted = DurableSlotLifecycle::new(
+            SlotId("slot-1".into()),
+            1,
+            Generation(7),
+            config_dir.clone(),
+        )
+        .unwrap();
+        let recycling_key = restarted
+            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
+            .expect("durable predecessor recovers recycling key");
+        assert_eq!(recycling_key, "jit-agent-42-generation-7-recycling");
+        assert!(sink.transition_slot(
+            &restarted.slot_id,
+            restarted.slot_index,
+            restarted.generation,
+            &recycling_key,
+            SlotPhase::Recycling,
+            None,
+        ));
+
+        let idle_key = restarted
+            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
+            .expect("durable recycling intent recovers idle key during configless gap");
+        assert_eq!(idle_key, "jit-agent-42-generation-7-idle");
+        assert!(sink.transition_slot(
+            &restarted.slot_id,
+            restarted.slot_index,
+            restarted.generation,
+            &idle_key,
+            SlotPhase::Idle,
+            None,
+        ));
+        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
+        assert_eq!(
+            reopened
+                .slot("test-instance", &restarted.slot_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            SlotPhase::Idle
+        );
+
+        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
+        let invalid = DurableSlotLifecycle::new(
+            restarted.slot_id.clone(),
+            1,
+            restarted.generation,
+            config_dir.clone(),
+        )
+        .unwrap();
+        assert!(invalid
+            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
+            .is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fresh_process_configless_rejects_skipping_recycling() {
+        let root = unique_temp_dir("fresh-process-slot-recovery-negative");
+        let config_dir = root.join("config");
+        fs::create_dir_all(&root).unwrap();
+        let sink =
+            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
+        let mut stored = stored_config();
+        stored.settings.agent_id = Some(42);
+        config::save(&config_dir, &stored).unwrap();
+
+        assert!(sink.transition_slot(
+            &SlotId("slot-1".into()),
+            0,
+            Generation(7),
+            "jit-agent-42-generation-7-teardown",
+            SlotPhase::Teardown,
+            None,
+        ));
+        fs::remove_file(config_dir.join("runner.json")).unwrap();
+
+        let restarted = DurableSlotLifecycle::new(
+            SlotId("slot-1".into()),
+            1,
+            Generation(7),
+            config_dir.clone(),
+        )
+        .unwrap();
+        assert!(
+            restarted
+                .request_key_with_sink(Some(&sink), SlotPhase::Idle)
+                .is_none(),
+            "configless recovery must not synthesize an illegal Teardown -> Idle edge"
+        );
+        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
+        assert_eq!(
+            reopened
+                .slot("test-instance", &restarted.slot_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            SlotPhase::Teardown
+        );
+        assert_eq!(reopened.event_count("test-instance", "slot-1").unwrap(), 1);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
