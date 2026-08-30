@@ -305,82 +305,6 @@ impl NoFollowDir {
             ),
         }
     }
-
-    /// Opens a nested directory for read-only traversal without following
-    /// symlinks anywhere along the relative path.
-    pub fn open_relative_directory(&self, relative: &Path) -> Result<Self> {
-        let mut current = self.try_clone()?;
-        for component in relative.components() {
-            match component {
-                Component::CurDir => {}
-                Component::Normal(name) => match current.open_entry(name)? {
-                    Some(NoFollowSource::Directory(directory)) => current = directory,
-                    Some(NoFollowSource::File(_)) => bail!(
-                        "artifact source is not a directory: {}",
-                        current.display_path.join(name).display()
-                    ),
-                    None => bail!(
-                        "artifact source does not exist: {}",
-                        current.display_path.join(name).display()
-                    ),
-                },
-                Component::RootDir | Component::ParentDir | Component::Prefix(_) => bail!(
-                    "artifact source is not a normalized relative path: {}",
-                    relative.display()
-                ),
-            }
-        }
-        Ok(current)
-    }
-
-    pub fn open_relative_file(&self, relative: &Path) -> Result<fs::File> {
-        self.open_relative_file_if_exists(relative)?
-            .with_context(|| format!("artifact file does not exist: {}", relative.display()))
-    }
-
-    pub fn open_relative_file_if_exists(&self, relative: &Path) -> Result<Option<fs::File>> {
-        let mut components = relative
-            .components()
-            .filter(|component| !matches!(component, Component::CurDir))
-            .peekable();
-        let mut parent = self.try_clone()?;
-        let file_name = loop {
-            let Some(component) = components.next() else {
-                bail!(
-                    "artifact file path has no file name: {}",
-                    relative.display()
-                );
-            };
-            let Component::Normal(name) = component else {
-                bail!(
-                    "artifact file path is not a normalized relative path: {}",
-                    relative.display()
-                );
-            };
-            if components.peek().is_none() {
-                break name.to_os_string();
-            }
-            match parent.open_entry(name)? {
-                Some(NoFollowSource::Directory(directory)) => parent = directory,
-                Some(NoFollowSource::File(_)) => bail!(
-                    "artifact source is not a directory: {}",
-                    parent.display_path.join(name).display()
-                ),
-                None => bail!(
-                    "artifact source does not exist: {}",
-                    parent.display_path.join(name).display()
-                ),
-            }
-        };
-        match parent.open_entry(&file_name)? {
-            Some(NoFollowSource::File(file)) => Ok(Some(file)),
-            Some(NoFollowSource::Directory(_)) => bail!(
-                "artifact file is not a regular file: {}",
-                relative.display()
-            ),
-            None => Ok(None),
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -457,33 +381,6 @@ impl NoFollowDestinationDir {
         destination_name: &OsStr,
     ) -> Result<()> {
         self.publish_staged_directory_from(self, staging_name, destination_name)
-    }
-
-    pub fn entry_is_directory(&self, name: &OsStr) -> Result<Option<bool>> {
-        validate_single_component(name, "artifact destination entry")?;
-        match rustix::fs::statat(&self.file, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => Ok(Some(
-                rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                    == rustix::fs::FileType::Directory,
-            )),
-            Err(rustix::io::Errno::NOENT) => Ok(None),
-            Err(error) => Err(std::io::Error::from(error))
-                .with_context(|| format!("inspect artifact destination entry {name:?}")),
-        }
-    }
-
-    pub fn for_each_entry_name(&self, mut visit: impl FnMut(OsString) -> Result<()>) -> Result<()> {
-        let entries = rustix::fs::Dir::read_from(&self.file)
-            .map_err(std::io::Error::from)
-            .context("read artifact destination directory")?;
-        for entry in entries {
-            let entry = entry.map_err(std::io::Error::from)?;
-            let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
-            if name != "." && name != ".." {
-                visit(name)?;
-            }
-        }
-        Ok(())
     }
 
     /// Atomically publishes a private staging directory from another already-open
@@ -634,50 +531,6 @@ impl NoFollowDestinationDir {
             }
         }
         bail!("could not atomically publish staged artifact directory")
-    }
-
-    /// Atomically publishes a staged directory only when the destination name
-    /// is still absent. This closes the duplicate-name race without replacing
-    /// another publisher's immutable artifact.
-    pub fn publish_staged_directory_noreplace_from(
-        &self,
-        staging_parent: &Self,
-        staging_name: &OsStr,
-        destination_name: &OsStr,
-    ) -> Result<()> {
-        validate_single_component(staging_name, "staging directory")?;
-        validate_single_component(destination_name, "destination directory")?;
-        let staging_stat = rustix::fs::statat(
-            &staging_parent.file,
-            staging_name,
-            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-        )
-        .map_err(std::io::Error::from)
-        .context("inspect staged immutable artifact directory")?;
-        if rustix::fs::FileType::from_raw_mode(staging_stat.st_mode)
-            != rustix::fs::FileType::Directory
-        {
-            bail!("staged immutable artifact is not a directory");
-        }
-        match rustix::fs::renameat_with(
-            &staging_parent.file,
-            staging_name,
-            &self.file,
-            destination_name,
-            rustix::fs::RenameFlags::NOREPLACE,
-        ) {
-            Ok(()) => Ok(()),
-            Err(rustix::io::Errno::EXIST) => bail!(
-                "immutable artifact destination already exists: {}",
-                self.display_path.join(destination_name).display()
-            ),
-            Err(error) => Err(std::io::Error::from(error)).with_context(|| {
-                format!(
-                    "atomically publish immutable staged artifact directory {}",
-                    self.display_path.join(destination_name).display()
-                )
-            }),
-        }
     }
 
     pub(crate) fn remove_tree_entry(&self, name: &OsStr) -> Result<()> {
@@ -1506,10 +1359,6 @@ impl NoFollowDestinationDir {
         )
     }
 
-    pub fn entry_is_directory(&self, _name: &OsStr) -> Result<Option<bool>> {
-        bail!("secure artifact destination copying is unsupported on this platform")
-    }
-
     pub fn open_relative_file(&self, relative: &Path) -> Result<fs::File> {
         bail!(
             "secure artifact destination copying is unsupported on this platform for {}",
@@ -1577,18 +1426,6 @@ impl NoFollowDestinationDir {
     }
 
     pub fn publish_staged_directory_from(
-        &self,
-        _staging_parent: &Self,
-        _staging_name: &OsStr,
-        destination_name: &OsStr,
-    ) -> Result<()> {
-        bail!(
-            "secure artifact destination publishing is unsupported on this platform for {}",
-            destination_name.to_string_lossy()
-        )
-    }
-
-    pub fn publish_staged_directory_noreplace_from(
         &self,
         _staging_parent: &Self,
         _staging_name: &OsStr,

@@ -4884,11 +4884,7 @@ fn validate_sha256_digest(digest: &str, field: &str) -> Result<String> {
 }
 
 impl ResultsArtifactDescriptorWire {
-    fn validate(
-        self,
-        expected_plan_id: &str,
-        expected_job_id: &str,
-    ) -> Result<ValidatedResultsArtifactDescriptor> {
+    fn validate(self, expected_plan_id: &str) -> Result<ValidatedResultsArtifactDescriptor> {
         if self.workflow_run_backend_id != expected_plan_id {
             bail!(
                 "Results Service artifact '{}' belongs to workflow backend {}, not {}",
@@ -4897,14 +4893,11 @@ impl ResultsArtifactDescriptorWire {
                 expected_plan_id
             );
         }
-        if self.workflow_job_run_backend_id != expected_job_id {
-            bail!(
-                "Results Service artifact '{}' belongs to job backend {}, not {}",
-                self.name,
-                self.workflow_job_run_backend_id,
-                expected_job_id
-            );
-        }
+        validate_backend_id(&self.workflow_run_backend_id, "workflow_run_backend_id")?;
+        validate_backend_id(
+            &self.workflow_job_run_backend_id,
+            "workflow_job_run_backend_id",
+        )?;
         validate_results_artifact_name(&self.name)?;
         let database_id = self.database_id.parse("database_id")?;
         if database_id == 0 {
@@ -4924,6 +4917,16 @@ impl ResultsArtifactDescriptorWire {
             digest,
         })
     }
+}
+
+fn validate_backend_id(value: &str, field: &str) -> Result<()> {
+    const MAX_BACKEND_ID_BYTES: usize = 256;
+
+    if value.is_empty() || value.len() > MAX_BACKEND_ID_BYTES || value.chars().any(char::is_control)
+    {
+        bail!("Results Service {field} is empty, oversized, or contains control characters");
+    }
+    Ok(())
 }
 
 fn digest_matches(expected: &str, actual_hex: &str) -> bool {
@@ -5865,7 +5868,7 @@ fn list_results_artifacts(
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for artifact in artifacts {
-        let artifact = artifact.validate(plan_id, job_id)?;
+        let artifact = artifact.validate(plan_id)?;
         if !names.insert(artifact.name.clone()) {
             bail!(
                 "Results Service returned duplicate artifact name '{}'",
@@ -7116,7 +7119,7 @@ mod tests {
                             "artifacts": [{
                                 "name": "release-linux",
                                 "workflow_run_backend_id": "plan",
-                                "workflow_job_run_backend_id": "consumer",
+                                "workflow_job_run_backend_id": "producer",
                                 "database_id": 11,
                                 "size": zip_bytes.len(),
                                 "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
@@ -7167,6 +7170,7 @@ mod tests {
         let requests = server.join().unwrap();
         assert!(requests[0].contains("ArtifactService/ListArtifacts"));
         assert!(requests[1].contains("ArtifactService/GetSignedArtifactURL"));
+        assert!(requests[1].contains("\"workflow_job_run_backend_id\":\"producer\""));
         assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
     }
 
@@ -7213,7 +7217,7 @@ mod tests {
                                 {
                                     "name": "release-linux",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "consumer",
+                                    "workflow_job_run_backend_id": "producer",
                                     "database_id": 21,
                                     "size": zip_bytes.len(),
                                     "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
@@ -7221,7 +7225,7 @@ mod tests {
                                 {
                                     "name": ".dockerbuild",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "consumer",
+                                    "workflow_job_run_backend_id": "image",
                                     "database_id": 22,
                                     "size": zip_bytes.len(),
                                     "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
