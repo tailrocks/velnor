@@ -11,6 +11,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
+use velnor_cache_service::CacheAdmissionError;
 
 /// Bump whenever target mounting or compiler-visible path semantics change.
 /// Old generations remain inactive, owned cache data and are reclaimed by GC.
@@ -34,7 +35,7 @@ pub fn github_job_container_spec(
     node_action_image: &str,
     daemon_id: String,
     trust_scope: &str,
-) -> JobContainerSpec {
+) -> Result<JobContainerSpec, CacheAdmissionError> {
     // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
@@ -47,7 +48,7 @@ pub fn github_job_container_spec(
             )
         })
         .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
-    JobContainerSpec {
+    Ok(JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
         network: job_network_name(job),
@@ -70,8 +71,8 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        compiler_cache_backend: crate::manifest::compiler_cache_backend(job),
-    }
+        compiler_cache_backend: crate::manifest::compiler_cache_backend(job)?,
+    })
 }
 
 pub(crate) fn github_cargo_target_store_host(
@@ -1060,9 +1061,14 @@ mod tests {
             "",
             "daemon".into(),
             "public-forks",
-        );
+        )
+        .unwrap();
 
         assert!(!spec.mount_docker_socket);
+        assert_eq!(
+            spec.compiler_cache_backend,
+            velnor_cache_service::CompilerCacheBackend::Kache
+        );
     }
 
     #[test]
@@ -1092,7 +1098,8 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
-        );
+        )
+        .unwrap();
         assert!(!spec.mount_docker_socket);
     }
 

@@ -6735,7 +6735,7 @@ fn execute_microvm_script_job(
         node_action_image,
         "microvm".into(),
         trust_scope,
-    );
+    )?;
     if container.mount_docker_socket {
         return Err(microvm_capability_error(
             "execution.container.mount_docker_socket",
@@ -7194,7 +7194,7 @@ fn execute_script_job_inner(
         node_action_image,
         daemon_id,
         trust_scope,
-    );
+    )?;
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();

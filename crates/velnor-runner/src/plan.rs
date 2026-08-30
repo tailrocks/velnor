@@ -188,6 +188,15 @@ mod tests {
         assert!(validated.outputs.is_empty());
         assert_eq!(validated.job_container_image, "ubuntu:24.04");
         assert_eq!(validated.workspace, "/__w");
+        assert_eq!(
+            validated.env,
+            vec![
+                ("RUSTC_WRAPPER".into(), "sccache".into()),
+                ("SCCACHE_CACHE_SIZE".into(), "20G".into()),
+                ("SCCACHE_DIR".into(), "/var/cache/sccache".into()),
+                ("SCCACHE_GHA_ENABLED".into(), "false".into()),
+            ]
+        );
         assert!(!validated.buildx);
         assert!(!validated.testcontainers);
         let guest = validated.to_guest("job", 1);

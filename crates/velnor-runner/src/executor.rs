@@ -7,7 +7,7 @@ use crate::{
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
-    container::{kache_host, sccache_host, JobContainerSpec, Shell},
+    container::{JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
@@ -3754,16 +3754,8 @@ where
                 container.temp_host.display()
             )
         })?;
-        let cache_host = match container.compiler_cache_backend {
-            velnor_cache_service::CompilerCacheBackend::Sccache => {
-                Some(sccache_host(&container.temp_host))
-            }
-            velnor_cache_service::CompilerCacheBackend::Kache => {
-                Some(kache_host(&container.temp_host))
-            }
-            velnor_cache_service::CompilerCacheBackend::Off => None,
-        };
-        if let Some(cache_host) = cache_host {
+        let cache_runtime = container.compiler_cache_runtime();
+        if let Some(cache_host) = cache_runtime.host_path() {
             fs::create_dir_all(cache_host).with_context(|| {
                 format!(
                     "create shared compiler-cache directory for {}",
@@ -12251,6 +12243,8 @@ mod tests {
         }
         assert!(sccache.contains("0.16.0"));
         assert!(kache.contains("0.14.2"));
+        assert!(!sccache.contains("node"));
+        assert!(!kache.contains("node"));
     }
 
     #[test]

@@ -197,6 +197,17 @@ impl ValidatedPlan {
     /// Lift the admitted GitHub plan into the backend-neutral contract.
     #[must_use]
     pub fn from_normalized(plan: &crate::plan::NormalizedJobPlan) -> Self {
+        let mut env = sanitized_pairs(&plan.execution.env);
+        for (name, value) in &plan
+            .execution
+            .job_container
+            .compiler_cache_runtime()
+            .environment()
+            .variables
+        {
+            env.retain(|(existing, _)| existing != name);
+            env.push((name.clone(), value.clone()));
+        }
         Self {
             job_id: plan.identity.job_id.clone(),
             steps: plan.steps.iter().map(validated_step).collect(),
@@ -226,7 +237,7 @@ impl ValidatedPlan {
                 .iter()
                 .map(|(name, output)| (name.clone(), output.value.clone()))
                 .collect(),
-            env: sanitized_pairs(&plan.execution.env),
+            env,
             workspace: plan.execution.workspace_container.clone(),
             context_data: plan.execution.context_data.clone(),
             cache: plan_cache(&plan.steps),

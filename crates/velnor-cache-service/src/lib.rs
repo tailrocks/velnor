@@ -179,6 +179,93 @@ pub struct CompilerCacheEnvironment {
     pub variables: BTreeMap<String, String>,
 }
 
+/// Runtime mount and environment contract for one compiler-cache backend.
+///
+/// The runner may choose where the host-side store lives, but it cannot invent
+/// a second wrapper/environment mapping. Keeping this descriptor in the
+/// service crate makes the mount and compiler-visible variables one atomic
+/// backend contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerCacheRuntime {
+    backend: CompilerCacheBackend,
+    host_path: Option<PathBuf>,
+    container_path: Option<&'static str>,
+    environment: CompilerCacheEnvironment,
+}
+
+impl CompilerCacheRuntime {
+    /// Construct the daemon-owned runtime contract for an enabled host-side
+    /// store. Disabled caching uses [`Self::off`], so an enabled backend can
+    /// never carry wrapper variables without a mount path.
+    #[must_use]
+    pub fn new(backend: CompilerCacheBackend, host_path: PathBuf) -> Self {
+        if backend == CompilerCacheBackend::Off {
+            return Self::off();
+        }
+        let (container_path, variables) = match backend {
+            CompilerCacheBackend::Kache => (
+                Some("/var/cache/kache"),
+                BTreeMap::from([
+                    ("RUSTC_WRAPPER".into(), "kache".into()),
+                    ("KACHE_CACHE_DIR".into(), "/var/cache/kache".into()),
+                    ("KACHE_MAX_SIZE".into(), "20GiB".into()),
+                    ("KACHE_LOCAL_ONLY".into(), "true".into()),
+                    ("KACHE_PREFETCH_ENABLED".into(), "false".into()),
+                ]),
+            ),
+            CompilerCacheBackend::Sccache => (
+                Some("/var/cache/sccache"),
+                BTreeMap::from([
+                    ("RUSTC_WRAPPER".into(), "sccache".into()),
+                    ("SCCACHE_DIR".into(), "/var/cache/sccache".into()),
+                    ("SCCACHE_CACHE_SIZE".into(), "20G".into()),
+                    ("SCCACHE_GHA_ENABLED".into(), "false".into()),
+                ]),
+            ),
+            CompilerCacheBackend::Off => unreachable!("off runtime returned above"),
+        };
+        Self {
+            backend,
+            host_path: Some(host_path),
+            container_path,
+            environment: CompilerCacheEnvironment { variables },
+        }
+    }
+
+    /// Construct the explicit passthrough runtime.
+    #[must_use]
+    pub fn off() -> Self {
+        Self {
+            backend: CompilerCacheBackend::Off,
+            host_path: None,
+            container_path: None,
+            environment: CompilerCacheEnvironment {
+                variables: BTreeMap::new(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn backend(&self) -> CompilerCacheBackend {
+        self.backend
+    }
+
+    #[must_use]
+    pub fn host_path(&self) -> Option<&Path> {
+        self.host_path.as_deref()
+    }
+
+    #[must_use]
+    pub fn container_path(&self) -> Option<&'static str> {
+        self.container_path
+    }
+
+    #[must_use]
+    pub fn environment(&self) -> &CompilerCacheEnvironment {
+        &self.environment
+    }
+}
+
 /// Result of the daemon restore-path check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestorePathProbe {
@@ -846,5 +933,24 @@ mod tests {
             variables.get("SCCACHE_GHA_ENABLED"),
             Some(&String::from("false"))
         );
+    }
+
+    #[test]
+    fn runtime_descriptor_has_one_backend_mount_and_wrapper() {
+        let runtime = CompilerCacheRuntime::new(
+            CompilerCacheBackend::Kache,
+            PathBuf::from("/var/cache/velnor/v1/untrusted/compiler/kache"),
+        );
+        assert_eq!(runtime.backend(), CompilerCacheBackend::Kache);
+        assert_eq!(
+            runtime.host_path(),
+            Some(Path::new("/var/cache/velnor/v1/untrusted/compiler/kache"))
+        );
+        assert_eq!(runtime.container_path(), Some("/var/cache/kache"));
+        assert_eq!(
+            runtime.environment().variables.get("RUSTC_WRAPPER"),
+            Some(&String::from("kache"))
+        );
+        assert!(!runtime.environment().variables.contains_key("SCCACHE_DIR"));
     }
 }

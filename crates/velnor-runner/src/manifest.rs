@@ -9,7 +9,10 @@ use crate::action::{
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
-use velnor_cache_service::CompilerCacheBackend;
+use velnor_cache_service::{
+    resolve_backend, CacheAdmissionError, CompilerCacheBackend, CompilerCachePolicy,
+    WrapperDeclaration,
+};
 
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
@@ -1317,24 +1320,28 @@ fn validate_attestation_permissions(
     }
 }
 
-pub fn compiler_cache_backend(job: &AgentJobRequestMessage) -> CompilerCacheBackend {
-    let mut sccache = false;
-    let mut kache = false;
+pub fn compiler_cache_declaration(job: &AgentJobRequestMessage) -> WrapperDeclaration {
+    let mut declaration = WrapperDeclaration::default();
     for step in job.steps.iter().filter(|step| step.enabled) {
         let repository = step
             .reference
             .as_ref()
             .and_then(|reference| reference.name.as_deref());
-        sccache |= repository
+        declaration.sccache |= repository
             .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"));
-        kache |=
+        declaration.kache |=
             repository.is_some_and(|name| name.eq_ignore_ascii_case("kunobi-ninja/kache-action"));
     }
-    match (sccache, kache) {
-        (true, false) => CompilerCacheBackend::Sccache,
-        (false, true) => CompilerCacheBackend::Kache,
-        _ => CompilerCacheBackend::Off,
-    }
+    declaration
+}
+
+/// Resolve the daemon-owned compiler-cache policy for the production runner.
+/// Auto is intentionally passed to the service resolver: no wrapper declaration
+/// selects Kache, while an explicit sccache declaration remains supported.
+pub fn compiler_cache_backend(
+    job: &AgentJobRequestMessage,
+) -> Result<CompilerCacheBackend, CacheAdmissionError> {
+    resolve_backend(CompilerCachePolicy::Auto, &compiler_cache_declaration(job))
 }
 
 fn validate_compiler_cache_topology(
@@ -1368,7 +1375,7 @@ fn validate_compiler_cache_topology(
             "mixed",
             "compiler-cache.backend",
             "sccache+kache",
-            vec!["off".into(), "sccache".into(), "kache".into()],
+            vec!["sccache".into(), "kache".into()],
         ));
     }
 
@@ -2725,7 +2732,10 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.field == "compiler-cache.backend"));
-        assert_eq!(compiler_cache_backend(&target), CompilerCacheBackend::Off);
+        assert_eq!(
+            compiler_cache_backend(&target),
+            Err(CacheAdmissionError::ConflictingWrappers)
+        );
     }
 
     #[test]
@@ -2749,7 +2759,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_selection_matches_single_wrapper_or_off() {
+    fn backend_selection_matches_single_wrapper_or_default_kache() {
         let sccache = job(
             "mozilla-actions/sccache-action",
             Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
@@ -2760,13 +2770,19 @@ mod tests {
             Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
             serde_json::json!({}),
         );
-        let mut off = sccache.clone();
-        off.steps.clear();
+        let mut default_job = sccache.clone();
+        default_job.steps.clear();
         assert_eq!(
             compiler_cache_backend(&sccache),
-            CompilerCacheBackend::Sccache
+            Ok(CompilerCacheBackend::Sccache)
         );
-        assert_eq!(compiler_cache_backend(&kache), CompilerCacheBackend::Kache);
-        assert_eq!(compiler_cache_backend(&off), CompilerCacheBackend::Off);
+        assert_eq!(
+            compiler_cache_backend(&kache),
+            Ok(CompilerCacheBackend::Kache)
+        );
+        assert_eq!(
+            compiler_cache_backend(&default_job),
+            Ok(CompilerCacheBackend::Kache)
+        );
     }
 }
