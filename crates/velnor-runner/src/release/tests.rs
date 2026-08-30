@@ -206,9 +206,14 @@ fn debian_package_includes_fleet_policy_audit_units() {
         );
     }
 
+    let service = include_str!("../../../velnor-tools/debian/velnor-fleet-policy-audit.service");
     assert!(
-        include_str!("../../../velnor-tools/debian/velnor-fleet-policy-audit.service")
-            .contains("fleet-policy audit")
+        service.contains("/usr/bin/velnor-tools fleet-policy audit --policy "),
+        "fleet-policy audit service must invoke the packaged audit command"
+    );
+    assert!(
+        service.contains("--ledger /usr/share/velnor/fleet/release-refs.toml"),
+        "fleet-policy audit service must pass the packaged release-ref ledger"
     );
     assert!(
         include_str!("../../../velnor-tools/debian/velnor-fleet-policy-audit.timer")
