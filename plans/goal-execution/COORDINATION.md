@@ -17,7 +17,7 @@ Historical binding for agent sessions executing
 This is retained only for audit context and is superseded by the single
 campaign branch directive above. It is non-executable.
 
-## Rules
+## Historical coordination rules (non-executable)
 
 1. **Claim before write (historical).** Before any writer subagent touches
    leaf scope, its session appends a row to the Active claims table in a
@@ -87,15 +87,14 @@ campaign branch directive above. It is non-executable.
   resolution; `docs/consolidate-main-flow` content contained via d6267fb in
   #297. Remaining: merge #297 after velnor lane, then fast-forward main.
 
-- **2026-08-24 branch consolidation to main** (operator directive): every
-  delivery now follows the modern flow — feature branch → PR → squash merge
-  into `main`. The campaign branches are gone: `velnor-estate-standard` merged
-  via #294 and deleted (local + remote); `velnorctl-clap-migration` delivered
-  via #291 and deleted; `fix/admit-paths-filter-v4.0.3` delivered via #292 and
-  deleted; duplicate PR #293 closed as superseded. All future leaf work:
-  claim in this registry, branch off current `origin/main`
-  (`<area>-<leaf-or-slug>`), open a PR, land it with green checks, delete the
-  branch after merge. `main` is the single integration line.
+- **2026-08-24 branch consolidation to main** (historical operator directive):
+  the former delivery used feature branch → PR → squash merge into `main`.
+  The former campaign branches were then consolidated: `velnor-estate-standard`
+  merged via #294 and was deleted (local + remote);
+  `velnorctl-clap-migration` was delivered via #291 and deleted;
+  `fix/admit-paths-filter-v4.0.3` was delivered via #292 and deleted; duplicate
+  PR #293 was closed as superseded. This record does not direct future leaf
+  work; the current static campaign branch and sole PR rule above governs.
 
 - **2026-08-24 OPERATOR RULING — leaf 039 removals + probes** (verbatim
   intent): "Never remove any repositories I listed. We must keep all of them
