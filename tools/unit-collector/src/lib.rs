@@ -412,9 +412,15 @@ fn target_name(object: &serde_json::Map<String, Value>, options: &CollectOptions
 }
 
 fn package_name(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .and_then(|package_id| package_id.split_whitespace().next())
+    let package_id = value.and_then(Value::as_str)?;
+    let identity = package_id
+        .split_once('#')
+        .map(|(_, identity)| identity)
+        .unwrap_or(package_id);
+    identity
+        .split('@')
+        .next()
+        .and_then(|identity| identity.split_whitespace().next())
         .map(redact_absolute_paths)
         .filter(|name| !name.is_empty())
 }
@@ -539,6 +545,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Freshness::Actual, Freshness::Fresh, Freshness::Unknown]
         );
+    }
+
+    #[test]
+    fn package_ids_are_reduced_to_stable_names() {
+        for (package_id, expected) in [
+            (
+                "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
+                "serde",
+            ),
+            ("git+https://github.com/example/demo#demo@abc123", "demo"),
+            ("demo 0.1.0 (path+file:///Users/alice/demo)", "demo"),
+        ] {
+            let message = serde_json::json!({
+                "reason": "build-script-executed",
+                "package_id": package_id
+            });
+            assert_eq!(
+                parse_cargo_message(&message, &CollectOptions::default())
+                    .expect("build script record")
+                    .unit_name,
+                expected
+            );
+        }
     }
 
     #[test]
