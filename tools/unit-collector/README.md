@@ -22,6 +22,17 @@ present; otherwise the output records zero and the summary states that timing
 was unavailable. Absolute paths in caller-supplied fields are replaced with a
 stable marker before serialization.
 
+The library also exposes `OutputSnapshot`, `OutputEvidenceManifest`, and
+`OutputEvidence`. A caller can capture declared `compiler-artifact.filenames`
+and `executable` outputs before and after the observed operation, then pass the
+path-free manifest through `CollectOptions::with_output_evidence`. Snapshots
+contain only a BLAKE3 byte fingerprint and modification time. Missing,
+unreadable, contradictory, or incomplete evidence is `unknown`; no Cargo
+process or human-readable diagnostic is launched or consulted. Supply the
+structured Cargo version with `--cargo-version` or
+`CollectOptions::with_cargo_version`; omitted or malformed versions remain
+explicitly unknown.
+
 Committed structured Cargo JSON fixtures under `tests/fixtures/` cover fresh,
 touched-source, and dependency-bump passes. The real Parallax ordinary-PR
 attribution report remains required before TASK-004 can be marked complete.
