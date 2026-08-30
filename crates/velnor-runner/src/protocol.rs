@@ -6212,6 +6212,37 @@ mod tests {
     }
 
     #[test]
+    fn results_service_list_requires_artifacts_array() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let body = b"{}";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let error =
+            download_artifacts_blocking(&base, "runtime-token", "plan", "job", "release", "")
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("missing an artifacts array"),
+            "{error:#}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
     fn zip_metadata_preflight_rejects_excess_zip64_members_before_parser() {
         let path = std::env::temp_dir().join(format!(
             "velnor-artifact-zip64-preflight-{}.zip",

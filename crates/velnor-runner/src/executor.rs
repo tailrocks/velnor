@@ -71,7 +71,7 @@ const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
- const MAX_TEST_END_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_TEST_END_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Return a stable test-runner label only when a shell segment starts with a
