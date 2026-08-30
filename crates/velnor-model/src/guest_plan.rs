@@ -97,6 +97,10 @@ pub struct GuestJobPlan {
     pub isolation_id: String,
     pub generation: u64,
     pub job_id: String,
+    /// Owning daemon identity (the slot work directory, matching the executor
+    /// path's `velnor.daemon-id` label value) so guest-created Docker objects
+    /// join the same ownership reclaim graph.
+    pub daemon_id: String,
     pub image: String,
     pub services: Vec<GuestService>,
     pub steps: Vec<GuestStep>,
@@ -223,6 +227,7 @@ impl GuestJobPlan {
             "isolation_id",
             "generation",
             "job_id",
+            "daemon_id",
             "image",
             "services",
             "steps",
@@ -389,6 +394,7 @@ mod tests {
             isolation_id: "job-1".into(),
             generation: 1,
             job_id: "job-1".into(),
+            daemon_id: "test-daemon".into(),
             image: "velnor/job-ubuntu:26.04".into(),
             services: vec![GuestService {
                 name: "pg".into(),
@@ -468,6 +474,7 @@ mod tests {
             "isolation_id": "job-1",
             "generation": 1,
             "job_id": "job-1",
+            "daemon_id": "test-daemon",
             "image": "velnor/job-ubuntu:26.04",
             "services": [],
             "steps": [],
@@ -507,6 +514,7 @@ mod tests {
             "isolation_id": "job-1",
             "generation": 1,
             "job_id": "job-1",
+            "daemon_id": "test-daemon",
             "image": "velnor/job-ubuntu:26.04",
             "services": [],
             "steps": [],
@@ -543,6 +551,7 @@ mod tests {
             "isolation_id": "job-1",
             "generation": 1,
             "job_id": "job-1",
+            "daemon_id": "test-daemon",
             "image": "velnor/job-ubuntu:26.04",
             "services": [],
             "steps": [],
@@ -587,6 +596,7 @@ mod tests {
             isolation_id: "job-1".into(),
             generation: 1,
             job_id: "job-1".into(),
+            daemon_id: "test-daemon".into(),
             image: "velnor/job-ubuntu:26.04".into(),
             services: Vec::new(),
             steps: Vec::new(),
