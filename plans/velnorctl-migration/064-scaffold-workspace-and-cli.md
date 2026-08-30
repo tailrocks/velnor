@@ -34,9 +34,13 @@ This plan establishes inward dependencies and a real `velnorctl` executable.
 ## Target shape
 
 Create `velnor-model`, `velnor-control`, `velnor-client`, `velnor-render`, and
-`velnorctl`. Dependency direction is:
+`velnorctl`. The later action-foundations work intentionally adds the
+physical-action journal below `velnor-control`; this is an owned architectural
+edge, not a client or CLI boundary leak. Current dependency direction is:
 
 ```text
+velnor-action-model <- velnor-action-journal <- velnor-control <- velnorctl
+velnor-model <- velnor-action-journal
 velnor-model <- velnor-control <- velnorctl
 velnor-model <- velnor-client  <- velnorctl
 velnor-model <- velnor-render  <- velnorctl
@@ -69,9 +73,11 @@ pins. Keep model/render/client/control as libraries. Make `velnorctl` a binary
 and library so integration tests can parse/dispatch without subprocess-only
 tests.
 
-**Verify**: `rtk cargo metadata --no-deps --format-version 1` lists seven
-workspace packages and the dependency graph has no cycle. A boundary test proves
-`velnor-client` does not depend on `velnor-control`, Axum, or runner internals.
+**Verify**: `rtk cargo metadata --no-deps --format-version 1` lists the seven
+Plan 064 workspace packages at scaffold closeout; later workspace additions are
+covered by the boundary test's current exact package-set assertion. The
+dependency graph has no cycle, and a boundary test proves `velnor-client` does
+not depend on `velnor-control`, Axum, or runner internals.
 
 ### 2. Extract binary bootstrapping from old main
 
@@ -121,13 +127,21 @@ conclusion changes.
 - [x] `rtk mise run check` passes.
 - [x] Fresh fixture success run passes.
 
-## Evidence (2026-08-24)
+## Evidence
 
-1. **Five crates, acyclic**: `crates/velnor-client/tests/dependency_boundaries.rs`
-   @5ab7479 (exactly-seven-packages assertion, DFS acyclicity check, direction
-   assertions) — 8 tests green. Workspace resolves exactly seven packages
-   (`velnor-runner`, `velnor-tools`, `velnor-model`, `velnor-control`,
-   `velnor-client`, `velnor-render`, `velnorctl`).
+1. **Workspace topology and acyclicity**: The dated 2026-08-24 closeout record
+   (`.velnor-compare/plan064-verify/gate-evidence.md`) documented the
+   seven-package Plan 064 scaffold. Current verification on
+   2026-08-30, in the working tree based on reachable SHA
+   `21db3a590b2ea302cd4691b4c13646a5027fab81`, ran
+   `rtk cargo metadata --no-deps --format-version 1 --locked` and
+   `rtk cargo nextest run -p velnor-client --test dependency_boundaries
+   --locked`: exactly eleven packages resolved and 6/6 boundary tests passed.
+   The current package set is `velnor-model`, `velnor-action-model`,
+   `velnor-cas`, `velnor-action-journal`, `velnor-control`, `velnor-client`,
+   `velnor-render`, `velnorctl`, `velnor-runner`, `velnor-tools`, and
+   `unit-collector`; the suite asserts that set, acyclicity, and the intentional
+   `velnor-control` direct workspace dependencies.
 2. **Seams with zero successful commands**: `lib.rs` legacy/unimplemented
    rejection tests plus `cli_smoke` subprocess assertions (`--help`=0,
    bare=2, `cache` du=3, `version`=2). Live binary smoke table verified
@@ -136,28 +150,30 @@ conclusion changes.
 3. **No spawn/parse of old binary**: the only `Command` uses are the
    `CARGO_BIN_EXE_velnorctl` smoke test and the `cargo metadata` boundary
    probe; zero in new-crate source.
-4. **Gates**: fmt/lint/test-focused (velnorctl 12/12, velnor-runner
-   732/732)/test (877/877)/check all exit 0 @5ab7479; re-ran
-   `test-focused -p velnorctl` + `check` after the dev-deps cleanup
-   (commit `7a63d72`) — both exit 0.
+4. **Historical gates (2026-08-24)**: the closeout record reports
+   fmt/lint/test-focused (velnorctl 12/12, velnor-runner 732/732), full test
+   (877/877), and `check` all exit 0; it also records a focused rerun after the
+   dev-dependencies cleanup with both gates exiting 0. These are dated closeout
+   counts, not the current six-test boundary suite above.
 5. **Fixture success through unchanged old daemon**: sanitized evidence in
    `.velnor-compare/2026-08-24-control-plane/summary.md` shows fresh
    successes including dual-lane compat run 32703106587 and the cold→warm
-   cache pair 32704574052→32704719858; daemon is apt-installed and
-   unaffected by velnorctl-only commits fb4fdbc→5ab7479→7a63d72.
+   cache pair 32704574052→32704719858; the dated record states that the daemon
+   was apt-installed and unaffected by the velnorctl-only closeout sequence.
 
 Provenance notes:
 
-- Implementation base of record is twin commit `5ab7479`, superseding
-  `fb4fdbc`. Review FIX-FIRST(4) items — missing serde_json dev-dep,
-  phantom runner-edge assertion, exit-code mismatches, dual seam systems —
-  are all resolved in `5ab7479` per
-  `.velnor-compare/2026-08-24-064-seam-review/feedback-to-twin.md`; the
-  residual empty `[dev-dependencies]` header was removed in `7a63d72`.
+- The 2026-08-24 closeout and review records document the implementation base
+  and resolution of the FIX-FIRST(4) items — missing serde_json dev-dep,
+  phantom runner-edge assertion, exit-code mismatches, and dual seam systems —
+  in `.velnor-compare/2026-08-24-064-seam-review/feedback-to-twin.md`; they also
+  record removal of the residual empty `[dev-dependencies]` header. The original
+  closeout commit objects are absent from the current repository, so this plan
+  uses the dated records rather than asserting unreachable hashes.
 - Executor run id 32714016121 was untraceable in the tree and is superseded by
   the `summary.md` evidence above.
 
-### Execution evidence 2026-08-24 @ 5ab7479 (+nit/closeout commit)
+### Historical execution evidence 2026-08-24 (closeout record)
 
 - Gates: `mise run test-focused -- -p velnorctl -p velnor-client -p
   velnor-model -p velnor-control -p velnor-render` exit 0 (23/23); `mise run
@@ -167,10 +183,20 @@ Provenance notes:
   unchanged old daemon; no execution or conclusion change.
 - Verification: PASS (gates green, criteria mapped). Review: APPROVE
   (`dependency_boundaries.rs:189-200` direction pin deliberate, left as is).
-- Message correction: commit `fb4fdbc` claims `velnorctl` depends on the
-  `velnor-runner` facade; the facade was extracted but never consumed. The
-  dependency exists only in the migration-scaffold allowance, and no code path
-  uses it. This note supersedes that message text.
+- Message correction in the closeout record: the earlier message claimed
+  `velnorctl` depends on the `velnor-runner` facade; the facade was extracted but
+  never consumed. The dependency exists only in the migration-scaffold
+  allowance, and no code path uses it. This note supersedes that message text.
+
+### Current dependency-boundary reconciliation 2026-08-30
+
+- The current workspace resolves eleven packages. The dependency-boundary leaf
+  asserts that set, acyclicity, and the exact direct workspace dependency set
+  of `velnor-control`: `velnor-action-journal` and `velnor-model`.
+- `velnor-control -> velnor-action-journal` is intentional ownership for
+  physical-action lifecycle journaling. The control journal remains the fleet
+  state journal described in `docs/action-foundations.md`; the edge is not
+  removed or generalized.
 
 ## STOP conditions
 

@@ -26,6 +26,8 @@ const WORKSPACE_PACKAGES: [&str; 11] = [
     "unit-collector",
 ];
 
+const VELNOR_CONTROL_DIRECT_WORKSPACE_DEPS: [&str; 2] = ["velnor-action-journal", "velnor-model"];
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -78,6 +80,236 @@ fn dependency_graph(metadata: &Value) -> BTreeMap<String, Vec<String>> {
         graph.insert(name, deps);
     }
     graph
+}
+
+fn workspace_package<'a>(metadata: &'a Value, name: &str) -> &'a Value {
+    let expected_manifest = workspace_root()
+        .join("crates")
+        .join(name)
+        .join("Cargo.toml")
+        .canonicalize()
+        .expect("workspace package manifest exists");
+    let expected_manifest = expected_manifest
+        .to_str()
+        .expect("workspace package manifest path is UTF-8");
+
+    metadata["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .find(|package| {
+            package["name"].as_str() == Some(name)
+                && package["source"].is_null()
+                && package["manifest_path"].as_str() == Some(expected_manifest)
+        })
+        .unwrap_or_else(|| panic!("workspace package {name} has unexpected identity"))
+}
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DeclaredDependencyEdge {
+    name: String,
+    source: Option<String>,
+    path: Option<String>,
+    rename: Option<String>,
+    kind: Option<String>,
+    target: Option<String>,
+    registry: Option<String>,
+}
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ResolvedDependencyEdge {
+    name: String,
+    package_id: String,
+    package_source: Option<String>,
+    package_manifest_path: String,
+    kind: Option<String>,
+    target: Option<String>,
+}
+
+fn optional_string(value: &Value, field: &str) -> Option<String> {
+    value[field].as_str().map(str::to_owned)
+}
+
+fn package_directory(package: &Value) -> String {
+    let manifest_path = package["manifest_path"]
+        .as_str()
+        .expect("workspace package manifest path");
+    PathBuf::from(manifest_path)
+        .parent()
+        .expect("workspace package manifest has parent")
+        .to_str()
+        .expect("workspace package path is UTF-8")
+        .to_owned()
+}
+
+fn package_library_name(package: &Value) -> String {
+    package["targets"]
+        .as_array()
+        .expect("package targets array")
+        .iter()
+        .find(|target| {
+            target["kind"]
+                .as_array()
+                .expect("target kinds array")
+                .iter()
+                .any(|kind| kind.as_str() == Some("lib"))
+        })
+        .and_then(|target| target["name"].as_str())
+        .expect("workspace package library target name")
+        .to_owned()
+}
+
+fn resolved_package<'a>(metadata: &'a Value, id: &str) -> &'a Value {
+    metadata["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .find(|package| package["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("resolved package {id} exists"))
+}
+
+fn declared_dependency_edge(dependency: &Value) -> DeclaredDependencyEdge {
+    DeclaredDependencyEdge {
+        name: dependency["name"]
+            .as_str()
+            .expect("dependency name")
+            .to_owned(),
+        source: optional_string(dependency, "source"),
+        path: optional_string(dependency, "path"),
+        rename: optional_string(dependency, "rename"),
+        kind: optional_string(dependency, "kind"),
+        target: optional_string(dependency, "target"),
+        registry: optional_string(dependency, "registry"),
+    }
+}
+
+fn expected_declared_dependency_edge(metadata: &Value, name: &str) -> DeclaredDependencyEdge {
+    let package = workspace_package(metadata, name);
+    DeclaredDependencyEdge {
+        name: name.to_owned(),
+        source: None,
+        path: Some(package_directory(package)),
+        rename: None,
+        kind: None,
+        target: None,
+        registry: None,
+    }
+}
+
+fn resolved_dependency_edges(
+    resolved: &Value,
+    resolved_control: &Value,
+    expected_library_names: &BTreeSet<String>,
+) -> Vec<ResolvedDependencyEdge> {
+    let local_package_ids = resolved["packages"]
+        .as_array()
+        .expect("packages array")
+        .iter()
+        .filter(|package| package["source"].is_null())
+        .map(|package| package["id"].as_str().expect("package id").to_owned())
+        .collect::<BTreeSet<_>>();
+
+    let mut edges = Vec::new();
+    for dependency in resolved_control["deps"]
+        .as_array()
+        .expect("resolved control dependencies array")
+    {
+        let package_id = dependency["pkg"].as_str().expect("resolved dependency pkg");
+        let dependency_name = dependency["name"]
+            .as_str()
+            .expect("resolved dependency name");
+        if !local_package_ids.contains(package_id)
+            && !expected_library_names.contains(dependency_name)
+        {
+            continue;
+        }
+        let package = resolved_package(resolved, package_id);
+        for kind in dependency["dep_kinds"]
+            .as_array()
+            .expect("resolved dependency kinds array")
+        {
+            edges.push(ResolvedDependencyEdge {
+                name: dependency_name.to_owned(),
+                package_id: package_id.to_owned(),
+                package_source: optional_string(package, "source"),
+                package_manifest_path: package["manifest_path"]
+                    .as_str()
+                    .expect("resolved package manifest path")
+                    .to_owned(),
+                kind: optional_string(kind, "kind"),
+                target: optional_string(kind, "target"),
+            });
+        }
+    }
+    edges
+}
+
+fn assert_velnor_control_direct_dependencies(metadata: &Value, resolved: &Value) {
+    let control = workspace_package(metadata, "velnor-control");
+    let control_id = control["id"].as_str().expect("control package id");
+    let control_dependencies = control["dependencies"]
+        .as_array()
+        .expect("control dependencies array");
+
+    let mut expected_declared_edges = VELNOR_CONTROL_DIRECT_WORKSPACE_DEPS
+        .into_iter()
+        .map(|name| expected_declared_dependency_edge(metadata, name))
+        .collect::<Vec<_>>();
+    let mut actual_declared_edges = control_dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency["name"]
+                .as_str()
+                .is_some_and(|name| WORKSPACE_PACKAGES.contains(&name))
+                || dependency["path"].is_string()
+                || dependency["rename"].is_string()
+        })
+        .map(declared_dependency_edge)
+        .collect::<Vec<_>>();
+    expected_declared_edges.sort_unstable();
+    actual_declared_edges.sort_unstable();
+    assert_eq!(
+        actual_declared_edges, expected_declared_edges,
+        "velnor-control direct runtime dependency declarations must match exactly"
+    );
+
+    let mut expected_resolved_edges = VELNOR_CONTROL_DIRECT_WORKSPACE_DEPS
+        .into_iter()
+        .map(|name| {
+            let package = workspace_package(resolved, name);
+            let package_id = package["id"].as_str().expect("workspace package id");
+            ResolvedDependencyEdge {
+                name: package_library_name(package),
+                package_id: package_id.to_owned(),
+                package_source: optional_string(package, "source"),
+                package_manifest_path: package["manifest_path"]
+                    .as_str()
+                    .expect("workspace package manifest path")
+                    .to_owned(),
+                kind: None,
+                target: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let resolved_control = resolved["resolve"]["nodes"]
+        .as_array()
+        .expect("resolved nodes array")
+        .iter()
+        .find(|node| node["id"].as_str() == Some(control_id))
+        .expect("resolved control package node");
+    let expected_library_names = VELNOR_CONTROL_DIRECT_WORKSPACE_DEPS
+        .into_iter()
+        .map(|name| package_library_name(workspace_package(resolved, name)))
+        .collect::<BTreeSet<_>>();
+    let mut actual_resolved_edges =
+        resolved_dependency_edges(resolved, resolved_control, &expected_library_names);
+    expected_resolved_edges.sort_unstable();
+    actual_resolved_edges.sort_unstable();
+    assert_eq!(
+        actual_resolved_edges, expected_resolved_edges,
+        "velnor-control direct runtime resolution edges must match exactly"
+    );
 }
 
 /// Everything transitively reachable from `root` through the resolved graph.
@@ -177,7 +409,8 @@ fn velnor_client_transitively_never_reaches_daemon_internals() {
 
 #[test]
 fn crate_dependency_direction_matches_plan_064() {
-    let graph = dependency_graph(&cargo_metadata());
+    let metadata = cargo_metadata();
+    let graph = dependency_graph(&metadata);
     let members_only = |deps: &[String]| -> Vec<String> {
         deps.iter()
             .filter(|d| WORKSPACE_PACKAGES.contains(&d.as_str()))
@@ -189,7 +422,18 @@ fn crate_dependency_direction_matches_plan_064() {
         members_only(&graph["velnor-model"]).is_empty(),
         "model is the root"
     );
-    assert_eq!(members_only(&graph["velnor-control"]), vec!["velnor-model"]);
+    let control_deps = members_only(&graph["velnor-control"])
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let control_allowed = VELNOR_CONTROL_DIRECT_WORKSPACE_DEPS
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        control_deps, control_allowed,
+        "velnor-control direct workspace dependencies are explicitly allowlisted"
+    );
+    assert_velnor_control_direct_dependencies(&metadata, &cargo_metadata_resolved());
     assert_eq!(members_only(&graph["velnor-render"]), vec!["velnor-model"]);
     let ctl = members_only(&graph["velnorctl"]);
     for required in [
