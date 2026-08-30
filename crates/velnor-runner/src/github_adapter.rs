@@ -72,6 +72,7 @@ pub fn github_job_container_spec(
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
         compiler_cache_backend: crate::manifest::compiler_cache_backend(job)?,
+        compiler_cache_trust_class: compiler_cache_trust_class(trust_scope),
     })
 }
 
@@ -126,6 +127,18 @@ fn cargo_target_trust_scope_from(value: Option<&str>) -> String {
 
 pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
     cargo_target_trust_scope_from(Some(trust_scope)).eq_ignore_ascii_case("trusted")
+}
+
+pub(crate) fn compiler_cache_trust_class(
+    trust_scope: &str,
+) -> velnor_model::guest_plan::GuestCompilerCacheTrustClass {
+    if trust_scope.trim().eq_ignore_ascii_case("trusted") {
+        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
+    } else if trust_scope.trim().eq_ignore_ascii_case("release") {
+        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
+    } else {
+        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
+    }
 }
 
 pub fn github_normalized_job_plan(
@@ -925,6 +938,8 @@ mod tests {
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
+            compiler_cache_trust_class:
+                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         };
         let plan = github_normalized_job_plan(
             &job,
@@ -1031,6 +1046,22 @@ mod tests {
         assert_eq!(
             cargo_target_trust_scope_from(Some(" public-forks ")),
             "public-forks"
+        );
+    }
+
+    #[test]
+    fn compiler_cache_trust_class_mapping_is_explicit_and_fail_closed() {
+        assert_eq!(
+            compiler_cache_trust_class("trusted"),
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
+        );
+        assert_eq!(
+            compiler_cache_trust_class(" release "),
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
+        );
+        assert_eq!(
+            compiler_cache_trust_class("public-forks"),
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
         );
     }
 
