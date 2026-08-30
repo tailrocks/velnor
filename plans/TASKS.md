@@ -10,18 +10,20 @@ Rules for every agent working this list:
    commit, and never mark `[x]` without evidence mapped to the item's done
    criteria.
 2. Never implement in primary context. Each leaf goes through fresh
-   investigator -> executor -> verifier -> reviewer subagents on the single
-   static generic campaign branch (`codex/velnor-project-goal`).
+   investigator -> executor -> verifier -> reviewer subagents on its assigned
+   branch (`velnor1` through `velnor10`) recorded in external
+   `../COORDINATION.md`.
 3. A leaf is DONE only when all gates pass at current HEAD: focused nextest,
    `rtk mise run check`, integration/fixture proof, safety scan, independent
    review, index agreement, commit trailers (`git commit -s`,
    `Co-authored-by: Codex <codex@openai.com>`).
-4. Every finished iteration is committed and pushed on the single campaign
-   branch. A Velnor blocker is fixed in Velnor, then audited by fresh security,
-   performance, goal/acceptance, verifier, and reviewer subagents. The sole
-   campaign PR merges to `main` at the authorized safe integration checkpoint;
-   an urgent pre-merge Sentry exception is signed-APT-only and bound to the
-   exact branch SHA over `ssh sentry`.
+4. Every finished iteration is committed and pushed on its assigned branch. A
+   Velnor blocker is fixed in Velnor, then audited by fresh security,
+   performance, goal/acceptance, verifier, and reviewer subagents. The assigned
+   branch's focused PR merges directly to `main` at the authorized safe
+   integration checkpoint; no shared integration branch or direct commit to
+   `main` is allowed. An urgent pre-merge Sentry exception is signed-APT-only
+   and bound to the exact branch SHA over `ssh sentry`.
 5. `BLOCKED` requires exact evidence and the named external decision. Never
    batch-complete siblings; shared code does not transfer proof.
 
@@ -159,12 +161,12 @@ Immediate next actions, in order (update this section as work lands):
 3. Run **039** in parallel via its own subagent lane; live apply waits for
    reviewed digest + explicit operator authorization.
 4. After 063: dispatch 064, then follow the Track B order above.
-5. Keep the campaign branch synchronized and push every iteration. Merge the
-   sole campaign PR to `main` only at the authorized safe integration point;
-   then rerun the complete required gates against the merged SHA. Before any
-   retry, clear older validation runs and validation-owned stale registrations.
+5. Keep each assigned branch synchronized and push every iteration. Merge its
+   focused PR to `main` only at the authorized safe integration point; then
+   rerun the complete required gates against the merged SHA. Before any retry,
+   clear older validation runs and validation-owned stale registrations.
 6. When 079 completes: verify no `velnor-runner` product surface remains; only
-   then use the sole campaign PR for the completion gate.
+   then use the assigned branch's focused PR for the completion gate.
 
 ## Done definition (campaign-wide)
 

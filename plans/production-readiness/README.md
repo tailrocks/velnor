@@ -18,8 +18,9 @@ green local test, a shared commit, or partial workflow success.
    owned, inactive validation resources; unresolved ownership is `BLOCKED`.
 3. Resolve lifecycle and correctness blockers in Velnor. Do not work around
    Velnor gaps in repositories or in `velnor-actions-fixture`. Commit and push
-   each fix on the single campaign branch, audit it with fresh security,
-   performance, goal/acceptance, verifier, and reviewer subagents, and keep
+   each fix on its operator-assigned branch (`velnor1` through `velnor10`),
+   audit it with fresh security, performance, goal/acceptance, verifier, and
+   reviewer subagents, and keep
    retrying until the Velnor defect is fixed or a proven external blocker is
    recorded.
 4. Execute Track A read-only fleet reconciliation and Track B migration in
@@ -30,9 +31,10 @@ green local test, a shared commit, or partial workflow success.
 6. Run defined cold/warm/rerun performance campaigns, fault injection, and
    multi-repository soak. Missing telemetry fails the gate.
 7. Finish Plan 079 and remove the legacy `velnor-runner` product surface.
-8. Integrate unique branch behavior through the sole campaign PR, merge it to
-   `main` at the authorized safe integration checkpoint, and prove the merged
-   SHA green before any release. If urgent pre-merge Sentry validation is
+8. Integrate unique branch behavior through its focused PR, merge it directly
+   to `main` at the authorized safe integration checkpoint, and prove the
+   merged SHA green before any release. No shared integration branch or direct
+   commit to `main` is permitted. If urgent pre-merge Sentry validation is
    explicitly authorized, use only an immutable signed-APT release bound to
    the exact pushed branch SHA over `ssh sentry`; never copy binaries or
    install local packages.
@@ -209,16 +211,16 @@ green local test, a shared commit, or partial workflow success.
   the new version, preserving active-job safety, caches, leases, logs, and
   evidence.
 
-## P1 — Deliver all Velnor plan work through the campaign PR
+## P1 — Deliver all Velnor plan work through focused PRs
 
 - [ ] Freeze the Velnor PR/branch inventory and inspect every unique commit.
-- [ ] Reconcile every open PR's unique behavior into the static campaign branch
-  or document an explicit modern replacement; do not create per-task PRs.
-- [ ] Merge only the sole campaign PR after `ci-required` and `DCO` are green;
+- [ ] Reconcile every open PR's unique behavior into its assigned focused branch
+  or document an explicit modern replacement; do not create unassigned PRs.
+- [ ] Merge each focused PR only after `ci-required` and `DCO` are green;
   verify a green `main` run after that merge.
-- [ ] For every branch, integrate all non-obsolete unique behavior through the
-  sole campaign PR or document an explicit modern replacement; never merge
-  deprecated code just to empty a branch.
+- [ ] For every branch, integrate all non-obsolete unique behavior through its
+  focused PR or document an explicit modern replacement; never merge deprecated
+  code just to empty a branch.
 - [ ] Confirm every original Velnor PR's unique behavior is delivered to
   `main` or has documented supersession.
 - [ ] Confirm no branch retains unique undelivered behavior; delete branches
