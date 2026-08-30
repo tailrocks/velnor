@@ -164,7 +164,7 @@ fn run_gc(
         Err(error) => return Err(error).context("read active cache-scope leases"),
     };
 
-    let listing = cache_listing(work_root)?;
+    let listing = cache_listing(work_root, false)?;
     let max_age = args
         .max_age_days
         .checked_mul(DAY.as_secs())
@@ -331,6 +331,7 @@ struct StoreRoot {
     scope_depth: usize,
     candidate_depth: usize,
     gc_managed: bool,
+    emergency_managed: bool,
 }
 
 fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
@@ -351,6 +352,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 0,
             candidate_depth: 0,
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Cargo,
@@ -359,6 +361,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 0,
             candidate_depth: 0,
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Cargo,
@@ -367,6 +370,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if cargo_bin_legacy { 2 } else { 1 },
             candidate_depth: if cargo_bin_legacy { 2 } else { 1 },
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Mise,
@@ -375,6 +379,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 0,
             candidate_depth: 0,
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Mise,
@@ -383,6 +388,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if mise_legacy { 2 } else { 1 },
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
+            emergency_managed: true,
         },
         // Plan 008: persistent per-version mise binaries, same trust/repository
         // boundary and mise budget as installs.
@@ -393,6 +399,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if mise_legacy { 2 } else { 1 },
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Mise,
@@ -401,6 +408,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if mise_legacy { 2 } else { 1 },
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Targets,
@@ -409,6 +417,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if targets_legacy { 4 } else { 3 },
             candidate_depth: if targets_legacy { 4 } else { 3 },
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::ActionsCache,
@@ -417,6 +426,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if actions_cache_legacy { 2 } else { 1 },
             candidate_depth: if actions_cache_legacy { 3 } else { 2 },
             gc_managed: true,
+            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Artifacts,
@@ -425,6 +435,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 1,
             candidate_depth: 1,
             gc_managed: true,
+            emergency_managed: true,
         },
     ];
     for trust_class in [
@@ -449,6 +460,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
                 scope_depth: 1,
                 candidate_depth: 1,
                 gc_managed: false,
+                emergency_managed: true,
             });
         }
     }
@@ -496,12 +508,15 @@ fn collect_scoped_sizes(
     Ok(total)
 }
 
-fn cache_listing(work_root: &Path) -> Result<Vec<CacheEntry>> {
+fn cache_listing(work_root: &Path, emergency: bool) -> Result<Vec<CacheEntry>> {
     let mut entries = Vec::new();
-    for store in store_roots(work_root)
-        .into_iter()
-        .filter(|store| store.gc_managed)
-    {
+    for store in store_roots(work_root).into_iter().filter(|store| {
+        if emergency {
+            store.emergency_managed
+        } else {
+            store.gc_managed
+        }
+    }) {
         collect_candidates(&store, &store.path, 0, &mut entries)?;
     }
     Ok(entries)
@@ -525,7 +540,55 @@ pub fn reclaim(
         &layout.log_root,
         target_bytes,
         in_use_scopes,
+        false,
     )
+}
+
+/// Reclaim cache storage across all discovered daemon work roots.
+///
+/// Disk pressure is best effort: one unavailable root must not prevent the
+/// remaining roots from being reclaimed or make the caller fail open. Each
+/// root retains the lease and filesystem coordination enforced by
+/// [`reclaim_work_root`].
+pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
+    let roots = crate::leftover_disk::discover_daemon_work_roots();
+    let layout = crate::storage::StorageLayout::resolve();
+    let mut report = ReclaimReport::default();
+
+    for work_root in roots {
+        let (run_root, log_root) = layout
+            .as_ref()
+            .map(|layout| (layout.run_root.clone(), layout.log_root.clone()))
+            .unwrap_or_else(|| {
+                (
+                    work_root.join("_velnor_runtime"),
+                    work_root.join("_velnor_logs"),
+                )
+            });
+        let remaining = target_bytes.saturating_sub(report.freed_bytes);
+        if remaining == 0 {
+            break;
+        }
+        match reclaim_work_root(
+            &work_root,
+            &run_root,
+            &log_root,
+            remaining,
+            &BTreeSet::new(),
+            true,
+        ) {
+            Ok(root_report) => {
+                report.freed_bytes = report.freed_bytes.saturating_add(root_report.freed_bytes);
+                report.deleted.extend(root_report.deleted);
+                report.failures.extend(root_report.failures);
+            }
+            Err(error) => report
+                .failures
+                .push(format!("{}: {error:#}", work_root.display())),
+        }
+    }
+
+    report
 }
 
 pub(crate) fn reclaim_work_root(
@@ -534,6 +597,7 @@ pub(crate) fn reclaim_work_root(
     log_root: &Path,
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
+    emergency: bool,
 ) -> Result<ReclaimReport> {
     let _lock = match GcLeaderLock::acquire(run_root) {
         Ok(lock) => lock,
@@ -551,7 +615,7 @@ pub(crate) fn reclaim_work_root(
         run_root,
         Duration::from_secs(24 * 3600),
     )?);
-    let mut entries = cache_listing(work_root)?;
+    let mut entries = cache_listing(work_root, emergency)?;
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: 0,
@@ -1208,12 +1272,42 @@ mod tests {
             &root.join("log"),
             16,
             &BTreeSet::from(["actions-cache/trusted/active".into()]),
+            false,
         )
         .unwrap();
         assert_eq!(report.deleted.len(), 1);
         assert!(active.exists());
         assert_eq!(first.exists() as u8 + second.exists() as u8, 1);
         assert!(root.join("log/gc-history.jsonl").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_pressure_reclaimer_reclaims_discovered_work_root() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-disk-pressure-reclaim-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("lib/velnor-test/work");
+        let cache = root.join("cache/velnor/v1/trusted/caches/idle/key");
+        let compiler_cache = work.join("_velnor_sccache/trusted/idle/key");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&compiler_cache).unwrap();
+        fs::write(cache.join("payload"), vec![0; 16]).unwrap();
+        fs::write(compiler_cache.join("payload"), vec![0; 16]).unwrap();
+
+        let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
+        std::env::set_var("VELNOR_STORAGE_ROOT", &root);
+        let report = reclaim_for_disk_pressure(32);
+        match previous {
+            Some(value) => std::env::set_var("VELNOR_STORAGE_ROOT", value),
+            None => std::env::remove_var("VELNOR_STORAGE_ROOT"),
+        }
+
+        assert_eq!(report.freed_bytes, 32);
+        assert_eq!(report.deleted, vec![cache, compiler_cache]);
+        assert!(report.failures.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1243,6 +1337,7 @@ mod tests {
                 scope_depth: 0,
                 candidate_depth: 0,
                 gc_managed: true,
+                emergency_managed: true,
             },
             StoreRoot {
                 kind: CacheStore::Cargo,
@@ -1251,6 +1346,7 @@ mod tests {
                 scope_depth: 1,
                 candidate_depth: 1,
                 gc_managed: true,
+                emergency_managed: true,
             },
             StoreRoot {
                 kind: CacheStore::Cargo,
@@ -1259,6 +1355,7 @@ mod tests {
                 scope_depth: 2,
                 candidate_depth: 2,
                 gc_managed: true,
+                emergency_managed: true,
             },
         ];
         let mut entries = Vec::new();

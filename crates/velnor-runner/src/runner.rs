@@ -2166,6 +2166,16 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     for root in roots {
         if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
+                let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
+                let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
+                if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
+                    eprintln!(
+                            "disk-pressure cache reclaim freed {} bytes across {} entries ({} failures)",
+                            cache_report.freed_bytes,
+                            cache_report.deleted.len(),
+                            cache_report.failures.len()
+                        );
+                }
                 let backend = crate::execution::load_execution_file(config_base, None)
                     .ok()
                     .map(|file| file.backend())
