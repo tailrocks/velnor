@@ -86,6 +86,7 @@ const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
 /// Keep lifecycle duration fields bounded to the same one-day policy used by
 /// the existing tool-preparation telemetry.
 const MAX_TELEMETRY_DURATION_MS: u64 = 24 * 60 * 60 * 1000;
+const NO_PROGRESS_THRESHOLD: Duration = Duration::from_secs(1);
 /// Keep plan cardinalities bounded even if a malformed broker message or
 /// backend result contains an unexpectedly large number of entries.
 const MAX_TELEMETRY_PLAN_ITEMS: u64 = 100_000;
@@ -521,6 +522,23 @@ fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTree
             Value::from(queue_time_present),
         ),
     ])
+}
+
+fn no_progress_telemetry_fields(
+    window_ms: u64,
+    last_event: &'static str,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "window_ms".to_owned(),
+            Value::from(window_ms.min(MAX_TELEMETRY_DURATION_MS)),
+        ),
+        ("last_event".to_owned(), Value::from(last_event)),
+    ])
+}
+
+fn no_progress_telemetry_due(waited: Duration, emitted: bool) -> bool {
+    !emitted && waited >= NO_PROGRESS_THRESHOLD
 }
 
 fn bounded_telemetry_count(count: usize) -> (u64, bool) {
@@ -4924,6 +4942,7 @@ async fn handle_job_request(
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let ops_job_uid = crate::ops::global().map(|_| job.job_id.clone());
         let mut emitted_pressure = false;
+        let mut emitted_no_progress = false;
         let job_peak_reservation = loop {
             let reserve_result = reserve_job_peak_capacity(storage_layout, config_dir, args);
             let last_error = reserve_result
@@ -4984,6 +5003,22 @@ async fn handle_job_request(
                         sleep.as_secs()
                     );
                     tokio::time::sleep(sleep).await;
+                    let waited = capacity_wait_started.elapsed();
+                    let no_progress_ms = duration_ms(waited);
+                    if no_progress_telemetry_due(waited, emitted_no_progress) {
+                        if let (Some(sink), Some(admission)) =
+                            (crate::ops::global(), telemetry_admission.as_ref())
+                        {
+                            let fields =
+                                no_progress_telemetry_fields(no_progress_ms, "passive_wait");
+                            let _ = sink.emit_telemetry_for_admission(
+                                admission,
+                                TelemetryEvent::NoProgress,
+                                fields,
+                            );
+                            emitted_no_progress = true;
+                        }
+                    }
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortRegistrationLost => {
                     cancellation.abort();
@@ -13159,6 +13194,25 @@ jobs:
         assert!(!serde_json::to_string(&fields)
             .unwrap()
             .contains("timestamp"));
+    }
+
+    #[test]
+    fn no_progress_telemetry_fields_are_bounded_and_secret_free() {
+        let fields = no_progress_telemetry_fields(u64::MAX, "passive_wait");
+
+        assert_eq!(fields["window_ms"], Value::from(MAX_TELEMETRY_DURATION_MS));
+        assert_eq!(fields["last_event"], Value::from("passive_wait"));
+        assert!(!serde_json::to_string(&fields).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn no_progress_telemetry_is_due_after_a_real_wait_and_only_once() {
+        assert!(!no_progress_telemetry_due(
+            Duration::from_millis(999),
+            false
+        ));
+        assert!(no_progress_telemetry_due(Duration::from_secs(1), false));
+        assert!(!no_progress_telemetry_due(Duration::from_secs(15), true));
     }
 
     #[test]
