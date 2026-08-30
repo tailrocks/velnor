@@ -83,6 +83,9 @@ const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_JIT_REGISTRATION_FILE: &str = ".jit-registration-pending.json";
 const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
+/// Keep lifecycle duration fields bounded to the same one-day policy used by
+/// the existing tool-preparation telemetry.
+const MAX_TELEMETRY_DURATION_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct PendingJitRegistration {
@@ -492,6 +495,19 @@ struct ExecutionTimings {
 
 fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "queue_ms".to_owned(),
+            Value::from(queue_ms.min(MAX_TELEMETRY_DURATION_MS)),
+        ),
+        (
+            "queue_time_present".to_owned(),
+            Value::from(queue_time_present),
+        ),
+    ])
 }
 
 /// Instance slug naming this daemon in the shared operational store:
@@ -4495,6 +4511,15 @@ async fn handle_job_request(
     let early_context = job_context_data(&job);
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
+    let queue_time_present = job
+        .queue_time
+        .as_deref()
+        .or_else(|| {
+            job.variables
+                .get("system.queueTime")
+                .and_then(|value| value.value.as_deref())
+        })
+        .is_some_and(|value| !value.trim().is_empty());
     let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
     if let Err(persist_error) = persist_in_flight_job(config_dir, &run_service_job, &job) {
         return fail_closed_after_in_flight_persist_error(
@@ -4560,6 +4585,11 @@ async fn handle_job_request(
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
         };
+        let _ = sink.emit_telemetry_for_admission(
+            &admission,
+            TelemetryEvent::RunQueued,
+            run_queued_telemetry_fields(queue_ms, queue_time_present),
+        );
         let telemetry_admission = admission.clone();
         let admission_outcome =
             persist_admission_on_blocking_pool(Arc::clone(sink), admission).await;
@@ -13023,6 +13053,17 @@ jobs:
                 "${{ steps.deployment.outputs.page_url }}"
             ))
         );
+    }
+
+    #[test]
+    fn run_queued_telemetry_fields_are_bounded_and_secret_free() {
+        let fields = run_queued_telemetry_fields(u64::MAX, true);
+
+        assert_eq!(fields["queue_ms"], Value::from(MAX_TELEMETRY_DURATION_MS));
+        assert_eq!(fields["queue_time_present"], Value::from(true));
+        assert!(!serde_json::to_string(&fields)
+            .unwrap()
+            .contains("timestamp"));
     }
 
     #[test]
