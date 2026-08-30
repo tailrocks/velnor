@@ -4987,15 +4987,6 @@ impl ResultsArtifactFile {
                 .with_context(|| format!("open staged artifact {}", relative.display())),
         }
     }
-
-    pub(crate) fn file(&self) -> Result<std::fs::File> {
-        self.temp
-            .file
-            .as_ref()
-            .context("downloaded artifact file descriptor is unavailable")?
-            .try_clone()
-            .context("duplicate downloaded artifact file descriptor")
-    }
 }
 
 #[derive(Debug)]
