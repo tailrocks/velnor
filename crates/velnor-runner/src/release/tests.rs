@@ -183,6 +183,44 @@ fn shipped_velnor_services_hold_shared_package_lock_across_exec() {
 }
 
 #[test]
+fn debian_package_includes_fleet_policy_audit_units() {
+    let assets = include_str!("../../Cargo.toml");
+    for (source, destination) in [
+        (
+            "../velnor-tools/debian/velnor-fleet-policy-audit.service",
+            "lib/systemd/system/velnor-fleet-policy-audit.service",
+        ),
+        (
+            "../velnor-tools/debian/velnor-fleet-policy-audit.timer",
+            "lib/systemd/system/velnor-fleet-policy-audit.timer",
+        ),
+        (
+            "../../fleet/release-refs.toml",
+            "usr/share/velnor/fleet/release-refs.toml",
+        ),
+    ] {
+        let asset = format!("[\"{source}\", \"{destination}\", \"644\"]");
+        assert!(
+            assets.contains(&asset),
+            "cargo-deb assets missing {source} -> {destination}"
+        );
+    }
+
+    assert!(
+        include_str!("../../../velnor-tools/debian/velnor-fleet-policy-audit.service")
+            .contains("fleet-policy audit")
+    );
+    assert!(
+        include_str!("../../../velnor-tools/debian/velnor-fleet-policy-audit.timer")
+            .contains("OnCalendar=")
+    );
+    assert!(
+        include_str!("../../../../fleet/release-refs.toml").contains("schema_version = 1"),
+        "packaged fleet ledger must be the repository's authoritative schema-v1 ledger"
+    );
+}
+
+#[test]
 fn debian_package_declares_flock_provider() {
     let manifest = include_str!("../../Cargo.toml");
     assert!(manifest.contains("util-linux (>= 2.37.2)"));
