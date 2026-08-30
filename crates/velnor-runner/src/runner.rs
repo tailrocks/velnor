@@ -380,13 +380,23 @@ fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
     now.duration_since(start).unwrap_or(Duration::ZERO)
 }
 
+fn job_queue_time(job: &AgentJobRequestMessage) -> Option<&str> {
+    job.queue_time
+        .as_deref()
+        .or_else(|| {
+            job.variables
+                .get("system.queueTime")
+                .and_then(|value| value.value.as_deref())
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn job_queue_time_present(job: &AgentJobRequestMessage) -> bool {
+    job_queue_time(job).is_some()
+}
+
 fn job_queued_for(job: &AgentJobRequestMessage, now: SystemTime) -> Duration {
-    let raw = job.queue_time.as_deref().or_else(|| {
-        job.variables
-            .get("system.queueTime")
-            .and_then(|value| value.value.as_deref())
-    });
-    queued_for_from_rfc3339(raw, now)
+    queued_for_from_rfc3339(job_queue_time(job), now)
 }
 
 fn select_unassigned_trusted_jobs(
