@@ -81,10 +81,7 @@ impl Clock for TokioClock {
                 return;
             }
             let delay_ms = deadline.as_millis().saturating_sub(now.as_millis());
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
-                _ = notified => {}
-            }
+            let _ = tokio::time::timeout(Duration::from_millis(delay_ms), notified).await;
         })
     }
 
