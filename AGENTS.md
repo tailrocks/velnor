@@ -67,9 +67,19 @@ temporary incident recovery, not a normal release or cutover path; identity,
 signature, lock, health, lane, rollback, and ledger proofs remain mandatory.
 
 2026-08-30 decision: the active goal and plan use the static generic campaign
-branch `codex/velnor-project-goal` and one pull request. Do not use the former
-plan-named branch or create per-task branches. A future topology change needs
-an explicit operator decision recorded in the governing prompt and plan before
-any branch is created.
+branch `codex/velnor-project-goal` and one pull request. Per-plan and per-task
+branches are prohibited for campaign delivery. A future delivery-topology
+change needs an explicit operator decision recorded in the governing prompt and
+plan before any delivery branch is created.
+
+2026-08-31 operator decision: one campaign delivery branch and one campaign PR
+remain mandatory. `codex/velnor-project-goal` is the sole delivery branch and
+its sole campaign PR is the only route into `main`. For this session only, the
+operator authorizes checkout `/Users/donbeave/Projects/tailrocks/velnor-project/velnor6`
+to use local branch `velnor6` for session isolation. `velnor6` is never a
+separate PR or direct `main` push target; its commits must be handed to and
+integrated by the campaign writer on `codex/velnor-project-goal`. This local
+isolation exception changes no safety, freshness, signed-off commit, validation,
+trust, lane, Sentry, merge-gate, or no-force-push requirement.
 
 Full history: `git log -p -- AGENTS.md`; entries predating the marked contract that conflict with it are historical and non-executable.

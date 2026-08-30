@@ -19,9 +19,20 @@ Velnor unified CI contract (2026-08-09):
 Current execution follows the marked contract and the tracked active goal graph.
 
 Campaign delivery rule: every active plan and retained command task is
-implemented on the single static generic campaign branch
+implemented on the single static generic delivery branch
 `codex/velnor-project-goal` and delivered in one pull request. No per-plan or
-per-task branch/PR exists; older coordination entries are historical.
+per-task branch/PR exists for campaign delivery; older coordination entries are
+historical.
+
+2026-08-31 operator decision: one campaign delivery branch and one campaign PR
+remain mandatory. `codex/velnor-project-goal` is the sole delivery branch and
+its sole campaign PR is the only route into `main`. For this session only, the
+operator authorizes checkout `/Users/donbeave/Projects/tailrocks/velnor-project/velnor6`
+to use local branch `velnor6` for session isolation. `velnor6` is never a
+separate PR or direct `main` push target; its commits must be handed to and
+integrated by the campaign writer on `codex/velnor-project-goal`. This local
+isolation exception changes no safety, freshness, signed-off commit, validation,
+trust, lane, Sentry, merge-gate, or no-force-push requirement.
 
 Velnor blocker rule: fix Velnor itself on that branch, commit and push each
 iteration, and use the sole campaign PR to merge to `main` at its authorized

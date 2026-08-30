@@ -24,12 +24,21 @@ exactly: the marked unified-CI contract, the tracked goal graph, and the
 ## Campaign delivery topology
 
 All work represented by the active `plans/` tree is one campaign. Implement
-every plan and retained command task on one static generic branch,
-`codex/velnor-project-goal`, and deliver one pull request from that branch. Do
-not create, switch to, or
-open per-plan, per-task, or per-item branches or pull requests. Historical
-coordination text that prescribes branch-per-leaf delivery is superseded by
-this operator directive.
+every plan and retained command task on one static generic delivery branch,
+`codex/velnor-project-goal`, and deliver one pull request from that branch.
+Per-plan, per-task, and per-item branches or pull requests are prohibited for
+campaign delivery. Historical coordination text that prescribes branch-per-leaf
+delivery is superseded by this operator directive.
+
+2026-08-31 operator decision: one campaign delivery branch and one campaign PR
+remain mandatory. `codex/velnor-project-goal` is the sole delivery branch and
+its sole campaign PR is the only route into `main`. For this session only, the
+operator authorizes checkout `/Users/donbeave/Projects/tailrocks/velnor-project/velnor6`
+to use local branch `velnor6` for session isolation. `velnor6` is never a
+separate PR or direct `main` push target; its commits must be handed to and
+integrated by the campaign writer on `codex/velnor-project-goal`. This local
+isolation exception changes no safety, freshness, signed-off commit, validation,
+trust, lane, Sentry, merge-gate, or no-force-push requirement.
 
 ## Velnor blocker integration loop
 

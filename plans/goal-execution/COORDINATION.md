@@ -2,11 +2,15 @@
 
 ## Current operator directive — static campaign branch and one PR
 
-All active work from the `plans/` tree is implemented together on exactly one
-static generic branch: `codex/velnor-project-goal`. It produces exactly one
-pull request. No plan, leaf, task, verifier, or status item may create or
-switch to another branch or open another pull request. Subagents work in the
-same campaign scope and return patches/evidence for primary reconciliation.
+All active work from the `plans/` tree is integrated together on exactly one
+static generic campaign branch: `codex/velnor-project-goal`. It produces
+exactly one pull request. No plan, leaf, task, verifier, or status item may
+create another delivery branch or open another pull request. The explicitly
+authorized `NIMBUS-VELO6-8F4` session may use local branch `velnor6` in
+`/Users/donbeave/Projects/tailrocks/velnor-project/velnor6` for isolated
+session work only; it is not a delivery branch, and its commits must be handed
+to the campaign writer for integration. Subagents return patches/evidence for
+primary reconciliation.
 
 The active claims and branch-merge entries below preserve historical audit
 context only. Any per-leaf branch, push, PR, or immediate-commit instruction
@@ -70,6 +74,12 @@ campaign branch directive above. It is non-executable.
   permitted under the current topology; a future topology change requires a
   new explicit operator decision recorded in the governing prompt and plan
   before any branch is created.
+
+- **2026-08-31 isolated-session exception**: the operator authorizes
+  `NIMBUS-VELO6-8F4` to use local branch `velnor6` only in the named checkout
+  for isolated session work. This does not create a delivery branch or PR;
+  commits must be handed to the campaign writer for integration on
+  `codex/velnor-project-goal`, with no direct `main` push and no force-push.
 
 - **2026-08-24 branch-merge directive executed; campaign work recovered**
   (ox-alpha session C): operator ordered all branches merged to `main` via

@@ -5,6 +5,15 @@ into one unbounded prompt. It is orchestration only. Product direction remains
 owned by `docs/mission.md`, `docs/vision.md`, `docs/roadmap.md`, the marked
 unified-CI contract, and `docs/prompt.md`.
 
+2026-08-31 topology decision: an explicitly authorized isolated session may
+use local branch `velnor6` in this checkout for that session's scoped work
+only. This is not a second campaign branch, task PR, or direct-main path:
+`codex/velnor-project-goal` remains the sole campaign integration branch and
+the sole campaign PR. All branch reconciliation, status/index writes, commits,
+pushes, fixture dispatches, live mutations, and integration are serialized.
+Never write `main` directly and never force-push; reconcile session work into
+the campaign branch before the authorized PR gate.
+
 ## Audited inventory
 
 Audited at Velnor commit `77b2b66` on 2026-08-24:
@@ -90,7 +99,21 @@ Three OpenCode sessions run this goal together as peers. Binding channel: plans/
 
 Each session's primary agent orchestrates only: dependencies, dispatch, conflict prevention, operator-approval boundaries, evidence reconciliation, ledger consistency, verdict. Never implement, edit, test, or review a leaf directly. Per leaf dispatch fresh subagents for investigation (drift and dependency validation), implementation (owned file scope), verification (commands, fixture runs, artifacts, done criteria), independent diff review, plus specialists for security, protocol, packaging, fleet, storage, migration, or documentation surfaces. Subagents get the full leaf file, this contract, dependency evidence, applicable AGENTS.md, exact scope, STOP conditions, and return schema. Subagents are mandatory for every plan item; if no slot is free use bounded wait and retry cycles while checking state, never pulling a leaf into primary context. A separate verifier confirms claims against repository state; self-asserted success never counts; an implementer never provides the only review or verdict.
 
-One campaign branch carries every leaf commit sequentially; never create or switch branches; no separate implementation worktree. Prove HEAD and branch match the campaign ledger at every handoff; repair mismatch by returning to the recorded branch without discarding work. Commit and push every finished iteration. Velnor execution failures are fixed in Velnor on this branch. The sole campaign PR merges to `main` at the authorized safe integration checkpoint; repeated per-task PRs or repeated PR merges are forbidden. An urgent pre-merge Sentry validation may use the exact pushed branch SHA only through an explicitly authorized, immutable signed-APT release over `ssh sentry`, with no checkout/binary copy/local package/direct `dpkg -i`.
+The campaign integration branch `codex/velnor-project-goal` carries every leaf
+commit sequentially. The explicit 2026-08-31 topology decision permits local
+`velnor6` only as an isolated session branch for that session's scoped work,
+preparation, review, and handoff; it is not a second campaign branch, task PR,
+or direct-main path. Prove HEAD and branch match the campaign ledger at every
+handoff; repair mismatch by returning to the recorded campaign branch without
+discarding work. All writes, commits, pushes, fixture dispatches, live
+mutations, and integration are serialized. Never write `main` directly or
+force-push. Commit and push every finished iteration on the campaign branch.
+Velnor execution failures are fixed in Velnor on this branch. The sole
+campaign PR merges to `main` at the authorized safe integration checkpoint;
+repeated per-task PRs or repeated PR merges are forbidden. An urgent pre-merge
+Sentry validation may use the exact pushed branch SHA only through an
+explicitly authorized, immutable signed-APT release over `ssh sentry`, with
+no checkout/binary copy/local package/direct `dpkg -i`.
 
 All gates run through mise tasks invoked via rtk (rtk mise run <task>): fmt, lint, test (nextest), actionlint, deny, composite check, ci. Never call cargo, clippy, nextest, actionlint, or cargo-deny directly where a task wraps them. Filters ride after the task name; focused scopes the task, never bypasses it. Missing capability means a mise.lock-pinned mise.toml task, never ad-hoc commands. Configure mise before gates.
 
