@@ -200,13 +200,6 @@ pub fn queued_unassigned_jobs_past_deadline(
         .collect()
 }
 
-/// Post-merge `push` must not occupy `velnor-trusted` while open PRs wait.
-/// `pull_request` / `merge_group` / `schedule` / `workflow_dispatch` still run
-/// on Velnor. `push` is routed to the GitHub lane in generated callers.
-pub fn trusted_fleet_accepts_github_event(event_name: &str) -> bool {
-    !event_name.eq_ignore_ascii_case("push")
-}
-
 /// GitHub DELETE 422 / registry `offline+busy` with no live online session:
 /// complete the leftover job so the lease can drop. `online+busy` is a live job.
 pub fn stale_busy_lease_should_complete_job(status: Option<&str>, busy: Option<bool>) -> bool {
@@ -841,16 +834,6 @@ mod tests {
             "velnor-trusted".into()
         ]));
         assert!(!job_waits_on_trusted_fleet(&["ubuntu-26.04".into()]));
-    }
-
-    #[test]
-    fn push_events_do_not_occupy_trusted_fleet() {
-        assert!(trusted_fleet_accepts_github_event("pull_request"));
-        assert!(trusted_fleet_accepts_github_event("merge_group"));
-        assert!(trusted_fleet_accepts_github_event("schedule"));
-        assert!(trusted_fleet_accepts_github_event("workflow_dispatch"));
-        assert!(!trusted_fleet_accepts_github_event("push"));
-        assert!(!trusted_fleet_accepts_github_event("PUSH"));
     }
 
     #[test]

@@ -24,6 +24,7 @@ use serde_json::Value;
 use crate::action::{native_action_adapter, ActionMetadata, NATIVE_ACTION_REF};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
+use crate::protocol::GitHubScope;
 
 /// Maximum composite nesting depth. Matches the removed local preflight bound.
 const MAX_COMPOSITE_DEPTH: usize = 10;
@@ -245,10 +246,23 @@ pub struct ContentsApiMetadataSource {
 }
 
 impl ContentsApiMetadataSource {
-    pub fn new(token: impl Into<String>, api_url: impl Into<String>) -> Result<Self> {
+    pub fn new(token: impl Into<String>, scope: &GitHubScope) -> Result<Self> {
+        Self::with_api_url(token, scope.api_base_url.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        token: impl Into<String>,
+        api_url: impl Into<String>,
+    ) -> Result<Self> {
+        Self::with_api_url(token, api_url)
+    }
+
+    fn with_api_url(token: impl Into<String>, api_url: impl Into<String>) -> Result<Self> {
         Ok(Self {
             client: reqwest::blocking::Client::builder()
                 .user_agent("velnor-runner")
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             api_url: api_url.into(),
             token: token.into(),
@@ -269,7 +283,6 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
         subpath: Option<&str>,
     ) -> Result<ActionMetadata> {
         self.reads.fetch_add(1, Ordering::Relaxed);
-        let base = self.api_url.trim_end_matches('/');
         let directory = normalize_subpath(subpath);
         let mut last_status = None;
         for file in ["action.yml", "action.yaml"] {
@@ -278,11 +291,29 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
             } else {
                 format!("{directory}/{file}")
             };
+            let mut url = url::Url::parse(&self.api_url)
+                .map_err(|error| anyhow::anyhow!("parse configured GitHub API URL: {error}"))?;
+            {
+                let mut segments = url
+                    .path_segments_mut()
+                    .map_err(|_| anyhow::anyhow!("cannot build GitHub contents URL"))?;
+                segments.push("repos");
+                for segment in repository.split('/') {
+                    if !segment.is_empty() {
+                        segments.push(segment);
+                    }
+                }
+                segments.push("contents");
+                for segment in metadata_path.split('/') {
+                    if !segment.is_empty() {
+                        segments.push(segment);
+                    }
+                }
+            }
+            url.query_pairs_mut().append_pair("ref", git_ref);
             let response = self
                 .client
-                .get(format!(
-                    "{base}/repos/{repository}/contents/{metadata_path}?ref={git_ref}"
-                ))
+                .get(url)
                 .bearer_auth(&self.token)
                 .header("Accept", "application/vnd.github.raw+json")
                 .header("X-GitHub-Api-Version", "2026-03-10")
@@ -414,20 +445,42 @@ fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), Admis
     else {
         return Ok(());
     };
-    // A reusable-workflow call is exactly the case where the job's defining
-    // workflow (`job_workflow_ref`) differs from the top-level entry workflow
-    // (`workflow_ref`). When the two match, or `workflow_ref` is absent so we
-    // cannot confirm a reusable call, there is nothing extra to admit here — the
-    // job's own steps are still admitted below.
+    // A reusable-workflow call is identified by the presence of the job-defining
+    // workflow identity. Once present, all related identity fields are required
+    // and validated before the action graph can perform any metadata read.
+    let ancestry = root.child("reusable workflow context".to_string());
     let Some(top_level) = context_string(walk.context_data, "github.workflow_ref") else {
-        return Ok(());
+        return Err(AdmissionError::new(
+            &ancestry,
+            "github.workflow_ref",
+            "reusable workflow context requires the top-level workflow identity",
+            vec!["owner/repository/.github/workflows/name.yml@ref".to_string()],
+        ));
     };
-    if workflow_ref_identity(&top_level) == workflow_ref_identity(&job_workflow_ref) {
-        return Ok(());
-    }
+    let Some((top_repository, top_path, top_ref)) = split_workflow_ref(&top_level) else {
+        return Err(AdmissionError::new(
+            &ancestry,
+            "github.workflow_ref",
+            "top-level workflow identity is malformed",
+            vec!["owner/repository/.github/workflows/name.yml@ref".to_string()],
+        ));
+    };
     let Some((repository, path, ref_part)) = split_workflow_ref(&job_workflow_ref) else {
-        return Ok(());
+        return Err(AdmissionError::new(
+            &ancestry,
+            "github.job_workflow_ref",
+            "reusable workflow identity is malformed",
+            vec!["owner/repository/.github/workflows/name.yml@<40-hex-SHA>".to_string()],
+        ));
     };
+    if top_repository == repository && top_path == path {
+        return Err(AdmissionError::new(
+            &ancestry,
+            "github.job_workflow_ref",
+            "reusable workflow identity must differ from the top-level workflow",
+            vec!["a distinct approved workflow identity".to_string()],
+        ));
+    }
     let ancestry = root.child(format!("reusable workflow {repository}/{path}@{ref_part}"));
     // N2: the caller must pin the reusable workflow by immutable full SHA. A
     // branch/tag ref (refs/heads/*, refs/tags/*, or a bare tag) is mutable.
@@ -439,16 +492,38 @@ fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), Admis
             vec!["a 40-hex commit SHA".to_string()],
         ));
     }
+    let Some(top_level_sha) = context_string(walk.context_data, "github.workflow_sha") else {
+        return Err(AdmissionError::new(
+            &ancestry,
+            "github.workflow_sha",
+            "reusable workflow context requires the resolved top-level workflow SHA",
+            vec!["the exact 40-hex workflow commit SHA".to_string()],
+        ));
+    };
+    if !is_full_sha(&top_level_sha) || (is_full_sha(&top_ref) && top_level_sha != top_ref) {
+        return Err(AdmissionError::new(
+            &ancestry,
+            "github.workflow_sha",
+            "top-level workflow ref does not match the resolved workflow SHA",
+            vec!["the exact 40-hex workflow commit SHA".to_string()],
+        ));
+    }
     // Cross-check the resolved workflow SHA when present.
-    if let Some(workflow_sha) = context_string(walk.context_data, "github.job_workflow_sha") {
-        if workflow_sha != ref_part {
-            return Err(AdmissionError::new(
-                &ancestry,
-                "sha",
-                "reusable workflow ref does not match the resolved workflow SHA",
-                vec![ref_part.clone()],
-            ));
-        }
+    let Some(workflow_sha) = context_string(walk.context_data, "github.job_workflow_sha") else {
+        return Err(AdmissionError::new(
+            &ancestry,
+            "github.job_workflow_sha",
+            "reusable workflow context requires the resolved workflow SHA",
+            vec!["the exact 40-hex workflow commit SHA".to_string()],
+        ));
+    };
+    if !is_full_sha(&workflow_sha) || workflow_sha != ref_part {
+        return Err(AdmissionError::new(
+            &ancestry,
+            "sha",
+            "reusable workflow ref does not match the resolved workflow SHA",
+            vec!["the exact 40-hex workflow commit SHA".to_string()],
+        ));
     }
     let inputs = context_object_strings(walk.context_data, "inputs");
     manifest::validate_reusable_workflow(
@@ -779,11 +854,19 @@ fn is_full_sha(value: &str) -> bool {
 /// `(owner/repo, .github/workflows/x.yml, ref)`.
 fn split_workflow_ref(workflow_ref: &str) -> Option<(String, String, String)> {
     let (path_part, ref_part) = workflow_ref.rsplit_once('@')?;
+    if ref_part.is_empty() || ref_part.trim() != ref_part {
+        return None;
+    }
     let mut segments = path_part.splitn(3, '/');
     let owner = segments.next()?;
     let repo = segments.next()?;
     let path = segments.next()?;
-    if owner.is_empty() || repo.is_empty() || path.is_empty() {
+    if owner.is_empty()
+        || repo.is_empty()
+        || path.is_empty()
+        || !path.starts_with(".github/workflows/")
+        || (!path.ends_with(".yml") && !path.ends_with(".yaml"))
+    {
         return None;
     }
     Some((
@@ -791,17 +874,6 @@ fn split_workflow_ref(workflow_ref: &str) -> Option<(String, String, String)> {
         path.to_string(),
         ref_part.to_string(),
     ))
-}
-
-/// The repository and workflow-file identity of a workflow ref, ignoring the
-/// ref suffix. Used to tell a reusable-workflow call apart from the top-level
-/// workflow.
-fn workflow_ref_identity(workflow_ref: &str) -> String {
-    workflow_ref
-        .rsplit_once('@')
-        .map(|(path, _)| path)
-        .unwrap_or(workflow_ref)
-        .to_ascii_lowercase()
 }
 
 fn workflow_source(context_data: &[(String, Value)]) -> Option<(String, String)> {
@@ -1126,6 +1198,59 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.kind == AdmissionNodeKind::ReusableWorkflow));
+    }
+
+    #[test]
+    fn reusable_workflow_missing_top_level_identity_rejected() {
+        let publish_sha = "80a1acd07257a23b441c546e6fcad12239ef7626";
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "job_workflow_ref": format!("jackin-project/jackin-role-action/.github/workflows/publish.yml@{publish_sha}"),
+                "job_workflow_sha": publish_sha,
+                "repository": "acme/repo",
+                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }),
+        )];
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job(serde_json::json!([])), &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "github.workflow_ref");
+    }
+
+    #[test]
+    fn reusable_workflow_missing_resolved_sha_rejected() {
+        let publish_sha = "80a1acd07257a23b441c546e6fcad12239ef7626";
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "job_workflow_ref": format!("jackin-project/jackin-role-action/.github/workflows/publish.yml@{publish_sha}"),
+                "workflow_ref": "acme/repo/.github/workflows/ci.yml@refs/heads/main",
+                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "repository": "acme/repo"
+            }),
+        )];
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job(serde_json::json!([])), &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "github.job_workflow_sha");
+    }
+
+    #[test]
+    fn reusable_workflow_malformed_identity_rejected() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "job_workflow_ref": "not-a-workflow-ref",
+                "workflow_ref": "acme/repo/.github/workflows/ci.yml@refs/heads/main",
+                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "repository": "acme/repo"
+            }),
+        )];
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job(serde_json::json!([])), &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "github.job_workflow_ref");
     }
 
     #[test]

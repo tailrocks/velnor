@@ -6609,6 +6609,7 @@ fn native_upload_artifact(
                     crate::protocol::ArtifactUploadOptions {
                         store_uncompressed,
                         retention_days,
+                        overwrite,
                     },
                 ) {
                     Ok(finalized) => {

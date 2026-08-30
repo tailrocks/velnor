@@ -4763,6 +4763,7 @@ fn read_bounded_response_body(
 pub(crate) struct ArtifactUploadOptions {
     pub(crate) store_uncompressed: bool,
     pub(crate) retention_days: Option<u8>,
+    pub(crate) overwrite: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4781,7 +4782,7 @@ struct FinalizeArtifactResponse {
 
 #[derive(Debug, Deserialize)]
 struct DeleteArtifactResponse {
-    ok: bool,
+    ok: Option<bool>,
     #[serde(alias = "artifactId")]
     artifact_id: WireU64,
 }
@@ -4884,11 +4885,7 @@ fn validate_sha256_digest(digest: &str, field: &str) -> Result<String> {
 }
 
 impl ResultsArtifactDescriptorWire {
-    fn validate(
-        self,
-        expected_plan_id: &str,
-        expected_job_id: &str,
-    ) -> Result<ValidatedResultsArtifactDescriptor> {
+    fn validate(self, expected_plan_id: &str) -> Result<ValidatedResultsArtifactDescriptor> {
         if self.workflow_run_backend_id != expected_plan_id {
             bail!(
                 "Results Service artifact '{}' belongs to workflow backend {}, not {}",
@@ -4897,14 +4894,11 @@ impl ResultsArtifactDescriptorWire {
                 expected_plan_id
             );
         }
-        if self.workflow_job_run_backend_id != expected_job_id {
-            bail!(
-                "Results Service artifact '{}' belongs to job backend {}, not {}",
-                self.name,
-                self.workflow_job_run_backend_id,
-                expected_job_id
-            );
-        }
+        validate_backend_id(&self.workflow_run_backend_id, "workflow_run_backend_id")?;
+        validate_backend_id(
+            &self.workflow_job_run_backend_id,
+            "workflow_job_run_backend_id",
+        )?;
         validate_results_artifact_name(&self.name)?;
         let database_id = self.database_id.parse("database_id")?;
         if database_id == 0 {
@@ -4924,6 +4918,16 @@ impl ResultsArtifactDescriptorWire {
             digest,
         })
     }
+}
+
+fn validate_backend_id(value: &str, field: &str) -> Result<()> {
+    const MAX_BACKEND_ID_BYTES: usize = 256;
+
+    if value.is_empty() || value.len() > MAX_BACKEND_ID_BYTES || value.chars().any(char::is_control)
+    {
+        bail!("Results Service {field} is empty, oversized, or contains control characters");
+    }
+    Ok(())
 }
 
 fn digest_matches(expected: &str, actual_hex: &str) -> bool {
@@ -5042,6 +5046,19 @@ fn upload_artifact_with_zip_builder(
         .build()
         .context("build Results Service HTTP client")?;
 
+    if options.overwrite {
+        let existing = artifacts_owned_by_job(
+            list_results_artifacts(&client, base, token, plan_id, job_id)?,
+            job_id,
+        )
+        .into_iter()
+        .filter(|artifact| artifact.name == name)
+        .collect::<Vec<_>>();
+        for artifact in existing {
+            delete_artifact_descriptor_blocking(&client, base, token, &artifact)?;
+        }
+    }
+
     // 1. CreateArtifact → signed upload URL.
     let create_url = format!("{base}/{SERVICE}/CreateArtifact");
     let create_request = artifact_create_request(
@@ -5126,6 +5143,36 @@ fn upload_artifact_with_zip_builder(
     })
 }
 
+fn delete_artifact_descriptor_blocking(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    token: &str,
+    artifact: &ValidatedResultsArtifactDescriptor,
+) -> Result<()> {
+    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+    let body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": artifact.workflow_run_backend_id,
+        "workflow_job_run_backend_id": artifact.workflow_job_run_backend_id,
+        "name": artifact.name,
+    }))
+    .context("serialize DeleteArtifact")?;
+    let url = format!("{base}/{SERVICE}/DeleteArtifact");
+    let text = results_service_post(client, &url, token, &body, "DeleteArtifact")?;
+    let response: DeleteArtifactResponse =
+        serde_json::from_str(&text).context("DeleteArtifact parse")?;
+    if response.ok == Some(false) {
+        bail!("DeleteArtifact: backend returned ok=false");
+    }
+    let response_id = response.artifact_id.parse("DeleteArtifact artifact_id")?;
+    if response_id != artifact.database_id {
+        bail!(
+            "DeleteArtifact returned artifact_id {response_id}, expected {}",
+            artifact.database_id
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn delete_finalized_artifact_blocking(
     results_service_url: &str,
     token: &str,
@@ -5134,7 +5181,6 @@ pub(crate) fn delete_finalized_artifact_blocking(
     name: &str,
     artifact_id: &str,
 ) -> Result<()> {
-    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let results_service_url = validate_known_service_url(
         results_service_url,
         "ResultsServiceUrl",
@@ -5153,25 +5199,20 @@ pub(crate) fn delete_finalized_artifact_blocking(
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
-    let body = serde_json::to_string(&serde_json::json!({
-        "workflow_run_backend_id": plan_id,
-        "workflow_job_run_backend_id": job_id,
-        "name": name,
-        "database_id": artifact_id.to_string(),
-    }))
-    .context("serialize DeleteArtifact")?;
-    let url = format!("{base}/{SERVICE}/DeleteArtifact");
-    let text = results_service_post(&client, &url, token, &body, "DeleteArtifact")?;
-    let response: DeleteArtifactResponse =
-        serde_json::from_str(&text).context("DeleteArtifact parse")?;
-    if !response.ok {
-        bail!("DeleteArtifact: backend returned ok=false or absent");
+    let matches = artifacts_owned_by_job(
+        list_results_artifacts(&client, base, token, plan_id, job_id)?,
+        job_id,
+    )
+    .into_iter()
+    .filter(|artifact| artifact.name == name && artifact.database_id == artifact_id)
+    .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        bail!(
+            "cannot safely delete Results Service artifact '{name}': expected one matching artifact ID, found {}",
+            matches.len()
+        );
     }
-    let response_id = response.artifact_id.parse("DeleteArtifact artifact_id")?;
-    if response_id != artifact_id {
-        bail!("DeleteArtifact returned artifact_id {response_id}, expected {artifact_id}");
-    }
-    Ok(())
+    delete_artifact_descriptor_blocking(&client, base, token, &matches[0])
 }
 
 #[derive(Debug)]
@@ -5865,7 +5906,7 @@ fn list_results_artifacts(
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for artifact in artifacts {
-        let artifact = artifact.validate(plan_id, job_id)?;
+        let artifact = artifact.validate(plan_id)?;
         if !names.insert(artifact.name.clone()) {
             bail!(
                 "Results Service returned duplicate artifact name '{}'",
@@ -5881,6 +5922,35 @@ fn list_results_artifacts(
         validated.push(artifact);
     }
     Ok(validated)
+}
+
+/// Restrict destructive artifact operations to artifacts produced by this
+/// job. The general listing intentionally remains cross-job because Results
+/// Service downloads support fan-in from parallel producer jobs.
+fn artifacts_owned_by_job(
+    artifacts: Vec<ValidatedResultsArtifactDescriptor>,
+    job_id: &str,
+) -> Vec<ValidatedResultsArtifactDescriptor> {
+    artifacts
+        .into_iter()
+        .filter(|artifact| artifact.workflow_job_run_backend_id == job_id)
+        .collect()
+}
+
+#[cfg(test)]
+fn test_results_artifact_descriptor(
+    job_id: &str,
+    database_id: u64,
+) -> ValidatedResultsArtifactDescriptor {
+    ValidatedResultsArtifactDescriptor {
+        workflow_run_backend_id: "plan".to_owned(),
+        workflow_job_run_backend_id: job_id.to_owned(),
+        database_id,
+        name: "release".to_owned(),
+        size: 7,
+        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .to_owned(),
+    }
 }
 
 pub(crate) fn results_artifact_id_by_name_blocking(
@@ -6654,12 +6724,28 @@ mod tests {
     }
 
     #[test]
+    fn destructive_artifact_selection_excludes_other_jobs() {
+        let selected = artifacts_owned_by_job(
+            vec![
+                test_results_artifact_descriptor("producer", 1),
+                test_results_artifact_descriptor("other-job", 2),
+            ],
+            "producer",
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].database_id, 1);
+        assert_eq!(selected[0].workflow_job_run_backend_id, "producer");
+    }
+
+    #[test]
     fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
+        use std::net::{Shutdown, TcpListener, TcpStream};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let probe_addr = listener.local_addr().unwrap();
+        let base = format!("http://{probe_addr}");
         let server_base = base.clone();
         let server = std::thread::spawn(move || {
             let mut requests = Vec::new();
@@ -6713,6 +6799,27 @@ mod tests {
                 )
                 .unwrap();
             }
+            // Wait for the caller to finish. If a regression restores the old
+            // reconciliation path, the client blocks on a fourth request and
+            // this server answers it, allowing the assertion below to fail.
+            // Otherwise the caller releases this accept with a sentinel after
+            // the upload function returns.
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let count = stream.read(&mut request).unwrap_or(0);
+                if request[..count].starts_with(b"PROBE") {
+                    break;
+                }
+                requests.push(request[..count].to_vec());
+                let body = "unexpected request";
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
             requests
         });
 
@@ -6726,7 +6833,15 @@ mod tests {
             ArtifactUploadOptions::default(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("ok=false"));
+        let mut probe = TcpStream::connect(probe_addr).unwrap();
+        probe.write_all(b"PROBE").unwrap();
+        probe.shutdown(Shutdown::Both).unwrap();
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("ok=false")),
+            "{error:#}"
+        );
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 3);
@@ -7116,7 +7231,7 @@ mod tests {
                             "artifacts": [{
                                 "name": "release-linux",
                                 "workflow_run_backend_id": "plan",
-                                "workflow_job_run_backend_id": "consumer",
+                                "workflow_job_run_backend_id": "producer",
                                 "database_id": 11,
                                 "size": zip_bytes.len(),
                                 "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
@@ -7167,6 +7282,7 @@ mod tests {
         let requests = server.join().unwrap();
         assert!(requests[0].contains("ArtifactService/ListArtifacts"));
         assert!(requests[1].contains("ArtifactService/GetSignedArtifactURL"));
+        assert!(requests[1].contains("\"workflow_job_run_backend_id\":\"producer\""));
         assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
     }
 
@@ -7213,7 +7329,7 @@ mod tests {
                                 {
                                     "name": "release-linux",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "consumer",
+                                    "workflow_job_run_backend_id": "producer",
                                     "database_id": 21,
                                     "size": zip_bytes.len(),
                                     "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
@@ -7221,7 +7337,7 @@ mod tests {
                                 {
                                     "name": ".dockerbuild",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "consumer",
+                                    "workflow_job_run_backend_id": "image",
                                     "database_id": 22,
                                     "size": zip_bytes.len(),
                                     "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())

@@ -209,17 +209,18 @@ green local test, a shared commit, or partial workflow success.
   the new version, preserving active-job safety, caches, leases, logs, and
   evidence.
 
-## P1 — Deliver all Velnor PR and branch work
+## P1 — Deliver all Velnor plan work through the campaign PR
 
 - [ ] Freeze the Velnor PR/branch inventory and inspect every unique commit.
-- [ ] Update each open PR onto current `main`, resolve conflicts using the
-  modern contract, and run checks on the exact PR head.
-- [ ] Merge each PR only after `ci-required` and `DCO` are green; verify a green
-  `main` run after every merge.
-- [ ] For every branch, integrate all non-obsolete unique behavior through a PR
-  or document an explicit modern replacement; never merge deprecated code just
-  to empty a branch.
-- [ ] Confirm every original Velnor PR is delivered to `main`.
+- [ ] Reconcile every open PR's unique behavior into the static campaign branch
+  or document an explicit modern replacement; do not create per-task PRs.
+- [ ] Merge only the sole campaign PR after `ci-required` and `DCO` are green;
+  verify a green `main` run after that merge.
+- [ ] For every branch, integrate all non-obsolete unique behavior through the
+  sole campaign PR or document an explicit modern replacement; never merge
+  deprecated code just to empty a branch.
+- [ ] Confirm every original Velnor PR's unique behavior is delivered to
+  `main` or has documented supersession.
 - [ ] Confirm no branch retains unique undelivered behavior; delete branches
   only after proving integration or documented supersession.
 
@@ -284,7 +285,7 @@ evidence and requires a fresh baseline.
 
 ### Current baseline — 2026-08-28T00:24:44Z
 
-- Repository: branch `fix/watchdog-registration-deadline`, HEAD
+- Repository: former watchdog-registration checkpoint branch, HEAD
   `3b9eabc9fb813653e6e2a5aa6e01e23c224fa9ce`, clean worktree, remote
   `origin=https://github.com/tailrocks/velnor.git`; branch is 269 commits ahead
   of `origin/main` and equal to its pushed branch tip.

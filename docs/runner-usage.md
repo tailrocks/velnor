@@ -93,9 +93,10 @@ that temporary mismatch until the operator activates the new signed record.
   (unassigned, no runner id) on `velnor-trusted` longer than
   `VELNOR_QUEUE_WAIT_SECS` (default 300s) is REST-cancelled by doctor
   before acquire. An already-assigned job is never failed for queue wait.
-  Post-merge `push` events are
-  not accepted on `velnor-trusted` (`merged_push_occupancy`); generated
-  callers route `push` to the GitHub lane so open PRs keep the fleet.
+  Automatic `push` events for trusted tailrocks and ChainArgos repositories
+  use Velnor; public `pull_request` and `merge_group` events remain on GitHub,
+  while jackin-project automatic events remain GitHub-hosted. Fleet policy
+  restricts trusted admission to the exact approved workflow paths and refs.
   Do not hammer DELETE. Leaked reservation files older
   than `VELNOR_RESERVATION_TTL_SECS` (default 6h) are reaped even while the
   daemon PID is still alive (multi-slot daemons share one PID). Doctor
