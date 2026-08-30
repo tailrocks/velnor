@@ -4,6 +4,9 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::forks::ForkTable;
+use crate::releases::ReleaseTable;
+
 const POLICY_SCHEMA: &str = "velnor-actions.package-policy.v1";
 const TAP_CONSUMERS: [&str; 4] = [
     "jackin-project/homebrew-tap",
@@ -13,9 +16,17 @@ const TAP_CONSUMERS: [&str; 4] = [
 ];
 const APT_CONSUMERS: [&str; 2] = ["tailrocks/holla-apt", "tailrocks/velnor-apt"];
 
+#[derive(Debug)]
+pub struct PackagePolicy {
+    schema: String,
+    consumer: Vec<Consumer>,
+    forks: ForkTable,
+    releases: ReleaseTable,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PackagePolicy {
+struct PackageFile {
     schema: String,
     consumer: Vec<Consumer>,
 }
@@ -27,7 +38,6 @@ struct Consumer {
     kind: String,
     source: String,
     source_ref: String,
-    signer_digest: String,
     channels: Vec<String>,
     assets: Vec<String>,
     #[serde(default)]
@@ -35,13 +45,22 @@ struct Consumer {
 }
 
 impl PackagePolicy {
-    pub fn load(root: &Path) -> Result<Self, String> {
+    pub fn load(root: &Path, forks: &ForkTable) -> Result<Self, String> {
         let path = root.join("fleet/packages.toml");
         let bytes = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
-        let policy: Self =
+        let file: PackageFile =
             toml::from_str(&bytes).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+        let policy = Self {
+            schema: file.schema,
+            consumer: file.consumer,
+            forks: forks.clone(),
+            releases: ReleaseTable::load(root)?,
+        };
         policy.validate()?;
+        policy
+            .releases
+            .validate_consumers(policy.consumer.iter().map(|row| row.slug.clone()), forks)?;
         Ok(policy)
     }
 
@@ -76,9 +95,6 @@ impl PackagePolicy {
             }
             if row.source_ref != "refs/tags/v*" {
                 return Err(format!("{} has mutable or unknown source_ref", row.slug));
-            }
-            if !is_sha40(&row.signer_digest) {
-                return Err(format!("{} has an invalid signer_digest", row.slug));
             }
             if row.channels.is_empty() || row.assets.is_empty() {
                 return Err(format!(
@@ -176,7 +192,6 @@ impl PackagePolicy {
         repository: &str,
         release_shas: [&str; 3],
         calver: &str,
-        old_signer: Option<(&str, &str, &str)>,
     ) -> Result<String, String> {
         if release_shas.iter().any(|sha| !is_sha40(sha)) {
             return Err(
@@ -191,32 +206,41 @@ impl PackagePolicy {
             .iter()
             .find(|row| row.slug == repository)
             .ok_or_else(|| format!("{repository:?} is not a package consumer"))?;
-        let (old_digest, activated_at, expires_at) = match old_signer {
-            None => ("", "", ""),
-            Some((digest, activated, expires)) => {
-                if !is_sha40(digest) || digest == row.signer_digest {
-                    return Err("old signer digest must be a distinct 40-hex SHA".into());
-                }
-                if !looks_rfc3339_utc(activated) || !looks_rfc3339_utc(expires) {
-                    return Err("rotation timestamps must be UTC RFC3339 seconds".into());
-                }
-                (digest, activated, expires)
-            }
-        };
+        let release = self
+            .releases
+            .by_calver(calver)
+            .ok_or_else(|| format!("release table has no row for {calver}"))?;
+        let signer = release
+            .signer_for(repository)
+            .ok_or_else(|| format!("release {calver} has no signer row for {repository}"))?;
+        if release_shas.len() != self.forks.len() {
+            return Err("release SHA count does not match the fork table".into());
+        }
         let template = match row.kind.as_str() {
             "tap" => TAP_TEMPLATE,
             "apt" => APT_TEMPLATE,
             _ => return Err("package policy contains an unknown kind".into()),
         };
-        let rendered = template
-            .replace("@JACKIN_FLEET_SHA@", release_shas[0])
-            .replace("@TAILROCKS_FLEET_SHA@", release_shas[1])
-            .replace("@CHAINARGOS_FLEET_SHA@", release_shas[2])
+        let mut rendered = template.to_string();
+        for (fork, sha) in self.forks.forks().iter().zip(release_shas) {
+            rendered = rendered.replace(fork.placeholder(), sha);
+        }
+        let rendered = rendered
             .replace("@CALVER@", calver)
-            .replace("@CURRENT_SIGNER_DIGEST@", &row.signer_digest)
-            .replace("@OLD_SIGNER_DIGEST@", old_digest)
-            .replace("@OLD_SIGNER_ACTIVATED_AT@", activated_at)
-            .replace("@OLD_SIGNER_EXPIRES_AT@", expires_at)
+            .replace("@SIGNER_FORK@", signer.signer_fork())
+            .replace("@CURRENT_SIGNER_DIGEST@", signer.current_digest())
+            .replace(
+                "@OLD_SIGNER_DIGEST@",
+                signer.old_digest().unwrap_or_default(),
+            )
+            .replace(
+                "@OLD_SIGNER_ACTIVATED_AT@",
+                signer.old_activated_at().unwrap_or_default(),
+            )
+            .replace(
+                "@OLD_SIGNER_EXPIRES_AT@",
+                signer.old_expires_at().unwrap_or_default(),
+            )
             .replace(
                 "@PACKAGE_CHANNELS@",
                 if row.slug == "jackin-project/homebrew-tap" {
@@ -225,17 +249,21 @@ impl PackagePolicy {
                     "[stable]"
                 },
             );
-        for placeholder in [
-            "@JACKIN_FLEET_SHA@",
-            "@TAILROCKS_FLEET_SHA@",
-            "@CHAINARGOS_FLEET_SHA@",
-            "@CALVER@",
-            "@CURRENT_SIGNER_DIGEST@",
-            "@OLD_SIGNER_DIGEST@",
-            "@OLD_SIGNER_ACTIVATED_AT@",
-            "@OLD_SIGNER_EXPIRES_AT@",
-            "@PACKAGE_CHANNELS@",
-        ] {
+        for placeholder in self
+            .forks
+            .forks()
+            .iter()
+            .map(|fork| fork.placeholder())
+            .chain([
+                "@CALVER@",
+                "@SIGNER_FORK@",
+                "@CURRENT_SIGNER_DIGEST@",
+                "@OLD_SIGNER_DIGEST@",
+                "@OLD_SIGNER_ACTIVATED_AT@",
+                "@OLD_SIGNER_EXPIRES_AT@",
+                "@PACKAGE_CHANNELS@",
+            ])
+        {
             if rendered.contains(placeholder) {
                 return Err(format!("package consumer rendering left {placeholder}"));
             }
@@ -257,17 +285,6 @@ fn valid_calver(value: &str) -> bool {
         && parts
             .iter()
             .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-}
-
-fn looks_rfc3339_utc(value: &str) -> bool {
-    value.len() == 20
-        && value.ends_with('Z')
-        && value.as_bytes()[4] == b'-'
-        && value.as_bytes()[7] == b'-'
-        && value.as_bytes()[10] == b'T'
-        && value.as_bytes()[13] == b':'
-        && value.as_bytes()[16] == b':'
-        && value[..19].bytes().filter(|b| b.is_ascii_digit()).count() == 14
 }
 
 pub const SIGNER_WORKFLOW: &str = include_str!("package_signer.yml");

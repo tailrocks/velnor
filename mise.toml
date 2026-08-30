@@ -64,6 +64,11 @@ description = "Fetch pinned remote actions and verify their recursive executable
 depends = ["_toolchain"]
 run = "cargo run --locked -p velnor-actions-generator -- verify-remote --root ."
 
+[tasks."release:check"]
+description = "Verify fork release trees are byte-identical at a release tag"
+depends = ["_toolchain"]
+run = "cargo run --locked -p velnor-actions-generator -- release-check --root ."
+
 [tasks."ci:contract"]
 description = "Check the generator-owned mise tool registry and fleet shape"
 depends = ["_toolchain"]

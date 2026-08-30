@@ -5,6 +5,7 @@ mod common;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+use velnor_actions_generator::forks::ForkTable;
 use velnor_actions_generator::model::{FleetManifest, is_sha40};
 use velnor_actions_generator::render::{self, CALVER_PLACEHOLDER, FLEET_SHA_PLACEHOLDER};
 use velnor_actions_generator::{ALL_CLASSES, RepositoryClass, audit, generate};
@@ -88,6 +89,11 @@ fn write_repos(dir: &Path, body: &str) {
     std::fs::copy(
         common::repo_root().join("fleet").join("classes.toml"),
         dir.join("fleet").join("classes.toml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        common::repo_root().join("fleet").join("forks.toml"),
+        dir.join("fleet").join("forks.toml"),
     )
     .unwrap();
 }
@@ -234,7 +240,8 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
     use velnor_actions_generator::package::{
         APT_TEMPLATE, PackagePolicy, SIGNER_WORKFLOW, TAP_TEMPLATE, UPDATER_WORKFLOW,
     };
-    PackagePolicy::load(&common::repo_root()).expect("package policy loads");
+    PackagePolicy::load(&common::repo_root(), &ForkTable::canonical())
+        .expect("package policy loads");
     let package_policy = std::fs::read_to_string(common::repo_root().join("fleet/packages.toml"))
         .expect("package policy bytes");
     assert!(!package_policy.contains(".tar.xz"));
@@ -341,9 +348,10 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
 #[test]
 fn package_generation_writes_exact_callables_and_templates() {
     let dir = common::bound_fixture(DUMMY_SHA);
-    let updater = velnor_actions_generator::package::PackagePolicy::load(&dir)
-        .unwrap()
-        .render_updater();
+    let updater =
+        velnor_actions_generator::package::PackagePolicy::load(&dir, &ForkTable::canonical())
+            .unwrap()
+            .render_updater();
     for (path, expected) in [
         (
             ".github/workflows/package-signer.yml",
@@ -364,24 +372,21 @@ fn package_generation_writes_exact_callables_and_templates() {
 }
 
 #[test]
-fn package_consumer_renderer_binds_current_and_bounded_old_signers() {
-    let policy = velnor_actions_generator::package::PackagePolicy::load(&common::repo_root())
-        .expect("package policy loads");
+fn package_consumer_renderer_binds_release_signer_slots() {
+    let policy = velnor_actions_generator::package::PackagePolicy::load(
+        &common::repo_root(),
+        &ForkTable::canonical(),
+    )
+    .expect("package policy loads");
     let current = "1111111111111111111111111111111111111111";
     let owner_shas = [
         current,
         "3333333333333333333333333333333333333333",
         "4444444444444444444444444444444444444444",
     ];
-    let old = "2222222222222222222222222222222222222222";
     let rendered = policy
-        .render_consumer(
-            "tailrocks/homebrew-tablerock",
-            owner_shas,
-            "2026.8.6",
-            Some((old, "2026-08-12T00:00:00Z", "2026-09-11T00:00:00Z")),
-        )
-        .expect("bounded rotation renders");
+        .render_consumer("tailrocks/homebrew-tablerock", owner_shas, "2026.8.33")
+        .expect("release signer renders");
     assert_eq!(rendered.matches(current).count(), 1);
     assert_eq!(rendered.matches(owner_shas[1]).count(), 1);
     assert_eq!(rendered.matches(owner_shas[2]).count(), 1);
@@ -391,13 +396,13 @@ fn package_consumer_renderer_binds_current_and_bounded_old_signers() {
             .count(),
         3
     );
-    assert_eq!(rendered.matches(old).count(), 3);
+    assert_eq!(rendered.matches("signer-fork: \"tailrocks\"").count(), 3);
     assert!(!rendered.contains("@FLEET_SHA@"));
-    assert!(rendered.contains("old-signer-expires-at: \"2026-09-11T00:00:00Z\""));
+    assert!(rendered.contains("old-signer-digest: \"\""));
 
     assert!(
         policy
-            .render_consumer("tailrocks/not-a-consumer", owner_shas, "2026.8.6", None)
+            .render_consumer("tailrocks/not-a-consumer", owner_shas, "2026.8.33")
             .is_err()
     );
     assert!(
@@ -405,29 +410,19 @@ fn package_consumer_renderer_binds_current_and_bounded_old_signers() {
             .render_consumer(
                 "tailrocks/homebrew-tablerock",
                 ["main", owner_shas[1], owner_shas[2]],
-                "2026.8.6",
-                None
+                "2026.8.33",
             )
             .is_err()
     );
     assert!(
         policy
-            .render_consumer("tailrocks/homebrew-tablerock", owner_shas, "v1", None)
+            .render_consumer("tailrocks/homebrew-tablerock", owner_shas, "v1")
             .is_err()
     );
     assert!(
         policy
-            .render_consumer(
-                "tailrocks/homebrew-tablerock",
-                owner_shas,
-                "2026.8.6",
-                Some((
-                    "1e062d5bbe329873047ee8a8e79bba0811e53b65",
-                    "2026-08-12T00:00:00Z",
-                    "2026-09-11T00:00:00Z"
-                )),
-            )
-            .is_err()
+            .render_consumer("tailrocks/homebrew-tablerock", owner_shas, "2026.8.32",)
+            .is_ok()
     );
 }
 
@@ -442,7 +437,7 @@ fn updater_executes_explicit_current_then_old_signer_alternatives() {
     assert!(body.contains("candidate_digests=(\"$source_digest\")"));
     assert!(body.contains("for signer_digest in \"${candidate_digests[@]}\""));
     assert!(body.contains("--signer-digest \"$signer_digest\""));
-    assert!(body.contains("$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"));
+    assert!(body.contains("$SIGNER_FORK/velnor-actions/.github/workflows/package-signer.yml"));
     assert!(body.contains("$SOURCE_REPOSITORY/.github/workflows/preview.yml"));
     assert!(body.contains("sort_by([.tag_name | ltrimstr(\"v\") | split(\".\") | map(tonumber)])"));
     assert!(!body.contains("sort_by(.published_at)"));
@@ -633,43 +628,43 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "9985949ffab8ba11f496531d5f0a5720ff7e0fe6db2416989c063a819bfe59ac",
+            "b64037e36988a9056dad0f90f8b798588e56a62cd91f158574e785f38e71df5a",
         ),
         (
             "templates/native/ci.yml",
-            "a535a04894935036ce3f5aacb511643e28e8fb878e3a34d375168d36e74f15f1",
+            "8666e38f835806cd0d93e120b0b7c73320b5ab01914befbc7d67795214c59d87",
         ),
         (
             "templates/tap/ci.yml",
-            "0c46efcc6ff6ab00ed18803b0307342b02ec0a5e79080a4a36652fbfff3fb2b9",
+            "dba7498a02346438f1d4ff070a964d711faa18827ea4deb3105058a41556c0ca",
         ),
         (
             "templates/apt/ci.yml",
-            "6ce72e47eb7768638442a643843806274e940bef18afac3e18fa82b4f316b21c",
+            "89e1b7970898087b62d16239f0abde4da0f4b8e10855ebde3ae9e722597264be",
         ),
         (
             "templates/fixture/ci.yml",
-            "70f093302ff6b4c9957a592db7456ca8b0c09a3c0518a5daf88742a2e6b8ad2e",
+            "75a311d5d733be8772325e125cdae11c3fb9173ba01a79803d8a0d62a4119a7d",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "ca4fac77d6f16aec779c80d112c77f87dace482a60a771aed374c6ed11bd9b69",
+            "d39709b2ef7f2093fe2d9b658d17d23528e903a1aba0ad270d570a06310f1380",
         ),
         (
             ".github/workflows/ci-native.yml",
-            "4d042b9fe8f95d12c91933a2f6459b8db04fbe7910366882f17fef56ac0e0c4e",
+            "18af8c045a9cb2d46436b7eb0bc622115e24035d420967eab0c51aa21eedf2aa",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "4400dea82645af4cf6dc51a31f666f4e857e4211b246deab4bda437562f66eb4",
+            "c1f2b9ecfcb5aea28f1be36ed3ba630837d7801427377c957fd5486fb29179c2",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "3ac2d6b6ff2a4457337c65e2fd1b0a53b12575f603256732dc778b7de00fded7",
+            "e1d7584a9763000103f7ed897cfb06db6b28fa4ea7644ed7d4458bcdbc03d7fa",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "ab63653d949c0302a252eb1306d0bbcbeed69a03ffbc277c188dee57cbcb6d73",
+            "e956e746619f7e84ac82d34c049d4fc8b02ab3d80998995fe857ea5a039649ea",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();

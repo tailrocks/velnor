@@ -121,7 +121,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          EXPECTED_CALLER_TEMPLATE_SHA256: 6ce72e47eb7768638442a643843806274e940bef18afac3e18fa82b4f316b21c
+          EXPECTED_CALLER_TEMPLATE_SHA256: 89e1b7970898087b62d16239f0abde4da0f4b8e10855ebde3ae9e722597264be
           DECLARED_CACHE_IDS: tools
         run: |
           set -euo pipefail
@@ -130,20 +130,22 @@ jobs:
           is_benchmark_generation() {
             [[ "$1" =~ ^[a-z0-9][a-z0-9._:/-]{6,238}[a-z0-9]$ && "$1" != *//* && "/$1/" != */../* ]]
           }
-          is_declared_cache() { [[ ",${DECLARED_CACHE_IDS}," == *",$1,"* ]]; }
-          protected_dispatch() {
-            [[ "${EVENT_NAME}" == "workflow_dispatch" ]] || fail "operation requires workflow_dispatch"
-            [[ "${REF_TYPE}" == "tag" && "${REF_PROTECTED}" == "true" ]] || fail "operation requires protected immutable tag"
-            [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ && "${WORKFLOW_SHA}" == "${HEAD_SHA}" ]] || fail "workflow blob does not equal protected tag target"
-            [[ "${REF_NAME}" =~ ^20[0-9]{2}\.[0-9]+\.[0-9]+$ ]] || fail "benchmark ref is not a release tag"
-            tag_row="$(gh api "repos/${REPOSITORY}/git/ref/tags/${REF_NAME}" --jq '[.object.type,.object.sha]|@tsv')"
+            is_declared_cache() { [[ ",${DECLARED_CACHE_IDS}," == *",$1,"* ]]; }
+            protected_dispatch() {
+              [[ "${EVENT_NAME}" == "workflow_dispatch" ]] || fail "operation requires workflow_dispatch"
+              [[ "${REF_TYPE}" == "tag" && "${REF_PROTECTED}" == "true" ]] || fail "operation requires protected immutable tag"
+              [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ && "${WORKFLOW_SHA}" == "${HEAD_SHA}" ]] || fail "workflow blob does not equal protected tag target"
+              [[ "${REF_NAME}" =~ ^20[0-9]{2}\.[0-9]+\.[0-9]+$ ]] || fail "benchmark ref is not a release tag"
+              tag_row="$(gh api "repos/${REPOSITORY}/git/ref/tags/${REF_NAME}" --jq '[.object.type,.object.sha]|@tsv')"
             IFS=$'\t' read -r tag_type tag_sha <<<"${tag_row}"
             if [[ "${tag_type}" == tag ]]; then
               tag_row="$(gh api "repos/${REPOSITORY}/git/tags/${tag_sha}" --jq '[.object.type,.object.sha]|@tsv')"
               IFS=$'\t' read -r tag_type tag_sha <<<"${tag_row}"
-            fi
-            [[ "${tag_type}" == commit && "${tag_sha}" == "${HEAD_SHA}" ]] || fail "protected tag does not resolve exactly to dispatched commit"
-            workflow_endpoint="repos/${REPOSITORY}/contents/.github/workflows/ci.yml?ref=${HEAD_SHA}"
+              fi
+              [[ "${tag_type}" == commit && "${tag_sha}" == "${HEAD_SHA}" ]] || fail "protected tag does not resolve exactly to dispatched commit"
+            }
+            verify_caller() {
+              workflow_endpoint="repos/${REPOSITORY}/contents/.github/workflows/ci.yml?ref=${HEAD_SHA}"
             workflow_blob="$(gh api "${workflow_endpoint}" --jq .sha)"
             [[ "${workflow_blob}" =~ ^[0-9a-f]{40}$ ]] || fail "generated workflow blob is not Git-bound"
             workflow_file="$(mktemp)"; normalized_file="$(mktemp)"
@@ -153,7 +155,7 @@ jobs:
             computed_blob="$({ printf 'blob %s\0' "${byte_count}"; cat "${workflow_file}"; } | sha1sum | cut -d' ' -f1)"
             [[ "${computed_blob}" == "${workflow_blob}" ]] || fail "workflow bytes do not match Git blob identity"
             mapfile -t pin_rows < <(sed -nE 's~^    uses: (jackin-project|tailrocks|ChainArgos)/velnor-actions/\.github/workflows/ci-[a-z-]+\.yml@([0-9a-f]{40}) # (20[0-9]{2}\.[0-9]+\.[0-9]+)$~\1\t\2\t\3~p' "${workflow_file}")
-            [[ "${#pin_rows[@]}" == 3 ]] || fail "caller does not contain exactly three generated owner pins"
+            [[ "${#pin_rows[@]}" == 3 ]] || fail "caller owner pin cardinality mismatch"
             owners="$(printf '%s\n' "${pin_rows[@]}" | cut -f1 | LC_ALL=C sort -u | paste -sd, -)"
             [[ "${owners}" == 'ChainArgos,jackin-project,tailrocks' ]] || fail "caller owner pin set mismatch"
             fleet_calver="$(printf '%s\n' "${pin_rows[@]}" | cut -f3 | sort -u)"
@@ -170,13 +172,13 @@ jobs:
               sed "\\~uses: ${owner}/velnor-actions/~ s/@${owner_sha} # ${fleet_calver}/${placeholder} # @CALVER@/" "${normalized_file}" > "${normalized_file}.next"
               mv "${normalized_file}.next" "${normalized_file}"
             done
-            [[ "$(grep -Ec '@(JACKIN|TAILROCKS|CHAINARGOS)_FLEET_SHA@ # @CALVER@' "${normalized_file}")" == 3 ]] || fail "caller normalization count mismatch"
+            [[ "$(grep -Ec '@[A-Z0-9_]+@ # @CALVER@' "${normalized_file}")" == 3 ]] || fail "caller normalization count mismatch"
             normalized_sha256="$(sha256sum "${normalized_file}" | cut -d' ' -f1)"
             [[ "${EXPECTED_CALLER_TEMPLATE_SHA256}" =~ ^[0-9a-f]{64}$ && "${normalized_sha256}" == "${EXPECTED_CALLER_TEMPLATE_SHA256}" ]] || fail "caller is not the exact generated class template"
-          }
+            }
 
           correlation="ordinary"
-          workflow_blob="none"
+            verify_caller
           cache_namespace="ci-v1"
           if [[ -n "${RECOVERY_PROOF_ID}" ]]; then
             [[ "${EVENT_NAME}" == "workflow_dispatch" && "${REF_TYPE}" == "branch" ]] || fail "recovery requires branch dispatch"

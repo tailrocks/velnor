@@ -33,6 +33,7 @@ jobs:
       consumer-repository: ${{ github.repository }}
       channel: ${{ matrix.channel }}
       current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
+      signer-fork: "@SIGNER_FORK@"
       old-signer-digest: "@OLD_SIGNER_DIGEST@"
       old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
       old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
@@ -53,6 +54,7 @@ jobs:
       consumer-repository: ${{ github.repository }}
       channel: ${{ matrix.channel }}
       current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
+      signer-fork: "@SIGNER_FORK@"
       old-signer-digest: "@OLD_SIGNER_DIGEST@"
       old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
       old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
@@ -73,6 +75,7 @@ jobs:
       consumer-repository: ${{ github.repository }}
       channel: ${{ matrix.channel }}
       current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
+      signer-fork: "@SIGNER_FORK@"
       old-signer-digest: "@OLD_SIGNER_DIGEST@"
       old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
       old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"

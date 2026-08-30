@@ -13,6 +13,9 @@ on:
       current-signer-digest:
         required: true
         type: string
+      signer-fork:
+        required: true
+        type: string
       old-signer-digest:
         required: false
         type: string
@@ -204,6 +207,7 @@ jobs:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
           GH_TOKEN: ${{ github.token }}
           CURRENT_SIGNER_DIGEST: ${{ inputs.current-signer-digest }}
+          SIGNER_FORK: ${{ inputs.signer-fork }}
           OLD_SIGNER_DIGEST: ${{ inputs.old-signer-digest }}
           OLD_SIGNER_ACTIVATED_AT: ${{ inputs.old-signer-activated-at }}
           OLD_SIGNER_EXPIRES_AT: ${{ inputs.old-signer-expires-at }}
@@ -211,8 +215,8 @@ jobs:
         run: |
           set -euo pipefail
 @CONSUMER_SOURCE_CASES@
-          SOURCE_OWNER=${SOURCE_REPOSITORY%%/*}
           [[ "$CURRENT_SIGNER_DIGEST" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SIGNER_FORK" =~ ^[A-Za-z0-9._-]+$ ]]
           accepted_digests=("$CURRENT_SIGNER_DIGEST")
           if [[ -n "$OLD_SIGNER_DIGEST$OLD_SIGNER_ACTIVATED_AT$OLD_SIGNER_EXPIRES_AT" ]]; then
             [[ "$OLD_SIGNER_DIGEST" =~ ^[0-9a-f]{40}$ ]]
@@ -236,7 +240,7 @@ jobs:
               signer_workflow="$SOURCE_REPOSITORY/.github/workflows/preview.yml"
               candidate_digests=("$source_digest")
             else
-              signer_workflow="$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"
+              signer_workflow="$SIGNER_FORK/velnor-actions/.github/workflows/package-signer.yml"
               candidate_digests=("${accepted_digests[@]}")
             fi
             for signer_digest in "${candidate_digests[@]}"; do

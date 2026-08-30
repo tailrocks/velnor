@@ -13,12 +13,11 @@ use std::process::{Command, Stdio};
 
 use crate::cache::CacheContract;
 use crate::composite;
-use crate::model::{FleetManifest, OWNERS, is_sha40};
+use crate::forks::ForkTable;
+use crate::model::{FleetManifest, is_sha40};
 use crate::package::{self, PackagePolicy};
-use crate::render::{
-    self, ACTIONS_REPO, CALVER_PLACEHOLDER, CANONICAL_OWNER, FLEET_SHA_PLACEHOLDER,
-    OWNER_SHA_PLACEHOLDERS,
-};
+use crate::releases::ReleaseTable;
+use crate::render::{self, ACTIONS_REPO, CALVER_PLACEHOLDER, FLEET_SHA_PLACEHOLDER};
 use crate::tools::{self, ToolRegistry};
 use crate::{ALL_CLASSES, RepositoryClass};
 use serde::Deserialize;
@@ -59,9 +58,10 @@ const AUDIT_CALVER: &str = "2026.7.0";
 /// Returns `Err` on any contract, byte, closure, owner-fan-out, aggregation,
 /// gate, or routing violation.
 pub fn audit(root: &Path) -> Result<String, String> {
+    let forks = ForkTable::load(root)?;
     let manifest = FleetManifest::load(root)?;
     let caches = CacheContract::load(&root.join("fleet").join("caches.toml"))?;
-    let packages = PackagePolicy::load(root)?;
+    let packages = PackagePolicy::load(root, &forks)?;
     let registry = ToolRegistry::load(&tools::registry_path(root))?;
     let remote_closure = load_remote_closure(root)?;
 
@@ -73,10 +73,10 @@ pub fn audit(root: &Path) -> Result<String, String> {
 
     // Every class template: regenerate and compare committed bytes.
     for class in ALL_CLASSES {
-        let rendered = render::consumer_template(class);
+        let rendered = render::consumer_template_for(class, &forks);
         let committed = read_committed(&template_path(root, class))?;
         require_equal(&committed, &rendered, &template_path_display(class))?;
-        audit_consumer_structure(class, &rendered)?;
+        audit_consumer_structure(class, &rendered, &forks)?;
     }
 
     let tools_template = root.join("templates").join("tools").join("mise.toml");
@@ -98,7 +98,7 @@ pub fn audit(root: &Path) -> Result<String, String> {
     }
 
     // Materialize all 28 repositories and prove each equals its class template.
-    audit_materialization(&manifest)?;
+    audit_materialization(&manifest, &forks)?;
 
     // If the block SHA is bound, audit the full callable-workflow closure.
     let block_sha_path = root.join("fleet").join("block-sha");
@@ -106,10 +106,10 @@ pub fn audit(root: &Path) -> Result<String, String> {
         let block_sha = read_block_sha(&block_sha_path)?;
         for class in ALL_CLASSES {
             let contract = manifest.class(class);
-            let rendered = render::callable_workflow(contract, &caches, &block_sha);
+            let rendered = render::callable_workflow_for(contract, &caches, &block_sha, &forks);
             let committed = read_committed(&callable_path(root, class))?;
             require_equal(&committed, &rendered, &callable_path_display(class))?;
-            audit_callable_structure(class, &rendered, &block_sha, &remote_closure)?;
+            audit_callable_structure(class, &rendered, &block_sha, &remote_closure, &forks)?;
         }
         let updater = packages.render_updater();
         for (path, expected) in [
@@ -139,6 +139,7 @@ pub fn audit(root: &Path) -> Result<String, String> {
                     &block_sha,
                     &path.display().to_string(),
                     &remote_closure,
+                    forks.canonical_owner(),
                 )?;
             }
         }
@@ -347,6 +348,123 @@ pub fn verify_remote_closure(root: &Path) -> Result<String, String> {
     ))
 }
 
+/// Verify that every declared owner-local fork has the same release tree as the
+/// canonical owner at an exact CalVer tag.
+pub fn release_check(root: &Path, requested: Option<&str>) -> Result<String, String> {
+    let forks = ForkTable::load(root)?;
+    let releases = ReleaseTable::load(root)?;
+    let calver = requested.unwrap_or_else(|| releases.current().calver());
+    if calver.is_empty() {
+        return Err("release label must be non-empty".into());
+    }
+    if releases.by_calver(calver).is_none() {
+        return Err(format!("release table has no row for {calver}"));
+    }
+
+    let mut trees = BTreeMap::new();
+    for fork in forks.forks() {
+        let endpoint = format!(
+            "repos/{}/{}/git/ref/tags/{calver}",
+            fork.owner(),
+            forks.repository()
+        );
+        let tag_row = gh_api_jq(&endpoint, "[.object.type,.object.sha]|@tsv")?;
+        let commit_sha = resolve_release_commit(fork.owner(), forks.repository(), &tag_row)?;
+        let commit_endpoint = format!(
+            "repos/{}/{}/git/commits/{commit_sha}",
+            fork.owner(),
+            forks.repository()
+        );
+        let tree_sha = gh_api_jq(&commit_endpoint, ".tree.sha")?;
+        if !is_sha40(&tree_sha) {
+            return Err(format!(
+                "release {calver} returned an invalid tree SHA for {}",
+                fork.owner()
+            ));
+        }
+        trees.insert(fork.owner().to_string(), tree_sha);
+    }
+    let canonical_tree = trees
+        .get(forks.canonical_owner())
+        .ok_or_else(|| "canonical fork tree was not collected".to_string())?;
+    let mismatches = trees
+        .iter()
+        .filter(|(owner, tree)| {
+            owner.as_str() != forks.canonical_owner() && *tree != canonical_tree
+        })
+        .map(|(owner, tree)| format!("{owner}={tree}"))
+        .collect::<Vec<_>>();
+    if !mismatches.is_empty() {
+        return Err(format!(
+            "release {calver} fork trees differ from {}: {}",
+            forks.canonical_owner(),
+            mismatches.join(", ")
+        ));
+    }
+    Ok(format!(
+        "fork release valid: {calver} ({} owner trees byte-equal)",
+        trees.len()
+    ))
+}
+
+fn gh_api_jq(endpoint: &str, expression: &str) -> Result<String, String> {
+    let output = Command::new("gh")
+        .args(["api", endpoint, "--jq", expression])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("executing gh for {endpoint}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "fetching {endpoint} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value = String::from_utf8(output.stdout)
+        .map_err(|error| format!("gh returned non-UTF-8 data for {endpoint}: {error}"))?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    if value.is_empty() {
+        return Err(format!("gh returned an empty value for {endpoint}"));
+    }
+    Ok(value.to_string())
+}
+
+fn resolve_release_commit(owner: &str, repository: &str, tag_row: &str) -> Result<String, String> {
+    let mut fields = tag_row.split('\t');
+    let mut object_type = fields.next().unwrap_or_default().to_string();
+    let mut object_sha = fields.next().unwrap_or_default().to_string();
+    if fields.next().is_some() || !is_sha40(&object_sha) {
+        return Err(format!(
+            "invalid release tag object for {owner}/{repository}"
+        ));
+    }
+    for _ in 0..=2 {
+        match object_type.as_str() {
+            "commit" => return Ok(object_sha),
+            "tag" => {
+                let endpoint = format!("repos/{owner}/{repository}/git/tags/{object_sha}");
+                let row = gh_api_jq(&endpoint, "[.object.type,.object.sha]|@tsv")?;
+                let mut next = row.split('\t');
+                object_type = next.next().unwrap_or_default().to_string();
+                object_sha = next.next().unwrap_or_default().to_string();
+                if next.next().is_some() || !is_sha40(&object_sha) {
+                    return Err(format!(
+                        "invalid annotated release tag for {owner}/{repository}"
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "release tag for {owner}/{repository} does not resolve to a commit"
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "release tag for {owner}/{repository} is nested too deeply"
+    ))
+}
+
 fn derive_manifest_closure(
     manifest_path: &str,
     raw: &[u8],
@@ -549,15 +667,21 @@ fn uses_identities(text: &str) -> Vec<String> {
     identities
 }
 
-fn audit_consumer_structure(class: RepositoryClass, rendered: &str) -> Result<(), String> {
+fn audit_consumer_structure(
+    class: RepositoryClass,
+    rendered: &str,
+    forks: &ForkTable,
+) -> Result<(), String> {
     let what = template_path_display(class);
     let file = render::callable_file_name(class);
 
-    // Exactly three static owner-local reusable calls, one per recognized owner,
+    // Exactly one static owner-local reusable call per recognized owner,
     // selected only by exact github.repository_owner. No dynamic `uses`.
-    for (owner, release_placeholder) in OWNERS.iter().zip(OWNER_SHA_PLACEHOLDERS) {
+    for fork in forks.forks() {
+        let owner = fork.owner();
         let call = format!(
-            "uses: {owner}/{ACTIONS_REPO}/.github/workflows/{file}{release_placeholder} # {CALVER_PLACEHOLDER}"
+            "uses: {owner}/{ACTIONS_REPO}/.github/workflows/{file}{} # {CALVER_PLACEHOLDER}",
+            fork.placeholder()
         );
         if !rendered.contains(&call) {
             return Err(format!("{what}: missing owner-local call for {owner}"));
@@ -567,10 +691,10 @@ fn audit_consumer_structure(class: RepositoryClass, rendered: &str) -> Result<()
             return Err(format!("{what}: missing exact owner guard for {owner}"));
         }
     }
-    if rendered.matches("uses:").count() != OWNERS.len() {
+    if rendered.matches("uses:").count() != forks.len() {
         return Err(format!(
             "{what}: expected exactly {} reusable-workflow calls",
-            OWNERS.len()
+            forks.len()
         ));
     }
     // A dynamic `uses:` (expression in the ref) is forbidden.
@@ -626,6 +750,7 @@ fn audit_callable_structure(
     rendered: &str,
     block_sha: &str,
     remote_closure: &RemoteClosure,
+    forks: &ForkTable,
 ) -> Result<(), String> {
     let what = callable_path_display(class);
 
@@ -654,8 +779,14 @@ fn audit_callable_structure(
     }
 
     // Internal composite closure is pinned to the block SHA.
-    let run_gate = format!("{CANONICAL_OWNER}/{ACTIONS_REPO}/actions/run-gate@{block_sha}");
-    let aggregate = format!("{CANONICAL_OWNER}/{ACTIONS_REPO}/actions/aggregate@{block_sha}");
+    let run_gate = format!(
+        "{}/{ACTIONS_REPO}/actions/run-gate@{block_sha}",
+        forks.canonical_owner()
+    );
+    let aggregate = format!(
+        "{}/{ACTIONS_REPO}/actions/aggregate@{block_sha}",
+        forks.canonical_owner()
+    );
     require_contains(rendered, &run_gate, &what, "run-gate pinned to block SHA")?;
     require_contains(rendered, &aggregate, &what, "aggregate pinned to block SHA")?;
 
@@ -665,7 +796,33 @@ fn audit_callable_structure(
             return Err(format!("{what}: non-40-hex or mutable ref {reference:?}"));
         }
     }
-    audit_admitted_closure(rendered, block_sha, &what, remote_closure)?;
+    audit_admitted_closure(
+        rendered,
+        block_sha,
+        &what,
+        remote_closure,
+        forks.canonical_owner(),
+    )?;
+
+    require_contains(
+        rendered,
+        "caller owner pin cardinality",
+        &what,
+        "generated caller cardinality check",
+    )?;
+    if rendered.contains("@OWNER_") || rendered.contains("@FORK_COUNT@") {
+        return Err(format!(
+            "{what}: generated caller verifier left a fork-table placeholder"
+        ));
+    }
+    for fork in forks.forks() {
+        require_contains(
+            rendered,
+            &format!("  {})", fork.owner()),
+            &what,
+            "generated caller owner truth table",
+        )?;
+    }
 
     // A selected Velnor lane always means a real Velnor job. Event-dependent
     // substitution would make the lane selector and its evidence dishonest.
@@ -739,6 +896,7 @@ fn audit_admitted_closure(
     block_sha: &str,
     what: &str,
     closure: &RemoteClosure,
+    canonical_owner: &str,
 ) -> Result<(), String> {
     for identity in uses_identities(rendered) {
         let (target, reference) = identity
@@ -748,7 +906,7 @@ fn audit_admitted_closure(
         let owner = segments.next().unwrap_or_default();
         let repository = segments.next().unwrap_or_default();
         let root = format!("{owner}/{repository}");
-        if root == format!("{CANONICAL_OWNER}/{ACTIONS_REPO}") {
+        if root == format!("{canonical_owner}/{ACTIONS_REPO}") {
             if reference != block_sha {
                 return Err(format!(
                     "{what}: internal action is not block-bound: {identity}"
@@ -782,20 +940,21 @@ fn audit_admitted_closure(
     Ok(())
 }
 
-fn audit_materialization(manifest: &FleetManifest) -> Result<(), String> {
+fn audit_materialization(manifest: &FleetManifest, forks: &ForkTable) -> Result<(), String> {
     for class in ALL_CLASSES {
-        let template = render::consumer_template(class);
-        let release_shas = [AUDIT_RELEASE_SHA; 3];
-        let class_bytes = render::render_consumer(&template, release_shas, AUDIT_CALVER)?;
+        let template = render::consumer_template_for(class, forks);
+        let release_shas = vec![AUDIT_RELEASE_SHA; forks.len()];
+        let class_bytes =
+            render::render_consumer_for(&template, forks, &release_shas, AUDIT_CALVER)?;
 
         // Three coherent owner references sharing one CalVer. Each SHA is
         // owner-local; the audit fixture intentionally uses the same bytes.
         let want_ref = format!("@{AUDIT_RELEASE_SHA} # {AUDIT_CALVER}");
-        if class_bytes.matches(&want_ref).count() != OWNERS.len() {
+        if class_bytes.matches(&want_ref).count() != forks.len() {
             return Err(format!(
                 "class {} materialization does not bind all {} owner calls to the release",
                 class.code(),
-                OWNERS.len()
+                forks.len()
             ));
         }
         // No placeholder survives; a second substitution is refused.
@@ -805,7 +964,7 @@ fn audit_materialization(manifest: &FleetManifest) -> Result<(), String> {
                 class.code()
             ));
         }
-        if render::render_consumer(&class_bytes, release_shas, AUDIT_CALVER).is_ok() {
+        if render::render_consumer_for(&class_bytes, forks, &release_shas, AUDIT_CALVER).is_ok() {
             return Err(format!(
                 "class {} accepted a second repository-specific substitution",
                 class.code()
@@ -815,7 +974,8 @@ fn audit_materialization(manifest: &FleetManifest) -> Result<(), String> {
         // Every member of the class materializes to the identical bytes: no
         // per-repository fork or slug-specific substitution.
         for repo in manifest.members_of(class) {
-            let repo_bytes = render::render_consumer(&template, release_shas, AUDIT_CALVER)?;
+            let repo_bytes =
+                render::render_consumer_for(&template, forks, &release_shas, AUDIT_CALVER)?;
             if repo_bytes != class_bytes {
                 return Err(format!(
                     "repository {} does not materialize to its class {} template bytes",

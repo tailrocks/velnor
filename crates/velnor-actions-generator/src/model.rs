@@ -12,9 +12,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::RepositoryClass;
-
-/// The three recognized fleet organizations, in canonical rendering order.
-pub const OWNERS: [&str; 3] = ["jackin-project", "tailrocks", "ChainArgos"];
+use crate::forks::ForkTable;
 
 /// The code class's standard repository-owned project command. Repository-specific
 /// work composes beneath this single checked-in task; the shared workflow never
@@ -193,7 +191,9 @@ impl FleetManifest {
     /// violation (invalid slug/SHA, duplicate or unclassified member, wrong
     /// count, empty gate command, or implicit/invalid applicability).
     pub fn load(root: &Path) -> Result<FleetManifest, String> {
-        let repositories = load_repositories(&root.join("fleet").join("repositories.toml"))?;
+        let forks = ForkTable::load(root)?;
+        let repositories =
+            load_repositories(&root.join("fleet").join("repositories.toml"), &forks)?;
         let classes = load_classes(&root.join("fleet").join("classes.toml"))?;
         Ok(FleetManifest {
             repositories,
@@ -263,7 +263,7 @@ struct RepoEntry {
     baseline_sha: String,
 }
 
-fn load_repositories(path: &Path) -> Result<Vec<Repository>, String> {
+fn load_repositories(path: &Path, forks: &ForkTable) -> Result<Vec<Repository>, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let file: RepositoriesFile =
@@ -321,7 +321,7 @@ fn load_repositories(path: &Path) -> Result<Vec<Repository>, String> {
 
     // Reject any organization outside the three recognized owners.
     for repo in &repositories {
-        if !OWNERS.contains(&repo.organization.as_str()) {
+        if forks.by_owner(&repo.organization).is_none() {
             return Err(format!(
                 "member {:?} has unknown organization {:?}",
                 repo.slug, repo.organization

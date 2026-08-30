@@ -1,0 +1,15 @@
+schema = "velnor-actions.forks.v1"
+repository = "velnor-actions"
+canonical_owner = "tailrocks"
+
+[[fork]]
+owner = "jackin-project"
+placeholder = "@JACKIN_FLEET_SHA@"
+
+[[fork]]
+owner = "tailrocks"
+placeholder = "@TAILROCKS_FLEET_SHA@"
+
+[[fork]]
+owner = "ChainArgos"
+placeholder = "@CHAINARGOS_FLEET_SHA@"

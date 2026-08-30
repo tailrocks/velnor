@@ -6,6 +6,7 @@ mod common;
 use sha2::Digest;
 use velnor_actions_generator::RepositoryClass;
 use velnor_actions_generator::cache::CacheContract;
+use velnor_actions_generator::forks::ForkTable;
 use velnor_actions_generator::model::{Applicability, FleetManifest, Lane, resolve_lanes};
 use velnor_actions_generator::render;
 
@@ -303,7 +304,16 @@ fn request_validator_result(overrides: &[(&str, &str)]) -> (bool, String) {
     use sha2::{Digest, Sha256};
     let output = common::temp_dir("request-validator").join("github-output");
     let mut command = std::process::Command::new("bash");
-    command.arg("-c").arg(render::VALIDATE_REQUEST_SCRIPT);
+    command
+        .arg("-c")
+        .arg(render::validate_request_script(&ForkTable::canonical()));
+    let fake_gh = fake_recovery_gh();
+    let fake_path = format!(
+        "{}:{}",
+        fake_gh.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    command.env("PATH", fake_path);
     for key in [
         "RECOVERY_PROOF_ID",
         "BENCHMARK_CAMPAIGN",

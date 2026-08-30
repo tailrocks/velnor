@@ -5,7 +5,6 @@ slug = "jackin-project/homebrew-tap"
 kind = "tap"
 source = "jackin-project/jackin"
 source_ref = "refs/tags/v*"
-signer_digest = "eeb8a182174f3c97c370ecf3f1e3e4689ae22cfe"
 channels = ["stable", "preview", "dev"]
 assets = ["jackin-*-aarch64-apple-darwin.tar.gz", "jackin-*-x86_64-apple-darwin.tar.gz", "jackin-*-aarch64-unknown-linux-gnu.tar.gz", "jackin-*-x86_64-unknown-linux-gnu.tar.gz", "jackin-desktop-*-aarch64-apple-darwin.zip"]
 preview_assets = ["jackin-aarch64-apple-darwin.tar.gz", "jackin-x86_64-apple-darwin.tar.gz", "jackin-aarch64-unknown-linux-gnu.tar.gz", "jackin-x86_64-unknown-linux-gnu.tar.gz", "jackin-capsule-aarch64-unknown-linux-gnu.tar.gz", "jackin-capsule-x86_64-unknown-linux-gnu.tar.gz"]
@@ -15,7 +14,6 @@ slug = "tailrocks/homebrew-tablerock"
 kind = "tap"
 source = "tailrocks/tablerock"
 source_ref = "refs/tags/v*"
-signer_digest = "1e062d5bbe329873047ee8a8e79bba0811e53b65"
 channels = ["stable", "preview", "dev"]
 assets = ["tablerock-*-aarch64-apple-darwin.tar.gz", "tablerock-*-x86_64-apple-darwin.tar.gz", "tablerock-*-aarch64-unknown-linux-gnu.tar.gz", "tablerock-*-x86_64-unknown-linux-gnu.tar.gz", "tablerock-app-*-aarch64-apple-darwin.zip"]
 
@@ -24,7 +22,6 @@ slug = "tailrocks/homebrew-parallax"
 kind = "tap"
 source = "tailrocks/parallax"
 source_ref = "refs/tags/v*"
-signer_digest = "643c5341b160be151a7fae19b89b6a4f8ab3b275"
 channels = ["stable", "preview", "dev"]
 assets = ["parallax-*-aarch64-apple-darwin.tar.gz", "parallax-*-x86_64-apple-darwin.tar.gz", "parallax-*-aarch64-unknown-linux-gnu.tar.gz", "parallax-*-x86_64-unknown-linux-gnu.tar.gz"]
 
@@ -33,7 +30,6 @@ slug = "tailrocks/homebrew-holla"
 kind = "tap"
 source = "tailrocks/holla"
 source_ref = "refs/tags/v*"
-signer_digest = "84a3d2c5f8f74a3054259ac494581b244bf61ee7"
 channels = ["stable", "preview", "dev"]
 assets = ["holla-*-aarch64-apple-darwin.tar.gz", "holla-*-x86_64-apple-darwin.tar.gz", "holla-*-aarch64-unknown-linux-gnu.tar.gz", "holla-*-x86_64-unknown-linux-gnu.tar.gz"]
 
@@ -42,7 +38,6 @@ slug = "tailrocks/velnor-apt"
 kind = "apt"
 source = "tailrocks/velnor"
 source_ref = "refs/tags/v*"
-signer_digest = "77d323dcfdb176b332edc24bfc92cb625b3ab4c8"
 channels = ["stable"]
 assets = ["velnor-runner-*-amd64.deb", "velnor-runner-*-arm64.deb"]
 
@@ -51,6 +46,5 @@ slug = "tailrocks/holla-apt"
 kind = "apt"
 source = "tailrocks/holla"
 source_ref = "refs/tags/v*"
-signer_digest = "84a3d2c5f8f74a3054259ac494581b244bf61ee7"
 channels = ["stable"]
 assets = ["holla-*-x86_64-unknown-linux-gnu.deb", "holla-*-aarch64-unknown-linux-gnu.deb"]

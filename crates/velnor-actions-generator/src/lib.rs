@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 pub mod audit;
 pub mod cache;
 pub mod composite;
+pub mod forks;
 pub mod model;
 pub mod package;
+pub mod releases;
 pub mod render;
 pub mod tools;
 
@@ -98,9 +100,10 @@ pub fn validate_layout(root: &Path) -> Result<(), String> {
 /// Returns `Err` on any data-contract violation, a malformed block SHA, or an I/O
 /// failure while writing.
 pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let forks = forks::ForkTable::load(root)?;
     let manifest = model::FleetManifest::load(root)?;
     let caches = cache::CacheContract::load(&root.join("fleet").join("caches.toml"))?;
-    let packages = package::PackagePolicy::load(root)?;
+    let packages = package::PackagePolicy::load(root, &forks)?;
     let registry = tools::ToolRegistry::load(&tools::registry_path(root))?;
     let mut written = Vec::new();
 
@@ -117,7 +120,7 @@ pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
     }
 
     for class in ALL_CLASSES {
-        let body = render::consumer_template(class);
+        let body = render::consumer_template_for(class, &forks);
         let dir = root.join("templates").join(class.code());
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         let path = dir.join("ci.yml");
@@ -148,7 +151,8 @@ pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
         let dir = root.join(".github").join("workflows");
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         for class in ALL_CLASSES {
-            let body = render::callable_workflow(manifest.class(class), &caches, block_sha);
+            let body =
+                render::callable_workflow_for(manifest.class(class), &caches, block_sha, &forks);
             let path = dir.join(render::callable_file_name(class));
             write_if_changed(&path, &body)?;
             written.push(path);
@@ -193,14 +197,15 @@ pub fn render_consumer_to_dir(
     calver: &str,
     output: &Path,
 ) -> Result<PathBuf, String> {
+    let forks = forks::ForkTable::load(root)?;
     let manifest = model::FleetManifest::load(root)?;
     let repo = manifest
         .repositories()
         .iter()
         .find(|r| r.slug == repository)
         .ok_or_else(|| format!("{repository:?} is not a fleet member"))?;
-    let template = render::consumer_template(repo.class);
-    let body = render::render_consumer(&template, release_shas, calver)?;
+    let template = render::consumer_template_for(repo.class, &forks);
+    let body = render::render_consumer_for(&template, &forks, &release_shas, calver)?;
     let dir = output.join(".github").join("workflows");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = dir.join("ci.yml");
@@ -225,11 +230,11 @@ pub fn render_package_consumer_to_dir(
     repository: &str,
     release_shas: [&str; 3],
     calver: &str,
-    old_signer: Option<(&str, &str, &str)>,
     output: &Path,
 ) -> Result<PathBuf, String> {
-    let policy = package::PackagePolicy::load(root)?;
-    let body = policy.render_consumer(repository, release_shas, calver, old_signer)?;
+    let forks = forks::ForkTable::load(root)?;
+    let policy = package::PackagePolicy::load(root, &forks)?;
+    let body = policy.render_consumer(repository, release_shas, calver)?;
     let dir = output.join(".github").join("workflows");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = dir.join("package-update.yml");

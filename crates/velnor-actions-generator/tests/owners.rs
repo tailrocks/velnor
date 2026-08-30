@@ -3,7 +3,7 @@
 mod common;
 
 use velnor_actions_generator::RepositoryClass;
-use velnor_actions_generator::model::OWNERS;
+use velnor_actions_generator::forks::ForkTable;
 use velnor_actions_generator::render;
 
 fn code_template() -> String {
@@ -13,10 +13,12 @@ fn code_template() -> String {
 #[test]
 fn exactly_three_static_owner_calls() {
     let t = code_template();
-    assert_eq!(OWNERS, ["jackin-project", "tailrocks", "ChainArgos"]);
+    let forks = ForkTable::canonical();
     // Exactly three reusable-workflow calls.
-    assert_eq!(t.matches("uses:").count(), 3);
-    for (owner, placeholder) in OWNERS.iter().zip(render::OWNER_SHA_PLACEHOLDERS) {
+    assert_eq!(t.matches("uses:").count(), forks.len());
+    for fork in forks.forks() {
+        let owner = fork.owner();
+        let placeholder = fork.placeholder();
         assert!(t.contains(&format!(
             "uses: {owner}/velnor-actions/.github/workflows/ci-code.yml{placeholder} # @CALVER@"
         )));
@@ -26,12 +28,12 @@ fn exactly_three_static_owner_calls() {
     }
     assert_eq!(
         t.matches("      actions: read").count(),
-        3,
+        forks.len(),
         "each reusable-call job must delegate the callable's actions:read permission"
     );
     assert_eq!(
         t.matches("      pull-requests: read").count(),
-        3,
+        forks.len(),
         "each reusable-call job must delegate the callable's PR-read permission"
     );
     // No dynamic `uses:` — the ref never contains an expression.
@@ -45,11 +47,12 @@ fn exactly_three_static_owner_calls() {
 #[test]
 fn ci_required_is_fail_closed_always() {
     let t = code_template();
+    let forks = ForkTable::canonical();
     assert!(t.contains("ci-required:"));
     assert!(t.contains("if: ${{ always() }}"));
     // needs all three owner calls.
-    for owner in OWNERS {
-        assert!(t.contains(&format!("- {owner}")));
+    for fork in forks.forks() {
+        assert!(t.contains(&format!("- {}", fork.owner())));
     }
 }
 
@@ -76,13 +79,15 @@ fn ci_required_uses_positive_truth_table() {
 #[test]
 fn three_calls_bind_owner_shas_and_share_one_calver() {
     let t = code_template();
+    let forks = ForkTable::canonical();
     let shas = [
         "1111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222",
         "3333333333333333333333333333333333333333",
     ];
     let out = render::render_consumer(&t, shas, "2026.7.0").unwrap();
-    for (owner, sha) in OWNERS.iter().zip(shas) {
+    for (fork, sha) in forks.forks().iter().zip(shas) {
+        let owner = fork.owner();
         assert!(out.contains(&format!(
             "uses: {owner}/velnor-actions/.github/workflows/ci-code.yml@{sha} # 2026.7.0"
         )));
@@ -92,30 +97,32 @@ fn three_calls_bind_owner_shas_and_share_one_calver() {
 #[test]
 fn contract_output_is_required_by_aggregator() {
     let t = code_template();
+    let forks = ForkTable::canonical();
     // ci-required reads BOTH the selected result and its explicit contract output.
-    assert!(t.contains("needs.jackin-project.result"));
-    assert!(t.contains("needs.jackin-project.outputs.contract"));
-    assert!(t.contains("needs.tailrocks.result"));
-    assert!(t.contains("needs.tailrocks.outputs.contract"));
-    assert!(t.contains("needs.ChainArgos.result"));
-    assert!(t.contains("needs.ChainArgos.outputs.contract"));
+    for fork in forks.forks() {
+        let job = fork.owner();
+        assert!(t.contains(&format!("needs.{job}.result")));
+        assert!(t.contains(&format!("needs.{job}.outputs.contract")));
+    }
 }
 
 #[test]
 fn all_classes_expose_three_owner_calls() {
     use velnor_actions_generator::ALL_CLASSES;
+    let forks = ForkTable::canonical();
     for class in ALL_CLASSES {
         let t = render::consumer_template(class);
         assert_eq!(
             t.matches("uses:").count(),
-            3,
+            forks.len(),
             "{} has 3 owner calls",
             class.code()
         );
         let file = render::callable_file_name(class);
-        for owner in OWNERS {
+        for fork in forks.forks() {
             assert!(t.contains(&format!(
-                "uses: {owner}/velnor-actions/.github/workflows/{file}@"
+                "uses: {}/velnor-actions/.github/workflows/{file}@",
+                fork.owner()
             )));
         }
     }
