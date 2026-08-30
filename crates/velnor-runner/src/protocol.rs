@@ -262,8 +262,7 @@ pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     match url.scheme() {
         "https" => Ok(url),
         "http"
-            if cfg!(feature = "test-support")
-                && url.host_str().is_some_and(is_loopback_host) =>
+            if cfg!(feature = "test-support") && url.host_str().is_some_and(is_loopback_host) =>
         {
             Ok(url)
         }
@@ -4858,7 +4857,7 @@ pub(crate) struct FinalizedArtifact {
     pub(crate) digest: String,
 }
 
-fn validate_results_artifact_name(name: &str) -> Result<()> {
+pub(crate) fn validate_results_artifact_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name == "."
         || name == ".."
@@ -4909,7 +4908,10 @@ impl ResultsArtifactDescriptorWire {
         validate_results_artifact_name(&self.name)?;
         let database_id = self.database_id.parse("database_id")?;
         if database_id == 0 {
-            bail!("Results Service artifact '{}' has an invalid database_id", self.name);
+            bail!(
+                "Results Service artifact '{}' has an invalid database_id",
+                self.name
+            );
         }
         let size = self.size.parse("size")?;
         let digest = validate_sha256_digest(self.digest.as_str(), "artifact digest")?;
@@ -5084,10 +5086,7 @@ fn upload_artifact_with_zip_builder(
         .body(zip_file)
         .send()
         .map_err(|error| {
-            anyhow::anyhow!(
-                "send artifact blob PUT: {}",
-                redacted_reqwest_error(&error)
-            )
+            anyhow::anyhow!("send artifact blob PUT: {}", redacted_reqwest_error(&error))
         })?;
     let put_status = put_response.status().as_u16();
     if !(200..300).contains(&put_status) {
@@ -5170,9 +5169,7 @@ pub(crate) fn delete_finalized_artifact_blocking(
     }
     let response_id = response.artifact_id.parse("DeleteArtifact artifact_id")?;
     if response_id != artifact_id {
-        bail!(
-            "DeleteArtifact returned artifact_id {response_id}, expected {artifact_id}"
-        );
+        bail!("DeleteArtifact returned artifact_id {response_id}, expected {artifact_id}");
     }
     Ok(())
 }
@@ -6936,7 +6933,14 @@ mod tests {
                     let _ = stream.read(&mut request).unwrap();
                     let body = match index {
                         0 => serde_json::json!({
-                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "consumer"}]
+                            "artifacts": [{
+                                "name": "release",
+                                "workflow_run_backend_id": "plan",
+                                "workflow_job_run_backend_id": "consumer",
+                                "database_id": "1",
+                                "size": "0",
+                                "digest": {"value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+                            }]
                         })
                         .to_string(),
                         1 => serde_json::json!({"signed_url": format!("{server_base}/signed.zip")}).to_string(),
@@ -7091,6 +7095,10 @@ mod tests {
             .unwrap();
         zip.write_all(b"artifact-v4\n").unwrap();
         let zip_bytes = zip.finish().unwrap().into_inner();
+        let zip_hash = sha2::Sha256::digest(&zip_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let signed_url = format!("{base}/signed.zip?credential=secret");
@@ -7119,7 +7127,10 @@ mod tests {
                             "artifacts": [{
                                 "name": "release-linux",
                                 "workflow_run_backend_id": "plan",
-                                "workflow_job_run_backend_id": "producer"
+                                "workflow_job_run_backend_id": "consumer",
+                                "database_id": "1",
+                                "size": zip_bytes.len().to_string(),
+                                "digest": {"value": format!("sha256:{zip_hash}")}
                             }]
                         }))
                         .unwrap(),
@@ -7276,6 +7287,14 @@ mod tests {
         // .dockerbuild build records are gzip blobs, not zips.
         let gzip_bytes = b"\x1f\x8b\x08\x00dockerbuild-record-not-a-zip".to_vec();
         let expected_gzip_bytes = gzip_bytes.clone();
+        let zip_hash = sha2::Sha256::digest(&zip_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let gzip_hash = sha2::Sha256::digest(&gzip_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let signed_url = format!("{base}/signed.bin?credential=secret");
@@ -7302,12 +7321,18 @@ mod tests {
                                 {
                                     "name": "release-linux",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "producer"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": "1",
+                                    "size": zip_bytes.len().to_string(),
+                                    "digest": {"value": format!("sha256:{zip_hash}")}
                                 },
                                 {
                                     "name": ".dockerbuild",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "image"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": "2",
+                                    "size": gzip_bytes.len().to_string(),
+                                    "digest": {"value": format!("sha256:{gzip_hash}")}
                                 }
                             ]
                         }))

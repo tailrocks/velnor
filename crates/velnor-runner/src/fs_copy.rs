@@ -305,6 +305,82 @@ impl NoFollowDir {
             ),
         }
     }
+
+    /// Opens a nested directory for read-only traversal without following
+    /// symlinks anywhere along the relative path.
+    pub fn open_relative_directory(&self, relative: &Path) -> Result<Self> {
+        let mut current = self.try_clone()?;
+        for component in relative.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(name) => match current.open_entry(name)? {
+                    Some(NoFollowSource::Directory(directory)) => current = directory,
+                    Some(NoFollowSource::File(_)) => bail!(
+                        "artifact source is not a directory: {}",
+                        current.display_path.join(name).display()
+                    ),
+                    None => bail!(
+                        "artifact source does not exist: {}",
+                        current.display_path.join(name).display()
+                    ),
+                },
+                Component::RootDir | Component::ParentDir | Component::Prefix(_) => bail!(
+                    "artifact source is not a normalized relative path: {}",
+                    relative.display()
+                ),
+            }
+        }
+        Ok(current)
+    }
+
+    pub fn open_relative_file(&self, relative: &Path) -> Result<fs::File> {
+        self.open_relative_file_if_exists(relative)?
+            .with_context(|| format!("artifact file does not exist: {}", relative.display()))
+    }
+
+    pub fn open_relative_file_if_exists(&self, relative: &Path) -> Result<Option<fs::File>> {
+        let mut components = relative
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .peekable();
+        let mut parent = self.try_clone()?;
+        let file_name = loop {
+            let Some(component) = components.next() else {
+                bail!(
+                    "artifact file path has no file name: {}",
+                    relative.display()
+                );
+            };
+            let Component::Normal(name) = component else {
+                bail!(
+                    "artifact file path is not a normalized relative path: {}",
+                    relative.display()
+                );
+            };
+            if components.peek().is_none() {
+                break name.to_os_string();
+            }
+            match parent.open_entry(name)? {
+                Some(NoFollowSource::Directory(directory)) => parent = directory,
+                Some(NoFollowSource::File(_)) => bail!(
+                    "artifact source is not a directory: {}",
+                    parent.display_path.join(name).display()
+                ),
+                None => bail!(
+                    "artifact source does not exist: {}",
+                    parent.display_path.join(name).display()
+                ),
+            }
+        };
+        match parent.open_entry(&file_name)? {
+            Some(NoFollowSource::File(file)) => Ok(Some(file)),
+            Some(NoFollowSource::Directory(_)) => bail!(
+                "artifact file is not a regular file: {}",
+                relative.display()
+            ),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -381,6 +457,33 @@ impl NoFollowDestinationDir {
         destination_name: &OsStr,
     ) -> Result<()> {
         self.publish_staged_directory_from(self, staging_name, destination_name)
+    }
+
+    pub fn entry_is_directory(&self, name: &OsStr) -> Result<Option<bool>> {
+        validate_single_component(name, "artifact destination entry")?;
+        match rustix::fs::statat(&self.file, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(Some(
+                rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                    == rustix::fs::FileType::Directory,
+            )),
+            Err(rustix::io::Errno::NOENT) => Ok(None),
+            Err(error) => Err(std::io::Error::from(error))
+                .with_context(|| format!("inspect artifact destination entry {name:?}")),
+        }
+    }
+
+    pub fn for_each_entry_name(&self, mut visit: impl FnMut(OsString) -> Result<()>) -> Result<()> {
+        let entries = rustix::fs::Dir::read_from(&self.file)
+            .map_err(std::io::Error::from)
+            .context("read artifact destination directory")?;
+        for entry in entries {
+            let entry = entry.map_err(std::io::Error::from)?;
+            let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+            if name != "." && name != ".." {
+                visit(name)?;
+            }
+        }
+        Ok(())
     }
 
     /// Atomically publishes a private staging directory from another already-open
@@ -906,7 +1009,14 @@ impl NoFollowDestinationDir {
 
             let write_result = (|| -> Result<u64> {
                 let bytes = if used_reflink {
-                    metadata.len()
+                    let actual = destination_file
+                        .metadata()
+                        .context("inspect reflink artifact destination")?
+                        .len();
+                    if actual != metadata.len() {
+                        bail!("reflink artifact source size changed while copying");
+                    }
+                    actual
                 } else {
                     destination_file
                         .set_len(0)
@@ -920,9 +1030,16 @@ impl NoFollowDestinationDir {
                     source
                         .seek(SeekFrom::Start(0))
                         .context("rewind source file for copy")?;
-                    std::io::copy(&mut source, &mut destination_file).with_context(|| {
-                        format!("copy opened source to {}", destination_path.display())
-                    })?
+                    let expected_size = metadata.len();
+                    let mut bounded_source = source.take(expected_size.saturating_add(1));
+                    let copied = std::io::copy(&mut bounded_source, &mut destination_file)
+                        .with_context(|| {
+                            format!("copy opened source to {}", destination_path.display())
+                        })?;
+                    if copied != expected_size {
+                        bail!("artifact source size changed while copying");
+                    }
+                    copied
                 };
                 destination_file.flush().with_context(|| {
                     format!(
@@ -1387,6 +1504,10 @@ impl NoFollowDestinationDir {
             "secure artifact destination copying is unsupported on this platform for {}",
             relative.display()
         )
+    }
+
+    pub fn entry_is_directory(&self, _name: &OsStr) -> Result<Option<bool>> {
+        bail!("secure artifact destination copying is unsupported on this platform")
     }
 
     pub fn open_relative_file(&self, relative: &Path) -> Result<fs::File> {
