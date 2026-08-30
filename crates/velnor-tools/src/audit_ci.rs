@@ -3543,4 +3543,20 @@ jobs:
             .message
             .contains("missing required generated policy file"));
     }
+
+    #[test]
+    fn active_repo_does_not_expose_legacy_runner_group_doctor() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert!(!root.join("scripts/runner_group_doctor.sh").exists());
+
+        let migration =
+            fs::read_to_string(root.join("docs/org-fleet-migration.md")).expect("migration guide");
+        let active_incident = migration
+            .split_once("## Allowlist drift incident (2026-08-24)")
+            .and_then(|(_, section)| section.split_once("## Rollback"))
+            .map(|(section, _)| section)
+            .expect("allowlist drift incident section");
+        assert!(!active_incident.contains("runner_group_doctor.sh"));
+        assert!(!active_incident.contains("gh api --method PUT"));
+    }
 }
