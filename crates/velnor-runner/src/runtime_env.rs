@@ -180,20 +180,17 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     // P1: self-hosted job messages never carry a CacheServerUrl, which makes
     // BuildKit's type=gha backend and actions/cache@v4 silently no-op. When
     // the operator enables the daemon-hosted cache service (gha_cache module)
-    // by exporting both variables into the runner environment, inject the
-    // equivalent contract so identical YAML is warm on every lane. Strict
-    // capability rule: absent those variables nothing changes.
+    // by exporting its URL, inject only that endpoint. The job's own runtime
+    // token remains the cache bearer and is also retained for Results Service;
+    // never replace it with an operator-wide credential.
     if !env.iter().any(|(name, _)| name == "ACTIONS_CACHE_URL") {
-        if let (Ok(url), Ok(token)) = (
-            std::env::var("VELNOR_ACTIONS_CACHE_URL"),
-            std::env::var("VELNOR_ACTIONS_RUNTIME_TOKEN"),
-        ) {
-            if !url.is_empty() && !token.is_empty() {
-                set_env(&mut env, "ACTIONS_CACHE_URL", &url);
-                set_env(&mut env, "ACTIONS_RESULTS_URL", &url);
-                set_env(&mut env, "ACTIONS_RUNTIME_TOKEN", &token);
-                env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "True".to_string()));
-            }
+        let configured_url = std::env::var("VELNOR_ACTIONS_CACHE_URL").ok();
+        let has_job_token = env
+            .iter()
+            .any(|(name, value)| name == "ACTIONS_RUNTIME_TOKEN" && !value.is_empty());
+        if let Some(url) = configured_cache_url(configured_url.as_deref(), has_job_token) {
+            set_env(&mut env, "ACTIONS_CACHE_URL", url);
+            env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "True".to_string()));
         }
     }
     if job.variable_bool("actions_uses_cache_service_v2") == Some(true) {
@@ -446,6 +443,10 @@ fn is_protected_default_env(name: &str) -> bool {
             "MISE_LOCKFILE" | "MISE_LOCKED" | "MISE_LOCKED_VERIFY_PROVENANCE"
         )
         || name == "SCCACHE_BASEDIRS"
+}
+
+fn configured_cache_url(url: Option<&str>, has_job_token: bool) -> Option<&str> {
+    url.filter(|url| has_job_token && !url.is_empty())
 }
 
 fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
@@ -760,6 +761,17 @@ mod tests {
         assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "True".into())));
         assert!(!env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "false".into())));
         assert!(env.contains(&("ACTIONS_ORCHESTRATION_ID".into(), "orch-123".into())));
+    }
+
+    #[test]
+    fn cache_endpoint_requires_the_job_runtime_token() {
+        assert_eq!(configured_cache_url(Some("http://cache"), false), None);
+        assert_eq!(configured_cache_url(Some(""), true), None);
+        assert_eq!(configured_cache_url(None, true), None);
+        assert_eq!(
+            configured_cache_url(Some("http://cache"), true),
+            Some("http://cache")
+        );
     }
 
     #[test]

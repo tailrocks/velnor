@@ -1793,12 +1793,11 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         }
     }
 
-    // P1: host the GitHub cache contract when the operator enables it. Both
-    // the service spawn and the runtime-env injection key off the same two
-    // variables, so an enabled fleet serves warm gha-cache traffic to job
-    // containers through their bridge gateway while disabled fleets remain
-    // byte-for-byte unchanged.
-    if let Some((url, _token)) = crate::gha_cache::enabled_from_env() {
+    // P1: host the GitHub cache contract when the operator enables it. The
+    // service spawn and runtime-env injection key off the same URL; each job
+    // still authenticates with its own runtime token, while disabled fleets
+    // remain byte-for-byte unchanged.
+    if let Some(url) = crate::gha_cache::enabled_from_env() {
         let root = gha_cache_root(crate::storage::StorageLayout::resolve())?;
         let service = crate::gha_cache::CacheService::open(root)
             .context("initialize GHA cache service on canonical storage")?;
