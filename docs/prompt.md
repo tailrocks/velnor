@@ -23,24 +23,25 @@ exactly: the marked unified-CI contract, the tracked goal graph, and the
 
 ## Campaign delivery topology
 
-All work represented by the active `plans/` tree is one campaign. Implement
-every plan and retained command task on one static generic branch,
-`codex/velnor-project-goal`, and deliver one pull request from that branch. Do
-not create, switch to, or
-open per-plan, per-task, or per-item branches or pull requests. Historical
-coordination text that prescribes branch-per-leaf delivery is superseded by
-this operator directive.
+All work represented by the active `plans/` tree is one campaign delivered
+through operator-assigned focused branches `velnor1` through `velnor10`. Each
+branch handles its exact assignment in external `../COORDINATION.md` and
+delivers one focused pull request directly to `main`. Do not self-assign,
+duplicate assignments, use a shared integration branch, or commit directly to
+`main`; do not create, switch to, or open branches or pull requests outside the
+operator assignment.
 
 ## Velnor blocker integration loop
 
 A failed Velnor execution is a Velnor defect until evidence proves an external
-failure. Fix the enabling Velnor architecture on this campaign branch; never
-hide the defect in a repository workflow or in `velnor-actions-fixture`.
+failure. Fix the enabling Velnor architecture on the operator-assigned focused
+branch; never hide the defect in a repository workflow or in
+`velnor-actions-fixture`.
 Commit and push every finished iteration with the required signed-off commit
-trailers. The sole campaign PR is the only path into `main`: merge it at the
-authorized safe integration checkpoint, then prove the merged SHA on `main`
-before release. Repeated per-task PRs or repeated PR merges are prohibited by
-the one-branch/one-PR topology.
+trailers. That branch's focused PR is the only path for its assignment into
+`main`: merge it directly at the authorized safe integration checkpoint, then
+prove the merged SHA on `main` before release. No shared integration branch or
+direct commit to `main` is permitted; each assigned branch keeps its PR focused.
 
 Normal releases use the signed `velnor-apt` workflow. For normal and emergency
 paths alike, before accepting publication or installing, verify the exact
@@ -48,9 +49,9 @@ package/source/version/digest binding, trusted signing-key fingerprint, and all
 three APT metadata artifacts—`Release`, clearsigned `InRelease`, and detached
 `Release.gpg`—with matching metadata bytes and checksums. If, and only if, a
 failed Velnor lane must build Velnor itself and urgent Sentry validation is
-required before the sole PR can merge, an explicitly authorized chicken-egg
-bootstrap may build one Debian package from the exact pushed campaign SHA only
-after verifying that the remote campaign branch tip equals that SHA.
+required before the focused PR can merge, an explicitly authorized chicken-egg
+bootstrap may build one Debian package from the exact pushed assigned-branch
+SHA only after verifying that the remote assigned branch tip equals that SHA.
 Bind the package version and source provenance to that SHA; record the
 package SHA-256 before and after transfer; transfer only that `.deb` via
 `ssh -o BatchMode=yes sentry` using a pinned and verified Sentry host identity
@@ -63,7 +64,8 @@ record all evidence. Cancel stale
 validation state as required, prove it is clear, then retry `velnor`,
 `github`, and `both`. This exception is not raw binary/source/checkout copy,
 local-path installation, an unpinned package, or silent GitHub fallback.
-Merge the same campaign branch when the PR becomes mergeable.
+Merge the same assigned branch through its focused PR when that PR becomes
+mergeable.
 
 Every Velnor blocker iteration must verify the deployed source/package
 identity, service health, rollback predecessor, and all three lane modes:
