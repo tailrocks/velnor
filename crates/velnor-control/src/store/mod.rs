@@ -26,7 +26,8 @@ pub use migrations::LATEST_SCHEMA_VERSION;
 pub use records::{
     EventRow, EventWindow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow,
     LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
-    SlotIdentity, SlotRow, SlotTransition, StoredEvent, Transition,
+    SlotIdentity, SlotRow, SlotTransition, SlotTransitionRequest, SlotTransitionRequestKey,
+    StoredEvent, Transition, SLOT_TRANSITION_REQUEST_CAP,
 };
 pub use retention::{
     PhysicalBudgetStatus, PrunePhase, PruneReport, RetentionBudget, RetentionLease,
