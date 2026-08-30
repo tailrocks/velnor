@@ -5117,50 +5117,27 @@ fn upload_artifact_with_zip_builder(
         "hash": {"value": format!("sha256:{zip_hash}")}
     }))
     .context("serialize FinalizeArtifact")?;
-    let finalize_outcome = (|| -> Result<u64> {
-        let finalize_text = results_service_post(
-            &client,
-            &finalize_url,
-            token,
-            &finalize_body,
-            "FinalizeArtifact",
-        )
-        .context("FinalizeArtifact request")?;
-        let finalize: FinalizeArtifactResponse =
-            serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
-        if !finalize.ok {
-            bail!("FinalizeArtifact: backend returned ok=false or absent");
-        }
-        let artifact_id = finalize.artifact_id.parse("FinalizeArtifact artifact_id")?;
-        if artifact_id == 0 {
-            bail!("FinalizeArtifact: artifact_id must be non-zero");
-        }
-        Ok(artifact_id)
-    })();
-    match finalize_outcome {
-        Ok(artifact_id) => Ok(FinalizedArtifact {
-            id: artifact_id.to_string(),
-            digest: format!("sha256:{zip_hash}"),
-        }),
-        Err(finalize_error) => match reconcile_finalized_artifact(
-            &ResultsArtifactServiceContext {
-                client: &client,
-                base,
-                token,
-                plan_id,
-                job_id,
-            },
-            name,
-            zip_size,
-            &zip_hash,
-        ) {
-            Ok(Some(reconciled)) => Ok(reconciled),
-            Ok(None) => Err(finalize_error),
-            Err(reconcile_error) => Err(anyhow::anyhow!(
-                "FinalizeArtifact failed: {finalize_error:#}; reconciliation failed: {reconcile_error:#}"
-            )),
-        },
+    let finalize_text = results_service_post(
+        &client,
+        &finalize_url,
+        token,
+        &finalize_body,
+        "FinalizeArtifact",
+    )
+    .context("FinalizeArtifact request")?;
+    let finalize: FinalizeArtifactResponse =
+        serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
+    if !finalize.ok {
+        bail!("FinalizeArtifact: backend returned ok=false or absent");
     }
+    let artifact_id = finalize.artifact_id.parse("FinalizeArtifact artifact_id")?;
+    if artifact_id == 0 {
+        bail!("FinalizeArtifact: artifact_id must be non-zero");
+    }
+    Ok(FinalizedArtifact {
+        id: artifact_id.to_string(),
+        digest: format!("sha256:{zip_hash}"),
+    })
 }
 
 fn delete_artifact_descriptor_blocking(
@@ -5939,44 +5916,6 @@ fn list_results_artifacts(
         validated.push(artifact);
     }
     Ok(validated)
-}
-
-struct ResultsArtifactServiceContext<'a> {
-    client: &'a reqwest::blocking::Client,
-    base: &'a str,
-    token: &'a str,
-    plan_id: &'a str,
-    job_id: &'a str,
-}
-
-fn reconcile_finalized_artifact(
-    context: &ResultsArtifactServiceContext<'_>,
-    name: &str,
-    size: u64,
-    digest: &str,
-) -> Result<Option<FinalizedArtifact>> {
-    let matches = list_results_artifacts(
-        context.client,
-        context.base,
-        context.token,
-        context.plan_id,
-        context.job_id,
-    )?
-    .into_iter()
-    .filter(|artifact| {
-        artifact.name == name && artifact.size == size && digest_matches(&artifact.digest, digest)
-    })
-    .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [] => Ok(None),
-        [artifact] => Ok(Some(FinalizedArtifact {
-            id: artifact.database_id.to_string(),
-            digest: artifact.digest.clone(),
-        })),
-        _ => bail!(
-            "FinalizeArtifact reconciliation found multiple matching artifacts named '{name}'"
-        ),
-    }
 }
 
 pub(crate) fn results_artifact_id_by_name_blocking(
@@ -6822,7 +6761,12 @@ mod tests {
             ArtifactUploadOptions::default(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("ok=false"));
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("ok=false")),
+            "{error:#}"
+        );
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 3);
