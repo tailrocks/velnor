@@ -3593,6 +3593,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "velnor-action-model",
+ "velnor-model",
 ]
 
 [[package]]

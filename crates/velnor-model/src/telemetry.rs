@@ -59,6 +59,11 @@ pub enum TelemetryEvent {
     CriticalPath,
     PlanSummary,
     NoProgress,
+    LeaseAcquired,
+    LeaseRenewed,
+    LeaseReleased,
+    LeaseAbandoned,
+    LeaseExpired,
 }
 
 /// Execution lane that produced an observation.

@@ -18,6 +18,10 @@ use velnor_action_model::{
     canonical_json_bytes, ActionKey, ActionState, ActionTiming, Clock, Digest, LogicalInstant,
     ProducerLease, TrustClass,
 };
+use velnor_model::{
+    InvalidTelemetry, TelemetryEnvelope, TelemetryEnvelopeInput, TelemetryEvent, TelemetryFields,
+    TelemetryLane, Timestamp,
+};
 
 pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
 
@@ -87,6 +91,8 @@ pub enum JournalError {
     LeaseFenced,
     #[error("lease expired before the requested transition")]
     LeaseExpired,
+    #[error("lease heartbeat is due at logical instant {next_at:?}")]
+    HeartbeatTooSoon { next_at: LogicalInstant },
     #[error("lease duration must be positive and heartbeat must not exceed it")]
     InvalidLeaseDuration,
     #[error("lease owner must not be empty")]
@@ -118,6 +124,49 @@ pub struct LeaseTelemetryEvent {
     pub generation: u64,
     pub at: LogicalInstant,
     pub kind: LeaseTransitionKind,
+}
+
+impl LeaseTelemetryEvent {
+    /// Convert a committed transition into the TASK-003 envelope contract.
+    ///
+    /// The journal deliberately receives run/repository context from its
+    /// adapter because those identities belong to the admission boundary,
+    /// not the durable action store.
+    pub fn into_envelope(
+        &self,
+        run_id: &str,
+        repo: &str,
+        trust_domain: &str,
+        ts_logical: u64,
+    ) -> Result<TelemetryEnvelope, InvalidTelemetry> {
+        let fields = TelemetryFields::new(BTreeMap::from([
+            ("generation".into(), serde_json::json!(self.generation)),
+            ("logical_ms".into(), serde_json::json!(self.at.as_millis())),
+        ]))?;
+        TelemetryEnvelope::new(TelemetryEnvelopeInput {
+            run_id,
+            action_key_digest: Some(self.action_key_digest.as_str()),
+            lane: TelemetryLane::Velnor,
+            repo,
+            trust_domain,
+            event: self.kind.telemetry_event(),
+            ts_logical,
+            ts_wall: Timestamp::now(),
+            fields,
+        })
+    }
+}
+
+impl LeaseTransitionKind {
+    fn telemetry_event(self) -> TelemetryEvent {
+        match self {
+            Self::Acquired => TelemetryEvent::LeaseAcquired,
+            Self::Renewed => TelemetryEvent::LeaseRenewed,
+            Self::Released => TelemetryEvent::LeaseReleased,
+            Self::Abandoned => TelemetryEvent::LeaseAbandoned,
+            Self::Expired => TelemetryEvent::LeaseExpired,
+        }
+    }
 }
 
 type TelemetrySink = Box<dyn FnMut(&LeaseTelemetryEvent) + Send>;
@@ -432,6 +481,7 @@ impl<C: Clock> LeaseManager<C> {
             transaction.commit()?;
             generation
         };
+        self.clock.wake_expiry();
         let lease = ProducerLease {
             action: action.clone(),
             generation,
@@ -481,6 +531,23 @@ impl<C: Clock> LeaseManager<C> {
         if row.expires_at_ms <= now_ms {
             return Err(JournalError::LeaseExpired);
         }
+        let lease_duration_ms = sqlite_integer(row.lease_duration_ms)?;
+        let last_heartbeat_ms = row
+            .expires_at_ms
+            .checked_sub(lease_duration_ms)
+            .ok_or_else(|| {
+                JournalError::InvalidState("lease deadline precedes its duration".into())
+            })?;
+        let next_heartbeat_ms = last_heartbeat_ms
+            .checked_add(sqlite_integer(row.heartbeat_every_ms)?)
+            .ok_or_else(|| {
+                JournalError::InvalidState("lease heartbeat deadline overflow".into())
+            })?;
+        if now_ms < next_heartbeat_ms {
+            return Err(JournalError::HeartbeatTooSoon {
+                next_at: logical_instant_from_sql(next_heartbeat_ms)?,
+            });
+        }
         let expires_at = now.saturating_add(row.lease_duration_ms);
         let changed = transaction.execute(
             "UPDATE producer_leases
@@ -499,6 +566,7 @@ impl<C: Clock> LeaseManager<C> {
             return Err(JournalError::LeaseFenced);
         }
         transaction.commit()?;
+        self.clock.wake_expiry();
         lease.expires_at = expires_at;
         lease.heartbeat_every = row.heartbeat_every_ms;
         lease.lease_duration = row.lease_duration_ms;
@@ -656,6 +724,7 @@ impl<C: Clock> LeaseManager<C> {
             return Err(JournalError::LeaseFenced);
         }
         transaction.commit()?;
+        self.clock.wake_expiry();
         self.emit_telemetry(LeaseTelemetryEvent {
             action_key_digest: digest,
             generation,
@@ -711,6 +780,9 @@ impl<C: Clock> LeaseManager<C> {
             }
         }
         transaction.commit()?;
+        if expired > 0 {
+            self.clock.wake_expiry();
+        }
         for event in events {
             self.emit_telemetry(event);
         }
@@ -718,8 +790,15 @@ impl<C: Clock> LeaseManager<C> {
     }
 
     fn emit_telemetry(&mut self, event: LeaseTelemetryEvent) {
-        if let Some(sink) = self.telemetry_sink.as_mut() {
-            sink(&event);
+        if let Some(mut sink) = self.telemetry_sink.take() {
+            let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sink(&event);
+            }))
+            .is_ok();
+            self.telemetry_sink = Some(sink);
+            if !delivered {
+                self.pending_telemetry.push_back(event);
+            }
         } else {
             self.pending_telemetry.push_back(event);
         }
@@ -924,7 +1003,9 @@ mod tests {
     use super::*;
     use std::{
         future::Future,
+        io::{BufRead, BufReader, Read, Write},
         pin::Pin,
+        process::{Command, Stdio},
         sync::{Arc, Barrier, Mutex},
         thread,
     };
@@ -941,7 +1022,7 @@ mod tests {
             let mut now = self.now_ms.lock().unwrap();
             *now = now.saturating_add(millis);
             drop(now);
-            self.wake.notify_waiters();
+            self.wake.notify_one();
         }
     }
 
@@ -956,14 +1037,15 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
             let clock = self.clone();
             Box::pin(async move {
-                loop {
-                    let notified = clock.wake.notified();
-                    if clock.now() >= deadline {
-                        return;
-                    }
+                let notified = clock.wake.notified();
+                if clock.now() < deadline {
                     notified.await;
                 }
             })
+        }
+
+        fn wake_expiry(&self) {
+            self.wake.notify_one();
         }
     }
 
@@ -1059,6 +1141,20 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_cadence_is_checked_from_persisted_deadline() {
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
+        let mut lease = manager.acquire(&action(50), "worker-a", 100, 25).unwrap();
+        assert!(matches!(
+            manager.renew(&mut lease),
+            Err(JournalError::HeartbeatTooSoon { .. })
+        ));
+        clock.advance(25);
+        manager.renew(&mut lease).unwrap();
+        assert_eq!(lease.expires_at, LogicalInstant::from_millis(125));
+    }
+
+    #[test]
     fn expiry_increments_generation_and_defers_takeover() {
         let clock = TestClock::default();
         let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
@@ -1150,6 +1246,59 @@ mod tests {
         assert_eq!(upgraded.entries().unwrap().len(), 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn process_restart_recovers_killed_lease() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("killed-lease.sqlite");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::lease_child", "--nocapture"])
+            .env("VELNOR_ACTION_JOURNAL_LEASE_CHILD_PATH", &path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let ready = BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == "lease-ready");
+        assert!(ready, "lease child did not publish readiness");
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+
+        let clock = TestClock::default();
+        let action = action(53);
+        let active = LeaseManager::open(&path, clock.clone()).unwrap();
+        assert_eq!(
+            active.lease_status(&action).unwrap(),
+            Some(LeaseStatus::Active)
+        );
+        drop(active);
+        clock.advance(100);
+        let recovered = LeaseManager::open(&path, clock).unwrap();
+        assert_eq!(
+            recovered.lease_status(&action).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_child() {
+        let Some(path) = std::env::var_os("VELNOR_ACTION_JOURNAL_LEASE_CHILD_PATH") else {
+            return;
+        };
+        let mut manager = LeaseManager::open(path, TestClock::default()).unwrap();
+        manager.acquire(&action(53), "worker-a", 100, 25).unwrap();
+        println!("lease-ready");
+        std::io::stdout().flush().unwrap();
+        let mut byte = [0_u8; 1];
+        let _ = std::io::stdin().read(&mut byte);
+    }
+
     #[test]
     fn telemetry_sink_receives_only_committed_transitions() {
         let clock = TestClock::default();
@@ -1173,6 +1322,12 @@ mod tests {
         assert!(events
             .iter()
             .all(|event| event.action_key_digest == lease.action.digest().unwrap()));
+        let envelope = events[0]
+            .into_envelope("run-a", "repo-a", "trusted", 7)
+            .unwrap();
+        let envelope = serde_json::to_value(envelope).unwrap();
+        assert_eq!(envelope["event"], "lease_acquired");
+        assert_eq!(envelope["fields"]["generation"], lease.generation);
     }
 
     #[cfg(feature = "virtual-time")]
@@ -1188,6 +1343,30 @@ mod tests {
         assert!(!task.is_finished());
         clock.advance(1);
         assert_eq!(task.await.unwrap().unwrap(), 1);
+    }
+
+    #[cfg(feature = "virtual-time")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn expiry_wait_reacts_to_an_earlier_persisted_deadline() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("earlier-deadline.sqlite");
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(&path, clock.clone()).unwrap();
+        manager.acquire(&action(51), "worker-a", 100, 25).unwrap();
+        let task = tokio::spawn(async move { manager.expire_next().await });
+        tokio::task::yield_now().await;
+
+        let mut second_manager = LeaseManager::open(&path, clock.clone()).unwrap();
+        second_manager
+            .acquire(&action(52), "worker-b", 10, 5)
+            .unwrap();
+        tokio::task::yield_now().await;
+        clock.advance(10);
+        assert_eq!(task.await.unwrap().unwrap(), 1);
+        assert_eq!(
+            second_manager.lease_status(&action(52)).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
     }
 
     #[test]

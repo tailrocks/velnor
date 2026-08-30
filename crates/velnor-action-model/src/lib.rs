@@ -245,8 +245,16 @@ pub trait Clock: Send + Sync {
     /// Return the current logical instant.
     fn now(&self) -> LogicalInstant;
 
-    /// Wait until a logical deadline is reached.
+    /// Wait until a logical deadline is reached or a lease mutation wakes it.
+    /// Returning early lets the expiry engine recalculate newly persisted
+    /// deadlines without periodic polling.
     fn sleep_until(&self, deadline: LogicalInstant) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    /// Wake a pending expiry wait after a committed lease mutation.
+    ///
+    /// Implementations shared by broker instances use this to make an
+    /// earlier newly persisted deadline observable without polling.
+    fn wake_expiry(&self) {}
 }
 
 /// A producer lease fencing one owner of an action.
