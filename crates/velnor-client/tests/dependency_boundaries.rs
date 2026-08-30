@@ -12,11 +12,12 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 11] = [
+const WORKSPACE_PACKAGES: [&str; 12] = [
     "velnor-model",
     "velnor-action-model",
     "velnor-cas",
     "velnor-action-journal",
+    "velnor-cache-service",
     "velnor-control",
     "velnor-client",
     "velnor-render",
@@ -117,7 +118,7 @@ fn transitive_closure(metadata: &Value, root: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn workspace_has_exactly_the_eleven_expected_packages() {
+fn workspace_has_exactly_the_twelve_expected_packages() {
     let metadata = cargo_metadata();
     let mut names: Vec<String> = metadata["packages"]
         .as_array()
@@ -189,7 +190,10 @@ fn crate_dependency_direction_matches_plan_064() {
         members_only(&graph["velnor-model"]).is_empty(),
         "model is the root"
     );
-    assert_eq!(members_only(&graph["velnor-control"]), vec!["velnor-model"]);
+    assert_eq!(
+        members_only(&graph["velnor-control"]),
+        vec!["velnor-action-journal", "velnor-model"]
+    );
     assert_eq!(members_only(&graph["velnor-render"]), vec!["velnor-model"]);
     let ctl = members_only(&graph["velnorctl"]);
     for required in [
