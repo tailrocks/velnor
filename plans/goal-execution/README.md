@@ -72,9 +72,10 @@ before any gate runs. Rust tests use nextest, never `cargo test`.
 
 ## Canonical whole-campaign prompt
 
-Submit this entire block once per OpenCode session. Ten assigned branch lanes
-execute this goal together as peers; ownership is arbitrated by external
-`../COORDINATION.md`, not by goal state. The
+Submit this entire block once per OpenCode session. Assigned branch lanes from the ten-branch operator set
+collectively progress this goal as peers; each assigned branch executes only
+the leaf and scoped files, symbols, and resources it claims. Ownership is
+arbitrated by external `../COORDINATION.md`, not by goal state. The
 `/goal` parser rejects objectives over 4000 characters and treats dash-prefixed
 words (`--check`, a bare argument separator, `-s`) as unknown flags, so the
 objective below stays under the limit and contains none; do not re-add them.
@@ -89,7 +90,8 @@ Supported flags (`--max-turns`, `--max-minutes`, `--max-duration-ms`,
 The allowed branch set is `velnor1` through `velnor10`; only branches with an
 active assignment in external `../COORDINATION.md` execute this goal. Ownership
 is arbitrated there, not by goal state. Claim the exact leaf, branch, files,
-symbols, and resources before any writer acts; one writer per overlap; claims
+symbols, and resources by recording that exact claim in external
+`../COORDINATION.md` before any writer acts; one writer per overlap; claims
 expire after 60 idle minutes or RELEASED. On
 collision the later session stops writing, saves evidence under
 `.velnor-compare/`, then reconciles forward from the coherent on-disk design;
@@ -212,11 +214,12 @@ Use this dependency order; priority never overrides prerequisites:
 
 Plan 039 and Track B may progress independently, but live fleet mutation,
 fixture dispatch, package cutover, and other shared external resources must be
-serialized. Subagents are mandatory for every leaf. Only read-only investigation
-and review may run concurrently. All edits, status transitions, commits, fixture
-dispatches, package operations, and live mutations are serialized across
-assigned branches and must not share status-index ownership or live validation
-resources.
+serialized. Subagents are mandatory for every leaf. Disjoint edits, status
+transitions, commits, and validation may proceed in parallel across assigned
+branches. Only shared indexes, fixture dispatches, package operations, live
+mutations, and other explicitly shared resources serialize across assigned
+branches; disjoint work must not share status-index ownership or live
+validation resources.
 
 ## Validation layers
 
