@@ -1196,10 +1196,15 @@ fn microvm_execute_sends_deliver_plan_over_vsock() {
         let mut session =
             open_session(&file, IsolationIdentity::new("job-vsock", 1), &mut world).unwrap();
         session.reserve(&mut world).unwrap();
-        let plan = ValidatedPlan::example_success("job-vsock");
+        let mut plan = ValidatedPlan::example_success("job-vsock");
+        let mut second_step = plan.steps[0].clone();
+        second_step.id = "second".into();
+        plan.steps.push(second_step);
         session.prepare(&plan, &mut world).unwrap();
         session.start(&mut world).unwrap();
         session.execute(&plan, &mut world).unwrap();
+        let outcome = session.collect().unwrap();
+        assert_eq!(outcome.executed_physical_actions, Some(2));
         assert!(!session.used_host_docker());
         assert!(session.used_firecracker());
     }
