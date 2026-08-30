@@ -1122,6 +1122,34 @@ mod tests {
     }
 
     #[test]
+    fn passive_wait_telemetry_is_bounded_and_secret_free() {
+        let (dir, sink) = temp_sink("passive-wait");
+        let marker_secret = "super-secret-marker-value-42";
+        let adm = admission(102, Some(marker_secret));
+        assert!(sink.record_admission(&adm));
+
+        let fields = BTreeMap::from([
+            ("cause".to_owned(), serde_json::json!("host_capacity")),
+            ("ms".to_owned(), serde_json::json!(15_000_u64)),
+        ]);
+        assert!(sink
+            .emit_telemetry_for_admission(&adm, TelemetryEvent::PassiveWait, fields)
+            .is_some());
+
+        let telemetry = std::fs::read_to_string(dir.join("state.test-instance.telemetry.jsonl"))
+            .expect("telemetry records");
+        let record = telemetry
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid record"))
+            .find(|record| record["event"] == "passive_wait")
+            .expect("passive wait record");
+        assert_eq!(record["fields"]["cause"], "host_capacity");
+        assert_eq!(record["fields"]["ms"], 15_000);
+        assert!(!telemetry.contains(marker_secret));
+        assert!(!telemetry.contains("raw capacity failure"));
+    }
+
+    #[test]
     fn admission_without_complete_identity_fails_closed() {
         for missing in ["run_id", "attempt"] {
             let (_dir, sink) = temp_sink(&format!("missing-{missing}"));
