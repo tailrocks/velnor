@@ -18,6 +18,16 @@ use std::{
     fmt, fs,
     path::{Path, PathBuf},
 };
+#[cfg(unix)]
+use std::{
+    ffi::CString,
+    fs::File,
+    io::{self, Write},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    },
+};
 use time::{Date, Month, OffsetDateTime};
 
 use crate::fleet_policy_client::{
@@ -742,6 +752,10 @@ pub struct FleetAuditArgs {
     /// Generated policy JSON to audit against.
     #[arg(long)]
     pub policy: PathBuf,
+    /// Required release-ref ledger; entries must be currently approved and
+    /// must generate the supplied policy before live observation.
+    #[arg(long)]
+    pub ledger: PathBuf,
     /// Organization to audit (must match the policy's organization).
     #[arg(long)]
     pub organization: String,
@@ -1022,11 +1036,202 @@ fn read_existing_policy_files(out_dir: &Path) -> Result<BTreeMap<String, Vec<u8>
     Ok(existing)
 }
 
+/// Write one generated policy through a directory descriptor.
+///
+/// The output directory is opened with `O_NOFOLLOW`, then the temporary file
+/// and final rename are both relative to that descriptor. This prevents a
+/// parent-directory replacement from redirecting the write, avoids mutating a
+/// hardlink target, and makes a partial write invisible. Existing regular
+/// file modes are preserved; symlinks and non-regular final members fail
+/// closed.
+#[cfg(unix)]
+struct PolicyDirectory {
+    path: PathBuf,
+    file: File,
+}
+
+#[cfg(unix)]
+impl PolicyDirectory {
+    fn open(path: &Path) -> Result<Self> {
+        let path_c = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| anyhow::anyhow!("fleet policy output directory contains NUL"))?;
+        let directory_fd = unsafe {
+            libc::open(
+                path_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if directory_fd < 0 {
+            return Err(io::Error::last_os_error())
+                .with_context(|| format!("opening fleet policy directory {}", path.display()));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            file: unsafe { File::from_raw_fd(directory_fd) },
+        })
+    }
+}
+
+#[cfg(all(unix, test))]
+fn write_policy_file(directory: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
+    let directory = PolicyDirectory::open(directory)?;
+    write_policy_file_at(&directory, file_name, bytes)
+}
+
+#[cfg(unix)]
+fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u8]) -> Result<()> {
+    let file_name_c = CString::new(file_name)
+        .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+
+    let mut existing_mode = 0o644;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stat_result = unsafe {
+        libc::fstatat(
+            directory.file.as_raw_fd(),
+            file_name_c.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if stat_result == 0 {
+        let stat = unsafe { stat.assume_init() };
+        if stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            bail!(
+                "refusing symlinked fleet policy entry {}/{}",
+                directory.path.display(),
+                file_name
+            );
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            bail!(
+                "refusing non-regular fleet policy entry {}/{}",
+                directory.path.display(),
+                file_name
+            );
+        }
+        existing_mode = stat.st_mode & 0o7777;
+    } else if io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "inspecting fleet policy entry {}/{}",
+                directory.path.display(),
+                file_name
+            )
+        });
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..32_u32 {
+        let temp_name = format!(".{file_name}.tmp-{}-{nonce}-{attempt}", std::process::id());
+        let temp_name_c = CString::new(temp_name.as_str())
+            .map_err(|_| anyhow::anyhow!("fleet policy temporary file name contains NUL"))?;
+        let temp_fd = unsafe {
+            libc::openat(
+                directory.file.as_raw_fd(),
+                temp_name_c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                existing_mode as libc::c_uint,
+            )
+        };
+        if temp_fd < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EEXIST) {
+                continue;
+            }
+            return Err(error)
+                .with_context(|| format!("creating fleet policy temporary file {temp_name}"));
+        }
+        let mut temp_file = unsafe { std::fs::File::from_raw_fd(temp_fd) };
+        let chmod_result =
+            unsafe { libc::fchmod(temp_file.as_raw_fd(), existing_mode as libc::mode_t) };
+        if chmod_result < 0 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
+            }
+            return Err(error).with_context(|| {
+                format!("setting mode on fleet policy temporary file {temp_name}")
+            });
+        }
+        let mut renamed = false;
+        let result = (|| -> io::Result<()> {
+            temp_file.write_all(bytes)?;
+            temp_file.sync_all()?;
+            let rename_result = unsafe {
+                libc::renameat(
+                    directory.file.as_raw_fd(),
+                    temp_name_c.as_ptr(),
+                    directory.file.as_raw_fd(),
+                    file_name_c.as_ptr(),
+                )
+            };
+            if rename_result < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            renamed = true;
+            directory.file.sync_all()?;
+            Ok(())
+        })();
+        if !renamed {
+            unsafe {
+                libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
+            }
+        }
+        return result.with_context(|| {
+            format!(
+                "writing fleet policy {}/{}",
+                directory.path.display(),
+                file_name
+            )
+        });
+    }
+    bail!(
+        "could not allocate a unique temporary fleet policy file in {}",
+        directory.path.display()
+    )
+}
+
+#[cfg(unix)]
+fn remove_policy_file_at(directory: &PolicyDirectory, file_name: &str) -> Result<()> {
+    let file_name_c = CString::new(file_name)
+        .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+    let result = unsafe { libc::unlinkat(directory.file.as_raw_fd(), file_name_c.as_ptr(), 0) };
+    if result < 0 {
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "removing fleet policy {}/{}",
+                directory.path.display(),
+                file_name
+            )
+        });
+    }
+    directory.file.sync_all().with_context(|| {
+        format!(
+            "syncing fleet policy directory {}",
+            directory.path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_policy_file(directory: &Path, file_name: &str, _bytes: &[u8]) -> Result<()> {
+    bail!(
+        "fleet policy generation requires a Unix no-follow file-open primitive; refusing to write {}",
+        directory.join(file_name).display()
+    )
+}
+
 fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
     let ledger = ReleaseRefLedger::load(&args.ledger)?;
     let policies = generate_policies_from_ledger(&ledger)?;
     fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("creating {}", args.out_dir.display()))?;
+    #[cfg(unix)]
+    let policy_directory = PolicyDirectory::open(&args.out_dir)?;
     let existing = read_existing_policy_files(&args.out_dir)?;
     let plan = plan_policy_actions(&policies, &existing)?;
     let by_org: BTreeMap<&str, &OrgPolicy> = policies
@@ -1034,14 +1239,17 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
         .map(|policy| (policy.organization.as_str(), policy))
         .collect();
     for (org, (action, bytes)) in &plan {
-        let path = args.out_dir.join(format!("{org}-desired-policy.json"));
+        let file_name = format!("{org}-desired-policy.json");
+        let path = args.out_dir.join(&file_name);
         match action {
             PolicyFileAction::Written => {
                 let bytes = bytes
                     .as_deref()
                     .expect("written actions always carry generated bytes");
-                fs::write(&path, bytes)
-                    .with_context(|| format!("writing fleet policy {}", path.display()))?;
+                #[cfg(unix)]
+                write_policy_file_at(&policy_directory, &file_name, bytes)?;
+                #[cfg(not(unix))]
+                write_policy_file(&args.out_dir, &file_name, bytes)?;
                 let policy = by_org[org.as_str()];
                 println!(
                     "{}: {} repos, {} workflows, {}",
@@ -1055,6 +1263,9 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
                 println!("{}: already current; left untouched", path.display());
             }
             PolicyFileAction::Removed => {
+                #[cfg(unix)]
+                remove_policy_file_at(&policy_directory, &file_name)?;
+                #[cfg(not(unix))]
                 fs::remove_file(&path)
                     .with_context(|| format!("removing stale fleet policy {}", path.display()))?;
                 println!(
@@ -1069,8 +1280,7 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
 }
 
 async fn fleet_audit(args: FleetAuditArgs) -> Result<()> {
-    let policy = load_policy(&args.policy)?;
-    ensure_organization(&policy, &args.organization)?;
+    let policy = fleet_audit_preflight(&args)?;
     let http = ReqwestFleetHttp::new(DEFAULT_GITHUB_API_URL, &fleet_github_token()?)?;
     let gateway = live_gateway(&http).await?;
     let mismatches = gateway.audit(&policy, &args.organization).await?;
@@ -1115,6 +1325,15 @@ fn load_policy(path: &Path) -> Result<OrgPolicy> {
     let policy: OrgPolicy = serde_json::from_str(&raw)
         .with_context(|| format!("parsing fleet policy {}", path.display()))?;
     validate_policy(&policy)?;
+    Ok(policy)
+}
+
+fn fleet_audit_preflight(args: &FleetAuditArgs) -> Result<OrgPolicy> {
+    let policy = load_policy(&args.policy)?;
+    let ledger = ReleaseRefLedger::load(&args.ledger)?;
+    ensure_live_plan_ledger_approved(&ledger)?;
+    ensure_policy_matches_ledger(&policy, &ledger)?;
+    ensure_organization(&policy, &args.organization)?;
     Ok(policy)
 }
 
@@ -1913,6 +2132,61 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    struct UmaskGuard {
+        previous: libc::mode_t,
+    }
+
+    #[cfg(unix)]
+    impl UmaskGuard {
+        fn new(mask: libc::mode_t) -> Self {
+            Self {
+                previous: unsafe { libc::umask(mask) },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::umask(self.previous);
+            }
+        }
+    }
+
+    #[test]
+    fn audit_preflight_rejects_policy_ledger_mismatch_before_gateway() {
+        let dir = PolicyDir::new("audit-preflight");
+        let policy_path = dir.path.join("policy.json");
+        let ledger_path = dir.path.join("release-refs.toml");
+        let policy = sample_policy();
+        fs::write(
+            &policy_path,
+            format!("{}\n", policy.canonical_json().expect("canonical policy")),
+        )
+        .expect("write policy");
+        let mut entry = base_entry();
+        entry = entry.replace(
+            "review_state = \"seed-pending-review\"",
+            "review_state = \"approved\"",
+        );
+        fs::write(&ledger_path, ledger_toml(&[entry])).expect("write ledger");
+
+        let args = FleetAuditArgs {
+            policy: policy_path,
+            ledger: ledger_path,
+            organization: "tailrocks".to_owned(),
+        };
+        let error = fleet_audit_preflight(&args).expect_err("mismatched ledger must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the supplied release-ref ledger"),
+            "unexpected preflight error: {error}"
+        );
+    }
+
     #[test]
     fn plan_policy_actions_classifies_write_skip_and_remove() {
         let mut ledger = approved_sample_ledger();
@@ -2114,6 +2388,73 @@ mod tests {
             fs::read(&stale_target).ok(),
             Some(b"do not remove\n".to_vec()),
             "removal path must never follow the symlink"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn policy_write_rejects_final_symlink_and_preserves_regular_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = PolicyDir::new("nofollow-write");
+        let alias = dir.path.join("nofollow-write-alias");
+        std::os::unix::fs::symlink(&dir.path, &alias).expect("seed directory symlink");
+        let err = write_policy_file(&alias, "alias.json", b"must not land")
+            .expect_err("parent symlink must fail closed");
+        assert!(!err.to_string().is_empty(), "failure should be actionable");
+        assert!(
+            !dir.path.join("alias.json").exists(),
+            "parent symlink must not redirect the write"
+        );
+
+        let regular = dir.path.join("regular.json");
+        fs::write(&regular, b"old\n").expect("seed regular file");
+        fs::set_permissions(&regular, fs::Permissions::from_mode(0o640))
+            .expect("set regular file mode");
+        {
+            let _umask = UmaskGuard::new(0o0777);
+            write_policy_file(&dir.path, "regular.json", b"new\n").expect("write regular file");
+        }
+        assert_eq!(fs::read(&regular).expect("read regular file"), b"new\n");
+        assert_eq!(
+            fs::metadata(&regular)
+                .expect("regular metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640,
+            "rewriting must preserve an existing policy's mode"
+        );
+
+        let target = dir.path.join("target.json");
+        fs::write(&target, b"protected\n").expect("seed symlink target");
+        let hardlink = dir.path.join("hardlink.json");
+        fs::hard_link(&target, &hardlink).expect("seed hardlink target");
+        write_policy_file(&dir.path, "hardlink.json", b"replacement\n")
+            .expect("replace hardlink atomically");
+        assert_eq!(
+            fs::read(&hardlink).expect("read replaced hardlink"),
+            b"replacement\n"
+        );
+        assert_eq!(
+            fs::read(&target).expect("read preserved hardlink target"),
+            b"protected\n"
+        );
+        let link = dir.path.join("linked.json");
+        std::os::unix::fs::symlink(&target, &link).expect("seed final symlink");
+        let err = write_policy_file(&dir.path, "linked.json", b"must not land")
+            .expect_err("symlink must fail");
+        assert!(!err.to_string().is_empty(), "failure should be actionable");
+        assert_eq!(
+            fs::read(&target).expect("read symlink target"),
+            b"protected\n"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("linked metadata")
+                .file_type()
+                .is_symlink(),
+            "failed open must not replace the symlink"
         );
     }
 

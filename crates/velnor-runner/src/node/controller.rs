@@ -1757,7 +1757,8 @@ fn maybe_spawn_job(
         .ok_or_else(|| {
             anyhow::anyhow!("cannot spawn worker {job_id} without generation-owned slot identity")
         })?;
-    if jobs.contains_key(job_id) {
+    let key = job_id.to_owned();
+    if jobs.contains_key(&key) {
         return Ok(());
     }
     if cleanup::read_owned_pid(&args.state_dir, job_id, generation.0)
