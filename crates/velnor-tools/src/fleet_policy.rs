@@ -13,20 +13,21 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
-use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
-    fmt, fs,
-    path::{Component, Path, PathBuf},
-};
 #[cfg(unix)]
 use std::{
-    ffi::{CStr, CString, OsString},
+    collections::VecDeque,
+    ffi::{CStr, CString, OsStr, OsString},
     fs::File,
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
-        unix::ffi::OsStrExt,
+        unix::ffi::{OsStrExt, OsStringExt},
     },
+};
+use std::{
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    fmt, fs,
+    path::{Component, Path, PathBuf},
 };
 use time::{Date, Month, OffsetDateTime};
 
@@ -1055,127 +1056,335 @@ struct PolicyDirectory {
 impl PolicyDirectory {
     fn open_or_create(path: &Path) -> Result<Self> {
         let directory_fd = open_policy_directory_fd(path, true)?;
+        let file = unsafe { File::from_raw_fd(directory_fd) };
+        lock_policy_directory(&file, path)?;
         Ok(Self {
             path: path.to_owned(),
-            file: unsafe { File::from_raw_fd(directory_fd) },
+            file,
         })
     }
 }
 
 #[cfg(unix)]
-fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        bail!(
-            "refusing parent component in fleet policy directory {}",
-            path.display()
-        );
-    }
-
-    // Resolve only the existing parent prefix. This accommodates platform
-    // aliases such as macOS /var -> /private/var without following the final
-    // directory member, which remains protected by O_NOFOLLOW below. Any
-    // missing suffix is then created and opened through the resolved parent
-    // descriptor, so replacement races cannot redirect later operations.
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut missing = Vec::<OsString>::new();
-    let mut existing_prefix = parent.to_owned();
+fn lock_policy_directory(file: &File, path: &Path) -> Result<()> {
     loop {
-        match fs::symlink_metadata(&existing_prefix) {
-            Ok(_) => break,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let component = existing_prefix
-                    .file_name()
-                    .ok_or_else(|| anyhow::anyhow!("invalid fleet policy directory path"))?;
-                missing.push(component.to_os_string());
-                existing_prefix = existing_prefix
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_owned();
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("inspecting fleet policy directory {}", path.display())
-                });
-            }
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result == 0 {
+            return Ok(());
         }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "locking fleet policy directory {} for generation",
+                path.display()
+            )
+        });
     }
-    let mut resolved_path = fs::canonicalize(&existing_prefix).with_context(|| {
-        format!(
-            "resolving existing fleet policy directory prefix {}",
-            existing_prefix.display()
-        )
-    })?;
-    for component in missing.into_iter().rev() {
-        resolved_path.push(component);
-    }
-    if let Some(file_name) = path.file_name() {
-        resolved_path.push(file_name);
-    }
+}
 
-    let start_c = CString::new("/").expect("static path has no NUL");
-    let mut current = unsafe {
+#[cfg(unix)]
+fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
+    let pending = policy_directory_components(path)?;
+
+    // Keep stable root and working-directory descriptors. Every component is
+    // opened relative to a descriptor; aliases are expanded only from a
+    // target captured by readlinkat, never by rebuilding a canonical path.
+    let root_c = CString::new("/").expect("static path has no NUL");
+    let root_fd = unsafe {
         libc::open(
-            start_c.as_ptr(),
+            root_c.as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
-    if current < 0 {
+    if root_fd < 0 {
         return Err(io::Error::last_os_error()).with_context(|| {
             format!("opening root for fleet policy directory {}", path.display())
         });
     }
+    let current = if path.is_absolute() {
+        unsafe { libc::dup(root_fd) }
+    } else {
+        let start_c = CString::new(".").expect("static path has no NUL");
+        unsafe {
+            libc::open(
+                start_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        }
+    };
+    if current < 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(root_fd) };
+        return Err(error).with_context(|| {
+            format!(
+                "opening start for fleet policy directory {}",
+                path.display()
+            )
+        });
+    }
 
-    for component in resolved_path.components() {
-        let component = match component {
-            Component::Normal(component) => component,
-            Component::RootDir | Component::CurDir => continue,
+    let result = open_policy_directory_components(current, root_fd, pending, create, path);
+    let root_close = unsafe { libc::close(root_fd) };
+    match result {
+        Ok(directory_fd) if root_close == 0 => Ok(directory_fd),
+        Ok(directory_fd) => {
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(directory_fd) };
+            Err(error).with_context(|| {
+                format!("closing root for fleet policy directory {}", path.display())
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn policy_directory_components(path: &Path) -> Result<VecDeque<OsString>> {
+    let mut components = VecDeque::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(component) => components.push_back(component.to_os_string()),
+            Component::RootDir | Component::CurDir => {}
             Component::ParentDir => {
-                unsafe { libc::close(current) };
                 bail!(
                     "refusing parent component in fleet policy directory {}",
                     path.display()
                 );
             }
             Component::Prefix(_) => {
-                unsafe { libc::close(current) };
                 bail!(
                     "unsupported path prefix in fleet policy directory {}",
                     path.display()
                 );
             }
-        };
-        let component_c = CString::new(component.as_bytes())
-            .map_err(|_| anyhow::anyhow!("fleet policy output directory contains NUL"))?;
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
-        let mut next = unsafe { libc::openat(current, component_c.as_ptr(), flags) };
-        if next < 0 && create && io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
-            let mkdir_result =
-                unsafe { libc::mkdirat(current, component_c.as_ptr(), 0o755 as libc::mode_t) };
-            if mkdir_result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
-                let error = io::Error::last_os_error();
+        }
+    }
+    Ok(components)
+}
+
+#[cfg(unix)]
+fn open_policy_directory_component(
+    parent_fd: RawFd,
+    component: &OsStr,
+    create: bool,
+) -> io::Result<RawFd> {
+    let component_c = CString::new(component.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fleet policy output directory contains NUL",
+        )
+    })?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    let mut next = unsafe { libc::openat(parent_fd, component_c.as_ptr(), flags) };
+    if next >= 0 {
+        return Ok(next);
+    }
+    if create && io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+        let mkdir_result =
+            unsafe { libc::mkdirat(parent_fd, component_c.as_ptr(), 0o755 as libc::mode_t) };
+        if mkdir_result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+            return Err(io::Error::last_os_error());
+        }
+        next = unsafe { libc::openat(parent_fd, component_c.as_ptr(), flags) };
+        if next >= 0 {
+            return Ok(next);
+        }
+    }
+    Err(io::Error::last_os_error())
+}
+
+#[cfg(unix)]
+fn read_link_at(directory: RawFd, name: &OsStr) -> io::Result<OsString> {
+    // Capture once. A size-probing loop could observe a replacement on its
+    // second read and make the walk follow a different alias than the one
+    // that produced ELOOP.
+    const MAX_TARGET_BYTES: usize = 64 * 1024;
+    let name_c = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fleet policy output directory contains NUL",
+        )
+    })?;
+    let before = policy_symlink_identity(directory, &name_c)?;
+    let mut buffer = vec![0_u8; MAX_TARGET_BYTES];
+    let length = unsafe {
+        libc::readlinkat(
+            directory,
+            name_c.as_ptr(),
+            buffer.as_mut_ptr().cast::<libc::c_char>(),
+            buffer.len(),
+        )
+    };
+    if length < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let length = length as usize;
+    if length == buffer.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory symlink target exceeds 64 KiB",
+        ));
+    }
+    let after = policy_symlink_identity(directory, &name_c)?;
+    if before != after {
+        return Err(io::Error::from_raw_os_error(libc::EAGAIN));
+    }
+    buffer.truncate(length);
+    if buffer.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory symlink target is empty",
+        ));
+    }
+    Ok(OsString::from_vec(buffer))
+}
+
+#[cfg(unix)]
+fn policy_symlink_identity(directory: RawFd, name: &CString) -> io::Result<(u64, u64, u64)> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            directory,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    Ok((stat.st_dev as u64, stat.st_ino, stat.st_mode as u64))
+}
+
+#[cfg(unix)]
+fn open_policy_directory_components(
+    mut current: RawFd,
+    root_fd: RawFd,
+    mut pending: VecDeque<OsString>,
+    create: bool,
+    path: &Path,
+) -> Result<RawFd> {
+    const MAX_SYMLINK_HOPS: usize = 40;
+    let mut symlink_hops = 0;
+
+    while let Some(component) = pending.pop_front() {
+        let is_final = pending.is_empty();
+        let next = match open_policy_directory_component(current, &component, create) {
+            Ok(next) => next,
+            Err(error)
+                if !is_final
+                    && matches!(
+                        error.raw_os_error(),
+                        Some(libc::ELOOP) | Some(libc::ENOTDIR)
+                    ) =>
+            {
+                let component_c = match CString::new(component.as_bytes()) {
+                    Ok(component_c) => component_c,
+                    Err(error) => {
+                        unsafe { libc::close(current) };
+                        return Err(anyhow::Error::new(error));
+                    }
+                };
+                let is_symlink = match policy_symlink_identity(current, &component_c) {
+                    Ok(_) => true,
+                    Err(identity_error)
+                        if matches!(
+                            identity_error.raw_os_error(),
+                            Some(libc::EINVAL) | Some(libc::ENOENT)
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(identity_error) => {
+                        unsafe { libc::close(current) };
+                        return Err(identity_error).with_context(|| {
+                            format!(
+                                "inspecting symlinked fleet policy directory component {}/{}",
+                                path.display(),
+                                component.to_string_lossy()
+                            )
+                        });
+                    }
+                };
+                if !is_symlink {
+                    unsafe { libc::close(current) };
+                    return Err(error).with_context(|| {
+                        format!(
+                            "opening component {} in fleet policy directory {}",
+                            component.to_string_lossy(),
+                            path.display()
+                        )
+                    });
+                }
+                if symlink_hops == MAX_SYMLINK_HOPS {
+                    unsafe { libc::close(current) };
+                    return Err(io::Error::from_raw_os_error(libc::ELOOP)).with_context(|| {
+                        format!("resolving fleet policy directory {}", path.display())
+                    });
+                }
+                let target = match read_link_at(current, &component) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        unsafe { libc::close(current) };
+                        return Err(error).with_context(|| {
+                            format!(
+                                "capturing symlinked fleet policy directory component {}/{}",
+                                path.display(),
+                                component.to_string_lossy()
+                            )
+                        });
+                    }
+                };
+                let target_path = Path::new(&target);
+                let mut target_components = match policy_directory_components(target_path) {
+                    Ok(components) => components,
+                    Err(error) => {
+                        unsafe { libc::close(current) };
+                        return Err(error);
+                    }
+                };
+                let replacement_base = unsafe {
+                    libc::dup(if target_path.is_absolute() {
+                        root_fd
+                    } else {
+                        current
+                    })
+                };
+                if replacement_base < 0 {
+                    let error = io::Error::last_os_error();
+                    unsafe { libc::close(current) };
+                    return Err(error).with_context(|| {
+                        format!(
+                            "duplicating symlink base for fleet policy directory {}",
+                            path.display()
+                        )
+                    });
+                }
+                unsafe { libc::close(current) };
+                target_components.append(&mut pending);
+                pending = target_components;
+                current = replacement_base;
+                symlink_hops += 1;
+                continue;
+            }
+            Err(error) => {
                 unsafe { libc::close(current) };
                 return Err(error).with_context(|| {
                     format!(
-                        "creating fleet policy directory component {}",
-                        component.display()
+                        "opening component {} in fleet policy directory {}",
+                        component.to_string_lossy(),
+                        path.display()
                     )
                 });
             }
-            next = unsafe { libc::openat(current, component_c.as_ptr(), flags) };
-        }
-        if next < 0 {
-            let error = io::Error::last_os_error();
-            unsafe { libc::close(current) };
-            return Err(error)
-                .with_context(|| format!("opening fleet policy directory {}", path.display()));
-        }
+        };
         unsafe { libc::close(current) };
         current = next;
     }
@@ -2682,6 +2891,33 @@ mod tests {
             .expect_err("FIFO policy-named entries must abort generation")
             .to_string();
         assert!(err.contains("non-regular"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn policy_directory_holds_exclusive_lock_until_file_close() {
+        use std::os::fd::AsRawFd;
+
+        let dir = PolicyDir::new("exclusive-lock");
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("lock policy dir");
+        let contender = fs::File::open(&dir.path).expect("open lock contender");
+        let result = unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let error = io::Error::last_os_error();
+        assert_eq!(result, -1, "contender must not acquire the held lock");
+        assert!(
+            matches!(
+                error.raw_os_error(),
+                Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK
+            ),
+            "unexpected lock contention error: {error}"
+        );
+
+        drop(directory);
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB,) },
+            0,
+            "directory File close must release the lock"
+        );
     }
 
     #[test]

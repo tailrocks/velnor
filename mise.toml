@@ -30,7 +30,7 @@ run = "cargo nextest run --workspace --locked --features velnor-runner/test-supp
 
 [tasks.test-focused]
 description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
-run = "cargo nextest run --locked --features velnor-runner/test-support --color=always"
+run = "cargo nextest run --locked --color=always"
 
 [tasks.test-focused-runner]
 description = "Runner tests with loopback fixture support"

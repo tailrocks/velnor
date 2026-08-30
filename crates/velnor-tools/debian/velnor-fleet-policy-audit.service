@@ -8,6 +8,7 @@ Wants=network-online.target
 Type=oneshot
 RuntimeDirectory=velnor
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 Environment=VELNOR_FLEET_POLICY_DIR=/var/lib/velnor/fleet-policy
 EnvironmentFile=/etc/velnor/fleet-policy-audit.env
 EnvironmentFile=-/etc/velnor/secrets.env
