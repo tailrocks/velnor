@@ -22,6 +22,6 @@ present; otherwise the output records zero and the summary states that timing
 was unavailable. Absolute paths in caller-supplied fields are replaced with a
 stable marker before serialization.
 
-The three-scenario fixture and the real Parallax ordinary-PR attribution report
-remain outside this bounded slice and are required before TASK-004 can be
-marked complete.
+Committed structured Cargo JSON fixtures under `tests/fixtures/` cover fresh,
+touched-source, and dependency-bump passes. The real Parallax ordinary-PR
+attribution report remains required before TASK-004 can be marked complete.
