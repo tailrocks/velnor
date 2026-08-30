@@ -1,7 +1,8 @@
 # Issue 408 — Control-plane idle CPU and reconciliation churn
 
 Issue: https://github.com/tailrocks/velnor/issues/408  
-Working branch: `codex/velnor-project-goal`
+Working branch: operator-assigned `velnor1` (assignment recorded in
+`../COORDINATION.md`)
 
 This is the execution ledger for the issue. A checkbox is marked `[x]` only
 when current code and a matching test or external artifact prove it. External
@@ -33,11 +34,11 @@ durability/job isolation tradeoff is allowed.
 ## Coordination lease — historical entries
 
 Earlier sibling-worktree and branch ownership notes are historical evidence
-only. They are superseded by the active single-campaign directive: all
+only. They are superseded by the active assigned-branch directive: all
 remaining issue-408 work, fixture tooling, fixture dispatch, APT, and Sentry
-evidence must be implemented and audited on this campaign branch and its sole
-PR. External evidence remains open until recorded below. No sibling branch or
-additional PR is executable.
+evidence must be implemented and audited on the assigned branch and its focused
+PR directly to `main`. External evidence remains open until recorded below. No
+shared integration branch or direct commit to `main` is executable.
 
 ## Phase 0 — attribution and budgets
 

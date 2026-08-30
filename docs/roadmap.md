@@ -450,7 +450,7 @@ binaries, and local builds are forbidden deployment paths. The sole chicken-egg
 exception is incident-only and requires fresh evidence that the Velnor lane
 failed or is unavailable, proof that this failure blocks building Velnor itself,
 explicit operator authorization, and—before building—verification that the
-remote campaign branch tip equals the exact pushed campaign SHA. Exactly one
+remote assigned-branch tip equals the exact pushed assigned-branch SHA. Exactly one
 Debian package may then be built on this host from that SHA. Even then, only
 that package may be transferred via `ssh -o BatchMode=yes sentry` using a pinned
 and verified Sentry host identity and fail-closed authentication, then proceed
