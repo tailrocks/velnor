@@ -15,4 +15,4 @@ velnor-action-model = { path = "../velnor-action-model", version = "0.1.0" }
 
 [dev-dependencies]
 libc.workspace = true
-tempfile = "3.23.0"
+tempfile = "=3.27.0"
