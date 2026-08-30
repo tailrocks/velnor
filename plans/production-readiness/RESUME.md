@@ -4,8 +4,10 @@ Snapshot recorded before the checkpoint commit and push.
 
 > This file is historical evidence only. Do not resume, execute, push, merge,
 > deploy, or install from any instruction below. The active authority is
-> docs/prompt.md and the static campaign branch codex/velnor-project-goal with
-> its sole PR.
+> docs/prompt.md; the static campaign branch codex/velnor-project-goal and its
+> sole PR are snapshot-era only. That static branch/sole-PR directive is
+> superseded by the current assigned-branch/focused-PR directive for `velnor1`
+> through `velnor10`.
 
 ## Objective
 
