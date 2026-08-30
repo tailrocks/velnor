@@ -9,9 +9,13 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
     fs::{File, OpenOptions},
-    io::{BufWriter, Write},
-    path::Path,
-    sync::{Arc, Mutex, MutexGuard},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
@@ -21,6 +25,7 @@ use crate::time::Timestamp;
 
 /// Stable discriminator for the telemetry wire contract.
 pub const TELEMETRY_SCHEMA: &str = "velnor.telemetry.v1";
+pub const DEFAULT_TELEMETRY_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 const MAX_TEXT_LEN: usize = 512;
 const SECRET_MARKERS: [&str; 10] = [
@@ -246,19 +251,37 @@ impl<'de> Deserialize<'de> for TelemetryEnvelope {
 
 /// Opaque position in the bounded telemetry stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TelemetryCursor(u64);
+pub struct TelemetryCursor {
+    epoch: u64,
+    sequence: u64,
+}
 
 impl TelemetryCursor {
     /// Construct a cursor previously returned by an emission or page.
     #[must_use]
     pub const fn from_value(value: u64) -> Self {
-        Self(value)
+        Self {
+            epoch: 0,
+            sequence: value,
+        }
+    }
+
+    /// Construct a cursor from its sink generation and sequence number.
+    #[must_use]
+    pub const fn from_parts(epoch: u64, sequence: u64) -> Self {
+        Self { epoch, sequence }
+    }
+
+    /// Return the sink generation encoded in this cursor.
+    #[must_use]
+    pub const fn epoch(self) -> u64 {
+        self.epoch
     }
 
     /// Return the stable numeric position for persistence by a caller.
     #[must_use]
     pub const fn value(self) -> u64 {
-        self.0
+        self.sequence
     }
 }
 
@@ -339,6 +362,8 @@ pub struct TelemetrySinkStats {
     ring_evictions: u64,
     file_writes: u64,
     file_failures: u64,
+    file_rotations: u64,
+    file_bytes: u64,
     file_enabled: bool,
 }
 
@@ -367,6 +392,18 @@ impl TelemetrySinkStats {
         self.file_failures
     }
 
+    /// Number of successful file truncations used to bound retention.
+    #[must_use]
+    pub const fn file_rotations(self) -> u64 {
+        self.file_rotations
+    }
+
+    /// Bytes currently retained in the bounded NDJSON file.
+    #[must_use]
+    pub const fn file_bytes(self) -> u64 {
+        self.file_bytes
+    }
+
     /// Whether the sink currently has an open NDJSON writer.
     #[must_use]
     pub const fn file_enabled(self) -> bool {
@@ -380,7 +417,7 @@ pub struct InvalidTelemetrySink;
 
 impl fmt::Display for InvalidTelemetrySink {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("telemetry ring capacity must be greater than zero")
+        formatter.write_str("telemetry ring capacity and file limit must be greater than zero")
     }
 }
 
@@ -389,11 +426,16 @@ impl std::error::Error for InvalidTelemetrySink {}
 #[derive(Debug)]
 struct TelemetrySinkState {
     ring: VecDeque<TelemetryRecord>,
-    next_cursor: u64,
+    epoch: u64,
+    next_sequence: u64,
     capacity: usize,
     ring_evictions: u64,
     file_writes: u64,
     file_failures: u64,
+    file_rotations: u64,
+    file_bytes: u64,
+    file_path: Option<PathBuf>,
+    max_file_bytes: u64,
     writer: Option<BufWriter<File>>,
 }
 
@@ -414,28 +456,38 @@ impl TelemetrySink {
     /// increments its failure counter; callers still receive successful ring
     /// emissions. Pass `None` for an intentional memory-only sink.
     pub fn new(path: Option<&Path>, capacity: usize) -> Result<Self, InvalidTelemetrySink> {
-        if capacity == 0 {
+        Self::new_with_max_file_bytes(path, capacity, DEFAULT_TELEMETRY_FILE_BYTES)
+    }
+
+    /// Open a sink with an explicit byte limit for the optional NDJSON file.
+    pub fn new_with_max_file_bytes(
+        path: Option<&Path>,
+        capacity: usize,
+        max_file_bytes: u64,
+    ) -> Result<Self, InvalidTelemetrySink> {
+        if capacity == 0 || max_file_bytes == 0 {
             return Err(InvalidTelemetrySink);
         }
 
-        let writer = path.and_then(|path| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-                .map(BufWriter::new)
-        });
+        let file_path = path.map(Path::to_path_buf);
+        let opened = path.and_then(|path| open_bounded_file(path, max_file_bytes).ok());
+        let (writer, file_bytes) =
+            opened.map_or((None, 0), |(writer, file_bytes)| (Some(writer), file_bytes));
         let file_failures = u64::from(path.is_some() && writer.is_none());
 
         Ok(Self {
             state: Arc::new(Mutex::new(TelemetrySinkState {
                 ring: VecDeque::with_capacity(capacity),
-                next_cursor: 1,
+                epoch: next_epoch(),
+                next_sequence: 1,
                 capacity,
                 ring_evictions: 0,
                 file_writes: 0,
                 file_failures,
+                file_rotations: 0,
+                file_bytes,
+                file_path,
+                max_file_bytes,
                 writer,
             })),
         })
@@ -445,8 +497,8 @@ impl TelemetrySink {
     #[must_use]
     pub fn emit(&self, envelope: TelemetryEnvelope) -> TelemetryEmission {
         let mut state = lock_state(&self.state);
-        let cursor = TelemetryCursor(state.next_cursor);
-        state.next_cursor = state.next_cursor.saturating_add(1);
+        let cursor = TelemetryCursor::from_parts(state.epoch, state.next_sequence);
+        state.next_sequence = state.next_sequence.saturating_add(1);
 
         let file_written = write_ndjson(&mut state, &envelope);
         if state.ring.len() == state.capacity {
@@ -466,10 +518,11 @@ impl TelemetrySink {
     pub fn read(&self, after: Option<TelemetryCursor>, limit: usize) -> TelemetryPage {
         let state = lock_state(&self.state);
         let oldest = state.ring.front().map(|record| record.cursor);
+        let cursor_is_stale = after.is_some_and(|cursor| cursor.epoch() != state.epoch);
         let dropped_before = match (state.ring_evictions > 0, oldest, after) {
             (true, Some(oldest), None) => Some(oldest),
             (true, Some(oldest), Some(after))
-                if after.value().saturating_add(1) < oldest.value() =>
+                if cursor_is_stale || after.value().saturating_add(1) < oldest.value() =>
             {
                 Some(oldest)
             }
@@ -487,7 +540,11 @@ impl TelemetrySink {
         let mut records: Vec<TelemetryRecord> = state
             .ring
             .iter()
-            .filter(|record| after.is_none_or(|cursor| record.cursor > cursor))
+            .filter(|record| {
+                after.is_none_or(|cursor| {
+                    cursor.epoch() != state.epoch || record.cursor.value() > cursor.value()
+                })
+            })
             .take(limit.saturating_add(1))
             .cloned()
             .collect();
@@ -508,10 +565,12 @@ impl TelemetrySink {
     pub fn stats(&self) -> TelemetrySinkStats {
         let state = lock_state(&self.state);
         TelemetrySinkStats {
-            emitted: state.next_cursor.saturating_sub(1),
+            emitted: state.next_sequence.saturating_sub(1),
             ring_evictions: state.ring_evictions,
             file_writes: state.file_writes,
             file_failures: state.file_failures,
+            file_rotations: state.file_rotations,
+            file_bytes: state.file_bytes,
             file_enabled: state.writer.is_some(),
         }
     }
@@ -523,17 +582,84 @@ fn lock_state(state: &Mutex<TelemetrySinkState>) -> MutexGuard<'_, TelemetrySink
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn write_ndjson(state: &mut TelemetrySinkState, envelope: &TelemetryEnvelope) -> bool {
-    let Some(writer) = state.writer.as_mut() else {
-        return false;
-    };
+fn next_epoch() -> u64 {
+    static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
-    let result = (|| -> std::io::Result<()> {
-        serde_json::to_writer(&mut *writer, envelope).map_err(std::io::Error::other)?;
-        writer.write_all(b"\n")?;
-        writer.flush()
-    })();
+    let sequence = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    nanos ^ sequence.rotate_left(17) ^ u64::from(std::process::id())
+}
+
+fn open_bounded_file(path: &Path, max_file_bytes: u64) -> io::Result<(BufWriter<File>, u64)> {
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let file_bytes = file.metadata()?.len();
+    if file_bytes > max_file_bytes {
+        drop(file);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        return Ok((BufWriter::new(file), 0));
+    }
+    Ok((BufWriter::new(file), file_bytes))
+}
+
+fn rotate_file(state: &mut TelemetrySinkState) -> io::Result<()> {
+    let Some(path) = state.file_path.as_deref() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "telemetry file path is unavailable",
+        ));
+    };
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    state.writer = Some(BufWriter::new(file));
+    state.file_bytes = 0;
+    state.file_rotations = state.file_rotations.saturating_add(1);
+    Ok(())
+}
+
+fn write_ndjson(state: &mut TelemetrySinkState, envelope: &TelemetryEnvelope) -> bool {
+    if state.writer.is_none() {
+        return false;
+    }
+
+    let mut line = Vec::new();
+    if serde_json::to_writer(&mut line, envelope).is_err() {
+        state.file_failures = state.file_failures.saturating_add(1);
+        state.writer = None;
+        return false;
+    }
+    line.push(b'\n');
+
+    let line_bytes = line.len() as u64;
+    if line_bytes > state.max_file_bytes {
+        state.file_failures = state.file_failures.saturating_add(1);
+        state.writer = None;
+        return false;
+    }
+
+    if state.file_bytes.saturating_add(line_bytes) > state.max_file_bytes
+        && rotate_file(state).is_err()
+    {
+        state.file_failures = state.file_failures.saturating_add(1);
+        state.writer = None;
+        return false;
+    }
+
+    let result = state.writer.as_mut().map_or_else(
+        || Err(io::Error::other("telemetry writer unavailable")),
+        |writer| writer.write_all(&line).and_then(|()| writer.flush()),
+    );
     if result.is_ok() {
+        state.file_bytes = state.file_bytes.saturating_add(line_bytes);
         state.file_writes = state.file_writes.saturating_add(1);
         true
     } else {
@@ -726,7 +852,7 @@ mod tests {
         assert_eq!(second.cursor().value(), 2);
         assert_eq!(third.cursor().value(), 3);
         let page = sink.read(None, 1);
-        assert_eq!(page.dropped_before(), Some(TelemetryCursor(2)));
+        assert_eq!(page.dropped_before().map(TelemetryCursor::value), Some(2));
         assert_eq!(page.records()[0].cursor(), second.cursor());
         assert_eq!(page.next_cursor(), Some(second.cursor()));
 
@@ -803,5 +929,55 @@ mod tests {
             TelemetrySink::new(None, 0),
             Err(InvalidTelemetrySink)
         ));
+    }
+
+    #[test]
+    fn sink_rejects_zero_file_limit() {
+        assert!(matches!(
+            TelemetrySink::new_with_max_file_bytes(None, 2, 0),
+            Err(InvalidTelemetrySink)
+        ));
+    }
+
+    #[test]
+    fn sink_rotates_file_before_exceeding_byte_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-rotation-{}-{}.jsonl",
+            std::process::id(),
+            TelemetryCursor::from_value(2).value()
+        ));
+        let _ = fs::remove_file(&path);
+        let line_bytes = serde_json::to_vec(&envelope())
+            .expect("serialize envelope")
+            .len()
+            + 1;
+        let sink = TelemetrySink::new_with_max_file_bytes(Some(&path), 4, (line_bytes * 2) as u64)
+            .expect("valid sink");
+
+        for _ in 0..3 {
+            assert!(sink.emit(envelope()).file_written());
+        }
+
+        let stats = sink.stats();
+        assert_eq!(stats.file_writes(), 3);
+        assert_eq!(stats.file_rotations(), 1);
+        assert_eq!(stats.file_bytes(), line_bytes as u64);
+        assert!(
+            fs::metadata(&path).expect("telemetry file exists").len() <= (line_bytes * 2) as u64
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sink_recreation_does_not_hide_new_records_behind_old_cursor() {
+        let first_sink = TelemetrySink::new(None, 2).expect("valid sink");
+        let old_cursor = first_sink.emit(envelope()).cursor();
+        let second_sink = TelemetrySink::new(None, 2).expect("valid sink");
+        let new_cursor = second_sink.emit(envelope()).cursor();
+
+        assert_ne!(old_cursor.epoch(), new_cursor.epoch());
+        let page = second_sink.read(Some(old_cursor), 10);
+        assert_eq!(page.records().len(), 1);
+        assert_eq!(page.records()[0].cursor(), new_cursor);
     }
 }
