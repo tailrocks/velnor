@@ -9,6 +9,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -24,6 +26,72 @@ use velnor_model::{
 };
 
 pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+
+/// Production clock for durable lease deadlines.
+///
+/// Logical time is Unix milliseconds so a restarted process uses the same
+/// epoch as the process that persisted the lease. Clones share the wake
+/// channel used by lease managers that observe the same journal.
+#[derive(Clone, Debug)]
+pub struct TokioClock {
+    expiry_wake: Arc<tokio::sync::Notify>,
+}
+
+impl TokioClock {
+    /// Create a production clock with a shared expiry wake channel.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            expiry_wake: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn unix_now() -> LogicalInstant {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        LogicalInstant::from_millis(millis)
+    }
+}
+
+impl Default for TokioClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clock for TokioClock {
+    fn now(&self) -> LogicalInstant {
+        Self::unix_now()
+    }
+
+    fn sleep_until(
+        &self,
+        deadline: LogicalInstant,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let wake = Arc::clone(&self.expiry_wake);
+        let now = self.now();
+        Box::pin(async move {
+            let notified = wake.notified();
+            if deadline == LogicalInstant::MAX {
+                notified.await;
+                return;
+            }
+            let delay_ms = deadline.as_millis().saturating_sub(now.as_millis());
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                _ = notified => {}
+            }
+        })
+    }
+
+    fn wake_expiry(&self) {
+        self.expiry_wake.notify_one();
+    }
+}
 
 /// One durable action record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,9 +665,10 @@ impl<C: Clock> LeaseManager<C> {
     /// Wait for the next persisted deadline, then expire due leases.
     pub async fn expire_next(&mut self) -> Result<usize, JournalError> {
         loop {
-            let Some(deadline) = self.next_expiry()? else {
-                return Ok(0);
-            };
+            // MAX is the durable event-driven idle wait. A lease acquired by
+            // another manager wakes the shared clock, after which this loop
+            // re-reads SQLite instead of polling or returning prematurely.
+            let deadline = self.next_expiry()?.unwrap_or(LogicalInstant::MAX);
             self.clock.sleep_until(deadline).await;
             let expired = self.expire_due()?;
             if expired > 0 {
@@ -1367,6 +1436,45 @@ mod tests {
             second_manager.lease_status(&action(52)).unwrap(),
             Some(LeaseStatus::Abandoned)
         );
+    }
+
+    #[cfg(feature = "virtual-time")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn expiry_wait_reacts_to_a_new_lease_when_idle() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("idle-expiry.sqlite");
+        let clock = TestClock::default();
+        let manager = LeaseManager::open(&path, clock.clone()).unwrap();
+        let task = tokio::spawn(async move {
+            let mut manager = manager;
+            manager.expire_next().await
+        });
+        tokio::task::yield_now().await;
+
+        let mut producer = LeaseManager::open(&path, clock.clone()).unwrap();
+        producer.acquire(&action(53), "worker-a", 10, 5).unwrap();
+        clock.advance(10);
+
+        assert_eq!(task.await.unwrap().unwrap(), 1);
+        assert_eq!(
+            producer.lease_status(&action(53)).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_clock_wakes_idle_expiry_wait() {
+        let clock = TokioClock::new();
+        let waiter_clock = clock.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_clock.sleep_until(LogicalInstant::MAX).await;
+        });
+        tokio::task::yield_now().await;
+        clock.wake_expiry();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

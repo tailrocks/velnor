@@ -217,6 +217,9 @@ impl ActionKey {
 pub struct LogicalInstant(u64);
 
 impl LogicalInstant {
+    /// Sentinel deadline used by event-driven waiters with no active lease.
+    pub const MAX: Self = Self(u64::MAX);
+
     /// Construct a logical instant from milliseconds.
     #[must_use]
     pub const fn from_millis(millis: u64) -> Self {
@@ -254,7 +257,7 @@ pub trait Clock: Send + Sync {
     ///
     /// Implementations shared by broker instances use this to make an
     /// earlier newly persisted deadline observable without polling.
-    fn wake_expiry(&self) {}
+    fn wake_expiry(&self);
 }
 
 /// A producer lease fencing one owner of an action.
