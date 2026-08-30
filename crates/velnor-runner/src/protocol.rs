@@ -5047,10 +5047,13 @@ fn upload_artifact_with_zip_builder(
         .context("build Results Service HTTP client")?;
 
     if options.overwrite {
-        let existing = list_results_artifacts(&client, base, token, plan_id, job_id)?
-            .into_iter()
-            .filter(|artifact| artifact.name == name)
-            .collect::<Vec<_>>();
+        let existing = artifacts_owned_by_job(
+            list_results_artifacts(&client, base, token, plan_id, job_id)?,
+            job_id,
+        )
+        .into_iter()
+        .filter(|artifact| artifact.name == name)
+        .collect::<Vec<_>>();
         for artifact in existing {
             delete_artifact_descriptor_blocking(&client, base, token, &artifact)?;
         }
@@ -5196,10 +5199,13 @@ pub(crate) fn delete_finalized_artifact_blocking(
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
-    let matches = list_results_artifacts(&client, base, token, plan_id, job_id)?
-        .into_iter()
-        .filter(|artifact| artifact.name == name && artifact.database_id == artifact_id)
-        .collect::<Vec<_>>();
+    let matches = artifacts_owned_by_job(
+        list_results_artifacts(&client, base, token, plan_id, job_id)?,
+        job_id,
+    )
+    .into_iter()
+    .filter(|artifact| artifact.name == name && artifact.database_id == artifact_id)
+    .collect::<Vec<_>>();
     if matches.len() != 1 {
         bail!(
             "cannot safely delete Results Service artifact '{name}': expected one matching artifact ID, found {}",
@@ -5916,6 +5922,35 @@ fn list_results_artifacts(
         validated.push(artifact);
     }
     Ok(validated)
+}
+
+/// Restrict destructive artifact operations to artifacts produced by this
+/// job. The general listing intentionally remains cross-job because Results
+/// Service downloads support fan-in from parallel producer jobs.
+fn artifacts_owned_by_job(
+    artifacts: Vec<ValidatedResultsArtifactDescriptor>,
+    job_id: &str,
+) -> Vec<ValidatedResultsArtifactDescriptor> {
+    artifacts
+        .into_iter()
+        .filter(|artifact| artifact.workflow_job_run_backend_id == job_id)
+        .collect()
+}
+
+#[cfg(test)]
+fn test_results_artifact_descriptor(
+    job_id: &str,
+    database_id: u64,
+) -> ValidatedResultsArtifactDescriptor {
+    ValidatedResultsArtifactDescriptor {
+        workflow_run_backend_id: "plan".to_owned(),
+        workflow_job_run_backend_id: job_id.to_owned(),
+        database_id,
+        name: "release".to_owned(),
+        size: 7,
+        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .to_owned(),
+    }
 }
 
 pub(crate) fn results_artifact_id_by_name_blocking(
@@ -6686,6 +6721,21 @@ mod tests {
             request["mime_type"],
             serde_json::json!({"value": "application/zip"})
         );
+    }
+
+    #[test]
+    fn destructive_artifact_selection_excludes_other_jobs() {
+        let selected = artifacts_owned_by_job(
+            vec![
+                test_results_artifact_descriptor("producer", 1),
+                test_results_artifact_descriptor("other-job", 2),
+            ],
+            "producer",
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].database_id, 1);
+        assert_eq!(selected[0].workflow_job_run_backend_id, "producer");
     }
 
     #[test]
