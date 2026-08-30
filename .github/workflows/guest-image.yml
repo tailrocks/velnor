@@ -153,7 +153,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: guest-image-${{ matrix.arch }}
-          compression-level: 0
+          compression-level: 1
           path: |
             dist/microvm/vmlinux
             dist/microvm/rootfs.ext4
