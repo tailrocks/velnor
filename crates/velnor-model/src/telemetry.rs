@@ -5,7 +5,18 @@
 //! describes observations that may be streamed, sampled, or retained in a
 //! bounded ring.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt,
+    fs::{File, OpenOptions},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -14,6 +25,7 @@ use crate::time::Timestamp;
 
 /// Stable discriminator for the telemetry wire contract.
 pub const TELEMETRY_SCHEMA: &str = "velnor.telemetry.v1";
+pub const DEFAULT_TELEMETRY_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 const MAX_TEXT_LEN: usize = 512;
 const SECRET_MARKERS: [&str; 10] = [
@@ -237,6 +249,426 @@ impl<'de> Deserialize<'de> for TelemetryEnvelope {
     }
 }
 
+/// Opaque position in the bounded telemetry stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TelemetryCursor {
+    epoch: u64,
+    sequence: u64,
+}
+
+impl TelemetryCursor {
+    /// Construct a cursor previously returned by an emission or page.
+    #[must_use]
+    pub const fn from_value(value: u64) -> Self {
+        Self {
+            epoch: 0,
+            sequence: value,
+        }
+    }
+
+    /// Construct a cursor from its sink generation and sequence number.
+    #[must_use]
+    pub const fn from_parts(epoch: u64, sequence: u64) -> Self {
+        Self { epoch, sequence }
+    }
+
+    /// Return the sink generation encoded in this cursor.
+    #[must_use]
+    pub const fn epoch(self) -> u64 {
+        self.epoch
+    }
+
+    /// Return the stable numeric position for persistence by a caller.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.sequence
+    }
+}
+
+/// An envelope paired with its ring-buffer position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TelemetryRecord {
+    cursor: TelemetryCursor,
+    envelope: TelemetryEnvelope,
+}
+
+impl TelemetryRecord {
+    /// The record position used as the next page's `after` cursor.
+    #[must_use]
+    pub const fn cursor(&self) -> TelemetryCursor {
+        self.cursor
+    }
+
+    /// The validated telemetry envelope.
+    #[must_use]
+    pub const fn envelope(&self) -> &TelemetryEnvelope {
+        &self.envelope
+    }
+}
+
+/// A bounded page from the in-memory telemetry ring.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TelemetryPage {
+    records: Vec<TelemetryRecord>,
+    next_cursor: Option<TelemetryCursor>,
+    dropped_before: Option<TelemetryCursor>,
+}
+
+impl TelemetryPage {
+    /// Records after the requested cursor, in emission order.
+    #[must_use]
+    pub fn records(&self) -> &[TelemetryRecord] {
+        &self.records
+    }
+
+    /// Cursor to pass to the next read when more records remain.
+    #[must_use]
+    pub const fn next_cursor(&self) -> Option<TelemetryCursor> {
+        self.next_cursor
+    }
+
+    /// Oldest retained cursor when earlier records were evicted.
+    #[must_use]
+    pub const fn dropped_before(&self) -> Option<TelemetryCursor> {
+        self.dropped_before
+    }
+}
+
+/// Result of a best-effort emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelemetryEmission {
+    cursor: TelemetryCursor,
+    file_written: bool,
+}
+
+impl TelemetryEmission {
+    /// Position assigned to the emitted envelope.
+    #[must_use]
+    pub const fn cursor(self) -> TelemetryCursor {
+        self.cursor
+    }
+
+    /// Whether the NDJSON append and flush succeeded for this event.
+    #[must_use]
+    pub const fn file_written(self) -> bool {
+        self.file_written
+    }
+}
+
+/// Counters describing best-effort sink behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelemetrySinkStats {
+    emitted: u64,
+    ring_evictions: u64,
+    file_writes: u64,
+    file_failures: u64,
+    file_rotations: u64,
+    file_bytes: u64,
+    file_enabled: bool,
+}
+
+impl TelemetrySinkStats {
+    /// Total envelopes accepted into the in-memory ring.
+    #[must_use]
+    pub const fn emitted(self) -> u64 {
+        self.emitted
+    }
+
+    /// Number of old ring records discarded at capacity.
+    #[must_use]
+    pub const fn ring_evictions(self) -> u64 {
+        self.ring_evictions
+    }
+
+    /// Number of envelopes written and flushed to NDJSON.
+    #[must_use]
+    pub const fn file_writes(self) -> u64 {
+        self.file_writes
+    }
+
+    /// Number of failed file opens/writes/flushes.
+    #[must_use]
+    pub const fn file_failures(self) -> u64 {
+        self.file_failures
+    }
+
+    /// Number of successful file truncations used to bound retention.
+    #[must_use]
+    pub const fn file_rotations(self) -> u64 {
+        self.file_rotations
+    }
+
+    /// Bytes currently retained in the bounded NDJSON file.
+    #[must_use]
+    pub const fn file_bytes(self) -> u64 {
+        self.file_bytes
+    }
+
+    /// Whether the sink currently has an open NDJSON writer.
+    #[must_use]
+    pub const fn file_enabled(self) -> bool {
+        self.file_enabled
+    }
+}
+
+/// Configuration failure for a telemetry sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidTelemetrySink;
+
+impl fmt::Display for InvalidTelemetrySink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("telemetry ring capacity and file limit must be greater than zero")
+    }
+}
+
+impl std::error::Error for InvalidTelemetrySink {}
+
+#[derive(Debug)]
+struct TelemetrySinkState {
+    ring: VecDeque<TelemetryRecord>,
+    epoch: u64,
+    next_sequence: u64,
+    capacity: usize,
+    ring_evictions: u64,
+    file_writes: u64,
+    file_failures: u64,
+    file_rotations: u64,
+    file_bytes: u64,
+    file_path: Option<PathBuf>,
+    max_file_bytes: u64,
+    writer: Option<BufWriter<File>>,
+}
+
+/// Thread-safe, bounded, best-effort telemetry output.
+///
+/// Every valid envelope is retained in the bounded ring even if the optional
+/// NDJSON file is unavailable. File failures are counted and never returned to
+/// the caller, so telemetry cannot make an execution fail.
+#[derive(Clone, Debug)]
+pub struct TelemetrySink {
+    state: Arc<Mutex<TelemetrySinkState>>,
+}
+
+impl TelemetrySink {
+    /// Open an append-only NDJSON sink and allocate a bounded ring.
+    ///
+    /// A missing/unwritable path intentionally creates a memory-only sink and
+    /// increments its failure counter; callers still receive successful ring
+    /// emissions. Pass `None` for an intentional memory-only sink.
+    pub fn new(path: Option<&Path>, capacity: usize) -> Result<Self, InvalidTelemetrySink> {
+        Self::new_with_max_file_bytes(path, capacity, DEFAULT_TELEMETRY_FILE_BYTES)
+    }
+
+    /// Open a sink with an explicit byte limit for the optional NDJSON file.
+    pub fn new_with_max_file_bytes(
+        path: Option<&Path>,
+        capacity: usize,
+        max_file_bytes: u64,
+    ) -> Result<Self, InvalidTelemetrySink> {
+        if capacity == 0 || max_file_bytes == 0 {
+            return Err(InvalidTelemetrySink);
+        }
+
+        let file_path = path.map(Path::to_path_buf);
+        let opened = path.and_then(|path| open_bounded_file(path, max_file_bytes).ok());
+        let (writer, file_bytes) =
+            opened.map_or((None, 0), |(writer, file_bytes)| (Some(writer), file_bytes));
+        let file_failures = u64::from(path.is_some() && writer.is_none());
+
+        Ok(Self {
+            state: Arc::new(Mutex::new(TelemetrySinkState {
+                ring: VecDeque::with_capacity(capacity),
+                epoch: next_epoch(),
+                next_sequence: 1,
+                capacity,
+                ring_evictions: 0,
+                file_writes: 0,
+                file_failures,
+                file_rotations: 0,
+                file_bytes,
+                file_path,
+                max_file_bytes,
+                writer,
+            })),
+        })
+    }
+
+    /// Emit an envelope into the ring and, when available, the NDJSON file.
+    #[must_use]
+    pub fn emit(&self, envelope: TelemetryEnvelope) -> TelemetryEmission {
+        let mut state = lock_state(&self.state);
+        let cursor = TelemetryCursor::from_parts(state.epoch, state.next_sequence);
+        state.next_sequence = state.next_sequence.saturating_add(1);
+
+        let file_written = write_ndjson(&mut state, &envelope);
+        if state.ring.len() == state.capacity {
+            state.ring.pop_front();
+            state.ring_evictions = state.ring_evictions.saturating_add(1);
+        }
+        state.ring.push_back(TelemetryRecord { cursor, envelope });
+
+        TelemetryEmission {
+            cursor,
+            file_written,
+        }
+    }
+
+    /// Read retained records after `after`, with at most `limit` records.
+    #[must_use]
+    pub fn read(&self, after: Option<TelemetryCursor>, limit: usize) -> TelemetryPage {
+        let state = lock_state(&self.state);
+        let oldest = state.ring.front().map(|record| record.cursor);
+        let cursor_is_stale = after.is_some_and(|cursor| cursor.epoch() != state.epoch);
+        let dropped_before = match (state.ring_evictions > 0, oldest, after) {
+            (true, Some(oldest), None) => Some(oldest),
+            (true, Some(oldest), Some(after))
+                if cursor_is_stale || after.value().saturating_add(1) < oldest.value() =>
+            {
+                Some(oldest)
+            }
+            _ => None,
+        };
+
+        if limit == 0 {
+            return TelemetryPage {
+                records: Vec::new(),
+                next_cursor: None,
+                dropped_before,
+            };
+        }
+
+        let mut records: Vec<TelemetryRecord> = state
+            .ring
+            .iter()
+            .filter(|record| {
+                after.is_none_or(|cursor| {
+                    cursor.epoch() != state.epoch || record.cursor.value() > cursor.value()
+                })
+            })
+            .take(limit.saturating_add(1))
+            .cloned()
+            .collect();
+        let next_cursor = (records.len() > limit).then(|| {
+            records.pop();
+            records.last().map(|record| record.cursor)
+        });
+
+        TelemetryPage {
+            records,
+            next_cursor: next_cursor.flatten(),
+            dropped_before,
+        }
+    }
+
+    /// Snapshot counters without exposing the underlying writer or lock.
+    #[must_use]
+    pub fn stats(&self) -> TelemetrySinkStats {
+        let state = lock_state(&self.state);
+        TelemetrySinkStats {
+            emitted: state.next_sequence.saturating_sub(1),
+            ring_evictions: state.ring_evictions,
+            file_writes: state.file_writes,
+            file_failures: state.file_failures,
+            file_rotations: state.file_rotations,
+            file_bytes: state.file_bytes,
+            file_enabled: state.writer.is_some(),
+        }
+    }
+}
+
+fn lock_state(state: &Mutex<TelemetrySinkState>) -> MutexGuard<'_, TelemetrySinkState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn next_epoch() -> u64 {
+    static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+    let sequence = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    nanos ^ sequence.rotate_left(17) ^ u64::from(std::process::id())
+}
+
+fn open_bounded_file(path: &Path, max_file_bytes: u64) -> io::Result<(BufWriter<File>, u64)> {
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let file_bytes = file.metadata()?.len();
+    if file_bytes > max_file_bytes {
+        drop(file);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        return Ok((BufWriter::new(file), 0));
+    }
+    Ok((BufWriter::new(file), file_bytes))
+}
+
+fn rotate_file(state: &mut TelemetrySinkState) -> io::Result<()> {
+    let Some(path) = state.file_path.as_deref() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "telemetry file path is unavailable",
+        ));
+    };
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    state.writer = Some(BufWriter::new(file));
+    state.file_bytes = 0;
+    state.file_rotations = state.file_rotations.saturating_add(1);
+    Ok(())
+}
+
+fn write_ndjson(state: &mut TelemetrySinkState, envelope: &TelemetryEnvelope) -> bool {
+    if state.writer.is_none() {
+        return false;
+    }
+
+    let mut line = Vec::new();
+    if serde_json::to_writer(&mut line, envelope).is_err() {
+        state.file_failures = state.file_failures.saturating_add(1);
+        state.writer = None;
+        return false;
+    }
+    line.push(b'\n');
+
+    let line_bytes = line.len() as u64;
+    if line_bytes > state.max_file_bytes {
+        state.file_failures = state.file_failures.saturating_add(1);
+        state.writer = None;
+        return false;
+    }
+
+    if state.file_bytes.saturating_add(line_bytes) > state.max_file_bytes
+        && rotate_file(state).is_err()
+    {
+        state.file_failures = state.file_failures.saturating_add(1);
+        state.writer = None;
+        return false;
+    }
+
+    let result = state.writer.as_mut().map_or_else(
+        || Err(io::Error::other("telemetry writer unavailable")),
+        |writer| writer.write_all(&line).and_then(|()| writer.flush()),
+    );
+    if result.is_ok() {
+        state.file_bytes = state.file_bytes.saturating_add(line_bytes);
+        state.file_writes = state.file_writes.saturating_add(1);
+        true
+    } else {
+        state.file_failures = state.file_failures.saturating_add(1);
+        state.writer = None;
+        false
+    }
+}
+
 /// A telemetry construction or deserialization failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidTelemetry {
@@ -335,6 +767,7 @@ fn contains_secret_marker(value: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::{fs, thread};
 
     fn fields() -> TelemetryFields {
         TelemetryFields::new(BTreeMap::from([(String::from("wall_ms"), json!(42))]))
@@ -406,5 +839,145 @@ mod tests {
         value["schema_version"] = json!("velnor.telemetry.v2");
         let error = serde_json::from_value::<TelemetryEnvelope>(value).expect_err("wrong schema");
         assert!(error.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn sink_cursor_pages_are_ordered_and_bounded() {
+        let sink = TelemetrySink::new(None, 2).expect("valid capacity");
+        let first = sink.emit(envelope());
+        let second = sink.emit(envelope());
+        let third = sink.emit(envelope());
+
+        assert_eq!(first.cursor().value(), 1);
+        assert_eq!(second.cursor().value(), 2);
+        assert_eq!(third.cursor().value(), 3);
+        let page = sink.read(None, 1);
+        assert_eq!(page.dropped_before().map(TelemetryCursor::value), Some(2));
+        assert_eq!(page.records()[0].cursor(), second.cursor());
+        assert_eq!(page.next_cursor(), Some(second.cursor()));
+
+        let final_page = sink.read(page.next_cursor(), 10);
+        assert_eq!(final_page.records().len(), 1);
+        assert_eq!(final_page.records()[0].cursor(), third.cursor());
+        assert_eq!(final_page.next_cursor(), None);
+        assert_eq!(sink.stats().ring_evictions(), 1);
+    }
+
+    #[test]
+    fn sink_writes_one_valid_envelope_per_ndjson_line() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-{}-{}.jsonl",
+            std::process::id(),
+            TelemetryCursor::from_value(1).value()
+        ));
+        let _ = fs::remove_file(&path);
+        let sink = TelemetrySink::new(Some(&path), 4).expect("valid sink");
+        assert!(sink.emit(envelope()).file_written());
+        assert!(sink.emit(envelope()).file_written());
+
+        let lines = fs::read_to_string(&path)
+            .expect("read telemetry file")
+            .lines()
+            .map(|line| serde_json::from_str::<TelemetryEnvelope>(line).expect("valid envelope"))
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(sink.stats().file_writes(), 2);
+        assert!(sink.stats().file_enabled());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn unwritable_ndjson_path_never_fails_ring_emission() {
+        let path = std::env::temp_dir()
+            .join(format!("velnor-missing-parent-{}", std::process::id()))
+            .join("telemetry.jsonl");
+        let sink = TelemetrySink::new(Some(&path), 2).expect("capacity is valid");
+        let emission = sink.emit(envelope());
+
+        assert!(!emission.file_written());
+        assert_eq!(sink.read(None, 10).records().len(), 1);
+        assert_eq!(sink.stats().file_failures(), 1);
+        assert!(!sink.stats().file_enabled());
+    }
+
+    #[test]
+    fn sink_is_safe_to_share_between_emitters() {
+        let sink = TelemetrySink::new(None, 8).expect("valid capacity");
+        let handles = (0..4)
+            .map(|_| {
+                let sink = sink.clone();
+                thread::spawn(move || {
+                    for _ in 0..4 {
+                        let _ = sink.emit(envelope());
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("emitter thread succeeds");
+        }
+
+        let stats = sink.stats();
+        assert_eq!(stats.emitted(), 16);
+        assert_eq!(stats.ring_evictions(), 8);
+        assert_eq!(sink.read(None, 20).records().len(), 8);
+    }
+
+    #[test]
+    fn sink_rejects_zero_capacity() {
+        assert!(matches!(
+            TelemetrySink::new(None, 0),
+            Err(InvalidTelemetrySink)
+        ));
+    }
+
+    #[test]
+    fn sink_rejects_zero_file_limit() {
+        assert!(matches!(
+            TelemetrySink::new_with_max_file_bytes(None, 2, 0),
+            Err(InvalidTelemetrySink)
+        ));
+    }
+
+    #[test]
+    fn sink_rotates_file_before_exceeding_byte_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-rotation-{}-{}.jsonl",
+            std::process::id(),
+            TelemetryCursor::from_value(2).value()
+        ));
+        let _ = fs::remove_file(&path);
+        let line_bytes = serde_json::to_vec(&envelope())
+            .expect("serialize envelope")
+            .len()
+            + 1;
+        let sink = TelemetrySink::new_with_max_file_bytes(Some(&path), 4, (line_bytes * 2) as u64)
+            .expect("valid sink");
+
+        for _ in 0..3 {
+            assert!(sink.emit(envelope()).file_written());
+        }
+
+        let stats = sink.stats();
+        assert_eq!(stats.file_writes(), 3);
+        assert_eq!(stats.file_rotations(), 1);
+        assert_eq!(stats.file_bytes(), line_bytes as u64);
+        assert!(
+            fs::metadata(&path).expect("telemetry file exists").len() <= (line_bytes * 2) as u64
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sink_recreation_does_not_hide_new_records_behind_old_cursor() {
+        let first_sink = TelemetrySink::new(None, 2).expect("valid sink");
+        let old_cursor = first_sink.emit(envelope()).cursor();
+        let second_sink = TelemetrySink::new(None, 2).expect("valid sink");
+        let new_cursor = second_sink.emit(envelope()).cursor();
+
+        assert_ne!(old_cursor.epoch(), new_cursor.epoch());
+        let page = second_sink.read(Some(old_cursor), 10);
+        assert_eq!(page.records().len(), 1);
+        assert_eq!(page.records()[0].cursor(), new_cursor);
     }
 }
