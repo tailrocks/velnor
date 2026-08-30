@@ -616,6 +616,8 @@ jobs:
           [ "$(dpkg-deb -f "$src" Architecture)" = "$expected_arch" ] || { echo "::error::deb arch != $expected_arch" >&2; exit 1; }
           manifest="$(mktemp)"
           dpkg-deb -c "$src" > "$manifest"
+          awk '$NF == "./usr/bin/velnor-runner" { count++; if (substr($1, 1, 1) != "-") type_ok=0; else if (count == 1) type_ok=1 } END { exit !(count == 1 && type_ok == 1) }' "$manifest" \
+            || { echo "::error::deb must contain exactly one regular usr/bin/velnor-runner" >&2; exit 1; }
           grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
           grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
           grep -q "usr/bin/velnor-tools" "$manifest" || { echo "::error::deb missing usr/bin/velnor-tools" >&2; exit 1; }
@@ -636,13 +638,7 @@ jobs:
           esac
           build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')"
           [ "$build_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::runner binary sidecar does not match target build" >&2; exit 1; }
-          package_root="$(mktemp -d)"
-          trap 'rm -rf "$package_root"' EXIT
-          dpkg-deb --extract "$src" "$package_root"
-          packaged_binary="$package_root/usr/bin/velnor-runner"
-          [ ! -L "$packaged_binary" ] || { echo "::error::packaged runner binary must not be a symlink" >&2; exit 1; }
-          [ -f "$packaged_binary" ] || { echo "::error::extracted deb missing usr/bin/velnor-runner" >&2; exit 1; }
-          packaged_binary_sha="$(sha256sum "$packaged_binary" | awk '{print $1}')"
+          packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
           [ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }
           [ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
