@@ -27,6 +27,9 @@ Environment=VELNOR_STORAGE_ROOT=/var
 Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/%i.env
 EnvironmentFile=-/etc/velnor/%i.secrets.env
+Environment=MISE_LOCKFILE=1
+Environment=MISE_LOCKED=1
+Environment=MISE_LOCKED_VERIFY_PROVENANCE=1
 # Plan 010: prove installed binary/package/manifest coherence with the active
 # release record before start; a missing/mismatched tuple fails closed so a
 # mixed old/new tuple never runs.
