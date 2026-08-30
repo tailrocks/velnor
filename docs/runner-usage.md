@@ -172,11 +172,13 @@ Units (all shipped by the package):
   with `VELNOR_SLO_QUEUE_MS` and `VELNOR_SLO_QUEUE_TO_FIRST_STEP_MS`; older
   timing records remain readable but are excluded from those two percentiles.
 - `velnor-fleet-policy-audit.timer` / `velnor-fleet-policy-audit.service`
-  (velnor-tools surface) — weekly read-only fleet-policy audit
+  (velnor-tools surface) — weekly read-only fleet-policy audit against the
+  packaged authoritative release-ref ledger
   (`Sat *-*-* 03:17`, `Persistent=true`). The service runs
-  `velnor-tools fleet-policy audit` sequentially for every organization listed
-  in `VELNOR_FLEET_ORGS` (`/etc/velnor/fleet-policy-audit.env`) against that
-  org's generated desired-policy JSON under
+  `velnor-tools fleet-policy audit --ledger /usr/share/velnor/fleet/release-refs.toml`
+  sequentially for every organization listed in `VELNOR_FLEET_ORGS`
+  (`/etc/velnor/fleet-policy-audit.env`) against that org's generated
+  desired-policy JSON under
   `VELNOR_FLEET_POLICY_DIR` (default `/var/lib/velnor/fleet-policy`). It is
   strictly **read-only**: it never invokes plan-with-write or apply; any live
   drift exits nonzero and stops the remaining organizations. Enable with
