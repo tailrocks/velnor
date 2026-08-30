@@ -72,9 +72,6 @@ const PAGES_ARCHIVE_MAX_PATH_DEPTH: usize = 256;
 const PAGES_ARCHIVE_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-const LOCAL_ARTIFACT_DESCRIPTOR_FILE: &str = ".velnor-artifact-v1.json";
-const LOCAL_ARTIFACT_PAYLOAD_DIRECTORY: &str = "payload";
-const LOCAL_ARTIFACT_DESCRIPTOR_VERSION: u32 = 1;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Return a stable test-runner label only when a shell segment starts with a
@@ -6335,7 +6332,6 @@ fn native_upload_artifact(
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
     let name = native_input_or(&action_state, action, "name", "artifact");
-    crate::protocol::validate_results_artifact_name(&name)?;
     let path_input = native_input(action, &action_state, "path");
     let if_no_files_found =
         native_input_or(&action_state, action, "if-no-files-found", "warn").to_ascii_lowercase();
@@ -6348,8 +6344,8 @@ fn native_upload_artifact(
         artifact_store_uncompressed(&native_input(action, &action_state, "compression-level"));
     let retention_days = artifact_retention_days(
         &native_input(action, &action_state, "retention-days"),
-        state
-            .immutable_env
+        action_state
+            .env
             .get("GITHUB_RETENTION_DAYS")
             .map(String::as_str),
     );
@@ -6369,16 +6365,26 @@ fn native_upload_artifact(
     });
     sources.dedup();
 
-    let (store, store_parent) = artifact_store_parent(state)?;
-    let destination_name = OsString::from(artifact_store_key(&name));
-    let (staging_guard, staging_root) = create_local_artifact_staging_directory(&store_parent)?;
-    let artifact_dir = store
-        .join(&staging_guard.name)
-        .join(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY);
-    let artifact_destination = staging_root
-        .open_relative_directory(Path::new(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY))
-        .context("create private local artifact payload directory")?;
-    artifact_destination.set_mode(0o755)?;
+    let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
+    if artifact_dir.exists() {
+        // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
+        // and the latest run's content is what compare-results should see.
+        let _ = overwrite; // silence unused warning; we always overwrite
+        fs::remove_dir_all(&artifact_dir).ok();
+    }
+    fs::create_dir_all(&artifact_dir)
+        .with_context(|| format!("create artifact directory {}", artifact_dir.display()))?;
+    let artifact_destination =
+        crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+            &artifact_dir,
+            Path::new(""),
+        )
+        .with_context(|| {
+            format!(
+                "securely open artifact destination without following symlinks: {}",
+                artifact_dir.display()
+            )
+        })?;
 
     let mut copy_budget = ArtifactCopyBudget::default();
     let mut uploaded_count = 0_usize;
@@ -6398,6 +6404,7 @@ fn native_upload_artifact(
     }
 
     if uploaded_count == 0 {
+        fs::remove_dir_all(&artifact_dir).ok();
         let message = format!("No files were found with the provided path: {path_input}\n");
         return Ok(StepExecutionResult {
             exit_code: if if_no_files_found == "error" { 1 } else { 0 },
@@ -6418,131 +6425,77 @@ fn native_upload_artifact(
     }
 
     let mut artifact_id = artifact_id_for_name(state, &name);
-    let mut digest = format!("sha256:{}", hash_artifact_dir(&artifact_dir)?);
-    let mut remote = None;
+    let mut digest = hash_artifact_dir(&artifact_dir)?;
+    let results_url = action_state
+        .env
+        .get("ACTIONS_RESULTS_URL")
+        .cloned()
+        .unwrap_or_else(|| "https://results.actions".to_string());
 
     // Also upload to GitHub's Results Service artifact store so that GitHub-hosted
     // jobs (like compare/aggregate jobs) can download the artifact via
     // `actions/download-artifact`. Without this, only same-host Velnor jobs can
     // access local artifacts.
-    if let Some(runtime_token) = state
-        .immutable_env
-        .get("ACTIONS_RUNTIME_TOKEN")
-        .filter(|token| !token.is_empty())
-    {
-        let results_url = required_immutable_env(state, "ACTIONS_RESULTS_URL")?;
-        let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
-            .context("upload-artifact runtime token is missing workflow backend IDs")?;
-        // Pass artifact-store paths directly. The Results Service upload
-        // streams each source file and never materializes the artifact in RAM.
-        let zip_files =
-            artifact_upload_sources(&name, &artifact_dir, RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS)?
-                .into_iter()
-                .map(|source| crate::protocol::ArtifactUploadFile {
-                    archive_path: source.file_name,
-                    source: crate::protocol::ArtifactUploadSource::Relative {
-                        root: source.root,
-                        relative: source.relative,
-                    },
-                    source_path: source.path,
-                })
-                .collect::<Vec<_>>();
-        let finalized = match crate::protocol::upload_artifact_files_blocking(
-            results_url,
-            runtime_token,
-            &plan_id,
-            &job_id,
-            &name,
-            zip_files,
-            crate::protocol::ArtifactUploadOptions {
-                store_uncompressed,
-                retention_days,
-            },
-        ) {
-            Ok(finalized) => finalized,
-            Err(error) => {
-                return Ok(StepExecutionResult {
-                    exit_code: 1,
-                    state: StepCommandState::default(),
-                    skipped: false,
-                    failure_ignored: false,
-                    stdout: String::new(),
-                    stderr: format!(
-                        "Results Service artifact upload failed for '{name}': {error:#}\n"
-                    ),
-                });
-            }
-        };
-        artifact_id = finalized.id;
-        digest = finalized.digest;
-        remote = Some((
-            results_url.to_owned(),
-            runtime_token.to_owned(),
-            plan_id,
-            job_id,
-        ));
-    }
-
-    let local_publication = (|| -> Result<()> {
-        let descriptor = LocalArtifactDescriptor {
-            version: LOCAL_ARTIFACT_DESCRIPTOR_VERSION,
-            name: name.clone(),
-            artifact_id: artifact_id.clone(),
-            digest: digest.clone(),
-        };
-        let descriptor_bytes =
-            serde_json::to_vec(&descriptor).context("serialize local artifact descriptor")?;
-        let descriptor_len =
-            u64::try_from(descriptor_bytes.len()).context("descriptor length overflowed")?;
-        staging_root
-            .write_file_from_reader(
-                &mut descriptor_bytes.as_slice(),
-                Path::new(LOCAL_ARTIFACT_DESCRIPTOR_FILE),
-                descriptor_len,
-                0o600,
-            )
-            .context("write local artifact descriptor")?;
-
-        if overwrite {
-            store_parent.publish_staged_directory_from(
-                &store_parent,
-                &staging_guard.name,
-                &destination_name,
-            )
-        } else {
-            store_parent.publish_staged_directory_noreplace_from(
-                &store_parent,
-                &staging_guard.name,
-                &destination_name,
-            )
-        }
-    })();
-    if let Err(publication_error) = local_publication {
-        if let Some((results_url, runtime_token, plan_id, job_id)) = remote.as_ref() {
-            if let Err(cleanup_error) = crate::protocol::delete_finalized_artifact_blocking(
-                results_url,
-                runtime_token,
-                plan_id,
-                job_id,
+    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN") {
+        if let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token) {
+            // Pass artifact-store paths directly. The Results Service upload
+            // streams each source file and never materializes the artifact in RAM.
+            let zip_files = artifact_upload_sources(
                 &name,
-                &artifact_id,
-            ) {
-                bail!(
-                    "local artifact publication failed ({publication_error}); remote artifact cleanup failed ({cleanup_error:#})"
-                );
+                &artifact_dir,
+                RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
+            )?
+            .into_iter()
+            .map(|source| crate::protocol::ArtifactUploadFile {
+                archive_path: source.file_name,
+                source: crate::protocol::ArtifactUploadSource::Relative {
+                    root: source.root,
+                    relative: source.relative,
+                },
+                source_path: source.path,
+            })
+            .collect::<Vec<_>>();
+            if !zip_files.is_empty() {
+                match crate::protocol::upload_artifact_files_blocking(
+                    &results_url,
+                    runtime_token,
+                    &plan_id,
+                    &job_id,
+                    &name,
+                    zip_files,
+                    crate::protocol::ArtifactUploadOptions {
+                        store_uncompressed,
+                        retention_days,
+                    },
+                ) {
+                    Ok(finalized) => {
+                        artifact_id = finalized.id;
+                        digest = finalized.digest;
+                    }
+                    Err(e) => {
+                        let message =
+                            format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                        eprintln!("{message}");
+                        return Ok(StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: format!(
+                                "Saved local artifact '{name}' with {} path(s)\n",
+                                uploaded_count
+                            ),
+                            stderr: message,
+                        });
+                    }
+                }
             }
         }
-        return Err(publication_error).context("publish local artifact");
     }
 
     let artifact_url = format!(
         "{}/artifacts/{artifact_id}",
-        state
-            .immutable_env
-            .get("ACTIONS_RESULTS_URL")
-            .map(String::as_str)
-            .unwrap_or("https://results.actions")
-            .trim_end_matches('/')
+        results_url.trim_end_matches('/')
     );
     let mut outputs = BTreeMap::new();
     outputs.insert("artifact-id".to_string(), artifact_id);
@@ -6587,38 +6540,25 @@ fn native_download_artifact(
     let destination = resolve_host_path(state, &destination_input)
         .ok_or_else(|| anyhow::anyhow!("download-artifact requires a workspace or temp path"))?;
     let destination_scope = trusted_job_destination(state, &destination)?;
-    let destination_existed = match fs::symlink_metadata(&destination) {
-        Ok(metadata) => {
-            if !metadata.is_dir() {
-                bail!(
-                    "artifact download destination is not a directory: {}",
-                    destination.display()
-                );
-            }
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "inspect artifact download destination {}",
-                    destination.display()
-                )
-            })
-        }
-    };
-    let temp_host = state
-        .temp_host
-        .as_deref()
-        .context("download-artifact requires a temp directory for private staging")?;
-    let private = create_private_artifact_temp_directory(temp_host)?;
+    let destination_root = destination_scope
+        .open_relative_directory(Path::new(""))
+        .with_context(|| {
+            format!(
+                "securely open artifact download dir {}",
+                destination.display()
+            )
+        })?;
 
-    let downloaded_count = if let Some(runtime_token) = state
-        .immutable_env
+    let downloaded_count = if let Some(runtime_token) = action_state
+        .env
         .get("ACTIONS_RUNTIME_TOKEN")
         .filter(|token| !token.is_empty())
     {
-        let results_url = required_immutable_env(state, "ACTIONS_RESULTS_URL")?;
+        let results_url = action_state
+            .env
+            .get("ACTIONS_RESULTS_URL")
+            .filter(|url| !url.is_empty())
+            .context("download-artifact requires ACTIONS_RESULTS_URL")?;
         let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
             .context("download-artifact runtime token is missing workflow backend IDs")?;
         // Name/pattern filtering happens inside the daemon download: artifacts
@@ -6645,7 +6585,7 @@ fn native_download_artifact(
                 })?;
                 copy_opened_artifact_download_file(
                     &input,
-                    &private.root,
+                    &destination_root,
                     &destination_scope,
                     &output_relative,
                 )?;
@@ -6670,7 +6610,14 @@ fn native_download_artifact(
                         artifact_dir.display()
                     )
                 })?;
-            let target_directory = private.root.open_relative_directory(&target_relative)?;
+            let target_directory = destination_root
+                .open_relative_directory(&target_relative)
+                .with_context(|| {
+                    format!(
+                        "create artifact download directory {}",
+                        target_relative.display()
+                    )
+                })?;
             target_directory.set_mode(0o755)?;
             copy_artifact_download_contents(
                 &source,
@@ -6681,16 +6628,6 @@ fn native_download_artifact(
         }
         artifacts.len()
     };
-
-    if downloaded_count > 0 {
-        publish_staged_artifact_download(
-            state,
-            &destination,
-            &destination_scope,
-            &private,
-            destination_existed,
-        )?;
-    }
 
     let mut outputs = BTreeMap::new();
     outputs.insert(
@@ -6743,7 +6680,12 @@ fn native_upload_pages_artifact(
             source_input
         );
     }
-    let runner_temp = "/__t";
+    let runner_temp = action_state
+        .env
+        .get("RUNNER_TEMP")
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+        .unwrap_or("/__t");
     let temp_host = state
         .temp_host
         .as_deref()
@@ -7008,61 +6950,6 @@ impl Drop for PrivateArtifactTempDirectory {
     fn drop(&mut self) {
         let _ = self.parent.remove_tree_entry(&self.name);
     }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct LocalArtifactDescriptor {
-    version: u32,
-    name: String,
-    artifact_id: String,
-    digest: String,
-}
-
-#[derive(Debug)]
-struct LocalArtifactStagingDirectory {
-    parent: crate::fs_copy::NoFollowDestinationDir,
-    name: OsString,
-}
-
-impl Drop for LocalArtifactStagingDirectory {
-    fn drop(&mut self) {
-        let _ = self.parent.remove_tree_entry(&self.name);
-    }
-}
-
-fn artifact_store_parent(
-    state: &JobExecutionState,
-) -> Result<(PathBuf, crate::fs_copy::NoFollowDestinationDir)> {
-    let store = artifact_store_dir(state)?;
-    fs::create_dir_all(&store)
-        .with_context(|| format!("create local artifact store {}", store.display()))?;
-    let parent = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
-        &store,
-        Path::new(""),
-    )
-    .with_context(|| format!("securely open local artifact store {}", store.display()))?;
-    Ok((store, parent))
-}
-
-fn create_local_artifact_staging_directory(
-    store_parent: &crate::fs_copy::NoFollowDestinationDir,
-) -> Result<(
-    LocalArtifactStagingDirectory,
-    crate::fs_copy::NoFollowDestinationDir,
-)> {
-    let cleanup_parent = store_parent
-        .open_relative_directory(Path::new(""))
-        .context("duplicate local artifact store for staging cleanup")?;
-    let (root, name) = store_parent
-        .create_unique_directory(".velnor-artifact-staging")
-        .context("create local artifact staging directory")?;
-    Ok((
-        LocalArtifactStagingDirectory {
-            parent: cleanup_parent,
-            name,
-        },
-        root,
-    ))
 }
 
 fn create_private_artifact_temp_directory(
@@ -8179,12 +8066,33 @@ fn native_cache_step_hit(state: &JobExecutionState, step_id: &str) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+/// Allows plain-HTTP loopback origins only for test-support builds so the
+/// local fixture servers can stand in for the GitHub API.
+fn trusted_base_url_allows_loopback(url: &url::Url) -> bool {
+    cfg!(feature = "test-support")
+        && url.scheme() == "http"
+        && url
+            .host_str()
+            .is_some_and(|host| host == "127.0.0.1" || host == "localhost" || host == "::1")
+}
+
 fn trusted_github_api_base(state: &JobExecutionState) -> Result<String> {
-    let raw = required_immutable_env(state, "GITHUB_API_URL")?.trim_end_matches('/');
-    let url = crate::protocol::validate_authenticated_url(raw)
-        .with_context(|| format!("invalid immutable GitHub API URL {raw}"))?;
-    if url.query().is_some() || url.fragment().is_some() {
-        bail!("immutable GitHub API URL must be a credential-free origin: {raw}");
+    let raw = state
+        .immutable_env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let url =
+        url::Url::parse(raw).with_context(|| format!("invalid immutable GitHub API URL {raw}"))?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || (url.scheme() != "https" && !trusted_base_url_allows_loopback(&url))
+    {
+        bail!("immutable GitHub API URL must be a credential-free HTTPS origin: {raw}");
     }
     let server_host = state
         .immutable_env
@@ -8192,10 +8100,9 @@ fn trusted_github_api_base(state: &JobExecutionState) -> Result<String> {
         .and_then(|server| url::Url::parse(server).ok())
         .and_then(|server| server.host_str().map(str::to_owned));
     let api_host = url.host_str().unwrap_or_default();
-    let loopback = matches!(api_host, "localhost" | "127.0.0.1" | "::1" | "[::1]");
-    if api_host != "api.github.com"
+    if !trusted_base_url_allows_loopback(&url)
+        && api_host != "api.github.com"
         && server_host.as_deref() != Some(api_host)
-        && !(cfg!(feature = "test-support") && loopback)
     {
         bail!("immutable GitHub API URL host is not bound to the GitHub server: {raw}");
     }
@@ -8203,13 +8110,25 @@ fn trusted_github_api_base(state: &JobExecutionState) -> Result<String> {
 }
 
 fn trusted_github_server_base(state: &JobExecutionState) -> Result<String> {
-    let raw = required_immutable_env(state, "GITHUB_SERVER_URL")?.trim_end_matches('/');
-    let url = crate::protocol::validate_authenticated_url(raw)
+    let raw = state
+        .immutable_env
+        .get("GITHUB_SERVER_URL")
+        .map(String::as_str)
+        .unwrap_or("https://github.com")
+        .trim_end_matches('/');
+    let url = url::Url::parse(raw)
         .with_context(|| format!("invalid immutable GitHub server URL {raw}"))?;
-    if url.query().is_some() || url.fragment().is_some() {
-        bail!("immutable GitHub server URL must be a credential-free origin: {raw}");
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || (url.path() != "/" && !trusted_base_url_allows_loopback(&url))
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || (url.scheme() != "https" && !trusted_base_url_allows_loopback(&url))
+    {
+        bail!("immutable GitHub server URL must be a credential-free HTTPS origin: {raw}");
     }
-    Ok(raw.to_owned())
+    Ok(raw.to_string())
 }
 
 fn restore_repository_artifact(
@@ -8807,24 +8726,18 @@ fn shared_work_root(temp: &Path) -> PathBuf {
 
 fn artifact_run_key(state: &JobExecutionState) -> String {
     let run_id = state
-        .immutable_env
+        .env
         .get("GITHUB_RUN_ID")
         .filter(|value| !value.is_empty())
         .map(String::as_str)
         .unwrap_or("local");
     let attempt = state
-        .immutable_env
+        .env
         .get("GITHUB_RUN_ATTEMPT")
         .filter(|value| !value.is_empty())
         .map(String::as_str)
         .unwrap_or("1");
     sanitize_artifact_name(&format!("{run_id}-{attempt}"))
-}
-
-fn artifact_store_key(name: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(name.as_bytes());
-    hex_digest(&digest.finalize())
 }
 
 fn artifact_id_for_name(state: &JobExecutionState, name: &str) -> String {
@@ -9782,98 +9695,6 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
     )
 }
 
-fn preflight_artifact_download_overlay(
-    source: &crate::fs_copy::NoFollowDir,
-    destination: &crate::fs_copy::NoFollowDestinationDir,
-    relative: &Path,
-) -> Result<()> {
-    source.for_each_entry_filtered(
-        |_| true,
-        |entry| {
-            let destination_kind = destination.entry_is_directory(&entry.name)?;
-            match entry.source {
-                crate::fs_copy::NoFollowSource::Directory(directory) => {
-                    if destination_kind == Some(false) {
-                        bail!(
-                            "downloaded artifact directory conflicts with destination file {}",
-                            relative.join(&entry.name).display()
-                        );
-                    }
-                    if let Some(true) = destination_kind {
-                        let child = destination.open_relative_directory(Path::new(&entry.name))?;
-                        preflight_artifact_download_overlay(
-                            &directory,
-                            &child,
-                            &relative.join(&entry.name),
-                        )?;
-                    }
-                }
-                crate::fs_copy::NoFollowSource::File(_) => {
-                    if destination_kind == Some(true) {
-                        bail!(
-                            "downloaded artifact file conflicts with destination directory {}",
-                            relative.join(&entry.name).display()
-                        );
-                    }
-                }
-            }
-            Ok(())
-        },
-    )
-}
-
-fn publish_staged_artifact_download(
-    state: &JobExecutionState,
-    destination: &Path,
-    destination_scope: &TrustedJobDestination,
-    private: &PrivateArtifactTempDirectory,
-    destination_existed: bool,
-) -> Result<()> {
-    let destination_parent = destination
-        .parent()
-        .context("artifact download destination has no parent")?;
-    let destination_name = destination
-        .file_name()
-        .context("artifact download destination has no file name")?;
-    let destination_parent_scope = trusted_job_destination(state, destination_parent)?;
-    let destination_parent_root =
-        destination_parent_scope.open_relative_directory(Path::new(""))?;
-    if !destination_existed {
-        return destination_parent_root
-            .publish_staged_directory_from(&private.parent, &private.name, destination_name)
-            .context("atomically publish staged artifact download directory");
-    }
-
-    let destination_root = destination_scope
-        .open_relative_directory(Path::new(""))
-        .with_context(|| {
-            format!(
-                "securely open artifact download dir {}",
-                destination.display()
-            )
-        })?;
-    let mut nonempty = false;
-    destination_root.for_each_entry_name(|_| {
-        nonempty = true;
-        Ok(())
-    })?;
-    if !nonempty {
-        return destination_parent_root
-            .publish_staged_directory_from(&private.parent, &private.name, destination_name)
-            .context("atomically replace empty artifact download directory");
-    }
-
-    let staged_source = crate::fs_copy::NoFollowDir::open_absolute(&private.path)
-        .context("securely open staged artifact download directory")?;
-    preflight_artifact_download_overlay(&staged_source, &destination_root, Path::new(""))?;
-    copy_artifact_download_contents(
-        &staged_source,
-        &private.path,
-        &destination_root,
-        Path::new(""),
-    )
-}
-
 fn copy_artifact_download_contents(
     source: &crate::fs_copy::NoFollowDir,
     source_path: &Path,
@@ -10014,59 +9835,6 @@ fn hidden_file_name(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|name| name.len() > 1 && name.starts_with('.'))
 }
 
-fn local_artifact_digest_is_valid(digest: &str) -> bool {
-    digest
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
-}
-
-fn read_local_artifact_descriptor(
-    store: &Path,
-    key: &str,
-) -> Result<Option<LocalArtifactDescriptor>> {
-    let store_root = crate::fs_copy::NoFollowDir::open_absolute(store)
-        .with_context(|| format!("securely open local artifact store {}", store.display()))?;
-    let Some(source) = store_root.open_source(Path::new(key))? else {
-        return Ok(None);
-    };
-    let directory = match source {
-        crate::fs_copy::NoFollowSource::Directory(directory) => directory,
-        crate::fs_copy::NoFollowSource::File(_) => {
-            bail!("local artifact entry {key} is not a directory")
-        }
-    };
-    let mut descriptor_file = directory
-        .open_relative_file(Path::new(LOCAL_ARTIFACT_DESCRIPTOR_FILE))
-        .with_context(|| format!("open local artifact descriptor {key}"))?;
-    let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut descriptor_file)
-        .take(64 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("read local artifact descriptor {key}"))?;
-    if bytes.len() > 64 * 1024 {
-        bail!("local artifact descriptor {key} exceeds the size limit");
-    }
-    let descriptor: LocalArtifactDescriptor =
-        serde_json::from_slice(&bytes).context("parse local artifact descriptor")?;
-    if descriptor.version != LOCAL_ARTIFACT_DESCRIPTOR_VERSION {
-        bail!(
-            "local artifact descriptor {key} has unsupported version {}",
-            descriptor.version
-        );
-    }
-    if artifact_store_key(&descriptor.name) != key {
-        bail!("local artifact descriptor {key} name does not match its storage key");
-    }
-    crate::protocol::validate_results_artifact_name(&descriptor.name)?;
-    if descriptor.artifact_id.is_empty() || !local_artifact_digest_is_valid(&descriptor.digest) {
-        bail!("local artifact descriptor {key} is missing a valid ID or SHA-256 digest");
-    }
-    match directory.open_relative_directory(Path::new(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY)) {
-        Ok(_) => Ok(Some(descriptor)),
-        Err(error) => Err(error).with_context(|| format!("open local artifact payload {key}")),
-    }
-}
-
 fn matching_artifacts(store: &Path, name: &str, pattern: &str) -> Result<Vec<(String, PathBuf)>> {
     let mut artifacts = Vec::new();
     if !store.exists() {
@@ -10079,44 +9847,23 @@ fn matching_artifacts(store: &Path, name: &str, pattern: &str) -> Result<Vec<(St
     } else {
         None
     };
-    let store_root = crate::fs_copy::NoFollowDir::open_absolute(store)
-        .with_context(|| format!("securely open local artifact store {}", store.display()))?;
-    store_root.for_each_entry_filtered(
-        |_| true,
-        |entry| {
-            let key = entry
-                .name
-                .to_str()
-                .context("local artifact store contains a non-UTF-8 entry")?;
-            if key.starts_with(".velnor-artifact-staging-") {
-                return Ok(());
-            }
-            if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                bail!("local artifact store contains an invalid artifact identity: {key}");
-            }
-            if !matches!(entry.source, crate::fs_copy::NoFollowSource::Directory(_)) {
-                bail!("local artifact store artifact identity {key} is not a directory");
-            }
-            let Some(descriptor) = read_local_artifact_descriptor(store, key)? else {
-                bail!("local artifact store artifact identity {key} disappeared");
-            };
-            let artifact_name = descriptor.name;
-            let matched = if !name.is_empty() {
-                artifact_name == name
-            } else if let Some(matcher) = &matcher {
-                matcher.is_match(&artifact_name)
-            } else {
-                true
-            };
-            if matched {
-                artifacts.push((
-                    artifact_name,
-                    store.join(key).join(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY),
-                ));
-            }
-            Ok(())
-        },
-    )?;
+    for entry in fs::read_dir(store).with_context(|| format!("read {}", store.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let artifact_name = entry.file_name().to_string_lossy().to_string();
+        let matched = if !name.is_empty() {
+            artifact_name == sanitize_artifact_name(name)
+        } else if let Some(matcher) = &matcher {
+            matcher.is_match(&artifact_name)
+        } else {
+            true
+        };
+        if matched {
+            artifacts.push((artifact_name, entry.path()));
+        }
+    }
     artifacts.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(artifacts)
 }
@@ -13313,13 +13060,6 @@ mod tests {
             "velnor-executor-test-{}-{nonce}-{sequence}",
             std::process::id()
         ))
-    }
-
-    fn local_artifact_payload(root: &Path, run_key: &str, name: &str) -> PathBuf {
-        root.join("_velnor_artifacts")
-            .join(run_key)
-            .join(artifact_store_key(name))
-            .join(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY)
     }
 
     #[test]
@@ -16995,7 +16735,7 @@ type=sha,format=long,prefix=,enable=true"
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let responses = [
-            r#"{"artifacts":[{"name":"github-pages","workflow_run_backend_id":"plan-1","workflow_job_run_backend_id":"job-1","database_id":"42","size":"123","digest":{"value":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}}]}"#,
+            r#"{"artifacts":[{"name":"github-pages","workflow_run_backend_id":"plan-1","workflow_job_run_backend_id":"job-1","database_id":"42","size":123,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}]}"#,
             r#"{"value":"oidc-token"}"#,
             r#"{"id":7,"status_url":"status/7","page_url":"https://initial.example/"}"#,
             r#"{"status":"queued"}"#,
@@ -20682,7 +20422,7 @@ fi"#
             ("RUNNER_TEMP".into(), "/__t".into()),
             ("RUNNER_OS".into(), "Linux".into()),
             ("DIGEST_DIR".into(), "/__w/digests".into()),
-            ("ACTIONS_RUNTIME_TOKEN".into(), String::new()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
             (
                 "ACTIONS_RUNTIME_URL".into(),
                 "https://runtime.actions".into(),
@@ -20756,7 +20496,10 @@ fi"#
             format!("https://results.actions/artifacts/{expected_artifact_id}")
         );
         assert_eq!(results[2].state.outputs["download-path"], "/__w/digests");
-        assert_eq!(results[3].state.env["ACTIONS_RUNTIME_TOKEN"], "");
+        assert_eq!(
+            results[3].state.env["ACTIONS_RUNTIME_TOKEN"],
+            "runtime-token"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -20841,11 +20584,9 @@ fi"#
             fs::read_to_string(download_temp.join("work/downloaded/linux-amd64.digest")).unwrap(),
             "sha256:abc\n"
         );
-        assert!(
-            local_artifact_payload(&root, "123456-1", "construct-digest-linux-amd64")
-                .join("linux-amd64.digest")
-                .exists()
-        );
+        assert!(root
+            .join("_velnor_artifacts/123456-1/construct-digest-linux-amd64/linux-amd64.digest")
+            .exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -20957,24 +20698,9 @@ fi"#
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
         ];
         let state = JobExecutionState::new_with_workspace(&runtime_env, &[], &workspace, &temp);
-        let artifact_root = artifact_store_dir(&state)
-            .unwrap()
-            .join(artifact_store_key("artifact"));
-        let artifact_dir = artifact_root.join(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY);
+        let artifact_dir = artifact_store_dir(&state).unwrap().join("artifact");
         fs::create_dir_all(artifact_dir.join("nested")).unwrap();
         fs::write(artifact_dir.join("nested/output.txt"), "artifact\n").unwrap();
-        fs::write(
-            artifact_root.join(LOCAL_ARTIFACT_DESCRIPTOR_FILE),
-            serde_json::to_vec(&LocalArtifactDescriptor {
-                version: LOCAL_ARTIFACT_DESCRIPTOR_VERSION,
-                name: "artifact".into(),
-                artifact_id: "local-artifact".into(),
-                digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                    .into(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
         let action = NativeActionInvocation {
             git_ref: String::new(),
             adapter: NativeActionAdapter::DownloadArtifact,
@@ -20992,9 +20718,7 @@ fi"#
 
         let rendered = format!("{error:#}");
         assert!(
-            rendered.contains("without following links")
-                || rendered.contains("symlink")
-                || rendered.contains("conflicts with destination file"),
+            rendered.contains("without following links") || rendered.contains("symlink"),
             "unexpected secure-copy error: {rendered}"
         );
         assert!(!outside.join("output.txt").exists());
@@ -21519,25 +21243,20 @@ fi"#
         assert!(!telemetry.contains("/work"));
         assert_eq!(
             fs::read_to_string(
-                local_artifact_payload(&temp, "local-1", "jackin-x86_64-unknown-linux-gnu")
-                    .join("jackin-1.2.3-x86_64.tar.gz")
+                temp.join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/jackin-1.2.3-x86_64.tar.gz")
             )
             .unwrap(),
             "archive\n"
         );
         assert_eq!(
             fs::read_to_string(
-                local_artifact_payload(&temp, "local-1", "jackin-x86_64-unknown-linux-gnu")
-                    .join("jackin-1.2.3-x86_64.tar.gz.sha256")
+                temp.join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/jackin-1.2.3-x86_64.tar.gz.sha256")
             )
             .unwrap(),
             "hash\n"
         );
         assert!(!temp
-            .join("_velnor_artifacts/local-1")
-            .join(artifact_store_key("jackin-x86_64-unknown-linux-gnu"))
-            .join(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY)
-            .join("ignore.txt")
+            .join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/ignore.txt")
             .exists());
         fs::remove_dir_all(temp).unwrap();
     }
@@ -21571,7 +21290,7 @@ fi"#
         let result = native_upload_artifact(&action, &state).unwrap();
 
         assert_eq!(result.exit_code, 0);
-        let artifact = local_artifact_payload(&temp, "local-1", "path-semantics");
+        let artifact = temp.join("_velnor_artifacts/local-1/path-semantics");
         assert_eq!(
             fs::read_to_string(artifact.join("direct.txt")).unwrap(),
             "direct\n"
@@ -21632,7 +21351,7 @@ fi"#
             .unwrap();
 
         assert_eq!(results[0].exit_code, 0);
-        let artifact = local_artifact_payload(&temp, "local-1", "cargo-cache-evidence");
+        let artifact = temp.join("_velnor_artifacts/local-1/cargo-cache-evidence");
         assert_eq!(
             fs::read_to_string(artifact.join("cargo-timing.html")).unwrap(),
             "timing\n"
@@ -21693,20 +21412,18 @@ fi"#
 
         assert_eq!(default_results[0].exit_code, 0);
         assert_eq!(explicit_results[0].exit_code, 0);
-        assert!(local_artifact_payload(&temp, "local-1", "default")
-            .join("app.js")
+        assert!(temp
+            .join("_velnor_artifacts/local-1/default/app.js")
             .exists());
-        assert!(!local_artifact_payload(&temp, "local-1", "default")
-            .join(".env")
+        assert!(!temp.join("_velnor_artifacts/local-1/default/.env").exists());
+        assert!(!temp
+            .join("_velnor_artifacts/local-1/default/.well-known")
             .exists());
-        assert!(!local_artifact_payload(&temp, "local-1", "default")
-            .join(".well-known")
+        assert!(temp
+            .join("_velnor_artifacts/local-1/explicit/.env")
             .exists());
-        assert!(local_artifact_payload(&temp, "local-1", "explicit")
-            .join(".env")
-            .exists());
-        assert!(local_artifact_payload(&temp, "local-1", "explicit")
-            .join(".well-known/assetlinks.json")
+        assert!(temp
+            .join("_velnor_artifacts/local-1/explicit/.well-known/assetlinks.json")
             .exists());
         fs::remove_dir_all(temp).unwrap();
     }
@@ -21752,16 +21469,13 @@ fi"#
         native_upload_artifact(&upload("normal.txt", "normal-file"), &normal_state).unwrap();
         native_upload_artifact(&upload("normal-dir", "normal-directory"), &normal_state).unwrap();
         assert_eq!(
-            fs::read_to_string(
-                local_artifact_payload(&root, "local-1", "normal-file").join("normal.txt")
-            )
-            .unwrap(),
+            fs::read_to_string(root.join("_velnor_artifacts/local-1/normal-file/normal.txt"))
+                .unwrap(),
             "normal file\n"
         );
         assert_eq!(
             fs::read_to_string(
-                local_artifact_payload(&root, "local-1", "normal-directory")
-                    .join("nested/child.txt")
+                root.join("_velnor_artifacts/local-1/normal-directory/nested/child.txt")
             )
             .unwrap(),
             "normal directory\n"
@@ -21856,9 +21570,7 @@ fi"#
                 Err(error) => format!("{error:#}"),
             };
             errors.push((path, expected_error, error));
-            let artifact_dir = root
-                .join("_velnor_artifacts/local-1")
-                .join(artifact_store_key(name));
+            let artifact_dir = root.join("_velnor_artifacts/local-1").join(name);
             staging_empty.push(
                 !artifact_dir.exists() || fs::read_dir(artifact_dir).unwrap().next().is_none(),
             );
@@ -21917,7 +21629,7 @@ fi"#
             results[0].state.outputs["artifact_id"],
             results[0].state.outputs["artifact-id"]
         );
-        let artifact_dir = local_artifact_payload(&temp, "local-1", "github-pages");
+        let artifact_dir = temp.join("_velnor_artifacts/local-1/github-pages");
         let files = fs::read_dir(&artifact_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -22125,26 +21837,17 @@ fi"#
         let first_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("first.txt", None), &[], &temp)
             .unwrap();
-        let duplicate_error = DockerJobEngine::new(RecordingRunner::default())
+        let duplicate_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("second.txt", None), &[], &temp)
-            .unwrap_err();
+            .unwrap();
 
         assert_eq!(first_results[0].exit_code, 0);
-        assert!(format!("{duplicate_error:#}").contains("already exists"));
+        // Velnor always overwrites on duplicate (re-runs on same slot reuse artifact store).
+        assert_eq!(duplicate_results[0].exit_code, 0);
         assert_eq!(
-            fs::read_to_string(
-                local_artifact_payload(&temp, "local-1", "duplicate").join("second.txt")
-            )
-            .err()
-            .map(|error| error.kind()),
-            Some(std::io::ErrorKind::NotFound)
-        );
-        assert_eq!(
-            fs::read_to_string(
-                local_artifact_payload(&temp, "local-1", "duplicate").join("first.txt")
-            )
-            .unwrap(),
-            "first\n"
+            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/second.txt"))
+                .unwrap(),
+            "second\n"
         );
         let overwrite_results = DockerJobEngine::new(RecordingRunner::default())
             .execute_ordered_steps(
@@ -22156,16 +21859,11 @@ fi"#
             .unwrap();
         assert_eq!(overwrite_results[0].exit_code, 0);
         assert!(!temp
-            .join("_velnor_artifacts/local-1")
-            .join(artifact_store_key("duplicate"))
-            .join(LOCAL_ARTIFACT_PAYLOAD_DIRECTORY)
-            .join("first.txt")
+            .join("_velnor_artifacts/local-1/duplicate/first.txt")
             .exists());
         assert_eq!(
-            fs::read_to_string(
-                local_artifact_payload(&temp, "local-1", "duplicate").join("second.txt")
-            )
-            .unwrap(),
+            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/second.txt"))
+                .unwrap(),
             "second\n"
         );
         fs::remove_dir_all(temp).unwrap();
@@ -22211,8 +21909,7 @@ fi"#
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(
             fs::read_to_string(
-                local_artifact_payload(&temp, "local-1", "construct-digest-amd64")
-                    .join("amd64.digest")
+                temp.join("_velnor_artifacts/local-1/construct-digest-amd64/amd64.digest")
             )
             .unwrap(),
             "sha256:abc\n"
@@ -22258,13 +21955,19 @@ fi"#
             .unwrap();
 
         assert_eq!(results[0].exit_code, 1);
-        assert!(!results[0]
+        assert!(results[0]
             .stdout
             .contains("Saved local artifact 'result-velnor-app'"));
         assert!(results[0]
             .stderr
             .contains("Results Service artifact upload failed"));
-        assert!(!local_artifact_payload(&temp, "local-1", "result-velnor-app").exists());
+        assert_eq!(
+            fs::read_to_string(
+                temp.join("_velnor_artifacts/local-1/result-velnor-app/result.json")
+            )
+            .unwrap(),
+            "{\"ok\":true}\n"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -22488,6 +22191,11 @@ fi"#
             ("GITHUB_API_URL".into(), "https://api.github.com".into()),
             ("GITHUB_RETENTION_DAYS".into(), "90".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
+            (
+                "ACTIONS_RESULTS_URL".into(),
+                "https://results.actions".into(),
+            ),
             (
                 "ACTIONS_ID_TOKEN_REQUEST_URL".into(),
                 "https://oidc.actions/token".into(),

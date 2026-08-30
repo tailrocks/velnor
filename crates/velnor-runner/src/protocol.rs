@@ -4857,7 +4857,7 @@ pub(crate) struct FinalizedArtifact {
     pub(crate) digest: String,
 }
 
-pub(crate) fn validate_results_artifact_name(name: &str) -> Result<()> {
+fn validate_results_artifact_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name == "."
         || name == ".."
@@ -6933,14 +6933,7 @@ mod tests {
                     let _ = stream.read(&mut request).unwrap();
                     let body = match index {
                         0 => serde_json::json!({
-                            "artifacts": [{
-                                "name": "release",
-                                "workflow_run_backend_id": "plan",
-                                "workflow_job_run_backend_id": "consumer",
-                                "database_id": "1",
-                                "size": "0",
-                                "digest": {"value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
-                            }]
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "consumer", "database_id": 1, "size": 4, "digest": format!("sha256:{}", sha2::Sha256::digest(b"x").iter().map(|b| format!("{b:02x}")).collect::<String>())}]
                         })
                         .to_string(),
                         1 => serde_json::json!({"signed_url": format!("{server_base}/signed.zip")}).to_string(),
@@ -6992,7 +6985,7 @@ mod tests {
                     0 => (
                         "application/json",
                         serde_json::to_vec(&serde_json::json!({
-                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job", "database_id": 1, "size": zip_bytes.len(), "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())}]
                         }))
                         .unwrap(),
                     ),
@@ -7044,7 +7037,7 @@ mod tests {
                     0 => (
                         "application/json",
                         serde_json::to_vec(&serde_json::json!({
-                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job", "database_id": 1, "size": 18, "digest": format!("sha256:{}", sha2::Sha256::digest(b"truncated artifact").iter().map(|b| format!("{b:02x}")).collect::<String>())}]
                         }))
                         .unwrap(),
                         None,
@@ -7095,10 +7088,6 @@ mod tests {
             .unwrap();
         zip.write_all(b"artifact-v4\n").unwrap();
         let zip_bytes = zip.finish().unwrap().into_inner();
-        let zip_hash = sha2::Sha256::digest(&zip_bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let signed_url = format!("{base}/signed.zip?credential=secret");
@@ -7128,9 +7117,9 @@ mod tests {
                                 "name": "release-linux",
                                 "workflow_run_backend_id": "plan",
                                 "workflow_job_run_backend_id": "consumer",
-                                "database_id": "1",
-                                "size": zip_bytes.len().to_string(),
-                                "digest": {"value": format!("sha256:{zip_hash}")}
+                                "database_id": 11,
+                                "size": zip_bytes.len(),
+                                "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                             }]
                         }))
                         .unwrap(),
@@ -7224,12 +7213,18 @@ mod tests {
                                 {
                                     "name": "release-linux",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "producer"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": 21,
+                                    "size": zip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 },
                                 {
                                     "name": ".dockerbuild",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "image"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": 22,
+                                    "size": zip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 }
                             ]
                         }))
@@ -7287,14 +7282,6 @@ mod tests {
         // .dockerbuild build records are gzip blobs, not zips.
         let gzip_bytes = b"\x1f\x8b\x08\x00dockerbuild-record-not-a-zip".to_vec();
         let expected_gzip_bytes = gzip_bytes.clone();
-        let zip_hash = sha2::Sha256::digest(&zip_bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let gzip_hash = sha2::Sha256::digest(&gzip_bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let signed_url = format!("{base}/signed.bin?credential=secret");
@@ -7322,17 +7309,17 @@ mod tests {
                                     "name": "release-linux",
                                     "workflow_run_backend_id": "plan",
                                     "workflow_job_run_backend_id": "consumer",
-                                    "database_id": "1",
-                                    "size": zip_bytes.len().to_string(),
-                                    "digest": {"value": format!("sha256:{zip_hash}")}
+                                    "database_id": 21,
+                                    "size": zip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 },
                                 {
                                     "name": ".dockerbuild",
                                     "workflow_run_backend_id": "plan",
                                     "workflow_job_run_backend_id": "consumer",
-                                    "database_id": "2",
-                                    "size": gzip_bytes.len().to_string(),
-                                    "digest": {"value": format!("sha256:{gzip_hash}")}
+                                    "database_id": 22,
+                                    "size": gzip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&gzip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 }
                             ]
                         }))
