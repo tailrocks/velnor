@@ -1900,21 +1900,28 @@ mod tests {
             .expect("build job must stage the deb with its guards");
 
         for required in [
-            "package_root=\"$(mktemp -d)\"",
-            "dpkg-deb --extract \"$src\" \"$package_root\"",
+            "dpkg-deb -c \"$src\" > \"$manifest\"",
+            "awk '$NF == \"./usr/bin/velnor-runner\"",
+            "substr($1, 1, 1) != \"-\"",
             "build_binary=\"target/${{ matrix.target }}/release/velnor-runner\"",
             "velnor-runner-${{ matrix.arch }}.bin.sha256",
             "sha256sum \"$build_binary\"",
-            "sha256sum \"$packaged_binary\"",
+            "dpkg-deb --fsys-tarfile \"$src\" | tar -xOf - ./usr/bin/velnor-runner | sha256sum",
             "[ \"$packaged_binary_sha\" = \"$build_binary_sha\" ]",
             "[ \"$packaged_binary_sha\" = \"$recorded_binary_sha\" ]",
         ] {
             assert!(guard.contains(required), "deb guard missing: {required}");
         }
+        assert!(!guard.contains("dpkg-deb --extract"), "deb guard must not fully extract the package");
+        assert!(!guard.contains("package_root"), "deb guard must not create a package root");
+        assert!(!guard.contains("trap "), "deb guard must not install an extraction cleanup trap");
 
         let copy = guard.find("cp \"$src\" \"$dst\"").expect("deb copy guard");
         assert!(
-            guard.find("dpkg-deb --extract").expect("deb extraction") < copy,
+            guard
+                .find("dpkg-deb --fsys-tarfile \"$src\" | tar -xOf - ./usr/bin/velnor-runner | sha256sum")
+                .expect("deb streaming verification")
+                < copy,
             "deb provenance must be checked before copying the package"
         );
         assert!(
