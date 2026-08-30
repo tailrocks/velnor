@@ -30,6 +30,10 @@ Environment=VELNOR_STORAGE_ROOT=/var
 Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
+# The runner-owned job environment always refuses unlocked mise resolution.
+Environment=MISE_LOCKFILE=1
+Environment=MISE_LOCKED=1
+Environment=MISE_LOCKED_VERIFY_PROVENANCE=1
 # Plan 010: prove the installed binary/package/manifest are coherent with the
 # atomically activated release record BEFORE the daemon starts. A missing or
 # mismatched tuple fails closed here, so a mixed old/new tuple never runs.

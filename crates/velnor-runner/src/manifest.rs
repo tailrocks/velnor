@@ -705,6 +705,10 @@ pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
         path: ".github/workflows/package-signer.yml",
         allowed_refs: &[
             allowed(
+                "c222e52030fee9ea6eae573a5769770be01d8438",
+                "fleet 2026.8.32 hosted package signer",
+            ),
+            allowed(
                 "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
                 "fleet 2026.8.30 hosted package signer",
             ),
