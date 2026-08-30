@@ -1,5 +1,9 @@
 //! Typed backend session. Wrong-phase calls fail; teardown cannot be skipped.
 
+use velnor_cache_service::CompilerCacheBackend;
+use velnor_model::guest_plan::{
+    GuestCompilerCacheBackend, GuestCompilerCacheDescriptor, GuestCompilerCacheTrustClass,
+};
 use velnor_model::{
     ExecutionBackendKind, ExecutionConfigError, JobConclusion, MicroVmPreflightFailure,
 };
@@ -58,6 +62,7 @@ pub struct ValidatedPlan {
     pub cancel_requested: bool,
     pub fail: bool,
     pub cache_digest: Option<String>,
+    pub compiler_cache: GuestCompilerCacheDescriptor,
     pub command_files: Vec<String>,
     pub outputs: Vec<(String, String)>,
     pub env: Vec<(String, String)>,
@@ -110,6 +115,7 @@ impl ValidatedPlan {
             cancel_requested: self.cancel_requested,
             fail: self.fail,
             cache_digest: self.cache_digest.clone(),
+            compiler_cache: self.compiler_cache.clone(),
             command_files: self.command_files.clone(),
             outputs: self
                 .outputs
@@ -175,6 +181,11 @@ impl ValidatedPlan {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
+            compiler_cache: GuestCompilerCacheDescriptor::new(
+                GuestCompilerCacheBackend::Off,
+                GuestCompilerCacheTrustClass::Trusted,
+                GuestCompilerCacheDescriptor::TRANSPORT_NAMESPACE,
+            ),
             command_files: vec![
                 "GITHUB_OUTPUT".into(),
                 "GITHUB_ENV".into(),
@@ -226,6 +237,10 @@ impl ValidatedPlan {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
+            compiler_cache: guest_compiler_cache_descriptor(
+                plan.execution.job_container.compiler_cache_backend,
+                plan.execution.job_container.compiler_cache_trust_class,
+            ),
             command_files: vec![
                 "GITHUB_OUTPUT".into(),
                 "GITHUB_ENV".into(),
@@ -292,6 +307,7 @@ impl ValidatedPlan {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
+            compiler_cache: GuestCompilerCacheDescriptor::off(),
             command_files: vec![
                 "GITHUB_OUTPUT".into(),
                 "GITHUB_ENV".into(),
@@ -310,6 +326,22 @@ impl ValidatedPlan {
             context_data: Vec::new(),
         }
     }
+}
+
+fn guest_compiler_cache_descriptor(
+    backend: CompilerCacheBackend,
+    trust_class: GuestCompilerCacheTrustClass,
+) -> GuestCompilerCacheDescriptor {
+    let backend = match backend {
+        CompilerCacheBackend::Kache => GuestCompilerCacheBackend::Kache,
+        CompilerCacheBackend::Sccache => GuestCompilerCacheBackend::Sccache,
+        CompilerCacheBackend::Off => GuestCompilerCacheBackend::Off,
+    };
+    GuestCompilerCacheDescriptor::new(
+        backend,
+        trust_class,
+        GuestCompilerCacheDescriptor::TRANSPORT_NAMESPACE,
+    )
 }
 
 /// Whole-plan timeout: the sum of each step's effective timeout. A job can
