@@ -1190,7 +1190,6 @@ mod tests {
             Some(expected)
         );
     }
-
     #[tokio::test]
     async fn disabled_lookup_is_a_passthrough() {
         let directory = tempfile::tempdir().expect("tempdir");
