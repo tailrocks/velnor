@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -40,6 +41,10 @@ const CONTROLLER_REMOTE_BUDGET: Duration = Duration::from_secs(15);
 const JIT_ORPHAN_CLEANUP_BUDGET: Duration = Duration::from_secs(8);
 const FENCED_SLOT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROLLER_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// A slot must publish fresh, generation-bound progress within this startup
+/// bound before it can prove session liveness or readiness.
+const SLOT_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
+const SUPERVISION_METRICS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -241,6 +246,144 @@ pub struct ControllerArgs {
     pub spawn_slots: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MetricsSnapshot {
+    slot_processes: usize,
+    job_processes: usize,
+    waiter_processes: usize,
+    reconcile_duration_ms: u64,
+}
+
+impl Default for MetricsSnapshot {
+    fn default() -> Self {
+        Self {
+            slot_processes: 0,
+            job_processes: 0,
+            waiter_processes: 0,
+            reconcile_duration_ms: 1,
+        }
+    }
+}
+
+struct MetricsPublisherState {
+    snapshot: MetricsSnapshot,
+    sequence: u64,
+    stopped: bool,
+}
+
+/// Publish telemetry independently of the local control cycle. The controller
+/// retains journal and child ownership. The shared state serializes snapshot
+/// updates, sequence allocation, stopping, and the atomic-file writer.
+struct MetricsPublisher {
+    state: Arc<Mutex<MetricsPublisherState>>,
+    stop: Arc<tokio::sync::Notify>,
+    state_dir: PathBuf,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl MetricsPublisher {
+    fn start(state_dir: &Path) -> Self {
+        let state = Arc::new(Mutex::new(MetricsPublisherState {
+            snapshot: MetricsSnapshot::default(),
+            sequence: 0,
+            stopped: false,
+        }));
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let task_state = Arc::clone(&state);
+        let task_stop = Arc::clone(&stop);
+        let task_state_dir = state_dir.to_owned();
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SUPERVISION_METRICS_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = task_stop.notified() => break,
+                    _ = interval.tick() => {
+                        match publish_metrics_snapshot(&task_state_dir, &task_state, false) {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                eprintln!("controller metrics publication failed: {error:#}");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            state,
+            stop,
+            state_dir: state_dir.to_owned(),
+            task: Some(task),
+        }
+    }
+
+    fn update(
+        &self,
+        slots: &HashMap<String, Child>,
+        jobs: &HashMap<String, Child>,
+        reconcile_duration_ms: u64,
+    ) {
+        let (job_processes, waiter_processes) = job_process_counts(jobs.keys());
+        let mut state = self
+            .state
+            .lock()
+            .expect("metrics snapshot mutex is not poisoned");
+        state.snapshot.slot_processes = slots.len();
+        state.snapshot.job_processes = job_processes;
+        state.snapshot.waiter_processes = waiter_processes;
+        state.snapshot.reconcile_duration_ms = reconcile_duration_ms.max(1);
+    }
+
+    async fn stop_and_publish(&mut self) -> anyhow::Result<()> {
+        self.state
+            .lock()
+            .expect("metrics snapshot mutex is not poisoned")
+            .stopped = true;
+        self.stop.notify_one();
+        if let Some(task) = self.task.take() {
+            task.await.context("metrics publisher task failed")?;
+        }
+        publish_metrics_snapshot(&self.state_dir, &self.state, true)?;
+        Ok(())
+    }
+}
+
+impl Drop for MetricsPublisher {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Allocate the next sequence and write the snapshot while holding the shared
+/// state lock. This prevents a synchronous final publish from racing the
+/// periodic task or regressing its sequence.
+fn publish_metrics_snapshot(
+    state_dir: &Path,
+    state: &Arc<Mutex<MetricsPublisherState>>,
+    allow_stopped: bool,
+) -> anyhow::Result<bool> {
+    let mut state = state
+        .lock()
+        .expect("metrics snapshot mutex is not poisoned");
+    if state.stopped && !allow_stopped {
+        return Ok(false);
+    }
+    state.sequence = state.sequence.saturating_add(1);
+    let current = state.snapshot;
+    publish_controller_metrics(
+        state_dir,
+        state.sequence,
+        current.slot_processes,
+        current.job_processes,
+        current.waiter_processes,
+        current.reconcile_duration_ms,
+    )?;
+    Ok(true)
+}
+
 pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.state_dir)?;
     let mut journal = Journal::open(args.state_dir.join("journal.db"))?;
@@ -253,14 +396,18 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut slots: HashMap<String, Child> = HashMap::new();
     let mut jobs: HashMap<String, Child> = HashMap::new();
     let mut heartbeats: HashMap<String, (u32, u64)> = HashMap::new();
+    let mut startup_deadlines: HashMap<String, Instant> = HashMap::new();
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
     let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
-    let mut metrics_sequence = 0_u64;
-    publish_controller_metrics(&args.state_dir, metrics_sequence, 0, 0, 0, 1)?;
+    let mut last_reconcile_duration_ms = 1;
+    publish_controller_metrics(&args.state_dir, 0, 0, 0, 0, 1)?;
+    let mut metrics = MetricsPublisher::start(&args.state_dir);
     loop {
         if crate::runner::draining() {
             drain_children(&journal, &mut slots, &mut jobs).await?;
+            metrics.update(&slots, &jobs, last_reconcile_duration_ms);
+            metrics.stop_and_publish().await?;
             return Ok(());
         }
         let cycle_started = Instant::now();
@@ -271,19 +418,15 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut slots,
             &mut jobs,
             &mut heartbeats,
+            &mut startup_deadlines,
             &mut last_registration_reconcile,
             &mut pacing,
+            &metrics,
         )
         .await?;
-        metrics_sequence = metrics_sequence.saturating_add(1);
-        publish_controller_metrics(
-            &args.state_dir,
-            metrics_sequence,
-            slots.len(),
-            jobs.len(),
-            0,
-            cycle_started.elapsed().as_millis().max(1) as u64,
-        )?;
+        let reconcile_duration_ms = cycle_started.elapsed().as_millis().max(1) as u64;
+        last_reconcile_duration_ms = reconcile_duration_ms;
+        metrics.update(&slots, &jobs, reconcile_duration_ms);
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
         if args.once {
@@ -292,6 +435,8 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             // through the same ownership path used by the normal loop.
             reap(&mut slots);
             reap(&mut jobs);
+            metrics.update(&slots, &jobs, reconcile_duration_ms);
+            metrics.stop_and_publish().await?;
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -315,7 +460,7 @@ fn publish_controller_metrics(
     let metrics = json!({
         "sequence": sequence,
         "slot_processes": slot_processes,
-        "job_processes": job_processes.saturating_sub(waiter_processes),
+        "job_processes": job_processes,
         "waiter_processes": waiter_processes,
         "reconcile_duration_ms": { "p95": reconcile_p95_ms },
         "journal": { "transactions": sequence.saturating_add(1), "wal_bytes": wal_bytes },
@@ -334,9 +479,18 @@ fn publish_controller_metrics(
     Ok(())
 }
 
-/// Stop controller-owned slot and job-worker processes when the daemon
-/// receives SIGTERM. Each worker has its own drain listener, so it can cancel
-/// an in-flight acquire or finish an active job through the normal boundary.
+fn job_process_counts<'a>(job_ids: impl Iterator<Item = &'a String>) -> (usize, usize) {
+    job_ids.fold((0, 0), |(jobs, waiters), job_id| {
+        if job_id.starts_with("wait-") {
+            (jobs, waiters + 1)
+        } else {
+            (jobs + 1, waiters)
+        }
+    })
+}
+
+/// Stop controller-owned slots, waiters, and stale job workers when the daemon
+/// receives SIGTERM. Active in-flight job workers remain alive for completion.
 async fn drain_children(
     journal: &Journal,
     slots: &mut HashMap<String, Child>,
@@ -365,7 +519,7 @@ async fn drain_children(
         .map(|job| job.job_id.0)
         .collect();
     for (job_id, child) in jobs.iter() {
-        if job_id.starts_with("wait-") || !active_job_ids.contains(job_id) {
+        if is_drainable_job(job_id, &active_job_ids) {
             request_child_shutdown(child)?;
         }
     }
@@ -373,25 +527,37 @@ async fn drain_children(
     let mut escalated = false;
     loop {
         reap_draining(slots, "slot")?;
-        reap_draining(jobs, "job")?;
-        if slots.is_empty() && jobs.is_empty() {
+        reap_draining_jobs(jobs, &active_job_ids)?;
+        if slots.is_empty()
+            && jobs
+                .keys()
+                .all(|job_id| !is_drainable_job(job_id, &active_job_ids))
+        {
             return Ok(());
         }
         if Instant::now() >= deadline {
             if escalated {
                 anyhow::bail!(
                     "controller child drain timed out after SIGKILL; {} handles retained",
-                    slots.len() + jobs.len()
+                    slots.len()
+                        + jobs
+                            .keys()
+                            .filter(|job_id| is_drainable_job(job_id, &active_job_ids))
+                            .count()
                 );
             }
             kill_draining(slots, "slot")?;
-            kill_draining(jobs, "job")?;
+            kill_draining_jobs(jobs, &active_job_ids)?;
             eprintln!("controller child drain escalated to SIGKILL");
             escalated = true;
             deadline = Instant::now() + CONTROLLER_CHILD_DRAIN_TIMEOUT;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn is_drainable_job(job_id: &str, active_job_ids: &HashSet<String>) -> bool {
+    job_id.starts_with("wait-") || !active_job_ids.contains(job_id)
 }
 
 fn request_child_shutdown(child: &Child) -> anyhow::Result<()> {
@@ -429,13 +595,16 @@ async fn reconcile_once(
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
     heartbeats: &mut HashMap<String, (u32, u64)>,
+    startup_deadlines: &mut HashMap<String, Instant>,
     last_registration_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
+    metrics: &MetricsPublisher,
 ) -> anyhow::Result<LocalCycle> {
     let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
     let total = args.desired_ready;
     let mut effects = Vec::new();
     reap(slots);
+    reap(jobs);
     // Ingest a surviving slot's heartbeat before deciding whether its permit
     // needs repair. On controller restart the child handle is gone, so the
     // heartbeat is the only fresh local proof that prevents a double spawn.
@@ -448,20 +617,35 @@ async fn reconcile_once(
             .map(|slot| slot.generation)
             .unwrap_or(Generation::INITIAL);
         let fenced = slot.is_some_and(|slot| slot.phase == ActorPhase::Fenced);
+        let admission_blocked = slot_has_admission_block(&state, &id, generation);
+        let heartbeat_fresh = prove::slot_heartbeat_is_fresh(
+            &args.state_dir,
+            &id,
+            generation,
+            SLOT_HEARTBEAT_MAX_AGE,
+        );
+        if heartbeat_fresh {
+            startup_deadlines.remove(&id.0);
+        } else if args.spawn_slots
+            && !fenced
+            && !admission_blocked
+            && stale_slot_deadline_reached(args, slot, &id, startup_deadlines, Instant::now())
+        {
+            fence_stale_slot_actor(args, journal, slots, &id, generation).await?;
+            startup_deadlines.remove(&id.0);
+            continue;
+        }
         if fenced && args.spawn_slots {
             terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
         }
         let fenced_generation = fenced_slot_recovery_generation(slot, &state, jobs);
         let generation = fenced_generation.unwrap_or(generation);
-        let process_alive = slots.contains_key(&id.0)
-            || slot.and_then(|slot| slot.pid).is_some_and(|pid| {
-                prove::slot_process_is_alive(pid, &args.state_dir, &id, generation)
-            });
+        let process_alive = heartbeat_fresh;
         if fenced && fenced_generation.is_none() {
             continue;
         }
         if fenced_generation.is_none()
-            && (slot_has_admission_block(&state, &id, generation)
+            && (admission_blocked
                 || child_owns_slot(&state, jobs, &id)
                 || !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive))
         {
@@ -482,12 +666,15 @@ async fn reconcile_once(
             journal,
             slots,
             jobs,
+            startup_deadlines,
             &mut *pacing,
             remote_deadline,
             command,
         )
         .await?;
     }
+
+    metrics.update(slots, jobs, 1);
 
     observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
 
@@ -528,18 +715,8 @@ async fn reconcile_once(
                     .commands,
             );
         }
-        let journal_pid = snapshot
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == id)
-            .and_then(|slot| slot.pid);
-        if prove::observe_slot_session(
-            slots.get_mut(&id.0),
-            journal_pid,
-            &args.state_dir,
-            &id,
-            generation,
-        ) {
+        if prove::slot_heartbeat_is_fresh(&args.state_dir, &id, generation, SLOT_HEARTBEAT_MAX_AGE)
+        {
             proof_effects.extend(
                 journal
                     .apply(Event::SessionLive {
@@ -577,6 +754,7 @@ async fn reconcile_once(
                     journal,
                     slots,
                     jobs,
+                    startup_deadlines,
                     &mut *pacing,
                     remote_deadline,
                     command,
@@ -603,6 +781,7 @@ async fn reconcile_once(
 
     reap(slots);
     reap(jobs);
+    metrics.update(slots, jobs, 1);
     let mut health = journal.materialized_state()?.health();
     health.execution_backend = execution.backend();
     server.publish(&health)?;
@@ -645,11 +824,13 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_effect(
     args: &ControllerArgs,
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
+    startup_deadlines: &mut HashMap<String, Instant>,
     pacing: &mut GithubPacing,
     remote_deadline: tokio::time::Instant,
     command: SideEffect,
@@ -658,7 +839,14 @@ async fn execute_effect(
         SideEffect::SpawnSlot {
             slot_id,
             generation,
-        } => maybe_spawn_slot(args, journal, slots, &slot_id, generation),
+        } => maybe_spawn_slot(
+            args,
+            journal,
+            slots,
+            startup_deadlines,
+            &slot_id,
+            generation,
+        ),
         SideEffect::RegisterRunner {
             slot_id,
             generation,
@@ -1167,14 +1355,15 @@ fn spawn_ready_waiters(
         }) {
             continue;
         }
-        if jobs.contains_key(&slot.slot_id.0) {
+        let waiter_id = format!("wait-{}", slot.slot_id.0);
+        if jobs.contains_key(&waiter_id) {
             continue;
         }
         maybe_spawn_job(
             args,
             journal,
             jobs,
-            &format!("wait-{}", slot.slot_id.0),
+            &waiter_id,
             slot.generation.0,
             Some(&slot.slot_id),
         )?;
@@ -1294,7 +1483,8 @@ fn child_owns_slot(
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
 ) -> bool {
-    jobs.contains_key(&slot_id.0)
+    let waiter_id = format!("wait-{}", slot_id.0);
+    jobs.contains_key(&waiter_id)
         || state
             .jobs
             .iter()
@@ -1391,6 +1581,56 @@ fn send_pid_signal(pid: u32, signal: libc::c_int) -> anyhow::Result<()> {
 fn send_pid_signal(_pid: u32, _signal: i32) -> anyhow::Result<()> {
     anyhow::bail!("fenced slot recovery requires Unix process signaling")
 }
+
+fn stale_slot_deadline_reached(
+    _args: &ControllerArgs,
+    slot: Option<&SlotRecord>,
+    id: &SlotId,
+    deadlines: &mut HashMap<String, Instant>,
+    now: Instant,
+) -> bool {
+    let Some(slot) = slot else {
+        return false;
+    };
+    if prove::slot_heartbeat_is_fresh(
+        &_args.state_dir,
+        id,
+        slot.generation,
+        SLOT_HEARTBEAT_MAX_AGE,
+    ) {
+        return false;
+    }
+    let deadline = deadlines
+        .entry(id.0.clone())
+        .or_insert(now + SLOT_HEARTBEAT_MAX_AGE);
+    *deadline <= now
+}
+
+async fn fence_stale_slot_actor(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    slots: &mut HashMap<String, Child>,
+    id: &SlotId,
+    generation: Generation,
+) -> anyhow::Result<()> {
+    let outcome = journal.apply(Event::SlotStale {
+        slot_id: id.clone(),
+        generation,
+    })?;
+    if outcome.rejected {
+        return Ok(());
+    }
+    let slot = journal
+        .materialized_state()?
+        .slots
+        .into_iter()
+        .find(|slot| {
+            slot.slot_id == *id && slot.generation == generation && slot.phase == ActorPhase::Fenced
+        })
+        .ok_or_else(|| anyhow::anyhow!("stale slot {id:?} was not fenced"))?;
+    terminate_fenced_slot_actor(args, slots, id, &slot).await
+}
+
 fn permit_needs_reconciliation(
     slot: Option<&SlotRecord>,
     generation: Generation,
@@ -1417,19 +1657,19 @@ fn ingest_slot_heartbeats(
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let Ok(heartbeat) = serde_json::from_slice::<SlotHeartbeat>(&bytes) else {
-            continue;
-        };
         let id = slot_id(&args.scope, index);
         let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) else {
             continue;
         };
+        let Ok(heartbeat) = serde_json::from_slice::<SlotHeartbeat>(&bytes) else {
+            continue;
+        };
         if slot.generation.0 != heartbeat.generation
-            || !prove::slot_process_is_alive(
-                heartbeat.pid,
+            || !prove::slot_heartbeat_is_fresh(
                 &args.state_dir,
                 &id,
-                Generation(heartbeat.generation),
+                slot.generation,
+                SLOT_HEARTBEAT_MAX_AGE,
             )
             || seen.get(&id.0).is_some_and(|(pid, sequence)| {
                 *pid == heartbeat.pid && *sequence >= heartbeat.sequence
@@ -1457,6 +1697,7 @@ fn maybe_spawn_slot(
     args: &ControllerArgs,
     journal: &Journal,
     children: &mut HashMap<String, Child>,
+    startup_deadlines: &mut HashMap<String, Instant>,
     slot_id: &SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
@@ -1489,6 +1730,7 @@ fn maybe_spawn_slot(
         .arg(generation.0.to_string())
         .spawn()?;
     children.insert(slot_id.0.clone(), child);
+    startup_deadlines.insert(slot_id.0.clone(), Instant::now() + SLOT_HEARTBEAT_MAX_AGE);
     Ok(())
 }
 
@@ -1515,7 +1757,7 @@ fn maybe_spawn_job(
         .ok_or_else(|| {
             anyhow::anyhow!("cannot spawn worker {job_id} without generation-owned slot identity")
         })?;
-    let key = slot_id.0.clone();
+    let key = job_id.to_owned();
     if jobs.contains_key(&key) {
         return Ok(());
     }
@@ -1525,7 +1767,7 @@ fn maybe_spawn_job(
         return Ok(());
     }
     let exe = std::env::current_exe()?;
-    let slot_index = slot_index_from_id(&SlotId(key.clone()));
+    let slot_index = slot_index_from_id(&slot_id);
     let child = Command::new(exe)
         .arg("job")
         .arg("--state-dir")
@@ -1551,7 +1793,7 @@ fn maybe_spawn_job(
             "failed to publish ownership marker for job {job_id}; child cleanup: kill={kill_result:?}, wait={wait_result:?}, marker={cleanup_result:?}"
         )));
     }
-    jobs.insert(key, child);
+    jobs.insert(job_id.to_owned(), child);
     Ok(())
 }
 
@@ -1597,6 +1839,50 @@ fn kill_draining(children: &mut HashMap<String, Child>, kind: &str) -> anyhow::R
         child.kill().map_err(|error| {
             anyhow::anyhow!(
                 "process-reap escalation failed for {kind} child {id}; handle retained: {error}"
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn reap_draining_jobs(
+    jobs: &mut HashMap<String, Child>,
+    active_job_ids: &HashSet<String>,
+) -> anyhow::Result<()> {
+    let mut dead = Vec::new();
+    for (job_id, child) in jobs.iter_mut() {
+        if !is_drainable_job(job_id, active_job_ids) {
+            continue;
+        }
+        if child
+            .try_wait()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "process-reap error while draining job child {job_id}; handle retained: {error}"
+                )
+            })?
+            .is_some()
+        {
+            dead.push(job_id.clone());
+        }
+    }
+    for job_id in dead {
+        jobs.remove(&job_id);
+    }
+    Ok(())
+}
+
+fn kill_draining_jobs(
+    jobs: &mut HashMap<String, Child>,
+    active_job_ids: &HashSet<String>,
+) -> anyhow::Result<()> {
+    for (job_id, child) in jobs
+        .iter_mut()
+        .filter(|(job_id, _)| is_drainable_job(job_id, active_job_ids))
+    {
+        child.kill().map_err(|error| {
+            anyhow::anyhow!(
+                "process-reap escalation failed for job child {job_id}; handle retained: {error}"
             )
         })?;
     }
@@ -1662,6 +1948,155 @@ mod tests {
             "require_docker_socket": false
         }))
         .unwrap()
+    }
+
+    fn metrics_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-controller-metrics-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn metrics_counts_waiters_from_wait_keys_once() {
+        let job_ids = [
+            "job-1".to_owned(),
+            "wait-velnor-1".to_owned(),
+            "job-2".to_owned(),
+        ];
+        let (job_processes, waiter_processes) = job_process_counts(job_ids.iter());
+        assert_eq!((job_processes, waiter_processes), (2, 1));
+
+        let dir = metrics_test_dir("active-jobs");
+        publish_controller_metrics(&dir, 1, 2, job_processes, waiter_processes, 7).unwrap();
+
+        let metrics: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
+                .unwrap();
+        assert_eq!(metrics["job_processes"], json!(2));
+        assert_eq!(metrics["waiter_processes"], json!(1));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drain_preserves_active_jobs_without_waiting_for_them() {
+        let dir = metrics_test_dir("drain-active-job");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ReadyAttempt {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Assigned {
+                slot_id: SlotId("velnor-1".to_owned()),
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::JobOwned {
+                job_id: JobId("job-1".to_owned()),
+                slot_id: SlotId("velnor-1".to_owned()),
+                attempt: 1,
+                generation: Generation::INITIAL,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1_234,
+            },
+            Event::JobStarted {
+                job_id: JobId("job-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+
+        let child = || Command::new("sleep").arg("5").spawn().unwrap();
+        let mut slots = HashMap::from([(String::from("velnor-1"), child())]);
+        let mut jobs = HashMap::from([
+            (String::from("job-1"), child()),
+            (String::from("wait-velnor-1"), child()),
+            (String::from("stale-job"), child()),
+        ]);
+        let state = journal.materialized_state().unwrap();
+        assert!(child_owns_slot(
+            &state,
+            &jobs,
+            &SlotId("velnor-1".to_owned())
+        ));
+        assert_eq!(
+            job_child_keys_for_slot(&jobs, &state, &SlotId("velnor-1".to_owned())),
+            vec!["job-1".to_owned(), "wait-velnor-1".to_owned()]
+        );
+
+        let started = Instant::now();
+        drain_children(&journal, &mut slots, &mut jobs)
+            .await
+            .unwrap();
+        let active_preserved = jobs.get_mut("job-1").unwrap().try_wait().unwrap().is_none();
+        let only_active_handle_remains = jobs.len() == 1 && jobs.contains_key("job-1");
+        for child in jobs.values_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        assert!(started.elapsed() < CONTROLLER_CHILD_DRAIN_TIMEOUT);
+        assert!(slots.is_empty());
+        assert!(active_preserved);
+        assert!(only_active_handle_remains);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_publisher_synchronously_writes_the_final_snapshot() {
+        let dir = metrics_test_dir("final-snapshot");
+        let mut publisher = MetricsPublisher::start(&dir);
+        publisher.update(&HashMap::new(), &HashMap::new(), 42);
+
+        publisher.stop_and_publish().await.unwrap();
+
+        let metrics: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
+                .unwrap();
+        assert_eq!(metrics["reconcile_duration_ms"]["p95"], json!(42));
+        assert_eq!(
+            metrics["sequence"].as_u64().unwrap(),
+            publisher.state.lock().unwrap().sequence
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn reserved_slot() -> SlotRecord {

@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
 
 use crate::{
     args::{CacheArgs, CacheCommand, CacheGcArgs},
@@ -342,7 +343,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
     let targets_legacy = is_legacy_store(&targets);
     let actions_cache = crate::storage::cache_class_path(work_root, "caches", "_velnor_caches");
     let actions_cache_legacy = is_legacy_store(&actions_cache);
-    vec![
+    let mut stores = vec![
         StoreRoot {
             kind: CacheStore::Cargo,
             path: cargo.join("registry"),
@@ -425,15 +426,33 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             candidate_depth: 1,
             gc_managed: true,
         },
-        StoreRoot {
-            kind: CacheStore::Sccache,
-            path: crate::container::sccache_host(work_root),
-            scope_prefix: Vec::new(),
-            scope_depth: 1,
-            candidate_depth: 1,
-            gc_managed: false,
-        },
-    ]
+    ];
+    for trust_class in [
+        GuestCompilerCacheTrustClass::Untrusted,
+        GuestCompilerCacheTrustClass::Trusted,
+        GuestCompilerCacheTrustClass::Release,
+    ] {
+        for (kind, path) in [
+            (
+                CacheStore::Sccache,
+                crate::container::sccache_host(work_root, trust_class),
+            ),
+            (
+                CacheStore::Kache,
+                crate::container::kache_host(work_root, trust_class),
+            ),
+        ] {
+            stores.push(StoreRoot {
+                kind,
+                path,
+                scope_prefix: Vec::new(),
+                scope_depth: 1,
+                candidate_depth: 1,
+                gc_managed: false,
+            });
+        }
+    }
+    stores
 }
 
 fn is_legacy_store(path: &Path) -> bool {
@@ -632,7 +651,7 @@ fn reclaim_priority(store: CacheStore) -> u8 {
         CacheStore::Targets => 2,
         CacheStore::Cargo => 3,
         CacheStore::Mise => 4,
-        CacheStore::Sccache => 5,
+        CacheStore::Sccache | CacheStore::Kache => 5,
     }
 }
 
@@ -760,6 +779,7 @@ pub(crate) enum CacheStore {
     ActionsCache,
     Artifacts,
     Sccache,
+    Kache,
 }
 
 impl fmt::Display for CacheStore {
@@ -771,6 +791,7 @@ impl fmt::Display for CacheStore {
             Self::ActionsCache => "actions-cache",
             Self::Artifacts => "artifacts",
             Self::Sccache => "sccache",
+            Self::Kache => "kache",
         })
     }
 }
