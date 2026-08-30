@@ -7202,51 +7202,25 @@ fn native_attest_build_provenance(
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
-    let workspace = action_state
+    let workspace = state
         .workspace_host
         .as_deref()
         .context("actions/attest-build-provenance requires a host workspace mapping")?;
-    let runner_temp = action_state
+    let runner_temp = state
         .temp_host
         .as_deref()
         .context("actions/attest-build-provenance requires RUNNER_TEMP")?;
-    let oidc_url = action_state
-        .env
-        .get("ACTIONS_ID_TOKEN_REQUEST_URL")
-        .filter(|value| !value.is_empty())
-        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_URL is absent")?;
-    let oidc_request_token = action_state
-        .env
-        .get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-        .filter(|value| !value.is_empty())
-        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_TOKEN is absent")?;
-    let github_token = action_state
-        .env
-        .get("GITHUB_TOKEN")
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .or_else(|| action_state.resolve_context_data_expression("github.token"))
-        .unwrap_or_else(|| oidc_request_token.clone());
-    let repository = action_state
-        .env
-        .get("GITHUB_REPOSITORY")
-        .filter(|value| !value.is_empty())
-        .context("actions/attest-build-provenance requires GITHUB_REPOSITORY")?;
-    let api_url = action_state
-        .env
-        .get("GITHUB_API_URL")
-        .map(String::as_str)
-        .unwrap_or("https://api.github.com");
-    let server_url = action_state
-        .env
-        .get("GITHUB_SERVER_URL")
-        .map(String::as_str)
-        .unwrap_or("https://github.com");
+    let oidc_url = required_immutable_env(state, "ACTIONS_ID_TOKEN_REQUEST_URL")?;
+    let oidc_request_token = required_immutable_env(state, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")?;
+    let github_token = required_immutable_env(state, "GITHUB_TOKEN")?;
+    let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
+    let api_url = trusted_github_api_base(state)?;
+    let server_url = trusted_github_server_base(state)?;
     let visibility = action_state
         .resolve_context_data_expression("github.event.repository.visibility")
         .or_else(|| {
             action_state
-                .env
+                .immutable_env
                 .get("GITHUB_REPOSITORY_VISIBILITY")
                 .cloned()
         });
@@ -7303,36 +7277,12 @@ fn native_attest_build_provenance(
 }
 
 fn native_configure_pages(
-    action: &NativeActionInvocation,
+    _action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let repository = action_state
-        .env
-        .get("GITHUB_REPOSITORY")
-        .filter(|value| !value.trim().is_empty())
-        .context("actions/configure-pages requires GITHUB_REPOSITORY")?;
-    let api_url = action_state
-        .env
-        .get("GITHUB_API_URL")
-        .map(String::as_str)
-        .unwrap_or("https://api.github.com")
-        .trim_end_matches('/');
-    let token = {
-        let input = native_input(action, &action_state, "token");
-        if input.trim().is_empty() {
-            action_state
-                .env
-                .get("GITHUB_TOKEN")
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            input
-        }
-    };
-    if token.trim().is_empty() {
-        bail!("actions/configure-pages requires input 'token' or GITHUB_TOKEN");
-    }
+    let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
+    let api_url = trusted_github_api_base(state)?;
+    let token = required_immutable_env(state, "GITHUB_TOKEN")?;
     let endpoint = format!("{api_url}/repos/{repository}/pages");
     let response = reqwest::blocking::Client::new()
         .get(&endpoint)
@@ -7379,10 +7329,7 @@ fn native_create_github_app_token(
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
-    let repository = action_state
-        .env
-        .get("GITHUB_REPOSITORY")
-        .context("actions/create-github-app-token requires GITHUB_REPOSITORY")?;
+    let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
     let (repository_owner, repository_name) = repository
         .split_once('/')
         .context("GITHUB_REPOSITORY must be owner/name")?;
@@ -7391,15 +7338,7 @@ fn native_create_github_app_token(
     if owner != repository_owner || repositories != repository_name {
         bail!("actions/create-github-app-token is restricted to current repository {repository}");
     }
-    let api_url = native_input_or(
-        &action_state,
-        action,
-        "github-api-url",
-        "https://api.github.com",
-    );
-    if api_url.trim_end_matches('/') != "https://api.github.com" {
-        bail!("actions/create-github-app-token requires github-api-url=https://api.github.com");
-    }
+    let api_url = trusted_github_api_base(state)?;
     if input_truthy(&native_input_or(
         &action_state,
         action,
@@ -7440,7 +7379,7 @@ fn native_create_github_app_token(
         .build()
         .context("build GitHub App API client")?;
     let installation_endpoint =
-        format!("https://api.github.com/repos/{repository_owner}/{repository_name}/installation");
+        format!("{api_url}/repos/{repository_owner}/{repository_name}/installation");
     let installation: Value = github_app_response(
         client
             .get(&installation_endpoint)
@@ -7460,7 +7399,7 @@ fn native_create_github_app_token(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let token_endpoint =
-        format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
+        format!("{api_url}/app/installations/{installation_id}/access_tokens");
     let token_response: Value = github_app_response(
         client
             .post(&token_endpoint)
@@ -7512,7 +7451,12 @@ fn github_app_response(
     response: std::result::Result<reqwest::blocking::Response, reqwest::Error>,
     operation: &str,
 ) -> Result<Value> {
-    let response = response.with_context(|| operation.to_string())?;
+    let response = response.map_err(|error| {
+        anyhow::anyhow!(
+            "{operation}: {}",
+            crate::protocol::redacted_reqwest_error(&error)
+        )
+    })?;
     let status = response.status();
     if !status.is_success() {
         bail!("{operation} failed with HTTP {status}");
@@ -7527,11 +7471,12 @@ fn native_revoke_github_app_token(state: &JobExecutionState) -> Result<StepExecu
     if token.is_empty() {
         return Ok(native_success_with_state(StepCommandState::default()));
     }
+    let api_url = trusted_github_api_base(state)?;
     let response = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .context("build GitHub App revoke client")?
-        .delete("https://api.github.com/installation/token")
+        .delete(format!("{api_url}/installation/token"))
         .bearer_auth(&token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2026-03-10")
@@ -7543,7 +7488,10 @@ fn native_revoke_github_app_token(state: &JobExecutionState) -> Result<StepExecu
             "Warning: failed to revoke GitHub App token: HTTP {}\n",
             response.status()
         ),
-        Err(error) => format!("Warning: failed to revoke GitHub App token: {error}\n"),
+        Err(error) => format!(
+            "Warning: failed to revoke GitHub App token: {}\n",
+            crate::protocol::redacted_reqwest_error(&error)
+        ),
     };
     Ok(StepExecutionResult {
         exit_code: 0,
@@ -7579,111 +7527,43 @@ fn native_deploy_pages(
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
-    let repository = action_state
-        .env
-        .get("GITHUB_REPOSITORY")
-        .filter(|value| !value.is_empty())
-        .context("actions/deploy-pages requires GITHUB_REPOSITORY")?;
-    let build_version = action_state
-        .env
-        .get("GITHUB_SHA")
-        .filter(|value| !value.is_empty())
-        .context("actions/deploy-pages requires GITHUB_SHA")?;
-    let github_token = {
-        let input = native_input(action, &action_state, "token");
-        if input.is_empty() {
-            action_state
-                .env
-                .get("GITHUB_TOKEN")
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            input
-        }
-    };
-    if github_token.is_empty() {
-        bail!("actions/deploy-pages requires input 'token' or GITHUB_TOKEN");
-    }
-    let runtime_token = action_state
-        .env
-        .get("ACTIONS_RUNTIME_TOKEN")
-        .filter(|value| !value.is_empty())
-        .context("actions/deploy-pages requires ACTIONS_RUNTIME_TOKEN")?;
-    let results_url = action_state
-        .env
-        .get("ACTIONS_RESULTS_URL")
-        .filter(|value| !value.is_empty())
-        .context("actions/deploy-pages requires ACTIONS_RESULTS_URL")?
-        .trim_end_matches('/');
-    let oidc_url = action_state
-        .env
-        .get("ACTIONS_ID_TOKEN_REQUEST_URL")
-        .filter(|value| !value.is_empty())
-        .context("actions/deploy-pages requires ACTIONS_ID_TOKEN_REQUEST_URL")?;
-    let oidc_request_token = action_state
-        .env
-        .get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-        .filter(|value| !value.is_empty())
-        .context("actions/deploy-pages requires ACTIONS_ID_TOKEN_REQUEST_TOKEN")?;
+    let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
+    let build_version = required_immutable_env(state, "GITHUB_SHA")?.to_owned();
+    let github_token = required_immutable_env(state, "GITHUB_TOKEN")?;
+    let runtime_token = required_immutable_env(state, "ACTIONS_RUNTIME_TOKEN")?;
+    let results_url = required_immutable_env(state, "ACTIONS_RESULTS_URL")?;
+    let oidc_url = required_immutable_env(state, "ACTIONS_ID_TOKEN_REQUEST_URL")?;
+    let oidc_request_token = required_immutable_env(state, "ACTIONS_ID_TOKEN_REQUEST_TOKEN")?;
+    let oidc_url = crate::protocol::validate_authenticated_url(oidc_url)?;
     let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
         .context("actions/deploy-pages runtime token is missing workflow backend IDs")?;
     let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages");
-    let api_url = action_state
-        .env
-        .get("GITHUB_API_URL")
-        .map(String::as_str)
-        .unwrap_or("https://api.github.com")
-        .trim_end_matches('/');
+    let api_url = trusted_github_api_base(state)?;
     let client = reqwest::blocking::Client::builder()
         .user_agent("velnor-runner")
         .timeout(Duration::from_secs(30))
         .build()
         .context("build Pages HTTP client")?;
 
-    let artifacts: Value = pages_json_response(
-        client
-            .post(format!(
-                "{results_url}/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts"
-            ))
-            .bearer_auth(runtime_token)
-            .json(&serde_json::json!({
-                "workflow_run_backend_id": plan_id,
-                "workflow_job_run_backend_id": job_id
-            }))
-            .send()
-            .context("list Pages artifacts")?,
-        "list Pages artifacts",
+    let artifact_id = crate::protocol::results_artifact_id_by_name_blocking(
+        results_url,
+        runtime_token,
+        &plan_id,
+        &job_id,
+        &artifact_name,
     )?;
-    let matching = artifacts
-        .get("artifacts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|artifact| artifact.get("name").and_then(Value::as_str) == Some(&artifact_name))
-        .collect::<Vec<_>>();
-    if matching.len() != 1 {
-        bail!(
-            "expected exactly one Pages artifact named '{artifact_name}', found {}",
-            matching.len()
-        );
-    }
-    let artifact_id = matching[0]
-        .get("database_id")
-        .or_else(|| matching[0].get("databaseId"))
-        .or_else(|| matching[0].get("id"))
-        .and_then(|value| match value {
-            Value::Number(value) => value.as_u64(),
-            Value::String(value) => value.parse().ok(),
-            _ => None,
-        })
-        .context("Pages artifact is missing numeric database_id")?;
 
     let oidc: Value = pages_json_response(
         client
-            .get(oidc_url)
+            .get(oidc_url.as_str())
             .bearer_auth(oidc_request_token)
             .send()
-            .context("request Pages OIDC token")?,
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "request Pages OIDC token: {}",
+                    crate::protocol::redacted_reqwest_error(&error)
+                )
+            })?,
         "request Pages OIDC token",
     )?;
     let oidc_token = oidc
@@ -7708,7 +7588,12 @@ fn native_deploy_pages(
             .header("X-GitHub-Api-Version", "2026-03-10")
             .json(&payload)
             .send()
-            .context("create Pages deployment")?,
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "create Pages deployment: {}",
+                    crate::protocol::redacted_reqwest_error(&error)
+                )
+            })?,
         "create Pages deployment",
     )?;
     let deployment_id = deployment
@@ -7794,7 +7679,10 @@ fn native_deploy_pages(
                         &deployment_id,
                         &github_token,
                     );
-                    return Err(error).context("get Pages deployment status");
+                    return Err(anyhow::anyhow!(
+                        "get Pages deployment status: {}",
+                        crate::protocol::redacted_reqwest_error(&error)
+                    ));
                 }
             }
         }

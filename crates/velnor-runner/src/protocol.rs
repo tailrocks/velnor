@@ -262,7 +262,7 @@ pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     match url.scheme() {
         "https" => Ok(url),
         "http"
-            if (cfg!(test) || cfg!(feature = "test-support"))
+            if cfg!(feature = "test-support")
                 && url.host_str().is_some_and(is_loopback_host) =>
         {
             Ok(url)
@@ -285,6 +285,9 @@ fn validate_known_service_url(raw: &str, field: &str, hosts: &[&str]) -> Result<
             redacted_authenticated_url(raw)
         );
     }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("{field} endpoint must not contain query or fragment data");
+    }
     Ok(url)
 }
 
@@ -301,6 +304,31 @@ pub(crate) fn redacted_authenticated_url(raw: &str) -> String {
     url.set_query(None);
     url.set_fragment(None);
     url.to_string()
+}
+
+/// Render a reqwest failure without including its URL. Reqwest's Display and
+/// source chain may contain a signed blob URL, so authenticated callers must
+/// never put the original error in a context or log message.
+pub(crate) fn redacted_reqwest_error(error: &reqwest::Error) -> String {
+    if let Some(status) = error.status() {
+        return format!("HTTP status {status}");
+    }
+    if error.is_timeout() {
+        return "request timed out".to_owned();
+    }
+    if error.is_redirect() {
+        return "request redirect failed".to_owned();
+    }
+    if error.is_body() {
+        return "request body transfer failed".to_owned();
+    }
+    if error.is_decode() {
+        return "response decoding failed".to_owned();
+    }
+    if error.is_builder() {
+        return "request construction failed".to_owned();
+    }
+    "request transport failed".to_owned()
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -4663,7 +4691,12 @@ fn results_service_post(
         .timeout(Duration::from_secs(30))
         .body(body.to_owned())
         .send()
-        .with_context(|| format!("send Results Service {operation}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "send Results Service {operation}: {}",
+                redacted_reqwest_error(&error)
+            )
+        })?;
     let status = response.status();
     if !status.is_success() {
         let mut response = response;
@@ -4733,6 +4766,170 @@ pub(crate) struct ArtifactUploadOptions {
     pub(crate) retention_days: Option<u8>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateArtifactResponse {
+    ok: bool,
+    #[serde(alias = "signedUploadUrl")]
+    signed_upload_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinalizeArtifactResponse {
+    ok: bool,
+    #[serde(alias = "artifactId")]
+    artifact_id: WireU64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteArtifactResponse {
+    ok: bool,
+    #[serde(alias = "artifactId")]
+    artifact_id: WireU64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetSignedArtifactUrlResponse {
+    #[serde(alias = "signedUrl")]
+    signed_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListArtifactsResponse {
+    artifacts: Option<Vec<ResultsArtifactDescriptorWire>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResultsArtifactDescriptorWire {
+    workflow_run_backend_id: String,
+    workflow_job_run_backend_id: String,
+    #[serde(alias = "databaseId")]
+    database_id: WireU64,
+    name: String,
+    size: WireU64,
+    digest: WireStringValue,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WireU64 {
+    Number(u64),
+    String(String),
+}
+
+impl WireU64 {
+    fn parse(&self, field: &str) -> Result<u64> {
+        match self {
+            Self::Number(value) => Ok(*value),
+            Self::String(value) => value
+                .parse()
+                .with_context(|| format!("{field} is not an unsigned integer")),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WireStringValue {
+    String(String),
+    Object { value: String },
+}
+
+impl WireStringValue {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::String(value) | Self::Object { value } => value,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedResultsArtifactDescriptor {
+    workflow_run_backend_id: String,
+    workflow_job_run_backend_id: String,
+    database_id: u64,
+    name: String,
+    size: u64,
+    digest: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizedArtifact {
+    pub(crate) id: String,
+    pub(crate) digest: String,
+}
+
+fn validate_results_artifact_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.chars().any(|character| {
+            matches!(
+                character,
+                '"' | ':' | '<' | '>' | '|' | '*' | '?' | '\r' | '\n' | '\\' | '/' | '\0'
+            )
+        })
+    {
+        bail!("Results Service artifact name is empty or contains unsafe path characters");
+    }
+    Ok(())
+}
+
+fn validate_sha256_digest(digest: &str, field: &str) -> Result<String> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        bail!("{field} must use the sha256:<64 hex digits> format");
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{field} must use the sha256:<64 hex digits> format");
+    }
+    Ok(digest.to_ascii_lowercase())
+}
+
+impl ResultsArtifactDescriptorWire {
+    fn validate(
+        self,
+        expected_plan_id: &str,
+        expected_job_id: &str,
+    ) -> Result<ValidatedResultsArtifactDescriptor> {
+        if self.workflow_run_backend_id != expected_plan_id {
+            bail!(
+                "Results Service artifact '{}' belongs to workflow backend {}, not {}",
+                self.name,
+                self.workflow_run_backend_id,
+                expected_plan_id
+            );
+        }
+        if self.workflow_job_run_backend_id != expected_job_id {
+            bail!(
+                "Results Service artifact '{}' belongs to job backend {}, not {}",
+                self.name,
+                self.workflow_job_run_backend_id,
+                expected_job_id
+            );
+        }
+        validate_results_artifact_name(&self.name)?;
+        let database_id = self.database_id.parse("database_id")?;
+        if database_id == 0 {
+            bail!("Results Service artifact '{}' has an invalid database_id", self.name);
+        }
+        let size = self.size.parse("size")?;
+        let digest = validate_sha256_digest(self.digest.as_str(), "artifact digest")?;
+        Ok(ValidatedResultsArtifactDescriptor {
+            workflow_run_backend_id: self.workflow_run_backend_id,
+            workflow_job_run_backend_id: self.workflow_job_run_backend_id,
+            database_id,
+            name: self.name,
+            size,
+            digest,
+        })
+    }
+}
+
+fn digest_matches(expected: &str, actual_hex: &str) -> bool {
+    expected
+        .strip_prefix("sha256:")
+        .is_some_and(|expected| expected.eq_ignore_ascii_case(actual_hex))
+}
+
 /// A file-backed artifact input. The upload path reads each source in bounded
 /// chunks, so artifact contents do not need to be materialized in memory.
 #[derive(Debug)]
@@ -4782,7 +4979,7 @@ pub(crate) fn upload_artifact_blocking(
     name: &str,
     files: &[(String, Vec<u8>)], // (archive path, content)
     options: ArtifactUploadOptions,
-) -> Result<String> {
+) -> Result<FinalizedArtifact> {
     upload_artifact_with_zip_builder(
         results_service_url,
         token,
@@ -4802,7 +4999,7 @@ pub(crate) fn upload_artifact_files_blocking(
     name: &str,
     files: Vec<ArtifactUploadFile>,
     options: ArtifactUploadOptions,
-) -> Result<String> {
+) -> Result<FinalizedArtifact> {
     upload_artifact_with_zip_builder(
         results_service_url,
         token,
@@ -4824,8 +5021,9 @@ fn upload_artifact_with_zip_builder(
     name: &str,
     options: ArtifactUploadOptions,
     build_zip: impl FnOnce(std::path::PathBuf) -> Result<(ArtifactTempFile, u64, String)>,
-) -> Result<String> {
+) -> Result<FinalizedArtifact> {
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+    validate_results_artifact_name(name)?;
     let results_service_url = validate_known_service_url(
         results_service_url,
         "ResultsServiceUrl",
@@ -4855,17 +5053,15 @@ fn upload_artifact_with_zip_builder(
     let create_text =
         results_service_post(&client, &create_url, token, &create_body, "CreateArtifact")
             .context("CreateArtifact request")?;
-    let create_resp: serde_json::Value =
+    let create_resp: CreateArtifactResponse =
         serde_json::from_str(&create_text).context("CreateArtifact parse")?;
-    if create_resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+    if !create_resp.ok {
         bail!("CreateArtifact: backend returned ok=false or absent");
     }
-    let upload_url = create_resp
-        .get("signed_upload_url")
-        .and_then(|v| v.as_str())
-        .filter(|u| !u.is_empty())
-        .context("CreateArtifact: empty signed_upload_url")?
-        .to_string();
+    let upload_url = create_resp.signed_upload_url;
+    if upload_url.is_empty() {
+        bail!("CreateArtifact: empty signed_upload_url");
+    }
     let upload_url = validate_signed_blob_url(&upload_url, "artifact upload")?;
 
     // 2. PUT the prepared mode-0600 temp archive without retaining a second
@@ -4887,7 +5083,12 @@ fn upload_artifact_with_zip_builder(
         .timeout(artifact_transfer_timeout(zip_size))
         .body(zip_file)
         .send()
-        .context("send artifact blob PUT")?;
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "send artifact blob PUT: {}",
+                redacted_reqwest_error(&error)
+            )
+        })?;
     let put_status = put_response.status().as_u16();
     if !(200..300).contains(&put_status) {
         bail!("artifact blob PUT failed: status={put_status}");
@@ -4911,22 +5112,69 @@ fn upload_artifact_with_zip_builder(
         "FinalizeArtifact",
     )
     .context("FinalizeArtifact request")?;
-    let finalize: serde_json::Value =
+    let finalize: FinalizeArtifactResponse =
         serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
-    if finalize.get("ok").and_then(|value| value.as_bool()) != Some(true) {
+    if !finalize.ok {
         bail!("FinalizeArtifact: backend returned ok=false or absent");
     }
-    let artifact_id = finalize
-        .get("artifact_id")
-        .or_else(|| finalize.get("artifactId"))
-        .and_then(|value| match value {
-            serde_json::Value::String(value) => Some(value.clone()),
-            serde_json::Value::Number(value) => Some(value.to_string()),
-            _ => None,
-        })
-        .filter(|value| !value.is_empty())
-        .context("FinalizeArtifact: missing artifact_id")?;
-    Ok(artifact_id)
+    let artifact_id = finalize.artifact_id.parse("FinalizeArtifact artifact_id")?;
+    if artifact_id == 0 {
+        bail!("FinalizeArtifact: artifact_id must be non-zero");
+    }
+    Ok(FinalizedArtifact {
+        id: artifact_id.to_string(),
+        digest: format!("sha256:{zip_hash}"),
+    })
+}
+
+pub(crate) fn delete_finalized_artifact_blocking(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    artifact_id: &str,
+) -> Result<()> {
+    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+    let results_service_url = validate_known_service_url(
+        results_service_url,
+        "ResultsServiceUrl",
+        &["results-receiver.actions.githubusercontent.com"],
+    )?;
+    let artifact_id = artifact_id
+        .parse::<u64>()
+        .context("Results Service artifact cleanup ID is not numeric")?;
+    if artifact_id == 0 {
+        bail!("Results Service artifact cleanup ID must be non-zero");
+    }
+    validate_results_artifact_name(name)?;
+    let base = results_service_url.as_str().trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build Results Service HTTP client")?;
+    let body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": plan_id,
+        "workflow_job_run_backend_id": job_id,
+        "name": name,
+        "database_id": artifact_id.to_string(),
+    }))
+    .context("serialize DeleteArtifact")?;
+    let url = format!("{base}/{SERVICE}/DeleteArtifact");
+    let text = results_service_post(&client, &url, token, &body, "DeleteArtifact")?;
+    let response: DeleteArtifactResponse =
+        serde_json::from_str(&text).context("DeleteArtifact parse")?;
+    if !response.ok {
+        bail!("DeleteArtifact: backend returned ok=false or absent");
+    }
+    let response_id = response.artifact_id.parse("DeleteArtifact artifact_id")?;
+    if response_id != artifact_id {
+        bail!(
+            "DeleteArtifact returned artifact_id {response_id}, expected {artifact_id}"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -5589,6 +5837,87 @@ pub(crate) fn download_artifacts_blocking(
     )
 }
 
+fn list_results_artifacts(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+) -> Result<Vec<ValidatedResultsArtifactDescriptor>> {
+    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+    let list_body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": plan_id,
+        "workflow_job_run_backend_id": job_id
+    }))
+    .context("serialize ListArtifacts")?;
+    let list_url = format!("{base}/{SERVICE}/ListArtifacts");
+    let listed_text = results_service_post(client, &list_url, token, &list_body, "ListArtifacts")?;
+    let listed: ListArtifactsResponse =
+        serde_json::from_str(&listed_text).context("parse Results Service ListArtifacts")?;
+    let artifacts = listed
+        .artifacts
+        .context("Results Service ListArtifacts omitted artifacts")?;
+    if artifacts.len() > RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS {
+        bail!(
+            "Results Service listed {} artifacts, exceeding the {}-artifact limit; narrow the workflow scope",
+            artifacts.len(),
+            RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS
+        );
+    }
+    let mut validated = Vec::with_capacity(artifacts.len());
+    let mut names = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    for artifact in artifacts {
+        let artifact = artifact.validate(plan_id, job_id)?;
+        if !names.insert(artifact.name.clone()) {
+            bail!(
+                "Results Service returned duplicate artifact name '{}'",
+                artifact.name
+            );
+        }
+        if !ids.insert(artifact.database_id) {
+            bail!(
+                "Results Service returned duplicate artifact database_id {}",
+                artifact.database_id
+            );
+        }
+        validated.push(artifact);
+    }
+    Ok(validated)
+}
+
+pub(crate) fn results_artifact_id_by_name_blocking(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+) -> Result<u64> {
+    validate_results_artifact_name(name)?;
+    let results_service_url = validate_known_service_url(
+        results_service_url,
+        "ResultsServiceUrl",
+        &["results-receiver.actions.githubusercontent.com"],
+    )?;
+    let base = results_service_url.as_str().trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(RUNNER_USER_AGENT)
+        .build()
+        .context("build Results Service HTTP client")?;
+    let matching = list_results_artifacts(&client, base, token, plan_id, job_id)?
+        .into_iter()
+        .filter(|artifact| artifact.name == name)
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        bail!(
+            "expected exactly one Results Service artifact named '{name}', found {}",
+            matching.len()
+        );
+    }
+    Ok(matching[0].database_id)
+}
+
 fn download_artifacts_blocking_in_temp_dir(
     results_service_url: &str,
     token: &str,
@@ -5620,37 +5949,11 @@ fn download_artifacts_blocking_in_temp_dir(
         .build()
         .context("build Results Service HTTP client")?;
 
-    let list_body = serde_json::to_string(&serde_json::json!({
-        "workflow_run_backend_id": plan_id,
-        "workflow_job_run_backend_id": job_id
-    }))
-    .context("serialize ListArtifacts")?;
-    let list_url = format!("{base}/{SERVICE}/ListArtifacts");
-    let listed_text = results_service_post(&client, &list_url, token, &list_body, "ListArtifacts")?;
-    let listed: serde_json::Value =
-        serde_json::from_str(&listed_text).context("parse Results Service ListArtifacts")?;
-    let artifacts = listed
-        .get("artifacts")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if artifacts.len() > RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS {
-        bail!(
-            "Results Service listed {} artifacts, exceeding the {}-artifact limit; narrow the workflow scope",
-            artifacts.len(),
-            RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS
-        );
-    }
+    let artifacts = list_results_artifacts(&client, base, token, plan_id, job_id)?;
     let mut downloads = Vec::new();
     let mut total_returned_bytes = 0_u64;
     for artifact in artifacts {
-        let Some(artifact_name) = artifact
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
+        let artifact_name = artifact.name.as_str();
         // Filter BEFORE signing/downloading: unrequested artifacts (notably
         // non-zip `.dockerbuild` build records) must never be fetched.
         let selected = if !name.is_empty() {
@@ -5663,34 +5966,9 @@ fn download_artifacts_blocking_in_temp_dir(
         if !selected {
             continue;
         }
-        let artifact_plan = artifact
-            .get("workflow_run_backend_id")
-            .or_else(|| artifact.get("workflowRunBackendId"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty())
-            .with_context(|| {
-                format!(
-                    "Results Service artifact '{artifact_name}' is missing workflow_run_backend_id"
-                )
-            })?;
-        if artifact_plan != plan_id {
-            bail!(
-                "Results Service artifact '{artifact_name}' belongs to workflow backend {artifact_plan}, not {plan_id}"
-            );
-        }
-        let artifact_job = artifact
-            .get("workflow_job_run_backend_id")
-            .or_else(|| artifact.get("workflowJobRunBackendId"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty())
-            .with_context(|| {
-                format!(
-                    "Results Service artifact '{artifact_name}' is missing workflow_job_run_backend_id"
-                )
-            })?;
         let signed_body = serde_json::to_string(&serde_json::json!({
-            "workflow_run_backend_id": artifact_plan,
-            "workflow_job_run_backend_id": artifact_job,
+            "workflow_run_backend_id": artifact.workflow_run_backend_id,
+            "workflow_job_run_backend_id": artifact.workflow_job_run_backend_id,
             "name": artifact_name
         }))
         .context("serialize GetSignedArtifactURL")?;
@@ -5702,15 +5980,13 @@ fn download_artifacts_blocking_in_temp_dir(
             &signed_body,
             "GetSignedArtifactURL",
         )?;
-        let signed: serde_json::Value = serde_json::from_str(&signed_text)
+        let signed: GetSignedArtifactUrlResponse = serde_json::from_str(&signed_text)
             .context("parse Results Service GetSignedArtifactURL")?;
-        let signed_url = signed
-            .get("signed_url")
-            .or_else(|| signed.get("signedUrl"))
-            .and_then(serde_json::Value::as_str)
-            .filter(|url| !url.is_empty())
-            .context("GetSignedArtifactURL returned no signed URL")?;
-        let signed_url = validate_signed_blob_url(signed_url, "artifact download")?;
+        if signed.signed_url.is_empty() {
+            bail!("GetSignedArtifactURL returned no signed URL");
+        }
+        let signed_url = signed.signed_url;
+        let signed_url = validate_signed_blob_url(&signed_url, "artifact download")?;
         let artifact_path = tmp_dir.join(format!(
             "velnor-artifact-download-{}.zip",
             uuid::Uuid::new_v4()
@@ -5721,7 +5997,12 @@ fn download_artifacts_blocking_in_temp_dir(
                 RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES,
             ))
             .send()
-            .context("download Results Service artifact zip")?;
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "download Results Service artifact blob: {}",
+                    redacted_reqwest_error(&error)
+                )
+            })?;
         let status = response.status();
         if status != reqwest::StatusCode::OK {
             let body = read_bounded_response_preview(&mut response);
@@ -5755,6 +6036,32 @@ fn download_artifacts_blocking_in_temp_dir(
             .context("sync downloaded artifact zip")?;
         artifact_path.file = Some(output_file);
         let artifact_archive = Arc::new(artifact_path);
+        let actual_size = artifact_archive
+            .file
+            .as_ref()
+            .context("retain downloaded artifact for size verification")?
+            .metadata()
+            .context("stat downloaded artifact")?
+            .len();
+        if actual_size != artifact.size {
+            bail!(
+                "artifact '{artifact_name}' downloaded size {actual_size} does not match descriptor size {}",
+                artifact.size
+            );
+        }
+        let mut digest_file = artifact_archive
+            .file
+            .as_ref()
+            .context("retain downloaded artifact for digest verification")?
+            .try_clone()
+            .context("duplicate downloaded artifact for digest verification")?;
+        let actual_digest = hash_artifact_file(&mut digest_file)?;
+        if !digest_matches(&artifact.digest, &actual_digest) {
+            bail!(
+                "artifact '{artifact_name}' downloaded digest sha256:{actual_digest} does not match descriptor digest {}",
+                artifact.digest
+            );
+        }
         let is_zip = artifact_response_is_zip(content_type.as_deref(), signed_url.as_str());
         let mut validation_file = artifact_archive
             .file
