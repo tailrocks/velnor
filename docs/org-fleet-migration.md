@@ -206,13 +206,23 @@ the removal is unrecorded.
 Membership was restored by re-adding every repository whose default-branch
 workflows reference `velnor-target-mvp`. Standing rule: **every repository
 onboarded to the Velnor lane must enter the generated policy in the same
-change**. Run `scripts/runner_group_doctor.sh` after onboarding batches as a
-read-only diagnostic; its printed direct `PUT` remediation lines are
-historical/non-executable and are not authorization to mutate GitHub. Use the
-reviewed `fleet-policy plan`, `apply`, and `audit` flow instead:
+change**. Use the reviewed, digest-gated `velnor-tools fleet-policy` plan,
+apply, and audit flow for onboarding batches and drift checks. Apply requires
+explicit approval of the unchanged plan digest:
 
 ```sh
-scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group velnor-trusted
+rtk mise run fleet-generate
+rtk cargo run -p velnor-tools --locked -- fleet-policy plan \
+  --policy fleet/policies/tailrocks-desired-policy.json \
+  --ledger fleet/release-refs.toml
+rtk cargo run -p velnor-tools --locked -- fleet-policy apply \
+  --policy fleet/policies/tailrocks-desired-policy.json \
+  --ledger fleet/release-refs.toml \
+  --organization tailrocks \
+  --plan-digest <REVIEWED_PLAN_DIGEST>
+rtk cargo run -p velnor-tools --locked -- fleet-policy audit \
+  --policy fleet/policies/tailrocks-desired-policy.json \
+  --organization tailrocks
 ```
 
 The authoritative allowlist is the `selected_repositories` field of
@@ -224,8 +234,9 @@ through `fleet-policy plan`/`audit` and treat runner-state and full guard-state
 as pending acceptance evidence:
 
 ```sh
-jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json
-scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group velnor-trusted
+rtk cargo run -p velnor-tools --locked -- fleet-policy audit \
+  --policy fleet/policies/tailrocks-desired-policy.json \
+  --organization tailrocks
 ```
 
 ## Rollback
