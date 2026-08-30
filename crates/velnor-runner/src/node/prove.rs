@@ -10,6 +10,7 @@ use std::process::Child;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -186,6 +187,48 @@ pub fn slot_process_is_alive(
         let _ = (state_dir, slot_id, generation);
         pid_is_alive(pid)
     }
+}
+
+/// Verify that a slot published recent progress for the expected generation
+/// and that its recorded process is still the expected live actor.
+#[must_use]
+pub fn slot_heartbeat_is_fresh(
+    state_dir: &Path,
+    slot_id: &SlotId,
+    generation: Generation,
+    max_age: Duration,
+) -> bool {
+    let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
+        return false;
+    };
+    if scope.is_empty() {
+        return false;
+    }
+    let Ok(index) = index.parse::<usize>() else {
+        return false;
+    };
+    let path = super::slot::heartbeat_path(state_dir, index);
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return false;
+    };
+    let Ok(age) = metadata
+        .modified()
+        .and_then(|time| time.elapsed().map_err(std::io::Error::other))
+    else {
+        return false;
+    };
+    if age > max_age {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(heartbeat) = serde_json::from_slice::<super::slot::SlotHeartbeat>(&bytes) else {
+        return false;
+    };
+    heartbeat.generation == generation.0
+        && heartbeat.sequence > 0
+        && slot_process_is_alive(heartbeat.pid, state_dir, slot_id, generation)
 }
 
 /// Persist evidence and desired policy. Never a boolean Ready stamp.
