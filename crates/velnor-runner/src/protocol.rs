@@ -6020,10 +6020,7 @@ mod tests {
             ArtifactUploadOptions::default(),
         )
         .unwrap_err();
-        assert!(
-            error.to_string().contains("artifact source"),
-            "{error:#}"
-        );
+        assert!(error.to_string().contains("artifact source"), "{error:#}");
 
         stop_tx.send(()).unwrap();
         assert_eq!(server.join().unwrap(), 0);
