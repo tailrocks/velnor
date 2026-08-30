@@ -941,9 +941,12 @@ mod tests {
     }
 
     fn tempfile_dir() -> TestDir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         TestDir(std::env::temp_dir().join(format!(
-            "velnor-gha-cache-test-{}-{}",
+            "velnor-gha-cache-test-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())

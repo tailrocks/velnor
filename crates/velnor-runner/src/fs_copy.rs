@@ -533,50 +533,6 @@ impl NoFollowDestinationDir {
         bail!("could not atomically publish staged artifact directory")
     }
 
-    /// Atomically publishes a staged directory only when the destination name
-    /// is still absent. This closes the duplicate-name race without replacing
-    /// another publisher's immutable artifact.
-    pub fn publish_staged_directory_noreplace_from(
-        &self,
-        staging_parent: &Self,
-        staging_name: &OsStr,
-        destination_name: &OsStr,
-    ) -> Result<()> {
-        validate_single_component(staging_name, "staging directory")?;
-        validate_single_component(destination_name, "destination directory")?;
-        let staging_stat = rustix::fs::statat(
-            &staging_parent.file,
-            staging_name,
-            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-        )
-        .map_err(std::io::Error::from)
-        .context("inspect staged immutable artifact directory")?;
-        if rustix::fs::FileType::from_raw_mode(staging_stat.st_mode)
-            != rustix::fs::FileType::Directory
-        {
-            bail!("staged immutable artifact is not a directory");
-        }
-        match rustix::fs::renameat_with(
-            &staging_parent.file,
-            staging_name,
-            &self.file,
-            destination_name,
-            rustix::fs::RenameFlags::NOREPLACE,
-        ) {
-            Ok(()) => Ok(()),
-            Err(rustix::io::Errno::EXIST) => bail!(
-                "immutable artifact destination already exists: {}",
-                self.display_path.join(destination_name).display()
-            ),
-            Err(error) => Err(std::io::Error::from(error)).with_context(|| {
-                format!(
-                    "atomically publish immutable staged artifact directory {}",
-                    self.display_path.join(destination_name).display()
-                )
-            }),
-        }
-    }
-
     pub(crate) fn remove_tree_entry(&self, name: &OsStr) -> Result<()> {
         validate_single_component(name, "artifact tree entry")?;
         remove_tree_at(&self.file, name).with_context(|| {

@@ -6425,7 +6425,7 @@ fn native_upload_artifact(
     }
 
     let mut artifact_id = artifact_id_for_name(state, &name);
-    let digest = hash_artifact_dir(&artifact_dir)?;
+    let mut digest = hash_artifact_dir(&artifact_dir)?;
     let results_url = action_state
         .env
         .get("ACTIONS_RESULTS_URL")
@@ -6468,7 +6468,10 @@ fn native_upload_artifact(
                         retention_days,
                     },
                 ) {
-                    Ok(id) => artifact_id = id,
+                    Ok(finalized) => {
+                        artifact_id = finalized.id;
+                        digest = finalized.digest;
+                    }
                     Err(e) => {
                         let message =
                             format!("Results Service artifact upload failed for '{name}': {e:#}\n");
@@ -7237,9 +7240,9 @@ fn native_attest_build_provenance(
             runner_temp_container: "/__t",
             oidc_url,
             oidc_request_token,
-            github_token: &github_token,
-            api_url,
-            server_url,
+            github_token,
+            api_url: &api_url,
+            server_url: &server_url,
             repository,
             repository_visibility: visibility.as_deref(),
         })?;
@@ -7286,7 +7289,7 @@ fn native_configure_pages(
     let endpoint = format!("{api_url}/repos/{repository}/pages");
     let response = reqwest::blocking::Client::new()
         .get(&endpoint)
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2026-03-10")
         .header("User-Agent", "velnor-runner")
@@ -7398,8 +7401,7 @@ fn native_create_github_app_token(
         .get("app_slug")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let token_endpoint =
-        format!("{api_url}/app/installations/{installation_id}/access_tokens");
+    let token_endpoint = format!("{api_url}/app/installations/{installation_id}/access_tokens");
     let token_response: Value = github_app_response(
         client
             .post(&token_endpoint)
@@ -7583,7 +7585,7 @@ fn native_deploy_pages(
     let deployment: Value = pages_json_response(
         client
             .post(format!("{api_url}/repos/{repository}/pages/deployments"))
-            .bearer_auth(&github_token)
+            .bearer_auth(github_token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2026-03-10")
             .json(&payload)
@@ -7629,7 +7631,7 @@ fn native_deploy_pages(
         }
         let response = client
             .get(&status_url)
-            .bearer_auth(&github_token)
+            .bearer_auth(github_token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2026-03-10")
             .send();
@@ -7658,10 +7660,10 @@ fn native_deploy_pages(
                 if errors >= max_errors {
                     cancel_pages_deployment(
                         &client,
-                        api_url,
+                        &api_url,
                         repository,
                         &deployment_id,
-                        &github_token,
+                        github_token,
                     );
                     bail!(
                         "Pages deployment status failed with HTTP {}",
@@ -7674,10 +7676,10 @@ fn native_deploy_pages(
                 if errors >= max_errors {
                     cancel_pages_deployment(
                         &client,
-                        api_url,
+                        &api_url,
                         repository,
                         &deployment_id,
-                        &github_token,
+                        github_token,
                     );
                     return Err(anyhow::anyhow!(
                         "get Pages deployment status: {}",
@@ -7687,7 +7689,7 @@ fn native_deploy_pages(
             }
         }
         if started.elapsed() >= Duration::from_millis(timeout) {
-            cancel_pages_deployment(&client, api_url, repository, &deployment_id, &github_token);
+            cancel_pages_deployment(&client, &api_url, repository, &deployment_id, github_token);
             bail!("Pages deployment {deployment_id} timed out after {timeout} ms");
         }
     }
@@ -8064,6 +8066,16 @@ fn native_cache_step_hit(state: &JobExecutionState, step_id: &str) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+/// Allows plain-HTTP loopback origins only for test-support builds so the
+/// local fixture servers can stand in for the GitHub API.
+fn trusted_base_url_allows_loopback(url: &url::Url) -> bool {
+    cfg!(feature = "test-support")
+        && url.scheme() == "http"
+        && url
+            .host_str()
+            .is_some_and(|host| host == "127.0.0.1" || host == "localhost" || host == "::1")
+}
+
 fn trusted_github_api_base(state: &JobExecutionState) -> Result<String> {
     let raw = state
         .immutable_env
@@ -8073,12 +8085,12 @@ fn trusted_github_api_base(state: &JobExecutionState) -> Result<String> {
         .trim_end_matches('/');
     let url =
         url::Url::parse(raw).with_context(|| format!("invalid immutable GitHub API URL {raw}"))?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
+    if url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
+        || (url.scheme() != "https" && !trusted_base_url_allows_loopback(&url))
     {
         bail!("immutable GitHub API URL must be a credential-free HTTPS origin: {raw}");
     }
@@ -8088,8 +8100,33 @@ fn trusted_github_api_base(state: &JobExecutionState) -> Result<String> {
         .and_then(|server| url::Url::parse(server).ok())
         .and_then(|server| server.host_str().map(str::to_owned));
     let api_host = url.host_str().unwrap_or_default();
-    if api_host != "api.github.com" && server_host.as_deref() != Some(api_host) {
+    if !trusted_base_url_allows_loopback(&url)
+        && api_host != "api.github.com"
+        && server_host.as_deref() != Some(api_host)
+    {
         bail!("immutable GitHub API URL host is not bound to the GitHub server: {raw}");
+    }
+    Ok(raw.to_string())
+}
+
+fn trusted_github_server_base(state: &JobExecutionState) -> Result<String> {
+    let raw = state
+        .immutable_env
+        .get("GITHUB_SERVER_URL")
+        .map(String::as_str)
+        .unwrap_or("https://github.com")
+        .trim_end_matches('/');
+    let url = url::Url::parse(raw)
+        .with_context(|| format!("invalid immutable GitHub server URL {raw}"))?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || (url.path() != "/" && !trusted_base_url_allows_loopback(&url))
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || (url.scheme() != "https" && !trusted_base_url_allows_loopback(&url))
+    {
+        bail!("immutable GitHub server URL must be a credential-free HTTPS origin: {raw}");
     }
     Ok(raw.to_string())
 }
@@ -16698,7 +16735,7 @@ type=sha,format=long,prefix=,enable=true"
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let responses = [
-            r#"{"artifacts":[{"name":"github-pages","database_id":"42","size":123}]}"#,
+            r#"{"artifacts":[{"name":"github-pages","workflow_run_backend_id":"plan-1","workflow_job_run_backend_id":"job-1","database_id":"42","size":123,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}]}"#,
             r#"{"value":"oidc-token"}"#,
             r#"{"id":7,"status_url":"status/7","page_url":"https://initial.example/"}"#,
             r#"{"status":"queued"}"#,

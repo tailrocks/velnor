@@ -262,8 +262,7 @@ pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     match url.scheme() {
         "https" => Ok(url),
         "http"
-            if cfg!(feature = "test-support")
-                && url.host_str().is_some_and(is_loopback_host) =>
+            if cfg!(feature = "test-support") && url.host_str().is_some_and(is_loopback_host) =>
         {
             Ok(url)
         }
@@ -4909,7 +4908,10 @@ impl ResultsArtifactDescriptorWire {
         validate_results_artifact_name(&self.name)?;
         let database_id = self.database_id.parse("database_id")?;
         if database_id == 0 {
-            bail!("Results Service artifact '{}' has an invalid database_id", self.name);
+            bail!(
+                "Results Service artifact '{}' has an invalid database_id",
+                self.name
+            );
         }
         let size = self.size.parse("size")?;
         let digest = validate_sha256_digest(self.digest.as_str(), "artifact digest")?;
@@ -5084,10 +5086,7 @@ fn upload_artifact_with_zip_builder(
         .body(zip_file)
         .send()
         .map_err(|error| {
-            anyhow::anyhow!(
-                "send artifact blob PUT: {}",
-                redacted_reqwest_error(&error)
-            )
+            anyhow::anyhow!("send artifact blob PUT: {}", redacted_reqwest_error(&error))
         })?;
     let put_status = put_response.status().as_u16();
     if !(200..300).contains(&put_status) {
@@ -5170,9 +5169,7 @@ pub(crate) fn delete_finalized_artifact_blocking(
     }
     let response_id = response.artifact_id.parse("DeleteArtifact artifact_id")?;
     if response_id != artifact_id {
-        bail!(
-            "DeleteArtifact returned artifact_id {response_id}, expected {artifact_id}"
-        );
+        bail!("DeleteArtifact returned artifact_id {response_id}, expected {artifact_id}");
     }
     Ok(())
 }
@@ -6936,7 +6933,7 @@ mod tests {
                     let _ = stream.read(&mut request).unwrap();
                     let body = match index {
                         0 => serde_json::json!({
-                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "consumer"}]
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "consumer", "database_id": 1, "size": 4, "digest": format!("sha256:{}", sha2::Sha256::digest(b"x").iter().map(|b| format!("{b:02x}")).collect::<String>())}]
                         })
                         .to_string(),
                         1 => serde_json::json!({"signed_url": format!("{server_base}/signed.zip")}).to_string(),
@@ -6988,7 +6985,7 @@ mod tests {
                     0 => (
                         "application/json",
                         serde_json::to_vec(&serde_json::json!({
-                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job", "database_id": 1, "size": zip_bytes.len(), "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())}]
                         }))
                         .unwrap(),
                     ),
@@ -7040,7 +7037,7 @@ mod tests {
                     0 => (
                         "application/json",
                         serde_json::to_vec(&serde_json::json!({
-                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job"}]
+                            "artifacts": [{"name": "release", "workflow_run_backend_id": "plan", "workflow_job_run_backend_id": "job", "database_id": 1, "size": 18, "digest": format!("sha256:{}", sha2::Sha256::digest(b"truncated artifact").iter().map(|b| format!("{b:02x}")).collect::<String>())}]
                         }))
                         .unwrap(),
                         None,
@@ -7119,7 +7116,10 @@ mod tests {
                             "artifacts": [{
                                 "name": "release-linux",
                                 "workflow_run_backend_id": "plan",
-                                "workflow_job_run_backend_id": "producer"
+                                "workflow_job_run_backend_id": "consumer",
+                                "database_id": 11,
+                                "size": zip_bytes.len(),
+                                "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                             }]
                         }))
                         .unwrap(),
@@ -7213,12 +7213,18 @@ mod tests {
                                 {
                                     "name": "release-linux",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "producer"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": 21,
+                                    "size": zip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 },
                                 {
                                     "name": ".dockerbuild",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "image"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": 22,
+                                    "size": zip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 }
                             ]
                         }))
@@ -7302,12 +7308,18 @@ mod tests {
                                 {
                                     "name": "release-linux",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "producer"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": 21,
+                                    "size": zip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 },
                                 {
                                     "name": ".dockerbuild",
                                     "workflow_run_backend_id": "plan",
-                                    "workflow_job_run_backend_id": "image"
+                                    "workflow_job_run_backend_id": "consumer",
+                                    "database_id": 22,
+                                    "size": gzip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&gzip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 }
                             ]
                         }))
