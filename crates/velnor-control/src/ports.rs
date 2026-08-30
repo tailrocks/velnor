@@ -7,7 +7,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use velnor_model::{AnyResource, Event};
+use velnor_model::{AnyResource, Event, TelemetryCursor, TelemetryEnvelope};
 
 /// Safe failure returned by an application port.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +133,35 @@ pub struct LogItem {
     pub message: String,
 }
 
+/// Request for one bounded shared telemetry page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelemetryRequest {
+    /// Resume after this opaque cursor.
+    pub after: Option<TelemetryCursor>,
+    /// Maximum records returned.
+    pub limit: u32,
+}
+
+/// One telemetry envelope paired with its opaque page cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TelemetryItem {
+    /// Cursor position after this record.
+    pub cursor: TelemetryCursor,
+    /// Secret-safe performance observation.
+    pub envelope: TelemetryEnvelope,
+}
+
+/// One bounded telemetry page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TelemetryPage {
+    /// Records in emission order.
+    pub records: Vec<TelemetryItem>,
+    /// Cursor for the next page, when more records remain.
+    pub next_cursor: Option<TelemetryCursor>,
+    /// Oldest cursor when the requested cursor crossed a file generation.
+    pub dropped_before: Option<TelemetryCursor>,
+}
+
 /// Supported lifecycle mutation intents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationKind {
@@ -198,6 +227,12 @@ pub trait WatchPort: Send + Sync {
 pub trait LogPort: Send + Sync {
     /// Read one bounded segment or stream page.
     fn logs(&self, request: LogRequest) -> Result<Vec<LogItem>, PortError>;
+}
+
+/// Shared process telemetry observation port.
+pub trait TelemetryPort: Send + Sync {
+    /// Read one bounded page from the daemon-shared telemetry stream.
+    fn telemetry(&self, request: TelemetryRequest) -> Result<TelemetryPage, PortError>;
 }
 
 /// Explicit lifecycle/reconciliation mutation port.

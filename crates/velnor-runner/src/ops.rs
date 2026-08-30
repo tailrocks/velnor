@@ -9,6 +9,7 @@
 //! accepted; when it cannot, the caller fail-closes that job explicitly as
 //! infrastructure rejection instead of silently executing unrecorded work.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -22,7 +23,8 @@ use velnor_control::store::{
 use velnor_model::ExitClass;
 use velnor_model::{
     EventReason, JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, Slug,
-    Timestamp, TriggerEvent,
+    TelemetryEmission, TelemetryEnvelope, TelemetryEnvelopeInput, TelemetryEvent, TelemetryFields,
+    TelemetryLane, TelemetrySink, Timestamp, TriggerEvent,
 };
 
 /// Environment override for the operational database location; tests and
@@ -43,6 +45,7 @@ const PRUNE_LEASE_DURATION: Duration = Duration::from_secs(30 * 60);
 /// projections to reach the operational store.
 const MAX_RETAINED_MASK_COUNT: usize = 256;
 const MAX_RETAINED_MASK_BYTES: usize = 64 * 1024;
+const TELEMETRY_RING_CAPACITY: usize = 4096;
 
 static OPS: OnceLock<Arc<OpsSink>> = OnceLock::new();
 
@@ -283,6 +286,8 @@ pub struct OpsSink {
     prune_retry_delay_secs: AtomicU64,
     prune_in_flight: Arc<AtomicBool>,
     budget: RetentionBudget,
+    telemetry: TelemetrySink,
+    telemetry_logical: AtomicU64,
     #[cfg(test)]
     injected_write_failure: Mutex<Option<(ExitClass, &'static str)>>,
     #[cfg(test)]
@@ -303,6 +308,7 @@ impl OpsSink {
         instance_slug: String,
     ) -> Result<Self, velnor_control::store::StoreError> {
         let store = Store::open(&path)?;
+        let telemetry_path = velnor_control::telemetry::path_for_instance(&path, &instance_slug);
         Ok(Self {
             store,
             instance_slug,
@@ -318,6 +324,9 @@ impl OpsSink {
             prune_retry_delay_secs: AtomicU64::new(0),
             prune_in_flight: Arc::new(AtomicBool::new(false)),
             budget: RetentionBudget::default(),
+            telemetry: TelemetrySink::new(Some(&telemetry_path), TELEMETRY_RING_CAPACITY)
+                .expect("fixed telemetry sink configuration is valid"),
+            telemetry_logical: AtomicU64::new(1),
             #[cfg(test)]
             injected_write_failure: Mutex::new(None),
             #[cfg(test)]
@@ -414,7 +423,48 @@ impl OpsSink {
                 return self.required_failure("store.admission.persist", &error.to_string());
             }
         }
+        let _ = self.emit_telemetry_for_admission(
+            admission,
+            TelemetryEvent::RunAdmitted,
+            BTreeMap::new(),
+        );
         true
+    }
+
+    /// Emit one secret-safe lifecycle observation for an admitted job.
+    ///
+    /// Invalid observations are dropped after validation; telemetry never
+    /// changes the workflow outcome or the required admission write.
+    pub fn emit_telemetry_for_admission(
+        &self,
+        admission: &JobAdmission,
+        event: TelemetryEvent,
+        fields: BTreeMap<String, serde_json::Value>,
+    ) -> Option<TelemetryEmission> {
+        let run_id = admission
+            .run_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| admission.project(&admission.job_uid));
+        let repo = admission.project(&admission.repository_full_name);
+        let trust_domain = admission.project(admission.trust_scope.as_deref().unwrap_or("unknown"));
+        let input = TelemetryEnvelopeInput {
+            run_id: &run_id,
+            action_key_digest: None,
+            lane: TelemetryLane::Velnor,
+            repo: &repo,
+            trust_domain: &trust_domain,
+            event,
+            ts_logical: self.telemetry_logical.fetch_add(1, Ordering::Relaxed),
+            ts_wall: Timestamp::now(),
+            fields: match TelemetryFields::new(fields) {
+                Ok(fields) => fields,
+                Err(_) => return None,
+            },
+        };
+        match TelemetryEnvelope::new(input) {
+            Ok(envelope) => Some(self.telemetry.emit(envelope)),
+            Err(_) => None,
+        }
     }
 
     /// Release a durable claim after stale in-flight recovery completed the
@@ -1051,7 +1101,7 @@ mod tests {
 
     #[test]
     fn admission_persists_sanitized_row_and_acquired_transition() {
-        let (_dir, sink) = temp_sink("admission");
+        let (dir, sink) = temp_sink("admission");
         assert!(sink.record_admission(&admission(101, None)));
         let uid = admission(101, None).job_uid().unwrap();
         let stored = sink.store.fetch_summary("test-instance", 101, 1).unwrap();
@@ -1064,6 +1114,11 @@ mod tests {
         // sanitized projection.
         let summary = stored.unwrap();
         assert_eq!(summary.workflow(), "control-plane");
+        let telemetry_path = dir.join("state.test-instance.telemetry.jsonl");
+        let telemetry = std::fs::read_to_string(telemetry_path).expect("telemetry record");
+        let record: serde_json::Value = serde_json::from_str(telemetry.trim()).unwrap();
+        assert_eq!(record["event"], "run_admitted");
+        assert_eq!(record["run_id"], "101");
     }
 
     #[test]

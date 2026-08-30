@@ -18,6 +18,7 @@ pub mod ports;
 pub mod query;
 pub mod storage;
 pub mod store;
+pub mod telemetry;
 
 #[cfg(test)]
 mod tests {

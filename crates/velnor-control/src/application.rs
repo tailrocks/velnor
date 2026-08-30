@@ -13,6 +13,7 @@ use crate::{
     query::QueryService,
     storage::StorageService,
     store::{Store, StoreResult},
+    telemetry::{path_for_instance, TelemetryService},
 };
 
 /// All local application services owned by one daemon instance.
@@ -23,6 +24,7 @@ pub struct ApplicationServices {
     logs: Arc<LogService>,
     lifecycle: Arc<LifecycleService>,
     storage: Arc<StorageService>,
+    telemetry: Arc<TelemetryService>,
 }
 
 impl ApplicationServices {
@@ -43,6 +45,10 @@ impl ApplicationServices {
             )?),
             // Storage catalog durability belongs to Plan 075.
             storage: Arc::new(StorageService::new()),
+            telemetry: Arc::new(TelemetryService::new(path_for_instance(
+                store.path(),
+                &instance_slug,
+            ))),
         })
     }
 
@@ -55,6 +61,7 @@ impl ApplicationServices {
             logs: Arc::new(LogService::new()),
             lifecycle: Arc::new(LifecycleService::new()),
             storage: Arc::new(StorageService::new()),
+            telemetry: Arc::new(TelemetryService::empty()),
         }
     }
 
@@ -87,6 +94,12 @@ impl ApplicationServices {
     pub fn storage(&self) -> Arc<StorageService> {
         Arc::clone(&self.storage)
     }
+
+    /// Shared process telemetry reader.
+    #[must_use]
+    pub fn telemetry(&self) -> Arc<TelemetryService> {
+        Arc::clone(&self.telemetry)
+    }
 }
 
 #[cfg(test)]
@@ -94,7 +107,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::ports::{LogPort, QueryPort, WatchPort};
+    use crate::ports::{LogPort, QueryPort, TelemetryPort, WatchPort};
     use velnor_model::{
         AnyResource, Event, ResourceMeta, Source, StorageClass, StorageObject, Timestamp,
     };
@@ -147,6 +160,7 @@ mod tests {
         assert!(Arc::ptr_eq(&services.logs(), &services.logs()));
         assert!(Arc::ptr_eq(&services.lifecycle(), &services.lifecycle()));
         assert!(Arc::ptr_eq(&services.storage(), &services.storage()));
+        assert!(Arc::ptr_eq(&services.telemetry(), &services.telemetry()));
     }
 
     #[test]
@@ -154,9 +168,11 @@ mod tests {
         fn assert_query<T: QueryPort>() {}
         fn assert_watch<T: WatchPort>() {}
         fn assert_logs<T: LogPort>() {}
+        fn assert_telemetry<T: TelemetryPort>() {}
         assert_query::<QueryService>();
         assert_watch::<EventStream>();
         assert_logs::<LogService>();
+        assert_telemetry::<TelemetryService>();
     }
 
     #[test]
