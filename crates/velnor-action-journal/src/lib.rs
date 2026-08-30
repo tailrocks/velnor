@@ -130,13 +130,19 @@ impl ActionJournal {
         let state = state_name(record.state);
         let checksum = checksum_for(&key_digest, state, &record_json);
         let transaction = self.connection.transaction()?;
+        #[cfg(all(test, unix))]
+        crash_test_if_requested(0);
         transaction.execute(
             "INSERT INTO action_events(action_key_digest, state, record_json, checksum)
              VALUES (?1, ?2, ?3, ?4)",
             params![key_digest.to_string(), state, record_json, checksum],
         )?;
         let sequence = transaction.last_insert_rowid();
+        #[cfg(all(test, unix))]
+        crash_test_if_requested(1);
         transaction.commit()?;
+        #[cfg(all(test, unix))]
+        crash_test_if_requested(2);
         Ok(sequence)
     }
 
@@ -235,6 +241,27 @@ fn checksum_for_raw(key_digest: &str, state: &str, record_json: &str) -> String 
     Digest::from_bytes(&material).to_string()
 }
 
+#[cfg(all(test, unix))]
+fn crash_test_if_requested(stage: u16) {
+    if std::env::var("VELNOR_ACTION_JOURNAL_CRASH_CHILD")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+    let Some(configured) = std::env::var("VELNOR_ACTION_JOURNAL_CRASH_STAGE").ok() else {
+        return;
+    };
+    if configured.parse::<u16>().ok() == Some(stage) {
+        // SAFETY: the test child deliberately terminates itself to verify
+        // SQLite recovery at each public append boundary.
+        unsafe {
+            libc::raise(libc::SIGKILL);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +350,8 @@ mod tests {
                 .args(["--exact", "tests::crash_child", "--nocapture"])
                 .env("VELNOR_ACTION_JOURNAL_CRASH_PATH", &path)
                 .env("VELNOR_ACTION_JOURNAL_CRASH_INDEX", index.to_string())
+                .env("VELNOR_ACTION_JOURNAL_CRASH_CHILD", "1")
+                .env("VELNOR_ACTION_JOURNAL_CRASH_STAGE", (index % 3).to_string())
                 .status()
                 .unwrap();
             use std::os::unix::process::ExitStatusExt;
@@ -347,34 +376,7 @@ mod tests {
             .unwrap();
         let mut journal = ActionJournal::open(path).unwrap();
         let record = record((index % 200) as u8 + 10, ActionState::Running);
-        let key_digest = record.action_key_digest().unwrap();
-        let record_json = String::from_utf8(canonical_json_bytes(&record).unwrap()).unwrap();
-        let state = state_name(record.state);
-        let checksum = checksum_for(&key_digest, state, &record_json);
-        let transaction = journal.connection.transaction().unwrap();
-        if index % 3 == 0 {
-            unsafe {
-                libc::raise(libc::SIGKILL);
-            }
-        }
-        transaction
-            .execute(
-                "INSERT INTO action_events(action_key_digest, state, record_json, checksum)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![key_digest.to_string(), state, record_json, checksum],
-            )
-            .unwrap();
-        if index % 3 == 1 {
-            unsafe {
-                libc::raise(libc::SIGKILL);
-            }
-        }
-        transaction.commit().unwrap();
-        if index % 3 == 2 {
-            unsafe {
-                libc::raise(libc::SIGKILL);
-            }
-        }
+        journal.append(&record).unwrap();
     }
 
     #[test]
