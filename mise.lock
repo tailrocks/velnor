@@ -175,7 +175,7 @@ version = "3.7.0"
 backend = "cargo:cargo-deb"
 
 [[tools."cargo:cargo-zigbuild"]]
-version = "0.23.0"
+version = "0.23.3"
 backend = "cargo:cargo-zigbuild"
 
 [[tools.rust]]
