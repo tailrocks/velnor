@@ -4718,7 +4718,7 @@ async fn handle_job_request(
         bail!("{REASON}");
     };
 
-    apply_workflow_script_step_names(&mut job, &early_context).await;
+    apply_workflow_script_step_names(&mut job, &early_context, &broker_cancellation.stored).await;
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
             .filter(|repository| !repository.is_empty())
@@ -4867,22 +4867,23 @@ async fn handle_job_request(
                 .context("failed to clear acknowledged in-flight job")?;
             return Err(error);
         }
-        let admission_graph = match admit_job_closure(&job, &early_context) {
-            Ok(graph) => graph,
-            Err(error) => {
-                complete_acquired_job_failure(
-                    &run_service_job,
-                    &AcquiredJobIdentity::from_job(&job),
-                    Some(&job),
-                    Some("action_admission".to_string()),
-                    &format!("{error:#}"),
-                )
-                .await?;
-                clear_in_flight_job(config_dir)
-                    .context("failed to clear acknowledged in-flight job")?;
-                return Err(error);
-            }
-        };
+        let admission_graph =
+            match admit_job_closure(&job, &early_context, &broker_cancellation.stored) {
+                Ok(graph) => graph,
+                Err(error) => {
+                    complete_acquired_job_failure(
+                        &run_service_job,
+                        &AcquiredJobIdentity::from_job(&job),
+                        Some(&job),
+                        Some("action_admission".to_string()),
+                        &format!("{error:#}"),
+                    )
+                    .await?;
+                    clear_in_flight_job(config_dir)
+                        .context("failed to clear acknowledged in-flight job")?;
+                    return Err(error);
+                }
+            };
         // Lease publication mutates the runtime store, so it must follow all
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
@@ -8084,15 +8085,20 @@ fn expand_broker_context_value(value: Value) -> Value {
 async fn apply_workflow_script_step_names(
     job: &mut AgentJobRequestMessage,
     context_data: &[(String, Value)],
+    stored: &StoredRunnerConfig,
 ) {
     let Some(workflow) = workflow_source_context(context_data) else {
         return;
     };
-    let Some(token) = context_string(context_data, "github.token") else {
+    let Some(token) = job_repository_access_token(job) else {
         eprintln!("Skipping workflow script-step name lookup: missing GitHub token.");
         return;
     };
-    let Ok(contents) = fetch_workflow_file(&workflow, &token).await else {
+    let Ok(scope) = GitHubScope::parse(&stored.settings.github_url) else {
+        eprintln!("Skipping workflow script-step name lookup: invalid configured GitHub URL.");
+        return;
+    };
+    let Ok(contents) = fetch_workflow_file(&workflow, &token, &scope).await else {
         eprintln!(
             "Skipping workflow script-step name lookup: could not fetch {} at {}.",
             workflow.path, workflow.sha
@@ -8194,15 +8200,17 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 fn admit_job_closure(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
+    stored: &StoredRunnerConfig,
 ) -> Result<crate::admission::AdmissionGraph> {
     // The SystemVssConnection token authenticates Actions service endpoints and
-    // does not carry repository Contents API scope; use the same repository
-    // token preference as checkout.
+    // does not carry repository Contents API scope; use only the repository
+    // token and the runner-configured GitHub API scope.
     let token = job_repository_access_token(job)
         .context("action admission requires the job repository access token")?;
-    let api_url = context_string(context_data, "github.api_url")
-        .unwrap_or_else(|| "https://api.github.com".to_string());
-    let source = crate::admission::ContentsApiMetadataSource::new(token, api_url)
+    let scope = GitHubScope::parse(&stored.settings.github_url)
+        .context("parse configured GitHub scope for action admission")?;
+    validate_job_api_endpoint(context_data, &scope)?;
+    let source = crate::admission::ContentsApiMetadataSource::new(token, &scope)
         .context("build read-only action metadata source")?;
     let graph =
         crate::admission::admit_job(job, context_data, &source).map_err(anyhow::Error::new)?;
@@ -8244,10 +8252,20 @@ fn job_repository_access_token(job: &AgentJobRequestMessage) -> Option<String> {
         .get("system.github.token")
         .and_then(|variable| variable.value.clone())
         .filter(|value| !value.is_empty())
-        .or_else(|| {
-            job.system_connection()
-                .and_then(system_connection_access_token)
-        })
+}
+
+fn validate_job_api_endpoint(context_data: &[(String, Value)], scope: &GitHubScope) -> Result<()> {
+    let Some(advertised) = context_string(context_data, "github.api_url") else {
+        return Ok(());
+    };
+    let advertised = crate::protocol::validate_authenticated_url(&advertised)
+        .context("validate advertised GitHub API endpoint")?;
+    if advertised.as_str().trim_end_matches('/')
+        != scope.api_base_url.as_str().trim_end_matches('/')
+    {
+        bail!("job-advertised GitHub API endpoint differs from configured runner scope");
+    }
+    Ok(())
 }
 
 pub(crate) fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
@@ -8274,12 +8292,16 @@ struct GitHubContentsResponse {
     encoding: Option<String>,
 }
 
-async fn fetch_workflow_file(source: &WorkflowSourceContext, token: &str) -> Result<String> {
+async fn fetch_workflow_file(
+    source: &WorkflowSourceContext,
+    token: &str,
+    scope: &GitHubScope,
+) -> Result<String> {
     let (owner, repo) = source
         .repository
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid workflow repository '{}'", source.repository))?;
-    let mut url = url::Url::parse("https://api.github.com/")?;
+    let mut url = scope.api_base_url.clone();
     {
         let mut segments = url
             .path_segments_mut()
@@ -15185,7 +15207,8 @@ runs:
             "github".to_string(),
             serde_json::json!({ "repository": "acme/repo", "workflow_sha": "deadbeef" }),
         )];
-        let source = crate::admission::ContentsApiMetadataSource::new("token", api).unwrap();
+        let source =
+            crate::admission::ContentsApiMetadataSource::new_for_test("token", api).unwrap();
         let error = crate::admission::admit_job(&job, &context, &source).unwrap_err();
         server.join().unwrap();
         assert_eq!(source.reads(), 1, "only the local composite was fetched");
@@ -15195,6 +15218,19 @@ runs:
             .0
             .iter()
             .any(|hop| hop.contains("acme/unknown")));
+    }
+
+    #[test]
+    fn job_api_endpoint_cannot_override_configured_scope() {
+        let scope = GitHubScope::parse("https://github.com/acme/repo").unwrap();
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({ "api_url": "https://attacker.invalid/" }),
+        )];
+        let error = validate_job_api_endpoint(&context, &scope).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("differs from configured runner scope"));
     }
 
     #[test]
