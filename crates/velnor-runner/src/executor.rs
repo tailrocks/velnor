@@ -426,14 +426,14 @@ impl CommandRunner for ProcessCommandRunner {
         } else {
             None
         };
-        if let Some(claim) = rm_claim.as_ref() {
-            if claim.ids.is_empty() {
-                return Ok(CommandResult {
-                    code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
+        if let Some(claim) = rm_claim.as_ref()
+            && claim.ids.is_empty()
+        {
+            return Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
         }
         let claimed_args = rm_claim
             .as_ref()
@@ -1712,73 +1712,67 @@ where
                 timeout_minutes,
                 ..
             } = step
+                && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
+                && step_state.evaluate_post_condition(invocation.pre_condition.as_deref())
             {
-                if let Some(pre_container_path) = invocation.pre_container_path.as_deref() {
-                    if step_state.evaluate_post_condition(invocation.pre_condition.as_deref()) {
-                        if invocation.post_container_path.is_some() {
-                            post_actions.push(PostJavaScriptAction {
-                                step_id: step_id.clone(),
-                                display_name: display_name.clone(),
-                                invocation: invocation.clone(),
-                                condition: invocation.post_condition.clone(),
-                                continue_on_error: *continue_on_error,
-                                timeout_minutes: *timeout_minutes,
-                                umbrella_display: composite_frame
-                                    .as_ref()
-                                    .map(|frame| frame.display_name.clone()),
-                            });
-                            post_registered = true;
-                        }
-                        let pre_step_id = uuid::Uuid::new_v4().to_string();
-                        let pre_started_at = if composite_frame.is_none() {
-                            self.emit_step_started(
-                                pre_step_id.clone(),
-                                &display_name,
-                                &mut timeline_order,
-                            )
-                        } else {
-                            unix_now_rfc3339()
-                        };
-                        let mut result = self.execute_javascript_action_in_started_container(
-                            container,
-                            step_id,
-                            invocation,
-                            pre_container_path,
-                            &step_state.action_state_env(step_id),
-                            temp_host,
-                            &step_state,
-                            effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                        )?;
-                        let failed = result.exit_code != 0;
-                        if failed && *continue_on_error {
-                            result.failure_ignored = true;
-                        }
-                        if let Some(frame) = composite_frame.as_mut() {
-                            frame.append_inner(
-                                &display_name,
-                                &step_log_prelude(step, &step_state),
-                                &result,
-                            );
-                        } else {
-                            let log = step_log_with_name(
-                                &pre_step_id,
-                                &display_name,
-                                timeline_order,
-                                &pre_started_at,
-                                &unix_now_rfc3339(),
-                                &result,
-                                &step_log_prelude(step, &step_state),
-                            );
-                            self.emit_step_log(&log);
-                            step_logs.push(log);
-                        }
-                        state.apply(step_id, &result);
-                        executed_physical_actions += 1;
-                        results.push(result);
-                        if failed {
-                            continue;
-                        }
-                    }
+                if invocation.post_container_path.is_some() {
+                    post_actions.push(PostJavaScriptAction {
+                        step_id: step_id.clone(),
+                        display_name: display_name.clone(),
+                        invocation: invocation.clone(),
+                        condition: invocation.post_condition.clone(),
+                        continue_on_error: *continue_on_error,
+                        timeout_minutes: *timeout_minutes,
+                        umbrella_display: composite_frame
+                            .as_ref()
+                            .map(|frame| frame.display_name.clone()),
+                    });
+                    post_registered = true;
+                }
+                let pre_step_id = uuid::Uuid::new_v4().to_string();
+                let pre_started_at = if composite_frame.is_none() {
+                    self.emit_step_started(pre_step_id.clone(), &display_name, &mut timeline_order)
+                } else {
+                    unix_now_rfc3339()
+                };
+                let mut result = self.execute_javascript_action_in_started_container(
+                    container,
+                    step_id,
+                    invocation,
+                    pre_container_path,
+                    &step_state.action_state_env(step_id),
+                    temp_host,
+                    &step_state,
+                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
+                )?;
+                let failed = result.exit_code != 0;
+                if failed && *continue_on_error {
+                    result.failure_ignored = true;
+                }
+                if let Some(frame) = composite_frame.as_mut() {
+                    frame.append_inner(
+                        &display_name,
+                        &step_log_prelude(step, &step_state),
+                        &result,
+                    );
+                } else {
+                    let log = step_log_with_name(
+                        &pre_step_id,
+                        &display_name,
+                        timeline_order,
+                        &pre_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                        &step_log_prelude(step, &step_state),
+                    );
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                }
+                state.apply(step_id, &result);
+                executed_physical_actions += 1;
+                results.push(result);
+                if failed {
+                    continue;
                 }
             }
             let step_state = state.with_step_action(&step_context_id);
@@ -1971,20 +1965,20 @@ where
                         timeout_minutes,
                         ..
                     } = step
+                        && invocation.post_container_path.is_some()
+                        && !post_registered
                     {
-                        if invocation.post_container_path.is_some() && !post_registered {
-                            post_actions.push(PostJavaScriptAction {
-                                step_id: step_context_id.clone(),
-                                display_name: display_name.clone(),
-                                invocation: invocation.clone(),
-                                condition: invocation.post_condition.clone(),
-                                continue_on_error: *continue_on_error,
-                                timeout_minutes: *timeout_minutes,
-                                umbrella_display: composite_frame
-                                    .as_ref()
-                                    .map(|frame| frame.display_name.clone()),
-                            });
-                        }
+                        post_actions.push(PostJavaScriptAction {
+                            step_id: step_context_id.clone(),
+                            display_name: display_name.clone(),
+                            invocation: invocation.clone(),
+                            condition: invocation.post_condition.clone(),
+                            continue_on_error: *continue_on_error,
+                            timeout_minutes: *timeout_minutes,
+                            umbrella_display: composite_frame
+                                .as_ref()
+                                .map(|frame| frame.display_name.clone()),
+                        });
                     }
                     if let ExecutableStep::Native {
                         invocation,
@@ -1992,22 +1986,20 @@ where
                         timeout_minutes,
                         ..
                     } = step
-                    {
-                        if let Some(condition) =
+                        && let Some(condition) =
                             native_post_condition(invocation.adapter, invocation.cache_kind)
-                        {
-                            native_post_actions.push(PostNativeAction {
-                                step_id: step_context_id.clone(),
-                                display_name: display_name.clone(),
-                                invocation: invocation.clone(),
-                                condition: Some(condition.to_string()),
-                                continue_on_error: *continue_on_error,
-                                timeout_minutes: *timeout_minutes,
-                                umbrella_display: composite_frame
-                                    .as_ref()
-                                    .map(|frame| frame.display_name.clone()),
-                            });
-                        }
+                    {
+                        native_post_actions.push(PostNativeAction {
+                            step_id: step_context_id.clone(),
+                            display_name: display_name.clone(),
+                            invocation: invocation.clone(),
+                            condition: Some(condition.to_string()),
+                            continue_on_error: *continue_on_error,
+                            timeout_minutes: *timeout_minutes,
+                            umbrella_display: composite_frame
+                                .as_ref()
+                                .map(|frame| frame.display_name.clone()),
+                        });
                     }
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
@@ -2234,16 +2226,15 @@ where
         if target_materialized
             && step_error.is_none()
             && persistent_target_results_publishable(&results)
-        {
-            if let Err(error) = publish_persistent_target(
+            && let Err(error) = publish_persistent_target(
                 container,
                 state.env.get("GITHUB_SHA").map(String::as_str),
-            ) {
-                eprintln!(
-                    "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
-                    container.name
-                );
-            }
+            )
+        {
+            eprintln!(
+                "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
+                container.name
+            );
         }
         if let Some(error) = step_error {
             return Err(error);
@@ -4166,10 +4157,9 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
         if matches!(
             name.as_str(),
             "GITHUB_OUTPUT" | "GITHUB_ENV" | "GITHUB_PATH" | "GITHUB_STATE" | "GITHUB_STEP_SUMMARY"
-        ) {
-            if let Some(file_name) = value.strip_prefix("/__t/") {
-                *value = format!("/github/file_commands/{file_name}");
-            }
+        ) && let Some(file_name) = value.strip_prefix("/__t/")
+        {
+            *value = format!("/github/file_commands/{file_name}");
         }
     }
 }
@@ -4769,10 +4759,10 @@ fn native_cache_restore_main(
     let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
     let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version, &path)?;
-    if let Some(matched_key) = &matched_key {
-        if !lookup_only {
-            restore_cache_paths(&action_state, matched_key, &path, &version)?;
-        }
+    if let Some(matched_key) = &matched_key
+        && !lookup_only
+    {
+        restore_cache_paths(&action_state, matched_key, &path, &version)?;
     }
     let restore_ms = t0.elapsed().as_millis();
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
@@ -5399,17 +5389,16 @@ fn cache_glob_source_overlaps_persistent_exact(
         if has_glob_pattern(declared) || !velnor_persistent_cache_path(state, declared) {
             continue;
         }
-        if state.persistent_workspace_target {
-            if let Some(target_relative) = workspace_target_relative(declared) {
-                if relative == target_relative || relative.starts_with(&target_relative) {
-                    return true;
-                }
-            }
+        if state.persistent_workspace_target
+            && let Some(target_relative) = workspace_target_relative(declared)
+            && (relative == target_relative || relative.starts_with(&target_relative))
+        {
+            return true;
         }
-        if let Some(persistent_path) = resolve_cache_path(state, declared) {
-            if source == persistent_path || source.starts_with(&persistent_path) {
-                return true;
-            }
+        if let Some(persistent_path) = resolve_cache_path(state, declared)
+            && (source == persistent_path || source.starts_with(&persistent_path))
+        {
+            return true;
         }
     }
     false
@@ -6580,59 +6569,56 @@ fn native_upload_artifact(
     // jobs (like compare/aggregate jobs) can download the artifact via
     // `actions/download-artifact`. Without this, only same-host Velnor jobs can
     // access local artifacts.
-    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN") {
-        if let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token) {
-            // Pass artifact-store paths directly. The Results Service upload
-            // streams each source file and never materializes the artifact in RAM.
-            let zip_files = artifact_upload_sources(
-                &name,
-                &artifact_dir,
-                RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
-            )?
-            .into_iter()
-            .map(|source| crate::protocol::ArtifactUploadFile {
-                archive_path: source.file_name,
-                source: crate::protocol::ArtifactUploadSource::Relative {
-                    root: source.root,
-                    relative: source.relative,
-                },
-                source_path: source.path,
-            })
-            .collect::<Vec<_>>();
-            if !zip_files.is_empty() {
-                match crate::protocol::upload_artifact_files_blocking(
-                    &results_url,
-                    runtime_token,
-                    &plan_id,
-                    &job_id,
-                    &name,
-                    zip_files,
-                    crate::protocol::ArtifactUploadOptions {
-                        store_uncompressed,
-                        retention_days,
-                        overwrite,
+    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN")
+        && let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token)
+    {
+        // Pass artifact-store paths directly. The Results Service upload
+        // streams each source file and never materializes the artifact in RAM.
+        let zip_files =
+            artifact_upload_sources(&name, &artifact_dir, RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS)?
+                .into_iter()
+                .map(|source| crate::protocol::ArtifactUploadFile {
+                    archive_path: source.file_name,
+                    source: crate::protocol::ArtifactUploadSource::Relative {
+                        root: source.root,
+                        relative: source.relative,
                     },
-                ) {
-                    Ok(finalized) => {
-                        artifact_id = finalized.id;
-                        digest = finalized.digest;
-                    }
-                    Err(e) => {
-                        let message =
-                            format!("Results Service artifact upload failed for '{name}': {e:#}\n");
-                        eprintln!("{message}");
-                        return Ok(StepExecutionResult {
-                            exit_code: 1,
-                            state: StepCommandState::default(),
-                            skipped: false,
-                            failure_ignored: false,
-                            stdout: format!(
-                                "Saved local artifact '{name}' with {} path(s)\n",
-                                uploaded_count
-                            ),
-                            stderr: message,
-                        });
-                    }
+                    source_path: source.path,
+                })
+                .collect::<Vec<_>>();
+        if !zip_files.is_empty() {
+            match crate::protocol::upload_artifact_files_blocking(
+                &results_url,
+                runtime_token,
+                &plan_id,
+                &job_id,
+                &name,
+                zip_files,
+                crate::protocol::ArtifactUploadOptions {
+                    store_uncompressed,
+                    retention_days,
+                    overwrite,
+                },
+            ) {
+                Ok(finalized) => {
+                    artifact_id = finalized.id;
+                    digest = finalized.digest;
+                }
+                Err(e) => {
+                    let message =
+                        format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                    eprintln!("{message}");
+                    return Ok(StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: format!(
+                            "Saved local artifact '{name}' with {} path(s)\n",
+                            uploaded_count
+                        ),
+                        stderr: message,
+                    });
                 }
             }
         }
@@ -7267,13 +7253,13 @@ fn append_pages_archive_dir<W: Write>(
         };
         match opened {
             crate::fs_copy::NoFollowSource::Directory(directory) => {
-                if let Some(canonical) = &canonical {
-                    if !active_directories.insert(canonical.clone()) {
-                        bail!(
-                            "Pages artifact directory contains a symlink cycle at {}",
-                            child.display()
-                        );
-                    }
+                if let Some(canonical) = &canonical
+                    && !active_directories.insert(canonical.clone())
+                {
+                    bail!(
+                        "Pages artifact directory contains a symlink cycle at {}",
+                        child.display()
+                    );
                 }
                 record_pages_archive_entry(bounds, &child_relative, 0)?;
                 append_pages_directory_header(builder, &child_relative)?;
@@ -8566,13 +8552,12 @@ fn preflight_prepared_artifact_zip<R: Read + std::io::Seek>(
         for ancestor in ordered_entries[index].relative.ancestors().skip(1) {
             if let Ok(ancestor_index) =
                 ordered_entries.binary_search_by(|entry| entry.relative.as_path().cmp(ancestor))
+                && !ordered_entries[ancestor_index].is_directory
             {
-                if !ordered_entries[ancestor_index].is_directory {
-                    bail!(
-                        "prepared CI artifact archive has a file ancestor conflict at {}",
-                        ancestor.display()
-                    );
-                }
+                bail!(
+                    "prepared CI artifact archive has a file ancestor conflict at {}",
+                    ancestor.display()
+                );
             }
         }
     }
@@ -8712,14 +8697,13 @@ fn repository_artifact_matches_trusted_producer(
     if event.starts_with("pull_request") {
         return false;
     }
-    if let Some(branch) = current_ref.strip_prefix("refs/heads/") {
-        if workflow_run
+    if let Some(branch) = current_ref.strip_prefix("refs/heads/")
+        && workflow_run
             .get("head_branch")
             .and_then(serde_json::Value::as_str)
             != Some(branch)
-        {
-            return false;
-        }
+    {
+        return false;
     }
     true
 }
@@ -9304,10 +9288,10 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     if path.is_empty() || artifact_path_has_parent_component(path) {
         return None;
     }
-    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
-        if let Some(base) = &state.cargo_target_host {
-            return Some(base.clone());
-        }
+    if (path == "target" || path == "/__w/target" || path == "/github/workspace/target")
+        && let Some(base) = &state.cargo_target_host
+    {
+        return Some(base.clone());
     }
     for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
@@ -24398,10 +24382,10 @@ bitcoin-processor-app.push=true")
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key == name {
-                        if let Some(value) = value.as_str() {
-                            strings.push(value);
-                        }
+                    if key == name
+                        && let Some(value) = value.as_str()
+                    {
+                        strings.push(value);
                     }
                     collect_yaml_key_strings(value, name, strings);
                 }

@@ -663,14 +663,14 @@ pub(crate) fn validate_guest_plan(plan: &GuestJobPlan) -> Result<(), String> {
             "valid descriptor and matching environment",
         )
     })?;
-    if let Some(cache_digest) = plan.cache_digest.as_deref() {
-        if !cache_digest.is_empty() {
-            return Err(guest_capability_error(
-                "guest.cache_digest",
-                cache_digest,
-                "absent or empty",
-            ));
-        }
+    if let Some(cache_digest) = plan.cache_digest.as_deref()
+        && !cache_digest.is_empty()
+    {
+        return Err(guest_capability_error(
+            "guest.cache_digest",
+            cache_digest,
+            "absent or empty",
+        ));
     }
     // Command files are the result_bridge: guest writes GITHUB_* files and
     // the host collects their bytes over vsock. Non-empty is required.
@@ -816,10 +816,11 @@ fn collect_guest_command_files(
             continue;
         }
         let contents = cat_guest_file(job_name, path, runner, events, host_docker)?;
-        if path == "GITHUB_OUTPUT" && !contents.trim().is_empty() {
-            if let Ok(parsed) = parse_file_commands(&contents) {
-                live_outputs = parsed;
-            }
+        if path == "GITHUB_OUTPUT"
+            && !contents.trim().is_empty()
+            && let Ok(parsed) = parse_file_commands(&contents)
+        {
+            live_outputs = parsed;
         }
         events.push(ExecutionEvent::CommandFile {
             path: path.clone(),

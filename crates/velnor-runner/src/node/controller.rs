@@ -128,15 +128,15 @@ impl GithubPacing {
             self.hold_rest_until(now, reset_epoch);
             return;
         }
-        if let (Some(remaining), Some(reset_epoch)) = (remaining, reset_epoch) {
-            if remaining < RATE_LIMIT_HEADROOM_REMAINING {
-                // Nearly exhausted: keep the remaining budget for
-                // DELETE traffic until the window resets. Do not spend it
-                // on new JIT registrations.
-                if until_epoch_with_jitter(reset_epoch, salt).is_some() {
-                    self.hold_rest_until(now, Some(reset_epoch));
-                    return;
-                }
+        if let (Some(remaining), Some(reset_epoch)) = (remaining, reset_epoch)
+            && remaining < RATE_LIMIT_HEADROOM_REMAINING
+        {
+            // Nearly exhausted: keep the remaining budget for
+            // DELETE traffic until the window resets. Do not spend it
+            // on new JIT registrations.
+            if until_epoch_with_jitter(reset_epoch, salt).is_some() {
+                self.hold_rest_until(now, Some(reset_epoch));
+                return;
             }
         }
         self.probe_failures = 0;
@@ -727,18 +727,19 @@ async fn reconcile_once(
             );
         }
         let state = journal.materialized_state()?;
-        if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) {
-            if slot.ready_proof().is_ok() && !slot.registered && pacing.registration_due(&id.0, now)
-            {
-                proof_effects.extend(
-                    journal
-                        .apply(Event::RegistrationIntended {
-                            slot_id: id,
-                            generation,
-                        })?
-                        .commands,
-                );
-            }
+        if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id)
+            && slot.ready_proof().is_ok()
+            && !slot.registered
+            && pacing.registration_due(&id.0, now)
+        {
+            proof_effects.extend(
+                journal
+                    .apply(Event::RegistrationIntended {
+                        slot_id: id,
+                        generation,
+                    })?
+                    .commands,
+            );
         }
     }
     let mut registrations = Vec::new();
@@ -1707,14 +1708,13 @@ fn maybe_spawn_slot(
     if children.contains_key(&slot_id.0) {
         return Ok(());
     }
-    if let Ok(state) = journal.materialized_state() {
-        if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == *slot_id) {
-            if slot.pid.is_some_and(|pid| {
-                prove::slot_process_is_alive(pid, &args.state_dir, slot_id, generation)
-            }) {
-                return Ok(());
-            }
-        }
+    if let Ok(state) = journal.materialized_state()
+        && let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == *slot_id)
+        && slot.pid.is_some_and(|pid| {
+            prove::slot_process_is_alive(pid, &args.state_dir, slot_id, generation)
+        })
+    {
+        return Ok(());
     }
     let exe = std::env::current_exe()?;
     let index = slot_index_from_id(slot_id);
@@ -2345,7 +2345,8 @@ mod tests {
             },
         )
         .unwrap();
-        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghs_test") };
 
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         for event in [
@@ -2433,7 +2434,8 @@ mod tests {
         let state = journal.load_state().unwrap();
         assert_eq!(state.jobs.len(), 1);
         assert_eq!(state.jobs[0].job_id, JobId("job-1".to_owned()));
-        std::env::remove_var("GITHUB_TOKEN");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2465,7 +2467,8 @@ mod tests {
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
         prepare_runner_config(&dir);
-        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghs_test") };
 
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         for event in [
@@ -2525,7 +2528,8 @@ mod tests {
             .into_iter()
             .find(|slot| slot.slot_id == SlotId("velnor-1".to_owned()))
             .unwrap();
-        std::env::remove_var("GITHUB_TOKEN");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
         std::fs::remove_dir_all(dir).ok();
         reconciliation.map(|()| slot)
     }
@@ -2665,7 +2669,8 @@ mod tests {
             },
         )
         .unwrap();
-        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghs_test") };
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         for event in [
             Event::ControlLive,
@@ -2700,7 +2705,8 @@ mod tests {
         reconcile_remote_registrations(&args, &mut journal, &mut HashMap::new(), &mut pacing)
             .await
             .unwrap();
-        std::env::remove_var("GITHUB_TOKEN");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
         std::fs::remove_dir_all(dir).ok();
         pacing
     }
@@ -2796,7 +2802,8 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        std::env::set_var("VELNOR_FLEET_POLICY_DIR", policy_dir.as_os_str());
+        // SAFETY: the test holds the process-wide environment lock.
+        unsafe { std::env::set_var("VELNOR_FLEET_POLICY_DIR", policy_dir.as_os_str()) };
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
         // Stale live-membership snapshot must not win over generated JSON.
@@ -2811,7 +2818,8 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghs_test") };
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         journal.apply(Event::ControlLive).unwrap();
         journal.apply(Event::JournalWritable).unwrap();
@@ -2855,8 +2863,11 @@ mod tests {
             !state.routing_valid,
             "drift against generated allowlist must fail closed: {state:?}"
         );
-        std::env::remove_var("GITHUB_TOKEN");
-        std::env::remove_var("VELNOR_FLEET_POLICY_DIR");
+        // SAFETY: the test holds the process-wide environment lock.
+        unsafe {
+            std::env::remove_var("GITHUB_TOKEN");
+            std::env::remove_var("VELNOR_FLEET_POLICY_DIR");
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -3082,7 +3093,8 @@ mod tests {
             trust_scope: "trusted".into(),
         };
         prove::write_routing_document(&dir, fields.clone(), fields).unwrap();
-        std::env::set_var("GITHUB_TOKEN", "ghs_test");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghs_test") };
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         journal.apply(Event::ControlLive).unwrap();
         journal.apply(Event::JournalWritable).unwrap();
@@ -3138,7 +3150,8 @@ mod tests {
         }
         server.verify().await;
 
-        std::env::remove_var("GITHUB_TOKEN");
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
         std::fs::remove_dir_all(dir).ok();
     }
 }

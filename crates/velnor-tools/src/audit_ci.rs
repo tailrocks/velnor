@@ -1578,19 +1578,19 @@ fn audit_generated_caller(
                 "owner callable class must be exactly code, tap, apt, or fixture",
             ));
         }
-        if let (Some(observed), Some(expected)) = (parsed_class, expected_class) {
-            if observed != expected {
-                findings.push(Finding::error(
-                    "generated-caller",
-                    file,
-                    format!("$.jobs.{owner}.uses"),
-                    format!(
-                        "canonical fleet map requires class {}, observed {}",
-                        expected.as_str(),
-                        observed.as_str()
-                    ),
-                ));
-            }
+        if let (Some(observed), Some(expected)) = (parsed_class, expected_class)
+            && observed != expected
+        {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.uses"),
+                format!(
+                    "canonical fleet map requires class {}, observed {}",
+                    expected.as_str(),
+                    observed.as_str()
+                ),
+            ));
         }
         if sha.len() != SHA_LEN || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             findings.push(Finding::error(
@@ -1890,15 +1890,15 @@ fn audit_steps(
                 "remove hardcoded runner identity from workload scripts",
             ));
         }
-        if let Some(condition) = object_get(step, "if").and_then(Value::as_str) {
-            if condition.contains("matrix.config.lane") {
-                findings.push(Finding::error(
-                    "lane-conditional",
-                    file,
-                    format!("{path}.if"),
-                    "step lane branching is forbidden; only matrix.config.writer is sanctioned",
-                ));
-            }
+        if let Some(condition) = object_get(step, "if").and_then(Value::as_str)
+            && condition.contains("matrix.config.lane")
+        {
+            findings.push(Finding::error(
+                "lane-conditional",
+                file,
+                format!("{path}.if"),
+                "step lane branching is forbidden; only matrix.config.writer is sanctioned",
+            ));
         }
         let Some(uses) = object_get(step, "uses").and_then(Value::as_str) else {
             continue;
@@ -1925,34 +1925,32 @@ fn audit_steps(
         }
         sccache |= family == "mozilla-actions/sccache-action";
         swatinem |= family == "Swatinem/rust-cache";
-        if family == "actions/cache" {
-            if let Some(with) = object_get(step, "with") {
-                let caches_target = object_get(with, "path").is_some_and(|value| {
-                    compact(value).lines().any(|line| line.contains("target"))
-                });
-                fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
-                    compact(value).lines().any(|line| {
-                        let path = line.trim();
-                        path == "fuzz/target" || path.ends_with("/fuzz/target")
-                    })
-                });
-                target_cache |= caches_target;
-                if caches_target {
-                    first_target_cache_step.get_or_insert(index);
-                }
-                literal_target_cache |= object_get(with, "path").is_some_and(|value| {
-                    compact(value).lines().any(|line| line.trim() == "target")
-                });
-                if caches_target {
-                    let key = object_get(with, "key").map(compact).unwrap_or_default();
-                    let restore = object_get(with, "restore-keys")
-                        .map(compact)
-                        .unwrap_or_default();
-                    target_cache_generation |= key.contains("github.sha")
-                        && !key.contains("github.ref")
-                        && !restore.contains("github.sha")
-                        && !restore.contains("github.ref");
-                }
+        if family == "actions/cache"
+            && let Some(with) = object_get(step, "with")
+        {
+            let caches_target = object_get(with, "path")
+                .is_some_and(|value| compact(value).lines().any(|line| line.contains("target")));
+            fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
+                compact(value).lines().any(|line| {
+                    let path = line.trim();
+                    path == "fuzz/target" || path.ends_with("/fuzz/target")
+                })
+            });
+            target_cache |= caches_target;
+            if caches_target {
+                first_target_cache_step.get_or_insert(index);
+            }
+            literal_target_cache |= object_get(with, "path")
+                .is_some_and(|value| compact(value).lines().any(|line| line.trim() == "target"));
+            if caches_target {
+                let key = object_get(with, "key").map(compact).unwrap_or_default();
+                let restore = object_get(with, "restore-keys")
+                    .map(compact)
+                    .unwrap_or_default();
+                target_cache_generation |= key.contains("github.sha")
+                    && !key.contains("github.ref")
+                    && !restore.contains("github.sha")
+                    && !restore.contains("github.ref");
             }
         }
         audit_ref(file, &path, uses, raw, offline, latest, findings);

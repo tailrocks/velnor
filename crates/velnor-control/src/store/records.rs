@@ -1341,10 +1341,10 @@ pub(crate) fn validate_event_contract(
             return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
         }
     }
-    if let Some(value) = correlation_id {
-        if Slug::validate("correlation_id", value).is_err() {
-            return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
-        }
+    if let Some(value) = correlation_id
+        && Slug::validate("correlation_id", value).is_err()
+    {
+        return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
     }
     if required
         .iter()
@@ -1462,12 +1462,12 @@ fn decode_escaped_text_once(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            if let Some((decoded, consumed)) = decode_escape(bytes, index) {
-                normalized.push(decoded);
-                index += consumed;
-                continue;
-            }
+        if bytes[index] == b'\\'
+            && let Some((decoded, consumed)) = decode_escape(bytes, index)
+        {
+            normalized.push(decoded);
+            index += consumed;
+            continue;
         }
         if let Some(character) = value[index..].chars().next() {
             normalized.push(character);

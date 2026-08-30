@@ -469,31 +469,31 @@ impl NoFollowDestinationDir {
             };
             match result {
                 Ok(()) => {
-                    if destination_exists {
-                        if let Err(cleanup_error) =
+                    if destination_exists
+                        && let Err(cleanup_error) =
                             remove_tree_at(&staging_parent.file, staging_name)
-                        {
-                            let rollback = rustix::fs::renameat_with(
-                                &staging_parent.file,
-                                staging_name,
-                                &self.file,
-                                destination_name,
-                                rustix::fs::RenameFlags::EXCHANGE,
-                            );
-                            match rollback {
-                                Ok(()) => {
-                                    if let Err(quarantine_error) =
-                                        remove_tree_at(&staging_parent.file, staging_name)
-                                    {
-                                        bail!(
+                    {
+                        let rollback = rustix::fs::renameat_with(
+                            &staging_parent.file,
+                            staging_name,
+                            &self.file,
+                            destination_name,
+                            rustix::fs::RenameFlags::EXCHANGE,
+                        );
+                        match rollback {
+                            Ok(()) => {
+                                if let Err(quarantine_error) =
+                                    remove_tree_at(&staging_parent.file, staging_name)
+                                {
+                                    bail!(
                                             "artifact directory publication rolled back after replaced-tree cleanup failed ({cleanup_error}); new tree remains quarantined at {} because cleanup also failed ({quarantine_error})",
                                             staging_parent
                                                 .display_path
                                                 .join(staging_name)
                                                 .display()
                                         );
-                                    }
-                                    return Err(cleanup_error).with_context(|| {
+                                }
+                                return Err(cleanup_error).with_context(|| {
                                         format!(
                                             "artifact directory publication rolled back after replaced-tree cleanup failed at {}",
                                             staging_parent
@@ -502,9 +502,9 @@ impl NoFollowDestinationDir {
                                                 .display()
                                         )
                                     });
-                                }
-                                Err(rollback_error) => {
-                                    bail!(
+                            }
+                            Err(rollback_error) => {
+                                bail!(
                                         "artifact directory publication committed-partial: new tree is published at {}; previous tree remains quarantined at {}; cleanup failed ({cleanup_error}) and rollback failed ({})",
                                         self.display_path.join(destination_name).display(),
                                         staging_parent
@@ -513,7 +513,6 @@ impl NoFollowDestinationDir {
                                             .display(),
                                         std::io::Error::from(rollback_error)
                                     );
-                                }
                             }
                         }
                     }

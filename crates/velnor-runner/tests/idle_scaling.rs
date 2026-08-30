@@ -144,10 +144,10 @@ impl Controller {
             ),
         };
 
-        if let Err(error) = self.child.kill() {
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                errors.push(format!("kill controller: {error}"));
-            }
+        if let Err(error) = self.child.kill()
+            && error.raw_os_error() != Some(libc::ESRCH)
+        {
+            errors.push(format!("kill controller: {error}"));
         }
 
         if group_owned {
@@ -409,10 +409,10 @@ fn wait_for_metrics(
     while Instant::now() < deadline {
         fail_if_controller_exited(controller, state_dir);
         controller.pump_output();
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Ok(value) = serde_json::from_slice(&bytes) {
-                return value;
-            }
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(value) = serde_json::from_slice(&bytes)
+        {
+            return value;
         }
         sleep_until(deadline);
     }
@@ -431,24 +431,24 @@ fn wait_for_steady_cycles(
     while Instant::now() < deadline {
         fail_if_controller_exited(controller, state_dir);
         controller.pump_output();
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                let populated = number(&value, &["slot_processes"]) == u64::from(slots);
-                let previous_sequence = number(&previous, &["sequence"]);
-                let consecutive = previous_sequence
-                    .checked_add(1)
-                    .is_some_and(|expected| number(&value, &["sequence"]) == expected);
-                if consecutive {
-                    if populated {
-                        steady_cycles += 1;
-                    } else {
-                        steady_cycles = 0;
-                    }
-                    if steady_cycles >= 4 {
-                        return (previous, value);
-                    }
-                    previous = value;
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        {
+            let populated = number(&value, &["slot_processes"]) == u64::from(slots);
+            let previous_sequence = number(&previous, &["sequence"]);
+            let consecutive = previous_sequence
+                .checked_add(1)
+                .is_some_and(|expected| number(&value, &["sequence"]) == expected);
+            if consecutive {
+                if populated {
+                    steady_cycles += 1;
+                } else {
+                    steady_cycles = 0;
                 }
+                if steady_cycles >= 4 {
+                    return (previous, value);
+                }
+                previous = value;
             }
         }
         sleep_until(deadline);

@@ -250,19 +250,19 @@ impl<'a> RetentionLeaseGuard<'a> {
 
 impl Drop for RetentionLeaseGuard<'_> {
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            if self.store.release_retention_lease_final(&lease).is_err() {
-                if let Some(sink) = self.telemetry {
-                    sink.report_lease_finalization_failure();
-                } else {
-                    eprintln!(
-                        "{}",
-                        forensic_failure_line(
-                            "store.prune-lease-release",
-                            "bounded finalization attempt failed",
-                        )
-                    );
-                }
+        if let Some(lease) = self.lease.take()
+            && self.store.release_retention_lease_final(&lease).is_err()
+        {
+            if let Some(sink) = self.telemetry {
+                sink.report_lease_finalization_failure();
+            } else {
+                eprintln!(
+                    "{}",
+                    forensic_failure_line(
+                        "store.prune-lease-release",
+                        "bounded finalization attempt failed",
+                    )
+                );
             }
         }
     }
@@ -900,12 +900,12 @@ impl OpsSink {
 
     fn before_store_write(&self) -> Result<(), StoreError> {
         #[cfg(test)]
-        if let Ok(mut injected) = self.injected_write_failure.lock() {
-            if let Some((class, reason)) = injected.take() {
-                return Err(
-                    StoreError::new(class, reason).with_remediation("test-injected write failure")
-                );
-            }
+        if let Ok(mut injected) = self.injected_write_failure.lock()
+            && let Some((class, reason)) = injected.take()
+        {
+            return Err(
+                StoreError::new(class, reason).with_remediation("test-injected write failure")
+            );
         }
         Ok(())
     }

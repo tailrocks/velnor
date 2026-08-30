@@ -101,10 +101,10 @@ pub fn observe_executor(state_dir: &Path, backend: ExecutionBackendKind) -> bool
 /// [`observe_slot_session`], which requires fresh generation-bound evidence.
 #[must_use]
 pub fn observe_session(child: Option<&mut Child>, pid: Option<u32>) -> bool {
-    if let Some(child) = child {
-        if child.try_wait().ok().flatten().is_none() {
-            return true;
-        }
+    if let Some(child) = child
+        && child.try_wait().ok().flatten().is_none()
+    {
+        return true;
     }
     pid.is_some_and(pid_is_alive)
 }

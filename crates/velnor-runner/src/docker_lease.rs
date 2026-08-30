@@ -232,10 +232,10 @@ pub fn force_remove_containers_serially(
 ) -> Result<()> {
     let mut first_error = None;
     for id in ids {
-        if let Err(error) = docker(&force_remove_one_container_args(id)) {
-            if first_error.is_none() {
-                first_error = Some(error.context(format!("remove BuildKit container {id}")));
-            }
+        if let Err(error) = docker(&force_remove_one_container_args(id))
+            && first_error.is_none()
+        {
+            first_error = Some(error.context(format!("remove BuildKit container {id}")));
         }
     }
     match first_error {
@@ -254,10 +254,10 @@ pub fn remove_containers_serially(
 ) -> Result<()> {
     let mut first_error = None;
     for id in ids {
-        if let Err(error) = docker(&remove_one_container_args(id)) {
-            if first_error.is_none() {
-                first_error = Some(error.context(format!("remove stale container {id}")));
-            }
+        if let Err(error) = docker(&remove_one_container_args(id))
+            && first_error.is_none()
+        {
+            first_error = Some(error.context(format!("remove stale container {id}")));
         }
     }
     match first_error {
@@ -648,10 +648,11 @@ pub fn orphan_job_buildkit_ids(
         {
             continue;
         }
-        if let Some(daemon_id) = daemon_id {
-            if !owner.is_empty() && !daemon_owns_label(owner, daemon_id) {
-                continue;
-            }
+        if let Some(daemon_id) = daemon_id
+            && !owner.is_empty()
+            && !daemon_owns_label(owner, daemon_id)
+        {
+            continue;
         }
         let job_live = if job_id.is_empty() {
             live_jobs
@@ -1051,10 +1052,10 @@ pub fn run_host_docker(args: &[String]) -> Result<String> {
 
 fn run_host_docker_bounded(args: &[String], timeout: std::time::Duration) -> Result<String> {
     let rm_claim = claim_docker_container_rm(args);
-    if let Some(claim) = rm_claim.as_ref() {
-        if claim.ids.is_empty() {
-            return Ok(String::new());
-        }
+    if let Some(claim) = rm_claim.as_ref()
+        && claim.ids.is_empty()
+    {
+        return Ok(String::new());
     }
     let claimed_args = rm_claim
         .as_ref()

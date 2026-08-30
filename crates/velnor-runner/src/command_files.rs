@@ -30,16 +30,16 @@ pub fn parse_command_file_contents(contents: &str) -> Result<Vec<FileCommand>> {
         let equals_index = line.find('=');
         let heredoc_index = line.find("<<");
 
-        if let (Some(equals_index), Some(heredoc_index)) = (equals_index, heredoc_index) {
-            if equals_index < heredoc_index {
-                let (name, value) = line.split_once('=').expect("line contains equals");
-                validate_name(name)?;
-                commands.push(FileCommand {
-                    name: name.to_string(),
-                    value: value.to_string(),
-                });
-                continue;
-            }
+        if let (Some(equals_index), Some(heredoc_index)) = (equals_index, heredoc_index)
+            && equals_index < heredoc_index
+        {
+            let (name, value) = line.split_once('=').expect("line contains equals");
+            validate_name(name)?;
+            commands.push(FileCommand {
+                name: name.to_string(),
+                value: value.to_string(),
+            });
+            continue;
         }
 
         if let Some((name, delimiter)) = line.split_once("<<") {
