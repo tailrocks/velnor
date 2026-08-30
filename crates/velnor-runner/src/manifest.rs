@@ -8,14 +8,18 @@ use crate::action::{
     string_inputs, unsupported_action_error, NativeActionAdapter, NATIVE_ACTION_REF,
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
-use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
+use velnor_cache_service::{
+    resolve_backend, CacheAdmissionError, CompilerCacheBackend, CompilerCachePolicy,
+    WrapperDeclaration,
+};
 
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
-// Approved composites introduced v8; the native GitHub App token adapter is v9.
-pub const MANIFEST_VERSION: u32 = 9;
+// Approved composites introduced v8; the native GitHub App token adapter is v9;
+// Kache v0.14.2 admission is v10.
+pub const MANIFEST_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -270,7 +274,7 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Forbidden("token"),
 ];
 const KACHE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["v0.10.0"]),
+    InputRule::Literal("version", &["v0.14.2"]),
     InputRule::Literal("github-cache", &["false"]),
     InputRule::Literal("cache-executables", &["false"]),
     InputRule::Literal("pr-comment", &["false"]),
@@ -1316,24 +1320,28 @@ fn validate_attestation_permissions(
     }
 }
 
-pub fn compiler_cache_backend(job: &AgentJobRequestMessage) -> CompilerCacheBackend {
-    let mut sccache = false;
-    let mut kache = false;
+pub fn compiler_cache_declaration(job: &AgentJobRequestMessage) -> WrapperDeclaration {
+    let mut declaration = WrapperDeclaration::default();
     for step in job.steps.iter().filter(|step| step.enabled) {
         let repository = step
             .reference
             .as_ref()
             .and_then(|reference| reference.name.as_deref());
-        sccache |= repository
+        declaration.sccache |= repository
             .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"));
-        kache |=
+        declaration.kache |=
             repository.is_some_and(|name| name.eq_ignore_ascii_case("kunobi-ninja/kache-action"));
     }
-    match (sccache, kache) {
-        (true, false) => CompilerCacheBackend::Sccache,
-        (false, true) => CompilerCacheBackend::Kache,
-        _ => CompilerCacheBackend::Off,
-    }
+    declaration
+}
+
+/// Resolve the daemon-owned compiler-cache policy for the production runner.
+/// Auto is intentionally passed to the service resolver: no wrapper declaration
+/// selects Kache, while an explicit sccache declaration remains supported.
+pub fn compiler_cache_backend(
+    job: &AgentJobRequestMessage,
+) -> Result<CompilerCacheBackend, CacheAdmissionError> {
+    resolve_backend(CompilerCachePolicy::Auto, &compiler_cache_declaration(job))
 }
 
 fn validate_compiler_cache_topology(
@@ -1367,7 +1375,7 @@ fn validate_compiler_cache_topology(
             "mixed",
             "compiler-cache.backend",
             "sccache+kache",
-            vec!["off".into(), "sccache".into(), "kache".into()],
+            vec!["sccache".into(), "kache".into()],
         ));
     }
 
@@ -1757,11 +1765,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_nine_and_structurally_immutable() {
-        // Unified-CI composite admission changes the accepted capability surface,
-        // and the approved GitHub App token adapter advances it from v8 to v9.
-        assert_eq!(MANIFEST_VERSION, 9);
-        assert_eq!(MANIFEST.version, 9);
+    fn compiled_manifest_is_version_ten_and_structurally_immutable() {
+        // Kache v0.14.2 changes the accepted capability surface and requires a
+        // new manifest version so stale workflow inputs fail closed.
+        assert_eq!(MANIFEST_VERSION, 10);
+        assert_eq!(MANIFEST.version, 10);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
@@ -2710,7 +2718,7 @@ mod tests {
             "kunobi-ninja/kache-action",
             Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
             serde_json::json!({
-                "version": "v0.10.0",
+                "version": "v0.14.2",
                 "github-cache": "false",
                 "cache-executables": "false",
                 "pr-comment": "false",
@@ -2724,7 +2732,10 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.field == "compiler-cache.backend"));
-        assert_eq!(compiler_cache_backend(&target), CompilerCacheBackend::Off);
+        assert_eq!(
+            compiler_cache_backend(&target),
+            Err(CacheAdmissionError::ConflictingWrappers)
+        );
     }
 
     #[test]
@@ -2748,7 +2759,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_selection_matches_single_wrapper_or_off() {
+    fn backend_selection_matches_single_wrapper_or_default_kache() {
         let sccache = job(
             "mozilla-actions/sccache-action",
             Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
@@ -2759,13 +2770,19 @@ mod tests {
             Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
             serde_json::json!({}),
         );
-        let mut off = sccache.clone();
-        off.steps.clear();
+        let mut default_job = sccache.clone();
+        default_job.steps.clear();
         assert_eq!(
             compiler_cache_backend(&sccache),
-            CompilerCacheBackend::Sccache
+            Ok(CompilerCacheBackend::Sccache)
         );
-        assert_eq!(compiler_cache_backend(&kache), CompilerCacheBackend::Kache);
-        assert_eq!(compiler_cache_backend(&off), CompilerCacheBackend::Off);
+        assert_eq!(
+            compiler_cache_backend(&kache),
+            Ok(CompilerCacheBackend::Kache)
+        );
+        assert_eq!(
+            compiler_cache_backend(&default_job),
+            Ok(CompilerCacheBackend::Kache)
+        );
     }
 }

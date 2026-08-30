@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use velnor_action_model::{
@@ -454,6 +454,86 @@ impl<C: Clock> LeaseManager<C> {
     /// Append an action lifecycle record through the manager-owned journal.
     pub fn append_action(&mut self, record: &ActionRecord) -> Result<i64, JournalError> {
         self.journal.append(record)
+    }
+
+    /// Append a terminal action record and release its producer lease in one
+    /// SQLite transaction. Keeping the event and fencing transition atomic
+    /// prevents a stale producer from publishing a completion after a new
+    /// generation has taken over the same action.
+    pub fn append_action_and_release(
+        &mut self,
+        lease: &ProducerLease,
+        record: &ActionRecord,
+    ) -> Result<i64, JournalError> {
+        if record.action_key != lease.action {
+            return Err(JournalError::InvalidState(
+                "terminal action record does not match producer lease".into(),
+            ));
+        }
+        if record.state != ActionState::Complete {
+            return Err(JournalError::InvalidState(
+                "terminal lease publication requires a complete action record".into(),
+            ));
+        }
+        validate_record(record)?;
+        let now = self.clock.now();
+        self.expire_due_at(now)?;
+        let digest = lease.action.digest()?;
+        let record_json = String::from_utf8(canonical_json_bytes(record).expect("JSON is UTF-8"))
+            .expect("serde_json emits UTF-8");
+        let state = state_name(record.state);
+        let checksum = checksum_for(&digest, state, &record_json);
+        let now_ms = sqlite_integer(now.as_millis())?;
+        let transaction = self
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = transaction
+            .query_row(
+                "SELECT generation, owner, expires_at_ms, heartbeat_every_ms,
+                        lease_duration_ms, state, action_key_json
+                 FROM producer_leases WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                lease_row_from_query,
+            )
+            .optional()?
+            .ok_or(JournalError::LeaseNotFound {
+                action_key_digest: digest.clone(),
+            })?;
+        verify_stored_action_key(&row.action_key_json, &digest)?;
+        if row.state != LeaseState::Active
+            || row.generation != lease.generation
+            || row.owner != lease.owner
+        {
+            return Err(JournalError::LeaseFenced);
+        }
+        if row.expires_at_ms <= now_ms {
+            return Err(JournalError::LeaseExpired);
+        }
+        let sequence = insert_action_record(&transaction, &digest, state, &record_json, &checksum)?;
+        let changed = transaction.execute(
+            "UPDATE producer_leases SET state = 'released'
+             WHERE action_key_digest = ?1 AND generation = ?2 AND owner = ?3
+               AND state = 'active' AND expires_at_ms > ?4",
+            params![
+                digest.to_string(),
+                sqlite_integer(lease.generation)?,
+                lease.owner,
+                now_ms,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::LeaseFenced);
+        }
+        transaction.commit()?;
+        self.clock.wake_expiry();
+        self.emit_telemetry(LeaseTelemetryEvent {
+            action_key_digest: digest,
+            generation: lease.generation,
+            at: now,
+            kind: LeaseTransitionKind::Released,
+        });
+        Ok(sequence)
     }
 
     /// Read the latest lifecycle record for one action key.
@@ -1050,6 +1130,21 @@ fn state_name(state: ActionState) -> &'static str {
     }
 }
 
+fn insert_action_record(
+    transaction: &Transaction<'_>,
+    key_digest: &Digest,
+    state: &str,
+    record_json: &str,
+    checksum: &str,
+) -> Result<i64, JournalError> {
+    transaction.execute(
+        "INSERT INTO action_events(action_key_digest, state, record_json, checksum)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![key_digest.to_string(), state, record_json, checksum],
+    )?;
+    Ok(transaction.last_insert_rowid())
+}
+
 fn validate_record(record: &ActionRecord) -> Result<(), JournalError> {
     if record.trust_class != record.action_key.execution_policy.trust_class {
         return Err(JournalError::TrustClassMismatch);
@@ -1214,6 +1309,31 @@ mod tests {
                 .filter(|result| matches!(result, Err(JournalError::LeaseBusy { .. })))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn terminal_record_and_release_share_one_fencing_transaction() {
+        let clock = TestClock::default();
+        let action = action(42);
+        let mut manager = LeaseManager::open(":memory:", clock).unwrap();
+        let lease = manager.acquire(&action, "worker-a", 100, 25).unwrap();
+        let mut terminal = record(42, ActionState::Complete);
+        terminal.action_key = action.clone();
+        terminal.producer_lease_ref = Some(format!("compiler-cache/{}", lease.generation));
+
+        let sequence = manager
+            .append_action_and_release(&lease, &terminal)
+            .unwrap();
+
+        assert_eq!(sequence, 1);
+        assert_eq!(
+            manager.lease_status(&action).unwrap(),
+            Some(LeaseStatus::Released)
+        );
+        assert_eq!(
+            manager.latest_action(&action).unwrap().unwrap().state,
+            ActionState::Complete
         );
     }
 

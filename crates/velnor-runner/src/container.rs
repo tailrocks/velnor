@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::compiler_cache::CompilerCacheBackend;
+use velnor_cache_service::{CompilerCacheBackend, CompilerCacheRuntime};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -52,23 +52,30 @@ pub struct JobContainerSpec {
 }
 
 impl JobContainerSpec {
-    fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
-        let (host, container, env) = match self.compiler_cache_backend {
-            CompilerCacheBackend::Sccache => (
+    pub(crate) fn compiler_cache_runtime(&self) -> CompilerCacheRuntime {
+        match self.compiler_cache_backend {
+            CompilerCacheBackend::Sccache => CompilerCacheRuntime::new(
+                CompilerCacheBackend::Sccache,
                 sccache_host(&self.temp_host),
-                "/var/cache/sccache",
-                vec!["SCCACHE_DIR=/var/cache/sccache"],
             ),
-            CompilerCacheBackend::Kache => (
-                kache_host(&self.temp_host),
-                "/var/cache/kache",
-                vec!["KACHE_CACHE_DIR=/var/cache/kache", "KACHE_MAX_SIZE=20GiB"],
-            ),
-            CompilerCacheBackend::Off => return,
+            CompilerCacheBackend::Kache => {
+                CompilerCacheRuntime::new(CompilerCacheBackend::Kache, kache_host(&self.temp_host))
+            }
+            CompilerCacheBackend::Off => CompilerCacheRuntime::off(),
+        }
+    }
+
+    fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
+        let runtime = self.compiler_cache_runtime();
+        let (Some(host), Some(container)) = (runtime.host_path(), runtime.container_path()) else {
+            return;
         };
-        args.extend(["-v".into(), self.mount_arg(&host, container)]);
-        for value in env {
-            args.extend(["-e".into(), value.into()]);
+        args.extend(["-v".into(), self.mount_arg(host, container)]);
+    }
+
+    fn append_compiler_cache_environment(&self, args: &mut Vec<String>) {
+        for (name, value) in &self.compiler_cache_runtime().environment().variables {
+            args.extend(["-e".into(), format!("{name}={value}")]);
         }
     }
 
@@ -207,6 +214,9 @@ impl JobContainerSpec {
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
+        // Daemon-owned compiler-cache variables are appended after workflow
+        // variables so a job cannot replace the selected wrapper or store.
+        self.append_compiler_cache_environment(&mut args);
         self.append_ownership_labels(&mut args);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
@@ -475,6 +485,7 @@ impl JobContainerSpec {
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
+        self.append_compiler_cache_environment(&mut args);
         if !path_prepend.is_empty() {
             let path = path_prepend
                 .iter()
@@ -579,6 +590,7 @@ impl JobContainerSpec {
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
+        self.append_compiler_cache_environment(&mut args);
         if let Some(entrypoint) = entrypoint {
             args.extend(["--entrypoint".into(), entrypoint.into()]);
         }
@@ -1329,6 +1341,7 @@ mod tests {
         let kache = job.start_args().join(" ");
         assert!(kache.contains("/var/cache/kache"));
         assert!(!kache.contains("/var/cache/sccache"));
+        assert!(kache.contains("RUSTC_WRAPPER=kache"));
 
         job.compiler_cache_backend = CompilerCacheBackend::Off;
         let off = job.start_args().join(" ");

@@ -4,6 +4,7 @@ members = [
   "crates/velnor-action-model",
   "crates/velnor-cas",
   "crates/velnor-action-journal",
+  "crates/velnor-cache-service",
   "crates/velnor-control",
   "crates/velnor-client",
   "crates/velnor-render",
