@@ -77,9 +77,9 @@ pub use source::Source;
 pub use storage::{GcCandidate, GcPlan, StorageClass, StorageObject, StorageSnapshot};
 pub use telemetry::{
     InvalidTelemetry, InvalidTelemetrySink, TelemetryCursor, TelemetryEmission, TelemetryEnvelope,
-    TelemetryEnvelopeInput, TelemetryEvent, TelemetryFields, TelemetryLane, TelemetryPage,
-    TelemetryRecord, TelemetrySink, TelemetrySinkStats, DEFAULT_TELEMETRY_FILE_BYTES,
-    TELEMETRY_SCHEMA,
+    TelemetryEnvelopeInput, TelemetryEvent, TelemetryFields, TelemetryFileError,
+    TelemetryFileReader, TelemetryLane, TelemetryPage, TelemetryRecord, TelemetrySink,
+    TelemetrySinkStats, DEFAULT_TELEMETRY_FILE_BYTES, TELEMETRY_SCHEMA,
 };
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};
 pub use vsock_protocol::{

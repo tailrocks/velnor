@@ -101,6 +101,17 @@ pub struct LogsArgs {
     pub tail: Option<u32>,
 }
 
+/// Read the daemon-shared performance telemetry stream.
+#[derive(Debug, Args)]
+pub struct TelemetryArgs {
+    /// Resume after an opaque telemetry cursor.
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Maximum records returned.
+    #[arg(long)]
+    pub limit: Option<u32>,
+}
+
 /// Query ordered events.
 #[derive(Debug, Args)]
 pub struct EventsArgs {

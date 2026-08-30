@@ -22,11 +22,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
-use velnor_model::{ExitClass, MachineErrorEnvelope, SCHEMA_VERSION};
+use velnor_model::{
+    ExitClass, MachineErrorEnvelope, TelemetryCursor, TelemetryEnvelope, SCHEMA_VERSION,
+};
 
 use velnor_control::ports::{
-    LogPort, LogRequest, MutationKind, MutationPort, QueryPage, QueryPort, QueryRequest, WatchPort,
-    WatchRequest,
+    LogPort, LogRequest, MutationKind, MutationPort, QueryPage, QueryPort, QueryRequest,
+    TelemetryPort, TelemetryRequest, WatchPort, WatchRequest,
 };
 
 /// Shared application ports held by HTTP handlers.
@@ -40,6 +42,8 @@ pub struct ApiState {
     pub watch: Arc<dyn WatchPort>,
     /// Sanitized log access implementation.
     pub logs: Arc<dyn LogPort>,
+    /// Shared process telemetry implementation.
+    pub telemetry: Arc<dyn TelemetryPort>,
     /// Lifecycle/reconciliation mutation implementation.
     pub mutation: Arc<dyn MutationPort>,
     /// Shared admission bound for synchronous application-port work.
@@ -66,6 +70,7 @@ impl ApiState {
             query: services.query(),
             watch: services.events(),
             logs: services.logs(),
+            telemetry: services.telemetry(),
             mutation: services.lifecycle(),
             blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
         }
@@ -98,6 +103,7 @@ pub fn control_router(state: ApiState) -> Router {
         .route("/v1/{resource_kind}", get(query_resource))
         .route("/v1/watch", get(watch))
         .route("/v1/logs/{subject}", get(logs))
+        .route("/v1/telemetry", get(telemetry))
         .layer(middleware::from_fn(require_peer))
         .layer(Extension(PeerPolicy::for_group(CONTROL_GROUP)))
         .with_state(state)
@@ -716,6 +722,28 @@ struct LogParams {
     limit: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelemetryParams {
+    after: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TelemetryResponse {
+    records: Vec<TelemetryResponseRecord>,
+    next_cursor: Option<String>,
+    dropped_before: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TelemetryResponseRecord {
+    cursor: String,
+    envelope: TelemetryEnvelope,
+}
+
 async fn logs(
     State(state): State<ApiState>,
     AxumPath(subject): AxumPath<String>,
@@ -754,6 +782,77 @@ async fn watch(
     })
     .await?;
     Ok(Json(events))
+}
+
+async fn telemetry(
+    State(state): State<ApiState>,
+    query: Result<Query<TelemetryParams>, QueryRejection>,
+) -> Result<Json<TelemetryResponse>, ApiError> {
+    let Query(params) = query.map_err(|_| {
+        ApiError::bad_request("query", "query parameters are malformed or unsupported")
+    })?;
+    let after = params
+        .after
+        .as_deref()
+        .map(parse_telemetry_cursor)
+        .transpose()?;
+    let telemetry = Arc::clone(&state.telemetry);
+    let page = run_application_call(state.blocking.clone(), move || {
+        telemetry.telemetry(TelemetryRequest {
+            after,
+            limit: params.limit.unwrap_or(100),
+        })
+    })
+    .await?;
+    let next_cursor = page.next_cursor.map(format_telemetry_cursor);
+    let dropped_before = page.dropped_before.map(format_telemetry_cursor);
+    Ok(Json(TelemetryResponse {
+        records: page
+            .records
+            .into_iter()
+            .map(|record| TelemetryResponseRecord {
+                cursor: format_telemetry_cursor(record.cursor),
+                envelope: record.envelope,
+            })
+            .collect(),
+        next_cursor,
+        dropped_before,
+    }))
+}
+
+fn format_telemetry_cursor(cursor: TelemetryCursor) -> String {
+    format!("v1.{}.{}", cursor.epoch(), cursor.value())
+}
+
+fn parse_telemetry_cursor(raw: &str) -> Result<TelemetryCursor, ApiError> {
+    if raw.len() > 128 || raw.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "after",
+            "telemetry cursor is malformed",
+        ));
+    }
+    let mut parts = raw.split('.');
+    let (Some(version), Some(epoch), Some(sequence), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(ApiError::bad_request(
+            "after",
+            "telemetry cursor is malformed",
+        ));
+    };
+    if version != "v1" || epoch.is_empty() || sequence.is_empty() {
+        return Err(ApiError::bad_request(
+            "after",
+            "telemetry cursor is malformed",
+        ));
+    }
+    let epoch = epoch
+        .parse::<u64>()
+        .map_err(|_| ApiError::bad_request("after", "telemetry cursor is malformed"))?;
+    let sequence = sequence
+        .parse::<u64>()
+        .map_err(|_| ApiError::bad_request("after", "telemetry cursor is malformed"))?;
+    Ok(TelemetryCursor::from_parts(epoch, sequence))
 }
 
 #[derive(Debug, Deserialize)]
@@ -847,6 +946,7 @@ fn parse_mutation(raw: &str) -> Result<MutationKind, ApiError> {
 }
 
 /// Safe transport error mapping for all handler/extractor failures.
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     envelope: MachineErrorEnvelope,
@@ -947,12 +1047,16 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use velnor_control::ports::{MutationRequest, MutationResult, PortError};
-    use velnor_model::{AnyResource, Event, ResourceMeta, Source, Timestamp};
+    use velnor_model::{
+        AnyResource, Event, ResourceMeta, Source, TelemetryEnvelope, TelemetryEnvelopeInput,
+        TelemetryEvent, TelemetryFields, TelemetryLane, TelemetrySink, Timestamp,
+    };
 
     #[derive(Default)]
     struct RecordingMutation {
@@ -1059,6 +1163,7 @@ mod tests {
             query: services.query(),
             watch: services.events(),
             logs: services.logs(),
+            telemetry: services.telemetry(),
             mutation: Arc::clone(&mutation) as Arc<dyn MutationPort>,
             blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
         };
@@ -1090,6 +1195,52 @@ mod tests {
         let error = result.expect_err("a full application bound must shed work");
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.envelope.reason, "control.overloaded");
+    }
+
+    #[tokio::test]
+    async fn telemetry_handler_reads_the_process_shared_file() {
+        let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
+        let path = test_socket_path("telemetry-file").with_extension("jsonl");
+        let _ = std::fs::remove_file(&path);
+        let sink = TelemetrySink::new(Some(&path), 4).expect("telemetry sink");
+        let envelope = TelemetryEnvelope::new(TelemetryEnvelopeInput {
+            run_id: "run-1",
+            action_key_digest: None,
+            lane: TelemetryLane::Velnor,
+            repo: "tailrocks/velnor",
+            trust_domain: "trusted",
+            event: TelemetryEvent::RunAdmitted,
+            ts_logical: 1,
+            ts_wall: Timestamp::UNIX_EPOCH,
+            fields: TelemetryFields::new(BTreeMap::new()).expect("empty fields"),
+        })
+        .expect("valid envelope");
+        let _ = sink.emit(envelope);
+        let telemetry_service = Arc::new(velnor_control::telemetry::TelemetryService::new(&path));
+        let state = ApiState {
+            instance: Arc::from("default"),
+            query: services.query(),
+            watch: services.events(),
+            logs: services.logs(),
+            telemetry: telemetry_service,
+            mutation: services.lifecycle(),
+            blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
+        };
+
+        let Json(page) = telemetry(
+            State(state),
+            Ok(Query(TelemetryParams {
+                after: None,
+                limit: Some(10),
+            })),
+        )
+        .await
+        .expect("telemetry page");
+
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].cursor.split('.').next(), Some("v1"));
+        assert_eq!(page.records[0].envelope.run_id(), "run-1");
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -1185,6 +1336,7 @@ mod tests {
             query: services.query(),
             watch: services.events(),
             logs: services.logs(),
+            telemetry: services.telemetry(),
             mutation: Arc::clone(&mutation) as Arc<dyn MutationPort>,
             blocking: Arc::new(Semaphore::new(APPLICATION_BLOCKING_CONCURRENCY)),
         };
