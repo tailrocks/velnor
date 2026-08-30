@@ -11,7 +11,9 @@ use std::time::Duration;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use velnor_model::{AnyResource, Event, ExitClass, MachineErrorEnvelope, SCHEMA_VERSION};
+use velnor_model::{
+    AnyResource, Event, ExitClass, MachineErrorEnvelope, TelemetryEnvelope, SCHEMA_VERSION,
+};
 
 use crate::unix::{EndpointError, SocketKind, UnixEndpoint, API_VERSION};
 
@@ -69,6 +71,28 @@ pub struct LogItem {
     pub sequence: u64,
     /// Redacted message.
     pub message: String,
+}
+
+/// One decoded shared telemetry record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryItem {
+    /// Opaque cursor returned by the daemon.
+    pub cursor: String,
+    /// Secret-safe performance observation.
+    pub envelope: TelemetryEnvelope,
+}
+
+/// One decoded shared telemetry page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryPage {
+    /// Records in emission order.
+    pub records: Vec<TelemetryItem>,
+    /// Cursor for the next page, when more records remain.
+    pub next_cursor: Option<String>,
+    /// Oldest cursor when the requested cursor crossed a generation.
+    pub dropped_before: Option<String>,
 }
 
 /// Server API identity returned by `/v1/info`.
@@ -193,6 +217,26 @@ impl UnixControlClient {
             query.push(("limit", limit.to_string()));
         }
         let path = format!("/v1/logs/{subject}{}", encoded_query(&query));
+        self.request_json(SocketKind::Control, "GET", &path, None)
+            .await
+    }
+
+    /// Read one bounded shared telemetry page through the read socket.
+    pub async fn telemetry(
+        &self,
+        after: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<TelemetryPage, ClientError> {
+        self.info().await?;
+        let mut query = Vec::new();
+        if let Some(after) = after {
+            validate_cursor(after)?;
+            query.push(("after", after.to_owned()));
+        }
+        if let Some(limit) = limit {
+            query.push(("limit", limit.to_string()));
+        }
+        let path = format!("/v1/telemetry{}", encoded_query(&query));
         self.request_json(SocketKind::Control, "GET", &path, None)
             .await
     }
@@ -538,6 +582,16 @@ fn validate_segment(value: &str, field: &str) -> Result<(), ClientError> {
         return Err(ClientError::Invalid {
             field: field.to_owned(),
             message: "value contains an unsupported path character".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cursor(value: &str) -> Result<(), ClientError> {
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err(ClientError::Invalid {
+            field: "after".to_owned(),
+            message: "telemetry cursor is malformed".to_owned(),
         });
     }
     Ok(())

@@ -8,18 +8,19 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::time::Timestamp;
 
@@ -449,6 +450,204 @@ pub struct TelemetrySink {
     state: Arc<Mutex<TelemetrySinkState>>,
 }
 
+/// Read a bounded NDJSON sink shared by multiple Velnor processes.
+///
+/// Writers keep their own in-memory rings, but this reader reconstructs the
+/// retained file window on every call. A file rewrite or rotation advances
+/// the reader epoch, so an older opaque cursor cannot hide new records.
+#[derive(Clone, Debug)]
+pub struct TelemetryFileReader {
+    path: PathBuf,
+    max_file_bytes: u64,
+    state: Arc<Mutex<TelemetryFileReaderState>>,
+}
+
+#[derive(Debug)]
+struct TelemetryFileReaderState {
+    epoch: u64,
+    fingerprint: Option<TelemetryFileFingerprint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TelemetryFileFingerprint {
+    len: u64,
+    modified_ns: u64,
+    first_line_hash: u64,
+    generation: Option<u64>,
+}
+
+/// Failure while reading a shared telemetry file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryFileError {
+    /// The file could not be read.
+    Io,
+    /// The file exceeded its configured byte bound.
+    TooLarge,
+    /// A complete line was not valid UTF-8.
+    InvalidUtf8,
+    /// A complete line was not a valid secret-safe telemetry envelope.
+    InvalidRecord,
+    /// The cursor is ahead of the current file window.
+    CursorAhead,
+}
+
+impl fmt::Display for TelemetryFileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Io => "telemetry file unavailable",
+            Self::TooLarge => "telemetry file exceeds its configured bound",
+            Self::InvalidUtf8 => "telemetry file contains invalid text",
+            Self::InvalidRecord => "telemetry file contains an invalid record",
+            Self::CursorAhead => "telemetry cursor is ahead of the retained file window",
+        })
+    }
+}
+
+impl std::error::Error for TelemetryFileError {}
+
+impl TelemetryFileReader {
+    /// Create a reader for one bounded NDJSON path.
+    pub fn new(
+        path: impl Into<PathBuf>,
+        max_file_bytes: u64,
+    ) -> Result<Self, InvalidTelemetrySink> {
+        if max_file_bytes == 0 {
+            return Err(InvalidTelemetrySink);
+        }
+        Ok(Self {
+            path: path.into(),
+            max_file_bytes,
+            state: Arc::new(Mutex::new(TelemetryFileReaderState {
+                epoch: next_epoch(),
+                fingerprint: None,
+            })),
+        })
+    }
+
+    /// Read at most `limit` valid records after an optional cursor.
+    pub fn read(
+        &self,
+        after: Option<TelemetryCursor>,
+        limit: usize,
+    ) -> Result<TelemetryPage, TelemetryFileError> {
+        let _lock = match fs::metadata(&self.path) {
+            Ok(_) => {
+                Some(lock_telemetry_file(&self.path, false).map_err(|_| TelemetryFileError::Io)?)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => return Err(TelemetryFileError::Io),
+        };
+        let modified_ns = fs::metadata(&self.path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos() as u64);
+        let generation =
+            read_telemetry_generation(&self.path).map_err(|_| TelemetryFileError::Io)?;
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(TelemetryFileError::Io),
+        };
+        if bytes.len() as u64 > self.max_file_bytes {
+            return Err(TelemetryFileError::TooLarge);
+        }
+
+        let complete_bytes = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |position| position.saturating_add(1));
+        let complete = &bytes[..complete_bytes];
+        let text = std::str::from_utf8(complete).map_err(|_| TelemetryFileError::InvalidUtf8)?;
+        let mut envelopes = Vec::new();
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            envelopes.push(
+                serde_json::from_str::<TelemetryEnvelope>(line)
+                    .map_err(|_| TelemetryFileError::InvalidRecord)?,
+            );
+        }
+
+        let fingerprint = telemetry_file_fingerprint(&bytes, modified_ns, generation);
+        let mut state = lock_file_reader_state(&self.state);
+        let first_read = state.fingerprint.is_none();
+        let rotated = state.fingerprint.is_some_and(|previous| {
+            fingerprint.len < previous.len
+                || fingerprint.first_line_hash != previous.first_line_hash
+                || (fingerprint.len == previous.len
+                    && fingerprint.modified_ns != previous.modified_ns)
+                || fingerprint.generation != previous.generation
+        });
+        state.fingerprint = Some(fingerprint);
+        if first_read || rotated {
+            state.epoch = telemetry_epoch(fingerprint);
+        }
+        let epoch = state.epoch;
+        drop(state);
+
+        let cursor_is_stale = after.is_some_and(|cursor| cursor.epoch() != epoch);
+        if !cursor_is_stale && after.is_some_and(|cursor| cursor.value() > envelopes.len() as u64) {
+            return Err(TelemetryFileError::CursorAhead);
+        }
+        let oldest = (!envelopes.is_empty()).then_some(TelemetryCursor::from_parts(epoch, 1));
+        let records = envelopes
+            .into_iter()
+            .enumerate()
+            .map(|(index, envelope)| TelemetryRecord {
+                cursor: TelemetryCursor::from_parts(epoch, index as u64 + 1),
+                envelope,
+            })
+            .filter(|record| {
+                after.is_none_or(|cursor| {
+                    cursor.epoch() != epoch || record.cursor.value() > cursor.value()
+                })
+            })
+            .take(limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let mut records = records;
+        let next_cursor = (records.len() > limit).then(|| {
+            records.pop();
+            records.last().map(|record| record.cursor)
+        });
+        Ok(TelemetryPage {
+            records,
+            next_cursor: next_cursor.flatten(),
+            dropped_before: cursor_is_stale.then_some(oldest).flatten(),
+        })
+    }
+}
+
+fn lock_file_reader_state(
+    state: &Mutex<TelemetryFileReaderState>,
+) -> MutexGuard<'_, TelemetryFileReaderState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn telemetry_file_fingerprint(
+    bytes: &[u8],
+    modified_ns: u64,
+    generation: Option<u64>,
+) -> TelemetryFileFingerprint {
+    let first_line_end = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(bytes.len());
+    let first_line = &bytes[..first_line_end];
+    let digest = Sha256::digest(first_line);
+    let mut hash_bytes = [0_u8; 8];
+    hash_bytes.copy_from_slice(&digest[..8]);
+    TelemetryFileFingerprint {
+        len: bytes.len() as u64,
+        modified_ns,
+        first_line_hash: u64::from_be_bytes(hash_bytes),
+        generation,
+    }
+}
+
 impl TelemetrySink {
     /// Open an append-only NDJSON sink and allocate a bounded ring.
     ///
@@ -594,6 +793,7 @@ fn next_epoch() -> u64 {
 }
 
 fn open_bounded_file(path: &Path, max_file_bytes: u64) -> io::Result<(BufWriter<File>, u64)> {
+    let _lock = lock_telemetry_file(path, true)?;
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     let file_bytes = file.metadata()?.len();
     if file_bytes > max_file_bytes {
@@ -603,8 +803,10 @@ fn open_bounded_file(path: &Path, max_file_bytes: u64) -> io::Result<(BufWriter<
             .write(true)
             .truncate(true)
             .open(path)?;
+        advance_telemetry_generation(path)?;
         return Ok((BufWriter::new(file), 0));
     }
+    ensure_telemetry_generation(path)?;
     Ok((BufWriter::new(file), file_bytes))
 }
 
@@ -620,10 +822,51 @@ fn rotate_file(state: &mut TelemetrySinkState) -> io::Result<()> {
         .write(true)
         .truncate(true)
         .open(path)?;
+    advance_telemetry_generation(path)?;
     state.writer = Some(BufWriter::new(file));
     state.file_bytes = 0;
     state.file_rotations = state.file_rotations.saturating_add(1);
     Ok(())
+}
+
+fn telemetry_generation_path(path: &Path) -> PathBuf {
+    path.with_extension("generation")
+}
+
+fn read_telemetry_generation(path: &Path) -> io::Result<Option<u64>> {
+    match fs::read_to_string(telemetry_generation_path(path)) {
+        Ok(value) => value.trim().parse::<u64>().map(Some).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid telemetry generation")
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_telemetry_generation(path: &Path, generation: u64) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(telemetry_generation_path(path))?;
+    file.write_all(generation.to_string().as_bytes())?;
+    file.write_all(b"\n")?;
+    file.flush()
+}
+
+fn ensure_telemetry_generation(path: &Path) -> io::Result<u64> {
+    if let Some(generation) = read_telemetry_generation(path)? {
+        return Ok(generation);
+    }
+    let generation = next_epoch();
+    write_telemetry_generation(path, generation)?;
+    Ok(generation)
+}
+
+fn advance_telemetry_generation(path: &Path) -> io::Result<u64> {
+    let generation = next_epoch();
+    write_telemetry_generation(path, generation)?;
+    Ok(generation)
 }
 
 fn write_ndjson(state: &mut TelemetrySinkState, envelope: &TelemetryEnvelope) -> bool {
@@ -646,6 +889,24 @@ fn write_ndjson(state: &mut TelemetrySinkState, envelope: &TelemetryEnvelope) ->
         return false;
     }
 
+    let Some(path) = state.file_path.clone() else {
+        return false;
+    };
+    let Ok(_lock) = lock_telemetry_file(&path, true) else {
+        state.file_failures = state.file_failures.saturating_add(1);
+        return false;
+    };
+    // Sibling processes have independent sink state. Refresh the physical
+    // size while holding the shared lock before deciding whether to rotate.
+    state.file_bytes = match fs::metadata(&path) {
+        Ok(metadata) => metadata.len(),
+        Err(_) => {
+            state.file_failures = state.file_failures.saturating_add(1);
+            state.writer = None;
+            return false;
+        }
+    };
+
     if state.file_bytes.saturating_add(line_bytes) > state.max_file_bytes
         && rotate_file(state).is_err()
     {
@@ -667,6 +928,51 @@ fn write_ndjson(state: &mut TelemetrySinkState, envelope: &TelemetryEnvelope) ->
         state.writer = None;
         false
     }
+}
+
+fn telemetry_epoch(fingerprint: TelemetryFileFingerprint) -> u64 {
+    if let Some(generation) = fingerprint.generation {
+        generation.max(1)
+    } else if fingerprint.first_line_hash == 0 {
+        1
+    } else {
+        fingerprint.first_line_hash
+    }
+}
+
+fn lock_telemetry_file(path: &Path, exclusive: bool) -> io::Result<File> {
+    let lock_path = path.with_extension("lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    let operation = if exclusive {
+        rustix::fs::FlockOperation::NonBlockingLockExclusive
+    } else {
+        rustix::fs::FlockOperation::NonBlockingLockShared
+    };
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        match rustix::fs::flock(&lock, operation) {
+            Ok(()) => break,
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK && Instant::now() < deadline => {
+                std::thread::yield_now();
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    if error == rustix::io::Errno::WOULDBLOCK {
+                        io::ErrorKind::WouldBlock
+                    } else {
+                        io::ErrorKind::Other
+                    },
+                    error.to_string(),
+                ));
+            }
+        }
+    }
+    Ok(lock)
 }
 
 /// A telemetry construction or deserialization failure.
@@ -979,5 +1285,107 @@ mod tests {
         let page = second_sink.read(Some(old_cursor), 10);
         assert_eq!(page.records().len(), 1);
         assert_eq!(page.records()[0].cursor(), new_cursor);
+    }
+
+    #[test]
+    fn shared_file_reader_reconstructs_records_and_paginates() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-reader-{}-{}.jsonl",
+            std::process::id(),
+            TelemetryCursor::from_value(3).value()
+        ));
+        let _ = fs::remove_file(&path);
+        let sink = TelemetrySink::new(Some(&path), 4).expect("valid sink");
+        let reader =
+            TelemetryFileReader::new(&path, DEFAULT_TELEMETRY_FILE_BYTES).expect("valid reader");
+        let _ = sink.emit(envelope());
+        let _ = sink.emit(envelope());
+
+        let first_page = reader.read(None, 1).expect("read first page");
+        assert_eq!(first_page.records().len(), 1);
+        let second_page = reader
+            .read(first_page.next_cursor(), 10)
+            .expect("read second page");
+        assert_eq!(second_page.records().len(), 1);
+        assert_eq!(second_page.records()[0].cursor().value(), 2);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn shared_file_reader_marks_rotation_as_a_new_generation() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-reader-rotation-{}-{}.jsonl",
+            std::process::id(),
+            TelemetryCursor::from_value(4).value()
+        ));
+        let _ = fs::remove_file(&path);
+        let line_bytes = serde_json::to_vec(&envelope())
+            .expect("serialize envelope")
+            .len()
+            + 1;
+        let sink = TelemetrySink::new_with_max_file_bytes(Some(&path), 4, (line_bytes * 2) as u64)
+            .expect("valid sink");
+        let reader =
+            TelemetryFileReader::new(&path, (line_bytes * 2) as u64).expect("valid reader");
+        let _ = sink.emit(envelope());
+        let first_page = reader.read(None, 10).expect("read initial page");
+        let old_cursor = first_page.records()[0].cursor();
+        let _ = sink.emit(envelope());
+        let _ = sink.emit(envelope());
+
+        let rotated_page = reader
+            .read(Some(old_cursor), 10)
+            .expect("read rotated page");
+        assert_eq!(rotated_page.records().len(), 1);
+        assert_eq!(
+            rotated_page.dropped_before(),
+            Some(rotated_page.records()[0].cursor())
+        );
+        assert_ne!(
+            old_cursor.epoch(),
+            rotated_page.records()[0].cursor().epoch()
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn shared_file_reader_keeps_cursor_epoch_across_reader_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-reader-restart-{}-{}.jsonl",
+            std::process::id(),
+            TelemetryCursor::from_value(5).value()
+        ));
+        let _ = fs::remove_file(&path);
+        let sink = TelemetrySink::new(Some(&path), 4).expect("valid sink");
+        let first_reader =
+            TelemetryFileReader::new(&path, DEFAULT_TELEMETRY_FILE_BYTES).expect("reader");
+        let _ = sink.emit(envelope());
+        let first_page = first_reader.read(None, 10).expect("initial page");
+        let cursor = first_page.records()[0].cursor();
+        let restarted_reader =
+            TelemetryFileReader::new(&path, DEFAULT_TELEMETRY_FILE_BYTES).expect("reader");
+        let page = restarted_reader
+            .read(Some(cursor), 10)
+            .expect("resumed page");
+        assert!(page.records().is_empty());
+        assert_eq!(page.dropped_before(), None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn separate_process_sinks_append_valid_records_to_one_file() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-reader-processes-{}-{}.jsonl",
+            std::process::id(),
+            TelemetryCursor::from_value(6).value()
+        ));
+        let _ = fs::remove_file(&path);
+        let first_sink = TelemetrySink::new(Some(&path), 4).expect("valid sink");
+        let second_sink = TelemetrySink::new(Some(&path), 4).expect("valid sink");
+        let _ = first_sink.emit(envelope());
+        let _ = second_sink.emit(envelope());
+        let reader = TelemetryFileReader::new(&path, DEFAULT_TELEMETRY_FILE_BYTES).expect("reader");
+        assert_eq!(reader.read(None, 10).expect("records").records().len(), 2);
+        let _ = fs::remove_file(path);
     }
 }

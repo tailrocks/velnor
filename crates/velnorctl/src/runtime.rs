@@ -113,6 +113,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let state_path = args
         .state_db
         .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH));
+    // The control process and every supervised runner slot must derive the
+    // same operational and telemetry paths. Child slot processes inherit this
+    // already-resolved path through the existing runner environment contract.
+    std::env::set_var("VELNOR_STATE_DB", &state_path);
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
     let services =
         velnor_control::application::ApplicationServices::with_store(Arc::clone(&store), instance)?;
