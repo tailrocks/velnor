@@ -30,6 +30,8 @@ pub const KACHE_VERSION: &str = "0.14.2";
 pub const SCCACHE_VERSION: &str = "0.16.0";
 const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
+const OUTPUT_ROOT_DIGEST: &str = "output_root";
+const RESULT_DIGEST: &str = "compiler_cache_result";
 
 /// One mutually exclusive compiler-cache implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,10 +147,12 @@ impl CompilerCacheConfig {
                 "compiler-cache owner must not be empty".into(),
             ));
         }
-        if self.lease_duration_ms == 0 || self.heartbeat_every_ms > self.lease_duration_ms {
+        if self.lease_duration_ms == 0
+            || self.heartbeat_every_ms == 0
+            || self.heartbeat_every_ms >= self.lease_duration_ms
+        {
             return Err(CacheError::InvalidConfig(
-                "compiler-cache lease duration must be positive and heartbeat must not exceed it"
-                    .into(),
+                "compiler-cache lease duration and heartbeat must be positive and heartbeat must be strictly less than lease duration".into(),
             ));
         }
         Ok(())
@@ -168,6 +172,12 @@ pub trait CompilerCache: Send + Sync {
 
     /// Fence one producer for a cache key.
     async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError>;
+
+    /// Renew one producer lease before its persisted deadline.
+    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError>;
+
+    /// Abandon one producer lease so it cannot publish a result.
+    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError>;
 
     /// Publish one result under its still-valid producer lease.
     async fn publish(&self, lease: ProducerLease, result: CompilerResult)
@@ -276,6 +286,17 @@ pub struct RestorePathProbe {
     pub regular_round_trip: bool,
 }
 
+/// Snapshot of compiler-cache lookup outcomes for one service.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompilerCacheTelemetry {
+    /// Number of validated cache hits.
+    pub hits: u64,
+    /// Number of clean cache misses.
+    pub misses: u64,
+    /// Number of lookups passed through because caching is disabled.
+    pub passthroughs: u64,
+}
+
 /// Durable compiler-cache service backed by CAS and the action journal.
 pub struct CompilerCacheService<C: Clock> {
     backend: CompilerCacheBackend,
@@ -287,6 +308,7 @@ pub struct CompilerCacheService<C: Clock> {
     cas: CasStore,
     metadata: Mutex<Connection>,
     journal: Mutex<LeaseManager<C>>,
+    telemetry: Mutex<CompilerCacheTelemetry>,
 }
 
 impl<C: Clock> CompilerCacheService<C> {
@@ -306,6 +328,7 @@ impl<C: Clock> CompilerCacheService<C> {
         fs::create_dir_all(&storage_root)?;
         let cas = CasStore::new(storage_root.join("cas"))?;
         let metadata = Connection::open(storage_root.join("metadata.sqlite"))?;
+        metadata.busy_timeout(std::time::Duration::from_secs(5))?;
         initialize_metadata(&metadata)?;
         let journal = LeaseManager::open(storage_root.join("journal.sqlite"), clock)?;
         Ok(Self {
@@ -318,6 +341,7 @@ impl<C: Clock> CompilerCacheService<C> {
             cas,
             metadata: Mutex::new(metadata),
             journal: Mutex::new(journal),
+            telemetry: Mutex::new(CompilerCacheTelemetry::default()),
         })
     }
 
@@ -331,6 +355,12 @@ impl<C: Clock> CompilerCacheService<C> {
     #[must_use]
     pub fn storage_root(&self) -> &Path {
         &self.storage_root
+    }
+
+    /// Return a snapshot of this service's compiler-cache lookup outcomes.
+    #[must_use]
+    pub fn telemetry(&self) -> CompilerCacheTelemetry {
+        *self.lock_telemetry()
     }
 
     /// Return daemon-owned wrapper variables for one job.
@@ -400,29 +430,61 @@ impl CompilerCacheService<velnor_action_journal::TokioClock> {
 impl<C: Clock> CompilerCache for CompilerCacheService<C> {
     async fn lookup(&self, key: &CompilerActionKey) -> Result<Option<CompilerResult>, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
+            self.record_passthrough();
             return Ok(None);
         }
         self.ensure_trust_scope(key)?;
         let expected_key_json = canonical_key_json(key)?;
-        let journal = self.lock_journal()?;
-        let Some(record) = journal.latest_action(key)? else {
+        let record = {
+            let journal = self.lock_journal()?;
+            let Some(record) = journal.latest_action(key)? else {
+                self.record_miss();
+                return Ok(None);
+            };
+            if record.state != ActionState::Complete {
+                self.record_miss();
+                return Ok(None);
+            }
+            if record.trust_class != key.execution_policy.trust_class {
+                return Err(CacheError::TrustMismatch);
+            }
+            record
+        };
+        let key_digest = key.digest()?.to_string();
+        let Some(result_digest) = record.output_digests.get(RESULT_DIGEST) else {
+            self.record_miss();
             return Ok(None);
         };
-        if record.state != ActionState::Complete {
-            return Ok(None);
-        }
-        if record.trust_class != key.execution_policy.trust_class {
-            return Err(CacheError::TrustMismatch);
-        }
-        let metadata = self.lock_metadata()?;
-        let Some(entry) = read_metadata(&metadata, &key.digest()?.to_string())? else {
-            return Ok(None);
+        let result_digest = result_digest.clone();
+        let output_digest = record_output_digest(&record)?;
+        let metadata_entry = {
+            let metadata = self.lock_metadata()?;
+            read_metadata(&metadata, &key_digest)?
         };
-        verify_metadata(&entry, key, &expected_key_json, &record)?;
-        let result_digest = Digest::parse(entry.result_digest)?;
         let bytes = self.cas.get(&result_digest).map_err(CacheError::from)?;
         let result: CompilerResult = serde_json::from_slice(&bytes)
             .map_err(|error| CacheError::CorruptEntry(error.to_string()))?;
+        if result.action_key != *key
+            || result.action_key.execution_policy.trust_class != key.execution_policy.trust_class
+            || result.output_root != *output_digest
+        {
+            return Err(CacheError::CorruptEntry(
+                "published compiler result does not match its journal record".into(),
+            ));
+        }
+        let entry = match metadata_entry {
+            Some(entry) => entry,
+            None => {
+                let mut metadata = self.lock_metadata()?;
+                finalize_metadata(&mut metadata, key, &record, &result_digest)?;
+                read_metadata(&metadata, &key_digest)?.ok_or_else(|| {
+                    CacheError::InvalidMetadata(
+                        "metadata finalization committed no cache entry".into(),
+                    )
+                })?
+            }
+        };
+        verify_metadata(&entry, key, &expected_key_json, &record, &result_digest)?;
         if result.exit_code != 0 {
             return Err(CacheError::CorruptEntry(
                 "failed compiler result cannot be a cache hit".into(),
@@ -436,8 +498,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
                 "published compiler result does not match its metadata".into(),
             ));
         }
-        drop(metadata);
-        drop(journal);
+        self.record_hit();
         Ok(Some(result))
     }
 
@@ -470,6 +531,26 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         Ok(lease)
     }
 
+    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.renew(lease)?;
+        Ok(())
+    }
+
+    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.abandon(lease)?;
+        Ok(())
+    }
+
     async fn publish(
         &self,
         lease: ProducerLease,
@@ -494,52 +575,29 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         }
         let result_bytes = serde_json::to_vec(&result)?;
         let result_digest = self.cas.put(&result_bytes)?;
-        let key_digest = lease.action.digest()?.to_string();
-        let key_json = canonical_key_json(&lease.action)?;
-        let trust_json = serde_json::to_string(&lease.action.execution_policy.trust_class)?;
         let complete = ActionRecord {
             action_key: lease.action.clone(),
             state: ActionState::Complete,
             producer_lease_ref: Some(lease_reference(&lease)),
             consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::from([(
-                String::from("output_root"),
-                result.output_root.clone(),
-            )]),
+            output_digests: BTreeMap::from([
+                (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
+                (RESULT_DIGEST.into(), result_digest.clone()),
+            ]),
             timing: result.timing,
             worker_id: Some(lease.owner.clone()),
             trust_class: lease.action.execution_policy.trust_class,
         };
 
+        // This journal transition is the fencing point. Metadata follows it;
+        // the durable result digest above lets lookup finish this step after a
+        // crash, without allowing a stale producer to write first.
         let mut journal = self.lock_journal()?;
-        let mut metadata = self.lock_metadata()?;
-        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO compiler_cache_entries(
-                 action_key_digest, action_key_json, result_digest, output_digest,
-                 trust_class, schema_version, lease_generation
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(action_key_digest) DO UPDATE SET
-                 action_key_json = excluded.action_key_json,
-                 result_digest = excluded.result_digest,
-                 output_digest = excluded.output_digest,
-                 trust_class = excluded.trust_class,
-                 schema_version = excluded.schema_version,
-                 lease_generation = excluded.lease_generation",
-            params![
-                key_digest,
-                key_json,
-                result_digest.to_string(),
-                result.output_root.to_string(),
-                trust_json,
-                i64::from(COMPILER_CACHE_SCHEMA_VERSION),
-                i64::try_from(lease.generation)
-                    .map_err(|_| CacheError::InvalidMetadata("lease generation overflow".into()))?,
-            ],
-        )?;
-        transaction.commit()?;
-        drop(metadata);
         journal.append_action_and_release(&lease, &complete)?;
+        drop(journal);
+
+        let mut metadata = self.lock_metadata()?;
+        finalize_metadata(&mut metadata, &lease.action, &complete, &result_digest)?;
         Ok(())
     }
 }
@@ -615,6 +673,37 @@ fn canonical_key_json(key: &ActionKey) -> Result<String, CacheError> {
     })
 }
 
+fn record_result_digest(record: &ActionRecord) -> Result<&Digest, CacheError> {
+    record.output_digests.get(RESULT_DIGEST).ok_or_else(|| {
+        CacheError::InvalidMetadata("journal record is missing result digest".into())
+    })
+}
+
+fn record_output_digest(record: &ActionRecord) -> Result<&Digest, CacheError> {
+    record
+        .output_digests
+        .get(OUTPUT_ROOT_DIGEST)
+        .ok_or_else(|| {
+            CacheError::InvalidMetadata("journal record is missing output root digest".into())
+        })
+}
+
+fn record_lease_generation(record: &ActionRecord) -> Result<u64, CacheError> {
+    let lease_reference = record.producer_lease_ref.as_deref().ok_or_else(|| {
+        CacheError::InvalidMetadata("journal record is missing lease reference".into())
+    })?;
+    let generation = lease_reference
+        .strip_prefix("compiler-cache/")
+        .ok_or_else(|| {
+            CacheError::InvalidMetadata("journal record has invalid lease reference".into())
+        })?;
+    generation.parse().map_err(|error| {
+        CacheError::InvalidMetadata(format!(
+            "journal record has invalid lease generation: {error}"
+        ))
+    })
+}
+
 fn read_metadata(
     connection: &Connection,
     action_key_digest: &str,
@@ -645,7 +734,66 @@ fn read_metadata(
         .map_err(CacheError::from)
 }
 
+fn finalize_metadata(
+    connection: &mut Connection,
+    key: &ActionKey,
+    record: &ActionRecord,
+    result_digest: &Digest,
+) -> Result<(), CacheError> {
+    if record.action_key != *key || record.state != ActionState::Complete {
+        return Err(CacheError::InvalidMetadata(
+            "journal record cannot finalize compiler-cache metadata".into(),
+        ));
+    }
+    if record_result_digest(record)? != result_digest {
+        return Err(CacheError::InvalidMetadata(
+            "journal result digest does not match completion record".into(),
+        ));
+    }
+    let key_digest = key.digest()?.to_string();
+    let key_json = canonical_key_json(key)?;
+    let trust_json = serde_json::to_string(&key.execution_policy.trust_class)?;
+    let output_digest = record_output_digest(record)?.to_string();
+    let lease_generation = record_lease_generation(record)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "INSERT INTO compiler_cache_entries(
+             action_key_digest, action_key_json, result_digest, output_digest,
+             trust_class, schema_version, lease_generation
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(action_key_digest) DO NOTHING",
+        params![
+            key_digest,
+            key_json,
+            result_digest.to_string(),
+            output_digest,
+            trust_json,
+            i64::from(COMPILER_CACHE_SCHEMA_VERSION),
+            i64::try_from(lease_generation)
+                .map_err(|_| CacheError::InvalidMetadata("lease generation overflow".into()))?,
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn verify_metadata(
+    entry: &MetadataEntry,
+    key: &ActionKey,
+    expected_key_json: &str,
+    record: &ActionRecord,
+    result_digest: &Digest,
+) -> Result<(), CacheError> {
+    verify_metadata_fields(entry, key, expected_key_json, record)?;
+    if entry.result_digest != result_digest.to_string() {
+        return Err(CacheError::CorruptEntry(
+            "metadata result digest does not match journal record".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_metadata_fields(
     entry: &MetadataEntry,
     key: &ActionKey,
     expected_key_json: &str,
@@ -710,15 +858,78 @@ impl<C: Clock> CompilerCacheService<C> {
     fn lock_metadata(&self) -> Result<MutexGuard<'_, Connection>, CacheError> {
         self.metadata.lock().map_err(|_| CacheError::LockPoisoned)
     }
+
+    fn lock_telemetry(&self) -> MutexGuard<'_, CompilerCacheTelemetry> {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn record_hit(&self) {
+        let mut telemetry = self.lock_telemetry();
+        telemetry.hits = telemetry.hits.saturating_add(1);
+    }
+
+    fn record_miss(&self) {
+        let mut telemetry = self.lock_telemetry();
+        telemetry.misses = telemetry.misses.saturating_add(1);
+    }
+
+    fn record_passthrough(&self) {
+        let mut telemetry = self.lock_telemetry();
+        telemetry.passthroughs = telemetry.passthroughs.saturating_add(1);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
     use tempfile::TempDir;
     use velnor_action_journal::TokioClock;
-    use velnor_action_model::{ActionTiming, ExecutionPolicy, PlatformIdentity, Provenance};
+    use velnor_action_model::{
+        ActionTiming, Clock, ExecutionPolicy, LogicalInstant, PlatformIdentity, Provenance,
+    };
+
+    #[derive(Clone)]
+    struct TestClock {
+        now: Arc<Mutex<LogicalInstant>>,
+    }
+
+    impl Default for TestClock {
+        fn default() -> Self {
+            Self {
+                now: Arc::new(Mutex::new(LogicalInstant::from_millis(0))),
+            }
+        }
+    }
+
+    impl TestClock {
+        fn advance(&self, millis: u64) {
+            let mut now = self.now.lock().expect("clock lock");
+            *now = (*now).saturating_add(millis);
+        }
+    }
+
+    impl Clock for TestClock {
+        fn now(&self) -> LogicalInstant {
+            *self.now.lock().expect("clock lock")
+        }
+
+        fn sleep_until(
+            &self,
+            _deadline: LogicalInstant,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(std::future::ready(()))
+        }
+
+        fn wake_expiry(&self) {}
+    }
 
     fn key(seed: u8) -> CompilerActionKey {
         let digest = Digest::from_bytes(&[seed]);
@@ -770,6 +981,14 @@ mod tests {
             WrapperDeclaration::default(),
         );
         assert!(cache.lookup(&key(1)).await.expect("lookup").is_none());
+        assert_eq!(
+            cache.telemetry(),
+            CompilerCacheTelemetry {
+                hits: 0,
+                misses: 1,
+                passthroughs: 0,
+            }
+        );
     }
 
     #[tokio::test]
@@ -791,7 +1010,203 @@ mod tests {
                 cache.lookup(&action_key).await.expect("lookup"),
                 Some(expected)
             );
+            assert_eq!(
+                cache.telemetry(),
+                CompilerCacheTelemetry {
+                    hits: 1,
+                    misses: 0,
+                    passthroughs: 0,
+                }
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn lookup_recovers_metadata_after_journal_completion() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(15);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        let expected = result(action_key.clone());
+        let result_digest = Digest::from_bytes(&serde_json::to_vec(&expected).expect("json"));
+        cache
+            .publish(lease, expected.clone())
+            .await
+            .expect("publish");
+
+        let key_digest = action_key.digest().expect("key digest").to_string();
+        {
+            let metadata = cache.lock_metadata().expect("metadata lock");
+            metadata
+                .execute(
+                    "DELETE FROM compiler_cache_entries WHERE action_key_digest = ?1",
+                    [&key_digest],
+                )
+                .expect("delete metadata");
+        }
+
+        assert_eq!(
+            cache.lookup(&action_key).await.expect("recovery lookup"),
+            Some(expected.clone())
+        );
+        let metadata = cache.lock_metadata().expect("metadata lock");
+        let entry = read_metadata(&metadata, &key_digest)
+            .expect("read recovered metadata")
+            .expect("recovered entry");
+        assert_eq!(entry.result_digest, result_digest.to_string());
+        assert_eq!(entry.output_digest, expected.output_root.to_string());
+    }
+
+    #[tokio::test]
+    async fn legacy_complete_record_with_metadata_is_a_clean_miss() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(17);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        let expected = result(action_key.clone());
+        cache.publish(lease, expected).await.expect("publish");
+
+        let mut legacy = {
+            let journal = cache.lock_journal().expect("journal lock");
+            journal
+                .latest_action(&action_key)
+                .expect("read journal")
+                .expect("complete record")
+        };
+        legacy.output_digests.remove(RESULT_DIGEST);
+        {
+            let mut journal = cache.lock_journal().expect("journal lock");
+            journal
+                .append_action(&legacy)
+                .expect("append legacy record");
+        }
+
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_complete_record_without_result_digest_and_metadata_is_a_clean_miss() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(18);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        cache
+            .publish(lease, result(action_key.clone()))
+            .await
+            .expect("publish");
+
+        let key_digest = action_key.digest().expect("key digest").to_string();
+        let mut malformed = {
+            let journal = cache.lock_journal().expect("journal lock");
+            journal
+                .latest_action(&action_key)
+                .expect("read journal")
+                .expect("complete record")
+        };
+        malformed.output_digests.remove(RESULT_DIGEST);
+        {
+            let mut journal = cache.lock_journal().expect("journal lock");
+            journal
+                .append_action(&malformed)
+                .expect("append malformed record");
+        }
+        {
+            let metadata = cache.lock_metadata().expect("metadata lock");
+            metadata
+                .execute(
+                    "DELETE FROM compiler_cache_entries WHERE action_key_digest = ?1",
+                    [&key_digest],
+                )
+                .expect("delete metadata");
+        }
+
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn metadata_recovery_does_not_overwrite_valid_entry() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(16);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        let expected = result(action_key.clone());
+        cache
+            .publish(lease, expected.clone())
+            .await
+            .expect("publish");
+
+        let key_digest = action_key.digest().expect("key digest").to_string();
+        let original = {
+            let metadata = cache.lock_metadata().expect("metadata lock");
+            read_metadata(&metadata, &key_digest)
+                .expect("read metadata")
+                .expect("metadata entry")
+        };
+        let mut alternate = {
+            let journal = cache.lock_journal().expect("journal lock");
+            journal
+                .latest_action(&action_key)
+                .expect("read journal")
+                .expect("complete record")
+        };
+        alternate.output_digests.insert(
+            OUTPUT_ROOT_DIGEST.into(),
+            Digest::from_bytes(b"alternate-output"),
+        );
+        let alternate_digest = Digest::from_bytes(b"alternate-result");
+        alternate
+            .output_digests
+            .insert(RESULT_DIGEST.into(), alternate_digest.clone());
+        {
+            let mut metadata = cache.lock_metadata().expect("metadata lock");
+            finalize_metadata(&mut metadata, &action_key, &alternate, &alternate_digest)
+                .expect("idempotent metadata finalization");
+            let preserved = read_metadata(&metadata, &key_digest)
+                .expect("read preserved metadata")
+                .expect("preserved entry");
+            assert_eq!(preserved.result_digest, original.result_digest);
+            assert_eq!(preserved.output_digest, original.output_digest);
+            assert_eq!(preserved.lease_generation, original.lease_generation);
+        }
+
+        assert_eq!(
+            cache.lookup(&action_key).await.expect("lookup"),
+            Some(expected)
+        );
+    }
+    #[tokio::test]
+    async fn disabled_lookup_is_a_passthrough() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Off,
+            WrapperDeclaration::default(),
+        );
+        assert!(cache.lookup(&key(7)).await.expect("lookup").is_none());
+        assert_eq!(
+            cache.telemetry(),
+            CompilerCacheTelemetry {
+                hits: 0,
+                misses: 0,
+                passthroughs: 1,
+            }
+        );
     }
 
     #[tokio::test]
@@ -835,6 +1250,101 @@ mod tests {
             second,
             Err(CacheError::Journal(JournalError::LeaseBusy { .. }))
         ));
+    }
+
+    #[tokio::test]
+    async fn renewed_lease_can_publish_after_original_deadline() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let clock = TestClock::default();
+        let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
+        config.policy = CompilerCachePolicy::Kache;
+        let cache =
+            CompilerCacheService::open(config, WrapperDeclaration::default(), clock.clone())
+                .expect("service");
+        let action_key = key(11);
+        let mut lease = cache.begin(&action_key).await.expect("lease");
+
+        clock.advance(10_000);
+        cache.renew(&mut lease).await.expect("renew");
+        clock.advance(20_001);
+
+        cache
+            .publish(lease, result(action_key.clone()))
+            .await
+            .expect("publish after renewal");
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_some());
+    }
+
+    #[tokio::test]
+    async fn abandoned_lease_is_safely_fenced_from_publication() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(12);
+        let lease = cache.begin(&action_key).await.expect("lease");
+
+        cache.abandon(&lease).await.expect("abandon");
+
+        assert!(matches!(
+            cache.publish(lease, result(action_key.clone())).await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_lease_is_safely_fenced_from_publication() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let clock = TestClock::default();
+        let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
+        config.policy = CompilerCachePolicy::Kache;
+        config.lease_duration_ms = 100;
+        config.heartbeat_every_ms = 50;
+        let cache =
+            CompilerCacheService::open(config, WrapperDeclaration::default(), clock.clone())
+                .expect("service");
+        let action_key = key(13);
+        let lease = cache.begin(&action_key).await.expect("lease");
+
+        clock.advance(100);
+
+        assert!(matches!(
+            cache.publish(lease, result(action_key.clone())).await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn fenced_publication_cannot_overwrite_existing_hit() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(14);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        let fenced_lease = lease.clone();
+        let expected = result(action_key.clone());
+        cache
+            .publish(lease, expected.clone())
+            .await
+            .expect("publish");
+
+        let mut stale = result(action_key.clone());
+        stale.output_root = Digest::from_bytes(b"stale-output");
+        assert!(matches!(
+            cache.publish(fenced_lease, stale).await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
+        assert_eq!(
+            cache.lookup(&action_key).await.expect("lookup"),
+            Some(expected)
+        );
     }
 
     #[tokio::test]
@@ -929,6 +1439,22 @@ mod tests {
         )
         .expect_err("mixed wrappers");
         assert_eq!(error.to_string(), "compiler-cache backend conflict: sccache and kache wrappers cannot be enabled together");
+    }
+
+    #[test]
+    fn config_rejects_zero_or_equal_heartbeat() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
+        let expected = "compiler-cache lease duration and heartbeat must be positive and heartbeat must be strictly less than lease duration";
+
+        for heartbeat_every_ms in [0, config.lease_duration_ms] {
+            config.heartbeat_every_ms = heartbeat_every_ms;
+            let error = config.validate().expect_err("invalid heartbeat");
+            let CacheError::InvalidConfig(message) = error else {
+                panic!("unexpected error: {error:?}");
+            };
+            assert_eq!(message, expected);
+        }
     }
 
     #[test]

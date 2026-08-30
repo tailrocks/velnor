@@ -29,8 +29,12 @@ run = "cargo clippy --workspace --all-targets --locked --features velnor-runner/
 run = "cargo nextest run --workspace --locked --features velnor-runner/test-support --color=always"
 
 [tasks.test-focused]
-description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
-run = "cargo nextest run --locked --features velnor-runner/test-support --color=always"
+description = "Focused nextest run; pass package/test filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
+run = "cargo nextest run --locked --color=always"
+
+[tasks.test-focused-runner]
+description = "Runner tests with loopback fixture support"
+run = "cargo nextest run --locked --package velnor-runner --features test-support --color=always"
 
 [tasks.test-production-topology]
 description = "Compile all workspace targets with production default features"
