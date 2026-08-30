@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use velnor_model::{
-    transition_target, EventReason, ExitClass, InfrastructureCategory, InvalidJobSummaryField,
-    JobConclusion, JobPhase, JobState, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
-    Slug, Timestamp, TriggerEvent,
+    slot_transition_allowed, transition_target, EventReason, ExitClass, Generation,
+    InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobState,
+    JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, SlotId, SlotKind, SlotPhase, Slug,
+    Timestamp, TriggerEvent,
 };
 
 use super::error::{StoreError, StoreResult};
@@ -32,16 +33,41 @@ pub struct InstanceRow {
     pub updated_at: Timestamp,
 }
 
-/// One execution slot owned by an instance.
+/// Immutable identity of one stable execution slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlotRow {
+pub struct SlotIdentity {
     pub instance_slug: String,
-    pub name: String,
+    pub slot_id: SlotId,
     pub host: String,
     pub slot_index: u32,
-    /// Stable-slot versus ephemeral-runner class (`SlotKind` spelling).
-    pub slot_kind: String,
-    pub phase: String,
+    pub slot_kind: SlotKind,
+}
+
+/// One typed, generation-owned slot transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotTransition {
+    /// Stable retry identity within `(instance, slot, generation)`.
+    pub token: String,
+    /// Correlates the atomic current-state update and appended event.
+    pub correlation_id: Slug,
+    /// Actor generation that owns this mutation.
+    pub generation: Generation,
+    /// Monotonic boundary sequence within the generation.
+    pub sequence: u64,
+    /// Target phase; the store derives and validates the edge from current state.
+    pub target: SlotPhase,
+    pub job_name: Option<String>,
+    pub message: Option<String>,
+    pub transition_time: Timestamp,
+}
+
+/// Durable current slot projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotRow {
+    pub identity: SlotIdentity,
+    pub phase: SlotPhase,
+    pub generation: Generation,
+    pub transition_sequence: u64,
     pub job_name: Option<String>,
     pub updated_at: Timestamp,
 }
@@ -411,34 +437,153 @@ impl Store {
         ))
     }
 
-    /// Insert or refresh current slot state.
+    /// Atomically advance current slot state and append its correlated event.
+    ///
+    /// Identity is immutable after first observation. A lower generation is a
+    /// stale owner and fails closed. Within one generation, lower sequences
+    /// are idempotent stale replays, equal sequences must reproduce the exact
+    /// token/correlation/target, and higher sequences must follow the closed
+    /// [`SlotPhase`] graph. A newer generation establishes fresh ownership.
+    ///
+    /// Returns `true` for a committed transition and `false` for a replay.
     ///
     /// # Errors
-    /// Envelope-classified persistence failures.
-    pub fn upsert_slot(&self, row: &SlotRow) -> StoreResult<()> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO slots (instance_slug, name, host, slot_index, slot_kind, phase, job_name, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    /// Invalid identity, generation, sequence, correlation, or phase edges are
+    /// envelope-classified conflicts. Event validation or persistence failure
+    /// rolls back the slot update in the same SQLite transaction.
+    pub fn record_slot_transition(
+        &self,
+        identity: &SlotIdentity,
+        transition: &SlotTransition,
+    ) -> StoreResult<bool> {
+        validate_slot_transition(identity, transition)?;
+        let detail = slot_transition_detail(transition);
+        let generation = i64::try_from(transition.generation.0)
+            .map_err(|_| StoreError::new(ExitClass::Usage, "store.slot.generation.range"))?;
+        let sequence = i64::try_from(transition.sequence)
+            .map_err(|_| StoreError::new(ExitClass::Usage, "store.slot.sequence.range"))?;
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = query_slot_state(&transaction, &identity.instance_slug, &identity.slot_id)?;
+
+        if let Some(current) = current {
+            if current.identity.host != identity.host
+                || current.identity.slot_index != identity.slot_index
+                || current.identity.slot_kind != identity.slot_kind
+            {
+                return Err(StoreError::new(
+                    ExitClass::Conflict,
+                    "store.slot.identity.mismatch",
+                )
+                .with_remediation(
+                    "reuse the original host, index, and slot kind for this stable slot identity",
+                ));
+            }
+            if transition.generation < current.generation {
+                return Err(
+                    StoreError::new(ExitClass::Conflict, "store.slot.generation.stale")
+                        .with_remediation(format!(
+                            "slot {} is owned by generation {}; generation {} cannot mutate it",
+                            identity.slot_id.0, current.generation.0, transition.generation.0
+                        )),
+                );
+            }
+            if transition.generation == current.generation {
+                if transition.sequence < current.transition_sequence {
+                    transaction.commit()?;
+                    return Ok(false);
+                }
+                if transition.sequence == current.transition_sequence {
+                    let prior: (Option<String>, Option<String>, Option<String>) = transaction
+                        .query_row(
+                        "SELECT last_transition_token, last_correlation_id, last_transition_detail
+                         FROM slots WHERE instance_slug = ?1 AND name = ?2",
+                        params![identity.instance_slug, identity.slot_id.0],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?;
+                    if current.phase == transition.target
+                        && current.job_name == transition.job_name
+                        && prior.0.as_deref() == Some(transition.token.as_str())
+                        && prior.1.as_deref() == Some(transition.correlation_id.as_str())
+                        && prior.2.as_deref() == Some(detail.as_str())
+                    {
+                        transaction.commit()?;
+                        return Ok(false);
+                    }
+                    return Err(StoreError::new(
+                        ExitClass::Conflict,
+                        "store.slot.transition.idempotency_conflict",
+                    )
+                    .with_remediation(
+                        "reuse a slot transition sequence only with its original token, correlation, and target phase",
+                    ));
+                }
+                if !slot_transition_allowed(current.phase, transition.target) {
+                    return Err(StoreError::new(
+                        ExitClass::Conflict,
+                        "store.slot.transition.illegal",
+                    )
+                    .with_remediation(format!(
+                        "slot {} generation {} cannot transition from {} to {}",
+                        identity.slot_id.0,
+                        transition.generation.0,
+                        current.phase.as_str(),
+                        transition.target.as_str()
+                    )));
+                }
+            }
+        }
+
+        transaction.execute(
+            "INSERT INTO slots
+                (instance_slug, name, host, slot_index, slot_kind, phase, job_name, updated_at,
+                 generation, transition_sequence, last_transition_token, last_correlation_id,
+                 last_transition_detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT (instance_slug, name) DO UPDATE SET
-                host = excluded.host,
-                slot_index = excluded.slot_index,
-                slot_kind = excluded.slot_kind,
                 phase = excluded.phase,
                 job_name = excluded.job_name,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                generation = excluded.generation,
+                transition_sequence = excluded.transition_sequence,
+                last_transition_token = excluded.last_transition_token,
+                last_correlation_id = excluded.last_correlation_id,
+                last_transition_detail = excluded.last_transition_detail",
             params![
-                row.instance_slug,
-                row.name,
-                row.host,
-                row.slot_index,
-                row.slot_kind,
-                row.phase,
-                row.job_name,
-                rfc3339(row.updated_at),
+                identity.instance_slug,
+                identity.slot_id.0,
+                identity.host,
+                identity.slot_index,
+                identity.slot_kind.as_str(),
+                transition.target.as_str(),
+                transition.job_name,
+                rfc3339(transition.transition_time),
+                generation,
+                sequence,
+                transition.token,
+                transition.correlation_id.as_str(),
+                detail,
             ],
         )?;
-        Ok(())
+        Self::append_event_in_transaction(
+            &transaction,
+            &EventRow {
+                instance_slug: identity.instance_slug.clone(),
+                event_kind: EventReason::SlotStateChanged.as_str().to_owned(),
+                subject: identity.slot_id.0.clone(),
+                correlation_id: Some(transition.correlation_id.as_str().to_owned()),
+                occurred_at: transition.transition_time,
+                detail: Some(detail),
+            },
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Fetch one durable slot projection by stable identity.
+    pub fn slot(&self, instance_slug: &str, slot_id: &SlotId) -> StoreResult<Option<SlotRow>> {
+        let conn = self.lock_conn()?;
+        query_slot_state(&conn, instance_slug, slot_id)
     }
 
     /// Insert or refresh one runner registration.
@@ -776,6 +921,15 @@ impl Store {
     /// # Errors
     /// Envelope-classified persistence failures.
     pub fn append_event(&self, row: &EventRow) -> StoreResult<u64> {
+        if row.event_kind == EventReason::SlotStateChanged.as_str() {
+            return Err(StoreError::new(
+                ExitClass::Conflict,
+                "store.slot.event.requires_transition",
+            )
+            .with_remediation(
+                "use record_slot_transition so slot state and its event commit atomically",
+            ));
+        }
         let mut conn = self.lock_conn()?;
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1604,6 +1758,121 @@ fn validate_job_row(row: &JobRow) -> StoreResult<()> {
         return Err(invalid());
     }
     Ok(())
+}
+
+fn validate_slot_transition(
+    identity: &SlotIdentity,
+    transition: &SlotTransition,
+) -> StoreResult<()> {
+    for (field, value) in [
+        ("instance_slug", identity.instance_slug.as_str()),
+        ("slot_id", identity.slot_id.0.as_str()),
+        ("host", identity.host.as_str()),
+        ("transition_token", transition.token.as_str()),
+    ] {
+        Slug::validate(field, value).map_err(|_| {
+            StoreError::new(ExitClass::Usage, "store.slot.identity.invalid")
+                .with_remediation(format!("{field} must satisfy the closed slug contract"))
+        })?;
+    }
+    if transition.generation < Generation::INITIAL {
+        return Err(
+            StoreError::new(ExitClass::Usage, "store.slot.generation.invalid")
+                .with_remediation("slot lifecycle mutations require a nonzero actor generation"),
+        );
+    }
+    if transition.sequence == 0 {
+        return Err(
+            StoreError::new(ExitClass::Usage, "store.slot.sequence.invalid")
+                .with_remediation("slot lifecycle mutations require a nonzero monotonic sequence"),
+        );
+    }
+    let expected_correlation = format!("corr-{}", transition.token);
+    if transition.correlation_id.as_str() != expected_correlation {
+        return Err(
+            StoreError::new(ExitClass::Conflict, "store.slot.transition.correlation")
+                .with_remediation(
+                    "derive slot correlation as 'corr-' followed by the exact transition token",
+                ),
+        );
+    }
+    if let Some(job_name) = transition.job_name.as_deref() {
+        Slug::validate("job_name", job_name).map_err(|_| {
+            StoreError::new(ExitClass::Usage, "store.slot.job.invalid").with_remediation(
+                "project the current job name through the sanitized slug contract",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn slot_transition_detail(transition: &SlotTransition) -> String {
+    transition.message.as_ref().map_or_else(
+        || format!("phase={}", transition.target.as_str()),
+        |message| format!("phase={}; {message}", transition.target.as_str()),
+    )
+}
+
+fn query_slot_state(
+    conn: &rusqlite::Connection,
+    instance_slug: &str,
+    slot_id: &SlotId,
+) -> StoreResult<Option<SlotRow>> {
+    let stored = conn
+        .query_row(
+            "SELECT host, slot_index, slot_kind, phase, job_name, updated_at,
+                    generation, transition_sequence
+             FROM slots WHERE instance_slug = ?1 AND name = ?2",
+            params![instance_slug, slot_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((host, slot_index, slot_kind, phase, job_name, updated_at, generation, sequence)) =
+        stored
+    else {
+        return Ok(None);
+    };
+    let slot_kind = SlotKind::try_from(slot_kind.as_str()).map_err(|_| {
+        StoreError::new(ExitClass::Operation, "store.slot.kind.unknown")
+            .with_remediation("stored slot kind is not part of the closed slot taxonomy")
+    })?;
+    let phase = SlotPhase::try_from(phase.as_str()).map_err(|_| {
+        StoreError::new(ExitClass::Operation, "store.slot.state.unknown")
+            .with_remediation("stored phase is not part of the closed slot taxonomy")
+    })?;
+    let slot_index = u32::try_from(slot_index)
+        .map_err(|_| StoreError::new(ExitClass::Operation, "store.slot.index.range"))?;
+    let generation = u64::try_from(generation)
+        .map_err(|_| StoreError::new(ExitClass::Operation, "store.slot.generation.range"))?;
+    let transition_sequence = u64::try_from(sequence)
+        .map_err(|_| StoreError::new(ExitClass::Operation, "store.slot.sequence.range"))?;
+    let updated_at = Timestamp::parse(&updated_at)
+        .map_err(|_| StoreError::new(ExitClass::Operation, "store.slot.timestamp.invalid"))?;
+    Ok(Some(SlotRow {
+        identity: SlotIdentity {
+            instance_slug: instance_slug.to_owned(),
+            slot_id: slot_id.clone(),
+            host,
+            slot_index,
+            slot_kind,
+        },
+        phase,
+        generation: Generation(generation),
+        transition_sequence,
+        job_name,
+        updated_at,
+    }))
 }
 
 fn record_job_transition_in_transaction(

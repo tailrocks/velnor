@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use velnor_control::store::{
-    EventRow, InstanceRow, JobRow, RetentionBudget, SlotRow, Store, StoreAccounting,
+    EventRow, InstanceRow, JobRow, RetentionBudget, SlotIdentity, SlotTransition, Store,
+    StoreAccounting,
 };
-use velnor_model::Timestamp;
+use velnor_model::{Generation, SlotId, SlotKind, SlotPhase, Slug, Timestamp};
 
 struct TempDb {
     dir: std::path::PathBuf,
@@ -141,16 +142,25 @@ fn aged_terminal_rows_go_while_active_state_and_ancestry_survive() {
         })
         .unwrap();
     store
-        .upsert_slot(&SlotRow {
-            instance_slug: "it".to_owned(),
-            name: "slot-1".to_owned(),
-            host: "sentry".to_owned(),
-            slot_index: 1,
-            slot_kind: "stable".to_owned(),
-            phase: "busy".to_owned(),
-            job_name: Some("active-job".to_owned()),
-            updated_at: Timestamp::now(),
-        })
+        .record_slot_transition(
+            &SlotIdentity {
+                instance_slug: "it".to_owned(),
+                slot_id: SlotId("slot-1".to_owned()),
+                host: "sentry".to_owned(),
+                slot_index: 1,
+                slot_kind: SlotKind::Stable,
+            },
+            &SlotTransition {
+                token: "slot-running-1".to_owned(),
+                correlation_id: Slug::validate("correlation_id", "corr-slot-running-1").unwrap(),
+                generation: Generation::INITIAL,
+                sequence: 1,
+                target: SlotPhase::Running,
+                job_name: Some("active-job".to_owned()),
+                message: None,
+                transition_time: Timestamp::now(),
+            },
+        )
         .unwrap();
 
     store
@@ -174,7 +184,7 @@ fn aged_terminal_rows_go_while_active_state_and_ancestry_survive() {
         ))
         .unwrap();
     store
-        .append_event(&event("it", "active-job", "slot.state_changed", 0))
+        .append_event(&event("it", "active-job", "capacity.pressure", 0))
         .unwrap();
 
     let report = store.prune_history(&tiny_budget()).unwrap();
@@ -191,7 +201,19 @@ fn aged_terminal_rows_go_while_active_state_and_ancestry_survive() {
 
     // Current instance/slot state is untouchable.
     assert_eq!(total_jobs(&store), 1);
-    assert_eq!(total_events(&store), 2);
+    let retained_events = store.events_after("it", 0, 10).unwrap();
+    let retained_event_order = retained_events
+        .iter()
+        .map(|event| (event.row.subject.as_str(), event.row.event_kind.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained_event_order,
+        [
+            ("slot-1", "slot.state_changed"),
+            ("active-job", "job.transition.job.started"),
+            ("active-job", "capacity.pressure"),
+        ]
+    );
 
     let accounting: StoreAccounting = store.accounting().unwrap();
     assert!(accounting.last_prune_at.is_some());

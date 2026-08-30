@@ -61,7 +61,7 @@ pub use node::{
     HealthAlertCode, HealthAlertSeverity, HealthDocument, JobId, NotReady, ReadyProof,
     RecoveryHealthState, SliDimension, SlotId,
 };
-pub use phase::{SlotKind, SlotPhase};
+pub use phase::{slot_transition_allowed, InvalidSlotToken, SlotKind, SlotPhase};
 pub use resources::{
     Adapter, AnyResource, Capability, Event, Host, Instance, Job, Lease, QueueEntry, Reservation,
     Run, RunnerRegistration, Slot,
