@@ -71,8 +71,24 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        compiler_cache_backend: crate::manifest::compiler_cache_backend(job)?,
+        compiler_cache_backend: github_compiler_cache_backend(job, paths.execution_backend)?,
     })
+}
+
+fn github_compiler_cache_backend(
+    job: &AgentJobRequestMessage,
+    execution_backend: velnor_model::ExecutionBackendKind,
+) -> Result<velnor_cache_service::CompilerCacheBackend, CacheAdmissionError> {
+    if matches!(
+        execution_backend,
+        velnor_model::ExecutionBackendKind::MicroVm
+    ) {
+        let declaration = crate::manifest::compiler_cache_declaration(job);
+        if !declaration.sccache && !declaration.kache {
+            return Ok(velnor_cache_service::CompilerCacheBackend::Off);
+        }
+    }
+    crate::manifest::compiler_cache_backend(job)
 }
 
 pub(crate) fn github_cargo_target_store_host(
@@ -1069,6 +1085,10 @@ mod tests {
             spec.compiler_cache_backend,
             velnor_cache_service::CompilerCacheBackend::Kache
         );
+        let args = spec.start_args();
+        assert!(args.iter().any(|arg| arg.contains("/var/cache/kache")));
+        assert!(args.contains(&"RUSTC_WRAPPER=kache".into()));
+        assert!(!args.contains(&"RUSTC_WRAPPER=sccache".into()));
     }
 
     #[test]
@@ -1101,6 +1121,107 @@ mod tests {
         )
         .unwrap();
         assert!(!spec.mount_docker_socket);
+        assert_eq!(
+            spec.compiler_cache_backend,
+            velnor_cache_service::CompilerCacheBackend::Off
+        );
+        let args = spec.start_args();
+        assert!(!args
+            .iter()
+            .any(|arg| { arg.contains("/var/cache/sccache") || arg.contains("/var/cache/kache") }));
+        assert!(!args.iter().any(|arg| {
+            arg.starts_with("RUSTC_WRAPPER=")
+                || arg.starts_with("SCCACHE_")
+                || arg.starts_with("KACHE_")
+        }));
+    }
+
+    #[test]
+    fn microvm_backend_honors_explicit_sccache_wrapper() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Trusted",
+            "requestId": 1,
+            "steps": [{
+                "reference": { "name": "mozilla-actions/sccache-action" }
+            }]
+        }))
+        .unwrap();
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.compiler_cache_backend,
+            velnor_cache_service::CompilerCacheBackend::Sccache
+        );
+        let args = spec.start_args();
+        assert!(args.iter().any(|arg| arg.contains("/var/cache/sccache")));
+        assert!(args.contains(&"RUSTC_WRAPPER=sccache".into()));
+        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
+        assert!(args.contains(&"SCCACHE_CACHE_SIZE=20G".into()));
+        assert!(args.contains(&"SCCACHE_GHA_ENABLED=false".into()));
+        assert!(!args.iter().any(|arg| arg.starts_with("KACHE_")));
+    }
+
+    #[test]
+    fn microvm_backend_honors_explicit_kache_wrapper() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Trusted",
+            "requestId": 1,
+            "steps": [{
+                "reference": { "name": "kunobi-ninja/kache-action" }
+            }]
+        }))
+        .unwrap();
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.compiler_cache_backend,
+            velnor_cache_service::CompilerCacheBackend::Kache
+        );
+        let args = spec.start_args();
+        assert!(args.iter().any(|arg| arg.contains("/var/cache/kache")));
+        assert!(args.contains(&"RUSTC_WRAPPER=kache".into()));
     }
 
     #[test]
