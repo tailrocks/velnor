@@ -108,6 +108,25 @@ pub fn cache_class_path(legacy_work_root: &Path, class: &str, legacy_name: &str)
     prefer_canonical_or_existing_legacy(canonical, legacy)
 }
 
+/// Resolve a trust-scoped cache path without consulting process-global trust
+/// state. Compiler caches use this boundary because the admitted trust class
+/// belongs to the job plan, while the other stores retain [`cache_class_path`]
+/// and their existing operator-selected scope.
+pub fn cache_class_path_for_trust(
+    legacy_work_root: &Path,
+    trust_scope: &str,
+    class: &str,
+    legacy_name: &str,
+) -> PathBuf {
+    let trust = crate::container::sanitize_store_key(trust_scope);
+    let legacy = legacy_work_root.join(legacy_name).join(&trust);
+    let Some(layout) = StorageLayout::resolve() else {
+        return legacy;
+    };
+    let canonical = layout.cache_class(&trust, class);
+    prefer_canonical_or_existing_legacy(canonical, legacy)
+}
+
 pub fn prefer_canonical_or_existing_legacy(canonical: PathBuf, legacy: PathBuf) -> PathBuf {
     if canonical.exists() || !legacy.exists() {
         canonical
