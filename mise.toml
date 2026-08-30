@@ -61,6 +61,14 @@ run = "cargo deny check advisories"
 description = "Regenerate fleet/policies/<org>-desired-policy.json from the release-ref ledger (offline, deterministic)"
 run = "cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir fleet/policies"
 
+[tasks.audit-ci]
+description = "Enforce the offline estate CI workflow contract"
+run = "cargo run -p velnor-tools --locked --quiet -- audit-ci --offline --repository-name tailrocks/velnor"
+
+[tasks.audit-ci-estate]
+description = "Audit live default heads and prove generated caller SHA-256 equality within every canonical class"
+run = "cargo run -p velnor-tools --locked --quiet -- audit-ci --estate config/estate-repositories.json --remote-defaults"
+
 [tasks.fleet-plan]
 description = "Read live desired/observed fleet state and print policy summary + sha256 digest per org (requires --ledger and GitHub credentials)"
 run = """
@@ -113,10 +121,10 @@ cat "$digest_output"
 """
 
 [tasks.check]
-depends = ["fmt", "actionlint", "deny", "fleet-generate", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
+depends = ["fmt", "actionlint", "audit-ci", "deny", "fleet-generate", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
 
 [tasks.ci]
-depends = ["actionlint", "deny", "fleet-generate"]
+depends = ["actionlint", "audit-ci", "deny", "fleet-generate"]
 # The generated CI workflow owns separate test, lint, and format gates. Keep
 # this task build-only so those gates are not executed twice on every run.
 run = "cargo check --workspace --all-targets --locked --features velnor-runner/test-support"

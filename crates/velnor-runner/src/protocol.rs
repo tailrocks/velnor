@@ -4340,19 +4340,49 @@ fn write_artifact_zip_from_paths_temp_file(
     let options = zip::write::FileOptions::<()>::default().compression_method(method);
     let mut source_total = 0_u64;
     for source in files {
-        let metadata = std::fs::metadata(&source.source_path)
-            .with_context(|| format!("stat artifact source {}", source.source_path.display()))?;
-        if !metadata.is_file() {
-            bail!(
-                "artifact source {} is not a regular file",
-                source.source_path.display()
-            );
-        }
-        checked_upload_source_add(source_total, metadata.len())?;
+        #[cfg(unix)]
+        let mut input = {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let input = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&source.source_path)
+                .with_context(|| {
+                    format!("open artifact source {}", source.source_path.display())
+                })?;
+            let metadata = input.metadata().with_context(|| {
+                format!(
+                    "stat opened artifact source {}",
+                    source.source_path.display()
+                )
+            })?;
+            if !metadata.is_file() {
+                bail!(
+                    "artifact source {} is not a regular file",
+                    source.source_path.display()
+                );
+            }
+            checked_upload_source_add(source_total, metadata.len())?;
+            input
+        };
+        #[cfg(not(unix))]
+        let mut input = {
+            let metadata = std::fs::metadata(&source.source_path).with_context(|| {
+                format!("stat artifact source {}", source.source_path.display())
+            })?;
+            if !metadata.is_file() {
+                bail!(
+                    "artifact source {} is not a regular file",
+                    source.source_path.display()
+                );
+            }
+            checked_upload_source_add(source_total, metadata.len())?;
+            std::fs::File::open(&source.source_path)
+                .with_context(|| format!("open artifact source {}", source.source_path.display()))?
+        };
         zip.start_file(&source.archive_path, options)
             .context("zip start_file")?;
-        let mut input = std::fs::File::open(&source.source_path)
-            .with_context(|| format!("open artifact source {}", source.source_path.display()))?;
         let remaining = RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES - source_total;
         let mut limited = (&mut input).take(remaining.saturating_add(1));
         let copied = std::io::copy(&mut limited, &mut zip)
@@ -4643,6 +4673,8 @@ fn upload_artifact_with_zip_builder(
     )?;
     let base = results_service_url.as_str().trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
+    let zip_path = tmp_dir.join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
+    let (zip_path, zip_size, zip_hash) = build_zip(zip_path)?;
 
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -4676,10 +4708,8 @@ fn upload_artifact_with_zip_builder(
         .to_string();
     let upload_url = validate_signed_blob_url(&upload_url, "artifact upload")?;
 
-    // 2. Stream the zip archive into its mode-0600 temp file, hash that file,
-    // and PUT the same bytes without retaining a second full archive in RAM.
-    let zip_path = tmp_dir.join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
-    let (zip_path, zip_size, zip_hash) = build_zip(zip_path)?;
+    // 2. PUT the prepared mode-0600 temp archive without retaining a second
+    // full archive in RAM.
     let zip_file = std::fs::File::open(zip_path.path()).context("open zip temp file")?;
     let put_response = client
         .put(upload_url)
@@ -5692,6 +5722,34 @@ mod tests {
         std::fs::remove_file(source_path).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn artifact_path_writer_rejects_symlink_at_descriptor_open() {
+        let root = std::env::temp_dir().join(format!("velnor-artifact-symlink-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.txt");
+        let source = root.join("source.txt");
+        let zip_path = root.join("artifact.zip");
+        std::fs::write(&target, b"must not upload").unwrap();
+        std::os::unix::fs::symlink(&target, &source).unwrap();
+
+        let error = write_artifact_zip_from_paths_temp_file(
+            zip_path,
+            &[ArtifactUploadFile {
+                archive_path: "source.txt".to_string(),
+                source_path: source,
+            }],
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("open artifact source"),
+            "{error:#}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn artifact_download_response_bound_stops_before_writing_excess_bytes() {
         let mut response = std::io::Cursor::new(b"12345".to_vec());
@@ -5900,6 +5958,72 @@ mod tests {
         let finalize = String::from_utf8_lossy(&requests[2]);
         assert!(finalize.contains("\"hash\":{"));
         assert!(finalize.contains("sha256:"));
+    }
+
+    #[test]
+    fn artifact_upload_preparation_failure_sends_no_create_request() {
+        use std::io::{ErrorKind, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server_base = base.clone();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests += 1;
+                        let mut request = [0_u8; 4096];
+                        let _ = stream.read(&mut request);
+                        let body = serde_json::json!({
+                            "ok": true,
+                            "signed_upload_url": format!("{server_base}/upload")
+                        })
+                        .to_string();
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .unwrap();
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if stop_rx.recv_timeout(Duration::from_millis(10)).is_ok() {
+                            break;
+                        }
+                    }
+                    Err(error) => panic!("artifact test server failed: {error}"),
+                }
+            }
+            requests
+        });
+
+        let missing_source = std::env::temp_dir().join(format!(
+            "velnor-missing-artifact-source-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let error = upload_artifact_files_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "job",
+            "release",
+            &[ArtifactUploadFile {
+                archive_path: "dist/output.txt".to_string(),
+                source_path: missing_source,
+            }],
+            ArtifactUploadOptions::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("artifact source"), "{error:#}");
+
+        stop_tx.send(()).unwrap();
+        assert_eq!(server.join().unwrap(), 0);
     }
 
     #[test]

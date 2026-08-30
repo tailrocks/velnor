@@ -1,9 +1,9 @@
 # Velnor runner — Debian package + apt-native repository
 
 **Status: implemented; publication decoupled for coherence (plan 010).**
-`git tag vX.Y.Z && git push origin vX.Y.Z` runs the single `release.yml`
-coordinator (release-deb.yml is deleted; its binary-presence + size + arch guards
-are folded in). It builds both debs and the multi-platform GHCR job image once,
+`git tag vX.Y.Z && git push origin vX.Y.Z` runs the single
+`.github/workflows/release.yml` coordinator. It builds both debs and the
+multi-platform GHCR job image once,
 then assembles ONE acyclic `release-record.json` binding source SHA -> crate
 version -> per-arch binary/deb digests -> OCI image digest -> compiled-manifest
 hash -> APT coordinate, and attaches the record + checksum + tar.gz + deb assets
@@ -40,8 +40,9 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 ## Pieces
 
 1. **Build the `.deb`** — `cargo-deb` (Rust-native; reads `[package.metadata.deb]`
-   in `Cargo.toml`). Both holla and velnor use the exact same approach in their
-   `release-deb.yml` (on tag `v*` or workflow_dispatch):
+   in `Cargo.toml`). The `build` matrix in
+   `.github/workflows/release.yml` builds amd64 and arm64 for tagged releases
+   and explicit `workflow_dispatch` runs:
    - `jdx/mise-action` (rust + zig + prebuilt cargo-binstall + cargo-zigbuild)
    - sccache + mold
    - Matrix over `x86_64-unknown-linux-gnu` + `aarch64-unknown-linux-gnu`
@@ -118,25 +119,21 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 
 **Policy:** You should always use GitHub Actions for GitHub Pages deployments (never "Deploy from a branch"). Use `actions/configure-pages`, `actions/upload-pages-artifact`, and `actions/deploy-pages`. The index on Pages is always for currently published versions only.
 
-`.github/workflows/release-deb.yml` (unified with holla's):
-1. Uses the exact same pattern as holla: `jdx/mise-action` + sccache + mold + `cargo zigbuild` (latest Debian glibc only, matrix for amd64+arm64) → `cargo deb --target $TGT --no-build --deb-version "$VERSION"`.
-2. Stages per-arch debs + shas as artifacts.
-3. Attaches the `.deb`(s) to the velnor source GitHub Release.
-4. If `GH_VELNOR_APT_TOKEN` is present, cross-uploads the .debs to the `velnor-apt` repository's Releases (same tag) and triggers `publish.yml` in the apt repo via `gh workflow run -f version=$TAG`.
-5. The apt-repo's `publish.yml` downloads candidate `.deb` files from its own
-   Release, recovers the exact prior pair from the signed live repository,
-   verifies its signed publication identity, builds a fresh two-version index,
-   and deploys it to Pages.
-
-The `.deb` build + attachment to the original release is the responsibility of
-the source project. The apt publisher consumes only the apt repository's own
-release assets. The Pages index is generated fresh with the requested version
-plus its exact signed rollback predecessor; older historical packages remain
-in Releases.
-6. Also attach the raw `.deb`(s) to the GitHub Release for direct download.
-
-Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
-upgrade` picks it up. That is the whole upgrade story.
+`.github/workflows/release.yml`:
+1. Resolves and validates the immutable tag/commit, then builds and checks the
+   amd64 and arm64 binaries, tarballs, guest images, and `.deb` packages.
+2. Stages per-arch `.deb` files and SHA-256 sidecars as artifacts, with package
+   version, architecture, contents, and size guards.
+3. Assembles and independently re-verifies one `release-record.json` binding
+   the source commit, package and binary digests, OCI image digests, and APT
+   coordinate.
+4. Creates or verifies the source GitHub Release and attaches the release
+   record, checksums, tarballs, and `.deb` assets. Package subjects then pass
+   through the signed package-signer workflows.
+5. Performs no APT publication: it holds no APT credential, does not upload to
+   `tailrocks/velnor-apt`, and does not dispatch an APT publisher. The signed
+   release-record/publisher process in `tailrocks/velnor-apt` independently
+   consumes and verifies the record before publishing signed APT metadata.
 
 ## User install (modern `signed-by` keyring — not deprecated `apt-key`)
 
@@ -168,21 +165,29 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
 - **reprepro vs aptly**: reprepro is simpler for a single-arch single-suite repo
   and signs Release out of the box; aptly if we later need snapshots/mirroring.
 - **arch**: amd64 + arm64 via matrix (using zigbuild for cross on ubuntu runner).
-  Both projects (holla + velnor) use the identical release-deb.yml structure.
+  The unified `.github/workflows/release.yml` is the sole Velnor release
+  coordinator; it builds and attaches `.deb` assets and emits the release
+  record, while signed APT publication is handled by the `velnor-apt` publisher.
 - **key rotation**: document a key-rotation procedure; expired signing keys break
   `apt update` for everyone (see the `gh` CLI incident).
 
 ## Maintainer release and Sentry deployment
 
-Sentry's normal package-deployment path is the configured signed apt
-repository. This rule covers first install, upgrade, downgrade, rollback, and
-forward recovery.
+Normal Sentry package deployment uses the configured signed `velnor-apt`
+repository and the release workflow below. This rule covers first install,
+upgrade, downgrade, rollback, and forward recovery. The only exception is the
+tightly bounded chicken-egg bootstrap below, allowed only when fresh evidence
+proves the Velnor lane failed or is unavailable, that failure blocks building
+Velnor itself, an operator explicitly authorizes incident recovery, and exactly
+one Debian package is built on this host from the exact pushed campaign SHA.
 
 1. Ensure the release commit is signed off, pushed, and green. Create a signed
    `vX.Y.Z` tag on that exact commit and push only that tag.
 2. Monitor Velnor's `Release` workflow. It must build amd64 and arm64, validate
-   the packages, publish immutable assets and the release record, and dispatch
-   `tailrocks/velnor-apt`'s `Publish apt repo` workflow.
+   the packages, and publish the signed release record and immutable release
+   assets. The `velnor-apt` publisher independently consumes and verifies that
+   record before publishing the signed APT repository; the Velnor source
+   release does not dispatch it.
 3. Monitor apt publication and Pages deployment. Before touching Sentry, verify
    the `InRelease` signature and signed publication record bind the requested
    tag, source-record digest, exact candidate, and exact rollback predecessor.
@@ -228,36 +233,63 @@ forward recovery.
    the same exact signed-APT procedure to move forward. Never republish an old
    release merely to roll back.
 
-### Emergency chicken-egg recovery
+### Authorized chicken-egg bootstrap (exception only)
 
 When fresh evidence proves the Velnor lane is failed or unavailable and that
 failure prevents building Velnor itself, an explicitly authorized operator may
-temporarily build the Debian package on this host from the exact recorded
-campaign or `main` SHA, then manually publish and deploy that exact signed
-artifact over `ssh sentry`:
+temporarily build exactly one Debian package on this host from the exact pushed
+campaign SHA only after verifying that the remote campaign branch tip equals that
+SHA. This is incident recovery, not a second normal release mechanism:
 
-1. Build from a clean host checkout at the recorded SHA. Record the source SHA,
-   package/version/architecture, artifact digest, and authorized signing-key
-   fingerprint; sign the package and repository metadata before transfer.
-2. Verify those identities locally and on Sentry, including the Sentry host
-   fingerprint, package digest, and APT `Release` signature. Transfer only the
-   exact signed package to the authorized staging path and publish it into the
-   signed `velnor-apt` repository from this host.
-3. Snapshot the current state, drain the affected units, and install only the
-   exact published candidate through the existing package-transaction lock and
-   apt-based path. Never use direct `dpkg -i`, an apt local path, or raw binary
-   transfer as an installation bypass.
-4. Prove package and binary identity, health/readiness, runner registration and
-   lease state, the original reproducer, all `velnor`/`github`/`both` lanes,
-   and rollback to the retained predecessor. Record authorization, commands,
-   digests, checks, and rollback in the incident ledger. Stop using this path
-   as soon as Velnor self-build is restored.
+1. Before building, verify that the remote campaign branch tip equals the exact
+   pushed campaign SHA; abort if the remote ref is unavailable or the SHA does
+   not match. Then build from a clean checkout at that exact SHA. Before
+   transfer, publication, or installation, create an immutable signed source
+   record binding the exact source SHA, package name, package version,
+   architecture, package SHA-256, and exact `velnor-apt` repository coordinate
+   (HTTPS origin, suite, component, and package path). Record the authorization,
+   provenance, package path, and authorized signing-key fingerprint; verify the
+   record signature and every binding before proceeding. Sign the repository
+   metadata with the authorized release key.
+2. Snapshot the current Sentry state. Verify the pinned Sentry host identity
+   against its expected fingerprint, and require fail-closed authentication.
+   Verify the signed source record and package SHA-256 before transfer, transfer
+   only that Debian package to the authorized staging path via
+   `ssh -o BatchMode=yes sentry`, and verify the same SHA-256 again after
+   transfer. Do not transfer source, a checkout, a raw binary, or any other
+   artifact; abort on any identity or digest mismatch.
+3. Publish that exact package into the signed `velnor-apt` repository through
+   the authorized host/Sentry release path at the exact coordinate in the signed
+   source record. Verify the record signature and binding, package checksum,
+   the exact APT `Release` metadata, its clearsigned `InRelease` signature and
+   detached `Release.gpg` signature, the trusted repository signing-key
+   fingerprint, and matching metadata/package checksums and bytes. Then prove
+   the exact pinned package name/version/architecture is available from the
+   configured HTTPS APT source.
+4. Drain the affected units and install only the exact published candidate
+   through APT under the existing exclusive
+   `/run/velnor/package-transaction.lock` `flock` wrapper. Never use `dpkg -i`,
+   an APT local path, or an unpinned install.
+5. Prove the signed source-record binding and source, package, and binary
+   identity; all required signatures and checksums;
+   health/readiness; runner registration and lease state; the original
+   reproducer; rollback to the retained signed predecessor; forward recovery;
+   and fresh `velnor`, `github`, and `both` lane results. Before retrying,
+   cancel stale pending/running validation and remove only validation-owned
+   stale registrations, prove both are clear, and monitor only the new runs.
+6. Record authorization, commands, provenance, signed source-record digest and
+   bindings, both transfer hashes, package and signing identities, health, lane,
+   predecessor, rollback, and recovery evidence in the incident ledger. Retire
+   this path as soon as Velnor self-build is restored.
 
-Outside this explicitly authorized exception, never deploy a local or
-downloaded `.deb`, use direct `dpkg -i`, install an apt local path, copy a
-binary, or build/install from a checkout on Sentry. A checksummed immutable
-release-record download is activation metadata only; it does not install
-executable code and cannot replace any apt step.
+Raw source, checkouts, and raw binaries are never transferred or deployed; the
+exception permits the clean checkout only on this host as the exact build input.
+Outside this explicitly authorized exception, never use an unpinned or
+unrelated artifact; deploy a local or downloaded `.deb`; use direct `dpkg -i`;
+install an APT local path; bypass signature or package verification; or silently
+fail over to GitHub. A checksummed immutable release-record download is
+activation metadata only; it does not install executable code and cannot replace
+any normal signed-APT step.
 
 Verified 2026-07-18 against both repositories and the live host:
 `tailrocks/velnor-apt` publishes amd64+arm64 with a signed reprepro index

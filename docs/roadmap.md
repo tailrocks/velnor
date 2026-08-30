@@ -436,13 +436,27 @@ export, Rust cache, and sccache.
 
 ## Verification Strategy
 
-Sentry deployment is permanently signed-APT-only. Every installation, upgrade,
-downgrade, rollback, and forward recovery follows: green signed commit, signed
-tag, immutable source release/record, signed `velnor-apt` publication,
-signature/publication/exact-candidate verification, fleet drain,
-`apt-get update`, exact-version `apt-get install`, then package/binary/record/
-OCI/runtime proof. Local or downloaded packages, `dpkg -i`, local-path apt,
-copied binaries, and local builds are forbidden deployment paths.
+Normal production Sentry deployment remains signed-APT-only. Every installation,
+upgrade, downgrade, rollback, and forward recovery follows: green signed commit,
+signed tag, immutable source release/record, signed `velnor-apt` publication,
+signature/publication/exact-candidate verification, fleet drain, `apt-get
+update`, exact-version `apt-get install`, then package/binary/record/OCI/runtime
+proof. For normal and emergency paths alike, before accepting publication or
+installing, verify the exact package/source/version/digest binding, trusted
+signing-key fingerprint, and all three APT metadata artifacts—`Release`,
+clearsigned `InRelease`, and detached `Release.gpg`—with matching metadata bytes
+and checksums. Local or downloaded packages, `dpkg -i`, local-path apt, copied
+binaries, and local builds are forbidden deployment paths. The sole chicken-egg
+exception is incident-only and requires fresh evidence that the Velnor lane
+failed or is unavailable, proof that this failure blocks building Velnor itself,
+explicit operator authorization, and—before building—verification that the
+remote campaign branch tip equals the exact pushed campaign SHA. Exactly one
+Debian package may then be built on this host from that SHA. Even then, only
+that package may be transferred via `ssh -o BatchMode=yes sentry` using a pinned
+and verified Sentry host identity and fail-closed authentication, then proceed
+through authorized staging, signed `velnor-apt` publication, and locked
+exact-version APT installation; raw source, checkouts, and binaries remain
+forbidden transfer and deployment artifacts.
 
 Verification must be staged.
 

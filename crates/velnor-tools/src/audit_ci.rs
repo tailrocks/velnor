@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,8 +13,20 @@ use std::process::Command;
 use crate::fleet_policy::{generate_policies_from_ledger, ReleaseRefLedger};
 
 const INLINE_MATRIX_MARKERS: [&str; 2] = ["inputs.lanes == 'both'", "inputs.lane == 'both'"];
+const VELNOR_GUEST_IMAGE_REQUIREMENT: &str = "guest-image-build.user-namespace";
+const VELNOR_GUEST_IMAGE_CAPABILITY: &str = "unprivileged user namespaces or CAP_SYS_ADMIN";
 
-fn has_real_both_lane_expansion(text: &str) -> bool {
+fn has_explicit_velnor_capability_gate(text: &str) -> bool {
+    text.contains(&format!(
+        "VELNOR_IMPLEMENTATION_REQUIREMENT: \"{VELNOR_GUEST_IMAGE_REQUIREMENT}\""
+    )) && text.contains(&format!(
+        "VELNOR_MISSING_CAPABILITY: \"{VELNOR_GUEST_IMAGE_CAPABILITY}\""
+    )) && text.contains("velnor|both)")
+        && text.contains("refusing GitHub substitution")
+        && text.contains("exit 1")
+}
+
+fn has_truthful_both_lane_contract(text: &str) -> bool {
     INLINE_MATRIX_MARKERS
         .iter()
         .any(|marker| text.contains(marker))
@@ -22,44 +35,53 @@ fn has_real_both_lane_expansion(text: &str) -> bool {
         ) && text.contains("case \"$LANES\" in")
             && text.contains("both)")
             && text.contains("configs=\"[$velnor,$github]\""))
+        || has_explicit_velnor_capability_gate(text)
 }
 const SHA_LEN: usize = 40;
-const EXPECTED_ESTATE: [&str; 28] = [
-    "ChainArgos/blockchain-nodes",
-    "ChainArgos/jackin-agent-brown",
-    "ChainArgos/java-monorepo",
-    "jackin-project/homebrew-tap",
-    "jackin-project/jackin",
-    "jackin-project/jackin-agent-smith",
-    "jackin-project/jackin-dev",
-    "jackin-project/jackin-role-action",
-    "jackin-project/jackin-sentinel",
-    "jackin-project/jackin-the-architect",
-    "tailrocks/holla",
-    "tailrocks/holla-apt",
-    "tailrocks/homebrew-holla",
-    "tailrocks/homebrew-parallax",
-    "tailrocks/homebrew-ruxel",
-    "tailrocks/homebrew-tablerock",
-    "tailrocks/parallax",
-    "tailrocks/parallax-telemetry-playground",
-    "tailrocks/pg-bigdecimal",
-    "tailrocks/ruxel",
-    "tailrocks/schemalane",
-    "tailrocks/tablerock",
-    "tailrocks/tailrocks-skills",
-    "tailrocks/termrock",
-    "tailrocks/tracing-request-level",
-    "tailrocks/velnor",
-    "tailrocks/velnor-actions-fixture",
-    "tailrocks/velnor-apt",
-];
+const FLEET_MAP_FILE: &str = "VELNOR_PROJECTS_SETUP.md";
+const FLEET_MAP_START: &str = "<!-- fleet-map:start -->";
+const FLEET_MAP_END: &str = "<!-- fleet-map:end -->";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum GeneratedCallerClass {
+    Code,
+    Tap,
+    Apt,
+    Fixture,
+}
+
+impl GeneratedCallerClass {
+    const ALL: [Self; 4] = [Self::Code, Self::Tap, Self::Apt, Self::Fixture];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Tap => "tap",
+            Self::Apt => "apt",
+            Self::Fixture => "fixture",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.as_str() == value)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CanonicalFleetEntry {
+    repository: String,
+    class: GeneratedCallerClass,
+}
 
 #[derive(Debug, Args)]
 pub struct AuditCiArgs {
     /// Repository checkout to audit.
     #[arg(long, default_value = ".")]
     pub repo_path: PathBuf,
+    /// Canonical owner/repository identity used to enforce its generated class.
+    #[arg(long)]
+    pub repository_name: Option<String>,
     /// Emit stable JSON findings.
     #[arg(long)]
     pub json: bool,
@@ -170,6 +192,8 @@ struct EstateRepository {
 struct EstateAuditResult {
     default_branch: String,
     head_sha: String,
+    generated_class: GeneratedCallerClass,
+    generated_ci_sha256: Option<String>,
     findings: Vec<Finding>,
 }
 
@@ -177,6 +201,13 @@ struct EstateAuditResult {
 struct EstateAuditOutput {
     schema_version: &'static str,
     repositories: BTreeMap<String, EstateAuditResult>,
+}
+
+struct GeneratedCallerSample {
+    repository: String,
+    class: GeneratedCallerClass,
+    sha256: String,
+    bytes: Vec<u8>,
 }
 
 struct RemoteCheckout {
@@ -219,9 +250,138 @@ struct ConcernImplementation {
 struct WorkflowAuditProfile {
     workload_override: Option<bool>,
     legacy_uniform_warnings: bool,
+    expected_generated_class: Option<GeneratedCallerClass>,
+}
+
+fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerClass>> {
+    let path = root.join(FLEET_MAP_FILE);
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("read canonical fleet map {}", path.display()))?;
+    canonical_fleet_map_from_text(&text)
+        .with_context(|| format!("parse canonical fleet map {}", path.display()))
+}
+
+fn canonical_fleet_map_from_text(text: &str) -> Result<BTreeMap<String, GeneratedCallerClass>> {
+    let marked = text
+        .split_once(FLEET_MAP_START)
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once(FLEET_MAP_END).map(|(body, _)| body))
+        .context("missing unique fleet-map markers")?;
+    let json = marked
+        .split_once("```json")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("```").map(|(body, _)| body))
+        .context("fleet-map markers must contain one JSON code fence")?;
+    let entries: Vec<CanonicalFleetEntry> =
+        serde_json::from_str(json).context("fleet-map JSON is invalid")?;
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        if map.insert(entry.repository.clone(), entry.class).is_some() {
+            bail!(
+                "fleet-map contains duplicate repository {}",
+                entry.repository
+            );
+        }
+    }
+    let expected_counts = [
+        (GeneratedCallerClass::Code, 20),
+        (GeneratedCallerClass::Tap, 5),
+        (GeneratedCallerClass::Apt, 2),
+        (GeneratedCallerClass::Fixture, 1),
+    ];
+    for (class, expected) in expected_counts {
+        let observed = map.values().filter(|value| **value == class).count();
+        if observed != expected {
+            bail!(
+                "fleet-map class {} has {observed} repositories, expected {expected}",
+                class.as_str()
+            );
+        }
+    }
+    Ok(map)
+}
+
+fn generated_caller_sample(
+    root: &Path,
+    repository: &str,
+    class: GeneratedCallerClass,
+) -> Result<Option<GeneratedCallerSample>> {
+    let path = root.join(".github/workflows/ci.yml");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    if !bytes.starts_with(b"# Generated by velnor-actions-generator. DO NOT EDIT.\n") {
+        return Ok(None);
+    }
+    let sha256 = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(Some(GeneratedCallerSample {
+        repository: repository.to_owned(),
+        class,
+        sha256,
+        bytes,
+    }))
+}
+
+fn generated_class_equality_findings(
+    samples: &[GeneratedCallerSample],
+) -> BTreeMap<String, Vec<Finding>> {
+    let mut findings = BTreeMap::<String, Vec<Finding>>::new();
+    for class in GeneratedCallerClass::ALL {
+        let class_samples = samples
+            .iter()
+            .filter(|sample| sample.class == class)
+            .collect::<Vec<_>>();
+        let groups = class_samples.iter().fold(
+            BTreeMap::<&[u8], Vec<&GeneratedCallerSample>>::new(),
+            |mut groups, sample| {
+                groups
+                    .entry(sample.bytes.as_slice())
+                    .or_default()
+                    .push(sample);
+                groups
+            },
+        );
+        if groups.len() <= 1 {
+            continue;
+        }
+        let summary = groups
+            .values()
+            .filter_map(|group| {
+                group
+                    .first()
+                    .map(|sample| format!("{}={}", sample.sha256, group.len()))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        for sample in class_samples {
+            findings
+                .entry(sample.repository.clone())
+                .or_default()
+                .push(Finding::error(
+                    "generated-class-bytes",
+                    ".github/workflows/ci.yml",
+                    "$",
+                    format!(
+                        "generated {} class is not byte-identical: repository sha256 {}; class hashes [{summary}]",
+                        class.as_str(),
+                        sample.sha256
+                    ),
+                ));
+        }
+    }
+    findings
 }
 
 pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
+    let canonical_classes = if args.estate.is_some() || args.repository_name.is_some() {
+        canonical_fleet_map(&args.repo_path)?
+    } else {
+        BTreeMap::new()
+    };
     let estate = if let Some(estate) = &args.estate {
         let text = fs::read_to_string(estate)
             .with_context(|| format!("read estate file {}", estate.display()))?;
@@ -233,6 +393,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
         None
     };
     let mut estate_results = BTreeMap::new();
+    let mut generated_samples = Vec::new();
     let mut all = BTreeMap::new();
     if let Some(estate) = &estate {
         if estate.version != 2 {
@@ -241,11 +402,15 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                 estate.version
             );
         }
-        validate_estate_scope(estate)?;
+        validate_estate_scope(estate, &canonical_classes)?;
         if args.offline {
             bail!("estate audit cannot skip delivered-default freshness checks");
         }
         for repo in &estate.repositories {
+            let expected_class = canonical_classes
+                .get(&repo.name)
+                .copied()
+                .with_context(|| format!("canonical fleet map has no class for {}", repo.name))?;
             let (default_branch, head_sha) = remote_default_identity(&repo.name)?;
             let remote_checkout = if args.remote_defaults {
                 Some(checkout_remote_default(
@@ -297,9 +462,20 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                         .collect::<BTreeSet<_>>()
                 })
                 .unwrap_or_default();
-            let mut findings =
-                audit_repo_profile(&canonical, args.offline, Some(&workload_files), false)?;
+            let mut findings = audit_repo_profile(
+                &canonical,
+                args.offline,
+                Some(&workload_files),
+                false,
+                Some(expected_class),
+            )?;
             findings.extend(audit_concern_contract(repo, &estate.defaults, &canonical)?);
+            let generated_ci_sha256 =
+                generated_caller_sample(&canonical, &repo.name, expected_class)?.map(|sample| {
+                    let sha256 = sample.sha256.clone();
+                    generated_samples.push(sample);
+                    sha256
+                });
             findings.sort_by(|left, right| {
                 (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
             });
@@ -308,16 +484,36 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                 EstateAuditResult {
                     default_branch,
                     head_sha,
+                    generated_class: expected_class,
+                    generated_ci_sha256,
                     findings,
                 },
             );
         }
+        for (repository, byte_findings) in generated_class_equality_findings(&generated_samples) {
+            let result = estate_results.get_mut(&repository).with_context(|| {
+                format!("generated sample has no estate result for {repository}")
+            })?;
+            result.findings.extend(byte_findings);
+            result.findings.sort_by(|left, right| {
+                (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
+            });
+        }
     } else {
         let root = &args.repo_path;
         let canonical = root.canonicalize().unwrap_or(root.clone());
+        let expected_class =
+            args.repository_name
+                .as_deref()
+                .map(|repository| {
+                    canonical_classes.get(repository).copied().with_context(|| {
+                        format!("canonical fleet map has no class for {repository}")
+                    })
+                })
+                .transpose()?;
         all.insert(
             canonical.display().to_string(),
-            audit_repo(&canonical, args.offline)?,
+            audit_repo_profile(&canonical, args.offline, None, true, expected_class)?,
         );
     }
     if let Some(log) = &args.perf_log {
@@ -360,8 +556,11 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     } else {
         for (repo, result) in &estate_results {
             println!(
-                "audit-ci: {repo} ({} {})",
-                result.default_branch, result.head_sha
+                "audit-ci: {repo} ({} {}; class {}; ci sha256 {})",
+                result.default_branch,
+                result.head_sha,
+                result.generated_class.as_str(),
+                result.generated_ci_sha256.as_deref().unwrap_or("missing")
             );
             if result.findings.is_empty() {
                 println!("  PASS");
@@ -392,7 +591,10 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_estate_scope(estate: &EstateManifest) -> Result<()> {
+fn validate_estate_scope(
+    estate: &EstateManifest,
+    canonical_classes: &BTreeMap<String, GeneratedCallerClass>,
+) -> Result<()> {
     let observed = estate
         .repositories
         .iter()
@@ -401,7 +603,10 @@ fn validate_estate_scope(estate: &EstateManifest) -> Result<()> {
     if observed.len() != estate.repositories.len() {
         bail!("estate manifest contains duplicate repository names");
     }
-    let expected = EXPECTED_ESTATE.into_iter().collect::<BTreeSet<_>>();
+    let expected = canonical_classes
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     if observed != expected {
         let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
         let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
@@ -724,8 +929,9 @@ fn concern_implementations<'a>(
     repo.concerns.get(name).or_else(|| defaults.get(name))
 }
 
+#[cfg(test)]
 fn audit_repo(root: &Path, offline: bool) -> Result<Vec<Finding>> {
-    audit_repo_profile(root, offline, None, true)
+    audit_repo_profile(root, offline, None, true, None)
 }
 
 fn audit_repo_profile(
@@ -733,6 +939,7 @@ fn audit_repo_profile(
     offline: bool,
     workload_files: Option<&BTreeSet<&str>>,
     legacy_uniform_warnings: bool,
+    expected_generated_class: Option<GeneratedCallerClass>,
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     findings.extend(audit_test_runner_surfaces(root)?);
@@ -762,6 +969,7 @@ fn audit_repo_profile(
         return Ok(findings);
     }
     let mut latest = BTreeMap::new();
+    let mut generated_caller_seen = false;
     for path in yaml_files(&workflow_dir)? {
         let relative = path
             .strip_prefix(root)
@@ -771,6 +979,8 @@ fn audit_repo_profile(
         let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let yaml: Value =
             serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+        generated_caller_seen |= path.file_name().and_then(|name| name.to_str()) == Some("ci.yml")
+            && is_generated_caller(&text);
         let workload = workload_files.map(|files| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -784,10 +994,19 @@ fn audit_repo_profile(
             WorkflowAuditProfile {
                 workload_override: workload,
                 legacy_uniform_warnings,
+                expected_generated_class,
             },
             &mut latest,
             &mut findings,
         );
+    }
+    if expected_generated_class.is_some() && !generated_caller_seen {
+        findings.push(Finding::error(
+            "generated-caller",
+            ".github/workflows/ci.yml",
+            "$",
+            "canonical estate repository must install its generated class caller as ci.yml",
+        ));
     }
     findings.sort_by(|left, right| {
         (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
@@ -1082,7 +1301,7 @@ fn audit_workflow(
         .unwrap_or(file);
     let generated_caller = file_name == "ci.yml" && is_generated_caller(text);
     if generated_caller {
-        audit_generated_caller(file, text, yaml, findings);
+        audit_generated_caller(file, text, yaml, profile.expected_generated_class, findings);
     }
     let workload = profile
         .workload_override
@@ -1149,7 +1368,7 @@ fn audit_workflow(
         && !is_native_apple_workflow(yaml)
         && !is_forced_public_unmerged_workflow(file_name, yaml)
         && (!has_lane_selector(yaml)
-            || (lane_selector_offers_both(yaml) && !has_real_both_lane_expansion(text)))
+            || (lane_selector_offers_both(yaml) && !has_truthful_both_lane_contract(text)))
     {
         findings.push(Finding::error(
             "lanes",
@@ -1255,7 +1474,35 @@ pub(crate) fn fleet_contract_is_success(selected_result: &str, selected_contract
 const CALLER_CONTRACT_RESULT_GUARD: &str = r#"if [ "${sel_result}" != "success" ]"#;
 const CALLER_CONTRACT_OUTPUT_GUARD: &str = r#"if [ "${sel_contract}" != "success" ]"#;
 
-fn audit_generated_caller(file: &str, text: &str, yaml: &Value, findings: &mut Vec<Finding>) {
+#[derive(Clone, Copy)]
+struct GeneratedOwnerLaneContract {
+    owner: &'static str,
+    lane_expression: &'static str,
+}
+
+const GENERATED_OWNER_LANE_CONTRACTS: [GeneratedOwnerLaneContract; 3] = [
+    GeneratedOwnerLaneContract {
+        owner: "jackin-project",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'github' }}",
+    },
+    GeneratedOwnerLaneContract {
+        owner: "tailrocks",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}",
+    },
+    GeneratedOwnerLaneContract {
+        owner: "ChainArgos",
+        lane_expression: "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}",
+    },
+];
+const GENERATED_AGGREGATOR_RUNNER_EXPRESSION: &str = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.repository_owner == 'jackin-project' && github.event_name != 'workflow_dispatch')) && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
+
+fn audit_generated_caller(
+    file: &str,
+    text: &str,
+    yaml: &Value,
+    expected_class: Option<GeneratedCallerClass>,
+    findings: &mut Vec<Finding>,
+) {
     if Path::new(file).file_name().and_then(|name| name.to_str()) != Some("ci.yml") {
         findings.push(Finding::error(
             "generated-caller",
@@ -1274,8 +1521,10 @@ fn audit_generated_caller(file: &str, text: &str, yaml: &Value, findings: &mut V
         return;
     };
     let observed = jobs.keys().map(String::as_str).collect::<BTreeSet<_>>();
-    let expected = ["jackin-project", "tailrocks", "ChainArgos", "ci-required"]
-        .into_iter()
+    let expected = GENERATED_OWNER_LANE_CONTRACTS
+        .iter()
+        .map(|contract| contract.owner)
+        .chain(std::iter::once("ci-required"))
         .collect::<BTreeSet<_>>();
     if observed != expected {
         findings.push(Finding::error(
@@ -1287,9 +1536,8 @@ fn audit_generated_caller(file: &str, text: &str, yaml: &Value, findings: &mut V
     }
 
     let mut classes = BTreeSet::new();
-    const DEFAULT_LANE_EXPRESSION: &str =
-        "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}";
-    for owner in ["jackin-project", "tailrocks", "ChainArgos"] {
+    for contract in GENERATED_OWNER_LANE_CONTRACTS {
+        let owner = contract.owner;
         let Some(job) = mapping_get(jobs, owner).and_then(Value::as_mapping) else {
             continue;
         };
@@ -1321,6 +1569,29 @@ fn audit_generated_caller(file: &str, text: &str, yaml: &Value, findings: &mut V
             ));
             continue;
         };
+        let parsed_class = GeneratedCallerClass::parse(class);
+        if parsed_class.is_none() {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.uses"),
+                "owner callable class must be exactly code, tap, apt, or fixture",
+            ));
+        }
+        if let (Some(observed), Some(expected)) = (parsed_class, expected_class) {
+            if observed != expected {
+                findings.push(Finding::error(
+                    "generated-caller",
+                    file,
+                    format!("$.jobs.{owner}.uses"),
+                    format!(
+                        "canonical fleet map requires class {}, observed {}",
+                        expected.as_str(),
+                        observed.as_str()
+                    ),
+                ));
+            }
+        }
         if sha.len() != SHA_LEN || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             findings.push(Finding::error(
                 "generated-caller",
@@ -1329,18 +1600,22 @@ fn audit_generated_caller(file: &str, text: &str, yaml: &Value, findings: &mut V
                 "owner callable ref must be an immutable 40-hex commit",
             ));
         }
-        classes.insert(class);
+        if let Some(class) = parsed_class {
+            classes.insert(class);
+        }
 
         let lane = mapping_get(job, "with")
             .and_then(Value::as_mapping)
             .and_then(|with| mapping_get(with, "lane"))
             .and_then(Value::as_str);
-        if lane != Some(DEFAULT_LANE_EXPRESSION) {
+        if lane != Some(contract.lane_expression) {
             findings.push(Finding::error(
                 "generated-caller",
                 file,
                 format!("$.jobs.{owner}.with.lane"),
-                "trusted automatic events must default to Velnor and workflow dispatch must forward the closed lane choice",
+                format!(
+                    "owner {owner} must use its canonical automatic lane default, preserve the public-unmerged GitHub trust route, and forward the closed dispatch lane choice"
+                ),
             ));
         }
     }
@@ -1388,6 +1663,18 @@ fn audit_generated_caller(file: &str, text: &str, yaml: &Value, findings: &mut V
             file,
             "$.on.workflow_dispatch.inputs.lane",
             "generated-caller must not define legacy singular lane input alongside lanes",
+        ));
+    }
+    let aggregator_runner = mapping_get(jobs, "ci-required")
+        .and_then(Value::as_mapping)
+        .and_then(|job| mapping_get(job, "runs-on"))
+        .and_then(Value::as_str);
+    if aggregator_runner != Some(GENERATED_AGGREGATOR_RUNNER_EXPRESSION) {
+        findings.push(Finding::error(
+            "generated-caller",
+            file,
+            "$.jobs.ci-required.runs-on",
+            "ci-required must follow the selected owner's canonical lane and the public-unmerged GitHub trust route",
         ));
     }
     let guards_present =
@@ -2007,17 +2294,18 @@ fn audit_lane_selector(file: &str, yaml: &Value, text: &str, findings: &mut Vec<
     // labels; `audit_generated_caller` closes the caller identity, ref, input,
     // and Velnor-default forwarding contract, while generator/release audits
     // prove the callable's real Velnor+GitHub expansion.
+    let capability_gated = has_explicit_velnor_capability_gate(text);
     if options.contains(&"both")
         && !is_generated_caller(text)
-        && (!has_real_both_lane_expansion(text)
-            || !text.contains("velnor-target-mvp")
-            || !text.contains("ubuntu-26.04"))
+        && (!has_truthful_both_lane_contract(text)
+            || (!capability_gated
+                && (!text.contains("velnor-target-mvp") || !text.contains("ubuntu-26.04"))))
     {
         findings.push(Finding::error(
             "lane-selector",
             file,
             &path,
-            "both must select real Velnor and GitHub runner lanes",
+            "both must select real Velnor and GitHub runner lanes, or fail before side effects at the canonical tracked Velnor capability gate",
         ));
     }
 }
@@ -2102,10 +2390,18 @@ mod tests {
     use super::*;
 
     fn audit(yaml: &str) -> Vec<Finding> {
-        audit_file(".github/workflows/ci.yml", yaml)
+        audit_file_with_class(".github/workflows/ci.yml", yaml, None)
     }
 
     fn audit_file(file: &str, yaml: &str) -> Vec<Finding> {
+        audit_file_with_class(file, yaml, None)
+    }
+
+    fn audit_file_with_class(
+        file: &str,
+        yaml: &str,
+        expected_generated_class: Option<GeneratedCallerClass>,
+    ) -> Vec<Finding> {
         let value: Value = serde_yaml::from_str(yaml).unwrap();
         let mut findings = Vec::new();
         audit_workflow(
@@ -2116,6 +2412,7 @@ mod tests {
             WorkflowAuditProfile {
                 workload_override: None,
                 legacy_uniform_warnings: true,
+                expected_generated_class,
             },
             &mut BTreeMap::new(),
             &mut findings,
@@ -2172,18 +2469,18 @@ jobs:
   jackin-project:
     uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'github' }}
   tailrocks:
     uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}
   ChainArgos:
     uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'github' || 'velnor' }}
   ci-required:
     timeout-minutes: 10
-    runs-on: ${{ 'ubuntu-26.04' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.repository_owner == 'jackin-project' && github.event_name != 'workflow_dispatch')) && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     steps:
       - run: |
           if [ "${sel_result}" != "success" ]; then
@@ -2230,15 +2527,65 @@ jobs:
         );
         assert!(has_rule(&audit(&tampered), "generated-caller"));
 
+        let unknown_class = GENERATED_CALLER.replace("ci-code.yml@", "ci-custom.yml@");
+        assert!(has_rule(&audit(&unknown_class), "generated-caller"));
+
+        let wrong_valid_class = GENERATED_CALLER.replace("ci-code.yml@", "ci-tap.yml@");
+        assert!(has_rule(
+            &audit_file_with_class(
+                ".github/workflows/ci.yml",
+                &wrong_valid_class,
+                Some(GeneratedCallerClass::Code),
+            ),
+            "generated-caller"
+        ));
+        assert!(!has_rule(
+            &audit_file_with_class(
+                ".github/workflows/ci.yml",
+                &wrong_valid_class,
+                Some(GeneratedCallerClass::Tap),
+            ),
+            "generated-caller"
+        ));
+
         let github_default = GENERATED_CALLER.replacen("default: velnor", "default: github", 1);
         assert!(has_rule(&audit(&github_default), "generated-caller"));
 
-        let owner_default = GENERATED_CALLER.replacen(
-            "github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor'",
-            "github.repository_owner == 'jackin-project' && 'github' || 'velnor'",
+        let obsolete_all_pushes_on_github = GENERATED_CALLER.replacen(
+            GENERATED_OWNER_LANE_CONTRACTS[1].lane_expression,
+            "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}",
             1,
         );
-        assert!(has_rule(&audit(&owner_default), "generated-caller"));
+        assert!(has_rule(
+            &audit(&obsolete_all_pushes_on_github),
+            "generated-caller"
+        ));
+
+        let jackin_velnor_default = GENERATED_CALLER.replacen(
+            GENERATED_OWNER_LANE_CONTRACTS[0].lane_expression,
+            GENERATED_OWNER_LANE_CONTRACTS[1].lane_expression,
+            1,
+        );
+        assert!(has_rule(&audit(&jackin_velnor_default), "generated-caller"));
+
+        let missing_public_trust_override = GENERATED_CALLER.replacen(
+            GENERATED_OWNER_LANE_CONTRACTS[2].lane_expression,
+            "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'velnor' }}",
+            1,
+        );
+        assert!(has_rule(
+            &audit(&missing_public_trust_override),
+            "generated-caller"
+        ));
+
+        let github_only_aggregator = GENERATED_CALLER.replace(
+            GENERATED_AGGREGATOR_RUNNER_EXPRESSION,
+            "${{ 'ubuntu-26.04' }}",
+        );
+        assert!(has_rule(
+            &audit(&github_only_aggregator),
+            "generated-caller"
+        ));
     }
 
     #[test]

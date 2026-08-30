@@ -24,11 +24,41 @@ permissions:
   contents: read
 
 concurrency:
-  group: guest-image-${{ github.workflow }}-${{ github.ref }}
+  group: guest-image-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  lane-admission:
+    name: Resolve guest-image lanes
+    timeout-minutes: 5
+    runs-on: ${{ 'ubuntu-26.04' }}
+    permissions:
+      contents: read
+    env:
+      VELNOR_IMPLEMENTATION_REQUIREMENT: "guest-image-build.user-namespace"
+      VELNOR_MISSING_CAPABILITY: "unprivileged user namespaces or CAP_SYS_ADMIN"
+    steps:
+      - name: Validate requested lanes and required capabilities
+        env:
+          REQUESTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'pull_request' && 'github' || 'velnor' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_LANES" in
+            github)
+              ;;
+            velnor|both)
+              echo "::error::guest-image lanes '$REQUESTED_LANES' fail capability check '$VELNOR_MISSING_CAPABILITY'; Velnor implementation requirement '$VELNOR_IMPLEMENTATION_REQUIREMENT' remains open; refusing GitHub substitution" >&2
+              exit 1
+              ;;
+            *)
+              echo "::error::invalid guest-image lanes '$REQUESTED_LANES'; expected velnor, github, or both" >&2
+              exit 1
+              ;;
+          esac
+
   guest-image:
+    needs: lane-admission
     name: Guest kernel/rootfs ${{ matrix.arch }}
     timeout-minutes: 180
     strategy:
@@ -39,11 +69,14 @@ jobs:
             deb: amd64
           - arch: aarch64
             deb: arm64
-    # Always GitHub-hosted: mmdebstrap needs unprivileged user namespaces
-    # (or CAP_SYS_ADMIN), which the Velnor job sandbox drops. Building the
-    # signed guest kernel/rootfs release artifacts is a trusted operation on
-    # the documented trust route anyway.
+    # lane-admission permits this implementation only for trusted PR code or an
+    # explicit github dispatch. Velnor/both fail instead of substituting GitHub.
     runs-on: ${{ matrix.deb == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    env:
+      CACHE_LANE: GitHub
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -54,10 +87,23 @@ jobs:
           install_args: "rust"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
+
       - name: Install kernel and rootfs build packages
         run: |
           set -euo pipefail
+          # velnor-sudo-exception: GitHub-hosted guest-image build installs required OS packages.
           sudo apt-get update
+          # velnor-sudo-exception: GitHub-hosted guest-image build installs required OS packages.
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
             mmdebstrap debootstrap qemu-user-binfmt binfmt-support gnupg arch-test \
