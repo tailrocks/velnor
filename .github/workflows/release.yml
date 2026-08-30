@@ -628,6 +628,23 @@ jobs:
           grep -q "usr/share/velnor/microvm/manifest.json" "$manifest" || { echo "::error::deb missing microvm manifest" >&2; exit 1; }
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
+          build_binary="target/${{ matrix.target }}/release/velnor-runner"
+          recorded_binary_sha="$(tr -d '\n' < "velnor-runner-${{ matrix.arch }}.bin.sha256")"
+          [ "${#recorded_binary_sha}" -eq 64 ] || { echo "::error::invalid recorded runner binary sha256" >&2; exit 1; }
+          case "$recorded_binary_sha" in
+            *[!0-9a-f]*) echo "::error::invalid recorded runner binary sha256" >&2; exit 1 ;;
+          esac
+          build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')"
+          [ "$build_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::runner binary sidecar does not match target build" >&2; exit 1; }
+          package_root="$(mktemp -d)"
+          trap 'rm -rf "$package_root"' EXIT
+          dpkg-deb --extract "$src" "$package_root"
+          packaged_binary="$package_root/usr/bin/velnor-runner"
+          [ ! -L "$packaged_binary" ] || { echo "::error::packaged runner binary must not be a symlink" >&2; exit 1; }
+          [ -f "$packaged_binary" ] || { echo "::error::extracted deb missing usr/bin/velnor-runner" >&2; exit 1; }
+          packaged_binary_sha="$(sha256sum "$packaged_binary" | awk '{print $1}')"
+          [ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }
+          [ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
           cp "$src" "$dst"
           sha256sum "$dst" | awk '{print $1}' > "$dst.sha256"
