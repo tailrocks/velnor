@@ -1,6 +1,6 @@
 use aho_corasick::{AhoCorasick, MatchKind};
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose, Engine as _};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 #[cfg(unix)]
@@ -13,14 +13,14 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot, Semaphore},
+    sync::{Semaphore, mpsc::UnboundedReceiver, oneshot},
     task::JoinHandle,
 };
 use tracing::Instrument as _;
@@ -28,26 +28,26 @@ use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
 
 use crate::{
     action::{
-        composite_action_invocations, composite_repository_action_plans,
-        composite_repository_action_plans_from_resolved, download_repository_actions,
-        is_local_action_step, local_action_plans_with_context, native_action_adapter,
-        native_invocation_from_plan, repository_action_plans, resolve_local_action,
-        unsupported_action_error, ActionMetadata, ActionRuntime, CompositeActionInvocation,
-        LocalActionPlan, RepositoryActionPlan, ResolvedAction,
+        ActionMetadata, ActionRuntime, CompositeActionInvocation, LocalActionPlan,
+        RepositoryActionPlan, ResolvedAction, composite_action_invocations,
+        composite_repository_action_plans, composite_repository_action_plans_from_resolved,
+        download_repository_actions, is_local_action_step, local_action_plans_with_context,
+        native_action_adapter, native_invocation_from_plan, repository_action_plans,
+        resolve_local_action, unsupported_action_error,
     },
     args::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     checkout::{
-        checkout_plan, checkout_plans, checkout_step_id, cleanup_checkout_credentials,
-        configure_safe_directory, CheckoutPlan,
+        CheckoutPlan, checkout_plan, checkout_plans, checkout_step_id,
+        cleanup_checkout_credentials, configure_safe_directory,
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        condition_is_statically_false, CommandRunner, DockerJobEngine, ExecutableStep,
-        JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
+        CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary, ProcessCommandRunner,
+        StepLog, StepStartEvent, condition_is_statically_false,
     },
     github_adapter::{
-        github_job_container_spec, github_normalized_job_plan, job_container_name,
-        system_connection_access_token, GitHubJobContainerPaths,
+        GitHubJobContainerPaths, github_job_container_spec, github_normalized_job_plan,
+        job_container_name, system_connection_access_token,
     },
     job_message::{
         ActionReferenceType, ActionStep, ActionStepDefinitionReference, AgentJobRequestMessage,
@@ -55,17 +55,17 @@ use crate::{
     },
     platform,
     protocol::{
-        decode_jit_config, github_api_retry_delay, is_transient_acquire_error, AcquireJobOutcome,
-        BrokerClient, DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope,
-        ListedRunner, OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
-        RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
-        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict,
-        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
-        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
+        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthAccessToken, OAuthClient,
+        OAuthJwtCredentials, RUNNER_JOB_REQUEST, RegistrationClient, RunServiceAnnotation,
+        RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob, RunServiceStepResult,
+        RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict, RunnerJobRequestRef,
+        RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
+        TimelineRecordState, decode_jit_config, github_api_retry_delay, is_transient_acquire_error,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
-    slot_log::{self, SlotForensics, LIFECYCLE_LOG},
+    slot_log::{self, LIFECYCLE_LOG, SlotForensics},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -2032,7 +2032,9 @@ async fn retention_lifecycle_with_sink(
         return;
     }
     let Some(sink) = injected_sink.or_else(|| crate::ops::global().cloned()) else {
-        eprintln!("forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness");
+        eprintln!(
+            "forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness"
+        );
         return;
     };
     loop {
@@ -2437,7 +2439,9 @@ pub(crate) async fn run_daemon_slot(
             );
             daemon_forensic_log(
                 &config_base,
-                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
+                &format!(
+                    "slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"
+                ),
             );
             reconfigure_daemon_slot_forever(
                 &args,
@@ -5938,8 +5942,8 @@ fn start_broker_cancellation_poll(
                                     Ok(refreshed) => {
                                         broker = refreshed;
                                         println!(
-                                        "Cancellation poller refreshed broker credentials mid-job."
-                                    );
+                                            "Cancellation poller refreshed broker credentials mid-job."
+                                        );
                                     }
                                     Err(error) => eprintln!(
                                         "Cancellation poller failed to rebuild broker client: {}",
@@ -8016,10 +8020,10 @@ impl PrecreatedJobEnvironment {
     fn spawn_with(
         container: crate::container::JobContainerSpec,
         starter: impl FnOnce(
-                &crate::container::JobContainerSpec,
-            ) -> Result<Option<crate::docker_lease::DockerLeaseGuard>>
-            + Send
-            + 'static,
+            &crate::container::JobContainerSpec,
+        ) -> Result<Option<crate::docker_lease::DockerLeaseGuard>>
+        + Send
+        + 'static,
     ) -> Self {
         let task_container = container.clone();
         let task = std::thread::spawn(move || {
@@ -9075,7 +9079,7 @@ fn append_job_console(writer: &mut BufWriter<fs::File>, display_name: &str, line
 }
 
 fn unix_now_iso8601() -> String {
-    use time::{format_description, OffsetDateTime};
+    use time::{OffsetDateTime, format_description};
     // LOG FORMAT CONTRACT — read docs/log-format-contract.md before touching
     // ANY of this. This timestamp prefixes lines in the UPLOADED LOG BLOB
     // only. GitHub's UI strips a leading per-line timestamp from blob lines
@@ -10352,7 +10356,7 @@ fn mask_log_lines_with(lines: &[String], masker: &Masker) -> Vec<String> {
 }
 
 fn current_time_rfc3339() -> Result<String> {
-    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -10712,11 +10716,7 @@ fn print_doctor_slos(records: &[JobTimingRecord]) {
 }
 
 fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
-    if p95 > budget {
-        "WARN"
-    } else {
-        "PASS"
-    }
+    if p95 > budget { "WARN" } else { "PASS" }
 }
 
 fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
@@ -10819,7 +10819,10 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
 
     println!(
         "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy, {stale_busy} offline+busy) for prefix '{}'",
-        args.url, args.slots, mine.len(), args.name
+        args.url,
+        args.slots,
+        mine.len(),
+        args.name
     );
     println!(
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
@@ -10937,8 +10940,8 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
 fn probe_compiler_cache(cache_root: &Path, owner: &str) -> Result<()> {
     use velnor_action_model::TrustClass;
     use velnor_cache_service::{
-        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
-        KACHE_VERSION, SCCACHE_VERSION,
+        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, KACHE_VERSION,
+        SCCACHE_VERSION, WrapperDeclaration,
     };
 
     println!(
@@ -11228,17 +11231,23 @@ mod tests {
 
         let owner = JobClaim::try_acquire(&root, "plan", "job").unwrap();
         assert!(owner.is_some());
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_none());
-        assert!(JobClaim::try_acquire(&root, "plan", "other-job")
-            .unwrap()
-            .is_some());
+        assert!(
+            JobClaim::try_acquire(&root, "plan", "job")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            JobClaim::try_acquire(&root, "plan", "other-job")
+                .unwrap()
+                .is_some()
+        );
 
         drop(owner);
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_some());
+        assert!(
+            JobClaim::try_acquire(&root, "plan", "job")
+                .unwrap()
+                .is_some()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -11346,17 +11355,21 @@ mod tests {
         assert!(error.contains("runner name mismatch"), "{error}");
     }
     use crate::action::{
-        parse_action_metadata, resolve_action, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
+        ActionRuntime, LocalActionPlan, RepositoryActionPlan, parse_action_metadata, resolve_action,
     };
 
     #[test]
     fn token_diagnosis_flags_missing_placeholder_and_garbage() {
-        assert!(diagnose_github_token(None)
-            .unwrap()
-            .contains("empty or unset"));
-        assert!(diagnose_github_token(Some("  "))
-            .unwrap()
-            .contains("empty or unset"));
+        assert!(
+            diagnose_github_token(None)
+                .unwrap()
+                .contains("empty or unset")
+        );
+        assert!(
+            diagnose_github_token(Some("  "))
+                .unwrap()
+                .contains("empty or unset")
+        );
         let placeholder = diagnose_github_token(Some("${VELNOR_GITHUB_TOKEN}")).unwrap();
         assert!(placeholder.contains("unexpanded placeholder"));
         assert!(placeholder.contains("class=placeholder"));
@@ -11967,9 +11980,11 @@ mod tests {
             "quarantine runner id 6676 until GitHub job is terminal; local identity preserved",
         );
         assert!(wrapped.downcast_ref::<LocalRunnerFailure>().is_some());
-        assert!(wrapped
-            .chain()
-            .any(|cause| cause.is::<crate::protocol::RunnerBusyConflict>()));
+        assert!(
+            wrapped
+                .chain()
+                .any(|cause| cause.is::<crate::protocol::RunnerBusyConflict>())
+        );
         assert!(!registration_was_deleted(&wrapped));
     }
 
@@ -12084,9 +12099,11 @@ mod tests {
         assert!(!registration_was_deleted(&remote));
 
         let missing = local_identity_unavailable(anyhow::anyhow!("runner.json missing"));
-        assert!(missing
-            .downcast_ref::<LocalRunnerIdentityUnavailable>()
-            .is_some());
+        assert!(
+            missing
+                .downcast_ref::<LocalRunnerIdentityUnavailable>()
+                .is_some()
+        );
         assert!(missing.downcast_ref::<LocalRunnerFailure>().is_none());
     }
 
@@ -12810,8 +12827,8 @@ jobs:
     #[tokio::test]
     async fn daemon_successor_cleanup_surfaces_directory_removal_failure() {
         use wiremock::{
-            matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
         };
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -12838,9 +12855,11 @@ jobs:
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("remove successor daemon slot-1 directory after deleting JIT identity"));
+        assert!(
+            error
+                .to_string()
+                .contains("remove successor daemon slot-1 directory after deleting JIT identity")
+        );
         assert!(!next_dir.join("runner.json").exists());
         assert!(leftover.exists());
         assert!(next_dir.is_dir());
@@ -12941,9 +12960,11 @@ jobs:
         );
         assert!(preflight.iter().all(|args| args.require_docker_socket));
         assert!(preflight.iter().all(|args| args.require_buildx));
-        assert!(preflight
-            .iter()
-            .all(|args| args.docker_image == "velnor/job-ubuntu:26.04"));
+        assert!(
+            preflight
+                .iter()
+                .all(|args| args.docker_image == "velnor/job-ubuntu:26.04")
+        );
     }
 
     #[test]
@@ -13045,21 +13066,27 @@ jobs:
         let mut args = daemon_args(2);
         args.url = Some("https://github.com/owner/repo".into());
         args.complete_noop = true;
-        assert!(daemon_preflight_args(&args, Path::new("/config"), 2)
-            .unwrap()
-            .is_empty());
+        assert!(
+            daemon_preflight_args(&args, Path::new("/config"), 2)
+                .unwrap()
+                .is_empty()
+        );
 
         args.complete_noop = false;
         args.dry_run_jobs = true;
-        assert!(daemon_preflight_args(&args, Path::new("/config"), 2)
-            .unwrap()
-            .is_empty());
+        assert!(
+            daemon_preflight_args(&args, Path::new("/config"), 2)
+                .unwrap()
+                .is_empty()
+        );
 
         args.dry_run_jobs = false;
         args.skip_preflight = true;
-        assert!(daemon_preflight_args(&args, Path::new("/config"), 2)
-            .unwrap()
-            .is_empty());
+        assert!(
+            daemon_preflight_args(&args, Path::new("/config"), 2)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -13386,9 +13413,11 @@ jobs:
             Value::from(MAX_TELEMETRY_DURATION_MS)
         );
         assert_eq!(fields["queue_time_present"], Value::from(true));
-        assert!(!serde_json::to_string(&fields)
-            .unwrap()
-            .contains("timestamp"));
+        assert!(
+            !serde_json::to_string(&fields)
+                .unwrap()
+                .contains("timestamp")
+        );
     }
 
     #[test]
@@ -13480,9 +13509,11 @@ jobs:
         assert_eq!(fields["logical_tasks"], Value::from(2_u64));
         assert_eq!(fields["physical_actions"], Value::from(1_u64));
         assert_eq!(fields["counts_scope"], Value::from("runner_execution"));
-        assert!(!serde_json::to_string(&fields)
-            .unwrap()
-            .contains("secret-marker"));
+        assert!(
+            !serde_json::to_string(&fields)
+                .unwrap()
+                .contains("secret-marker")
+        );
         assert_eq!(fields["duplicates_prevented"], Value::from(0_u64));
         assert_eq!(fields["selection_reasons"], Value::Array(Vec::new()));
         assert_eq!(
@@ -13603,12 +13634,14 @@ jobs:
             .as_deref(),
             Some("https://example.com/docs/")
         );
-        assert!(safe_environment_url(
-            Some("https://example.com/runtime-secret".into()),
-            &["job-secret".into()],
-            &[log],
-        )
-        .is_none());
+        assert!(
+            safe_environment_url(
+                Some("https://example.com/runtime-secret".into()),
+                &["job-secret".into()],
+                &[log],
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -13691,18 +13724,24 @@ jobs:
         let rejection_log =
             failed_acquired_job_step_log("executor_panic", "join Docker job execution task");
         assert_eq!(rejection_log.exit_code, 1);
-        assert!(rejection_log
-            .lines
-            .iter()
-            .any(|line| line == "phase: executor_panic"));
-        assert!(rejection_log
-            .lines
-            .iter()
-            .any(|line| line.contains("join Docker job execution task")));
-        assert!(rejection_log
-            .lines
-            .iter()
-            .any(|line| line.starts_with("remediation:")));
+        assert!(
+            rejection_log
+                .lines
+                .iter()
+                .any(|line| line == "phase: executor_panic")
+        );
+        assert!(
+            rejection_log
+                .lines
+                .iter()
+                .any(|line| line.contains("join Docker job execution task"))
+        );
+        assert!(
+            rejection_log
+                .lines
+                .iter()
+                .any(|line| line.starts_with("remediation:"))
+        );
         assert_eq!(
             completion.step_results[0].completed_log_lines,
             rejection_log.lines.len() as i64
@@ -13803,9 +13842,11 @@ jobs:
             completion.infrastructure_failure_category.as_deref(),
             Some("operational_store")
         );
-        assert!(completion.annotations[0]
-            .message
-            .contains("failed closed before execution"));
+        assert!(
+            completion.annotations[0]
+                .message
+                .contains("failed closed before execution")
+        );
 
         fs::remove_dir_all(base).unwrap();
     }
@@ -13834,7 +13875,7 @@ jobs:
 
     #[tokio::test]
     async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
-        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
         transport_guard.set_native();
@@ -13877,8 +13918,8 @@ jobs:
     #[tokio::test]
     async fn successful_runner_delete_surfaces_in_flight_cleanup_failure() {
         use wiremock::{
-            matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
         };
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -13899,9 +13940,11 @@ jobs:
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("clear in-flight job after remote runner deletion"));
+        assert!(
+            error
+                .to_string()
+                .contains("clear in-flight job after remote runner deletion")
+        );
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
@@ -13909,8 +13952,8 @@ jobs:
     #[tokio::test]
     async fn busy_runner_delete_surfaces_leftover_completion_failure() {
         use wiremock::{
-            matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
         };
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -13943,12 +13986,16 @@ jobs:
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("complete recorded in-flight job before retrying deletion"));
-        assert!(error
-            .chain()
-            .any(|cause| cause.to_string().contains("missing credentials")));
+        assert!(
+            error
+                .to_string()
+                .contains("complete recorded in-flight job before retrying deletion")
+        );
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("missing credentials"))
+        );
         assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
         assert!(config::load(&config_dir).is_ok());
         assert!(in_flight_job_path(&config_dir).exists());
@@ -13959,8 +14006,8 @@ jobs:
     #[tokio::test]
     async fn busy_runner_delete_surfaces_runner_config_load_failure() {
         use wiremock::{
-            matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
         };
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -13983,9 +14030,11 @@ jobs:
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("load runner identity before completing in-flight job"));
+        assert!(
+            error
+                .to_string()
+                .contains("load runner identity before completing in-flight job")
+        );
         assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
         assert!(config_dir.join("runner.json").is_dir());
         server.verify().await;
@@ -13994,7 +14043,7 @@ jobs:
 
     #[tokio::test]
     async fn journal_acceptance_failure_preserves_retry_record_after_failed_completion() {
-        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
         transport_guard.set_native();
@@ -14091,10 +14140,12 @@ jobs:
             ),
         );
         assert_eq!(rejection_log.exit_code, 1);
-        assert!(rejection_log
-            .lines
-            .iter()
-            .any(|line| line == "phase: host_capacity"));
+        assert!(
+            rejection_log
+                .lines
+                .iter()
+                .any(|line| line == "phase: host_capacity")
+        );
     }
 
     #[test]
@@ -14622,7 +14673,7 @@ jobs:
 
     #[tokio::test]
     async fn transient_acquire_failure_keeps_broker_session_alive() {
-        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
         transport_guard.set_native();
@@ -15428,11 +15479,13 @@ runs:
         server.join().unwrap();
         assert_eq!(source.reads(), 1, "only the local composite was fetched");
         assert_eq!(error.field, "uses");
-        assert!(error
-            .ancestry
-            .0
-            .iter()
-            .any(|hop| hop.contains("acme/unknown")));
+        assert!(
+            error
+                .ancestry
+                .0
+                .iter()
+                .any(|hop| hop.contains("acme/unknown"))
+        );
     }
 
     #[test]
@@ -15443,9 +15496,11 @@ runs:
             serde_json::json!({ "api_url": "https://attacker.invalid/" }),
         )];
         let error = validate_job_api_endpoint(&context, &scope).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("differs from configured runner scope"));
+        assert!(
+            error
+                .to_string()
+                .contains("differs from configured runner scope")
+        );
     }
 
     #[test]
@@ -16563,14 +16618,18 @@ runs:
             }
         });
 
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_none());
+        assert!(
+            JobClaim::try_acquire(&root, "plan", "job")
+                .unwrap()
+                .is_none()
+        );
         release.store(true, Ordering::SeqCst);
         teardown.join().unwrap();
-        assert!(JobClaim::try_acquire(&root, "plan", "job")
-            .unwrap()
-            .is_some());
+        assert!(
+            JobClaim::try_acquire(&root, "plan", "job")
+                .unwrap()
+                .is_some()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -16651,8 +16710,8 @@ runs:
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
-        compiler_cache_trust_class:
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
+            compiler_cache_trust_class:
+                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         }
     }
 
