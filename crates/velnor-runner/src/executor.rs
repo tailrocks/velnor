@@ -1916,7 +1916,8 @@ where
                     let test_started = test_runner.map(|_| Instant::now());
                     let compiler = compile_command_kind(&step.script);
                     let linker = link_command_kind(&step.script);
-                    let plan = ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
+                    let plan =
+                        ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
                     let plan = script_plan.insert(plan);
                     let mut env = step_state.step_env(&[]);
                     env.extend(step.env.iter().cloned());
