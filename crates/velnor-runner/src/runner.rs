@@ -16980,6 +16980,42 @@ runs:
     }
 
     #[test]
+    fn step_log_result_reports_success_for_continue_on_error_failure() {
+        // actions/runner parity (ExecutionContext.ApplyContinueOnError): a failed
+        // step with continue-on-error keeps outcome=failure internally but its
+        // reported timeline/Results-Service conclusion is success.
+        // Regression: jackin-project/jackin Hygiene run 33319391723.
+        use crate::executor::StepLog;
+        use crate::protocol::TaskResult;
+
+        let failed_ignored = StepLog {
+            step_id: "miri-step".to_string(),
+            display_name: "miri crate".to_string(),
+            order: 9,
+            started_at: "2026-08-30T16:43:00Z".to_string(),
+            completed_at: "2026-08-30T17:24:12Z".to_string(),
+            lines: vec!["error: test failed".to_string()],
+            masks: vec![],
+            annotations: vec![],
+            telemetry: vec![],
+            exit_code: 101,
+            skipped: false,
+            failure_ignored: true,
+            error_count: 1,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+        assert_eq!(step_log_result(&failed_ignored), TaskResult::Succeeded);
+
+        let failed_plain = StepLog {
+            failure_ignored: false,
+            ..failed_ignored.clone()
+        };
+        assert_eq!(step_log_result(&failed_plain), TaskResult::Failed);
+    }
+
+    #[test]
     fn run_service_step_result_uses_per_step_completed_at_not_job_finish() {
         // RunServiceStepResult.completed_at must come from StepLog.completed_at (the
         // actual step finish time), NOT from a single job-level completion_time.
