@@ -7,9 +7,9 @@ use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use crate::fleet_policy::{generate_policies_from_ledger, ReleaseRefLedger};
 
@@ -692,7 +692,6 @@ fn checkout_remote_default(
         .stdin(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("configure sparse checkout for {repository}"))?;
-    use std::io::Write as _;
     sparse
         .stdin
         .as_mut()
