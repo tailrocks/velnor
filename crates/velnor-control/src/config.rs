@@ -231,8 +231,8 @@ impl FileContextStore {
     pub fn set(&self, mut context: ContextConfig) -> Result<(), ConfigError> {
         validate_context_config(&context)?;
         let path = self.absolute_path()?;
-        let lock = SidecarLock::acquire(&path)?;
-        let mut file = read_file_at(&lock.path)?;
+        let mut lock = SidecarLock::acquire(&path)?;
+        let mut file = read_file_at(lock.context_file.as_mut())?;
         let is_current =
             file.current.as_deref() == Some(context.name.as_str()) || file.current.is_none();
         if is_current {
@@ -255,8 +255,8 @@ impl FileContextStore {
     pub fn use_context(&self, name: &str) -> Result<ContextConfig, ConfigError> {
         validate_context_name(name)?;
         let path = self.absolute_path()?;
-        let lock = SidecarLock::acquire(&path)?;
-        let mut file = read_file_at(&lock.path)?;
+        let mut lock = SidecarLock::acquire(&path)?;
+        let mut file = read_file_at(lock.context_file.as_mut())?;
         if !file.contexts.iter().any(|context| context.name == name) {
             return Err(ConfigError::ContextNotFound);
         }
@@ -278,8 +278,8 @@ impl FileContextStore {
     pub fn delete(&self, name: &str) -> Result<(), ConfigError> {
         validate_context_name(name)?;
         let path = self.absolute_path()?;
-        let lock = SidecarLock::acquire(&path)?;
-        let mut file = read_file_at(&lock.path)?;
+        let mut lock = SidecarLock::acquire(&path)?;
+        let mut file = read_file_at(lock.context_file.as_mut())?;
         if file.current.as_deref() == Some(name) {
             return Err(ConfigError::ContextCurrent);
         }
@@ -301,11 +301,11 @@ impl FileContextStore {
 struct SidecarLock {
     _file: Option<std::fs::File>,
     path: AnchoredPath,
+    context_file: Option<std::fs::File>,
 }
 
 struct OpenedLock {
     file: std::fs::File,
-    created: bool,
 }
 
 #[cfg(unix)]
@@ -399,26 +399,14 @@ impl SidecarLock {
         let opened = open_lock(&path.parent, &lock_name, true)?.ok_or_else(|| {
             ConfigError::Io("context lock disappeared while opening it".to_owned())
         })?;
-        let OpenedLock { file, created } = opened;
-        if let Err(error) = validate_existing_file(&path.parent, &path.name, "context file") {
-            drop(file);
-            if created {
-                let _ =
-                    rustix::fs::unlinkat(&path.parent, &lock_name, rustix::fs::AtFlags::empty());
-            }
-            return Err(error);
-        }
-        if let Err(error) = file.lock() {
-            drop(file);
-            if created {
-                let _ =
-                    rustix::fs::unlinkat(&path.parent, &lock_name, rustix::fs::AtFlags::empty());
-            }
-            return Err(ConfigError::Io(error.to_string()));
-        }
+        let file = opened.file;
+        file.lock()
+            .map_err(|error| ConfigError::Io(error.to_string()))?;
+        let context_file = open_verified_file(&path.parent, &path.name, "context file")?;
         Ok(Self {
             _file: Some(file),
             path,
+            context_file,
         })
     }
 
@@ -438,10 +426,11 @@ impl SidecarLock {
         let file = opened.file;
         file.lock_shared()
             .map_err(|error| ConfigError::Io(error.to_string()))?;
-        validate_existing_file(&path.parent, &path.name, "context file")?;
+        let context_file = open_verified_file(&path.parent, &path.name, "context file")?;
         Ok(Some(Self {
             _file: Some(file),
             path,
+            context_file,
         }))
     }
 }
@@ -683,18 +672,10 @@ fn open_lock(
     let file: std::fs::File = descriptor.into();
     if created && let Err(error) = rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o600))
     {
-        drop(file);
-        let _ = rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty());
         return Err(ConfigError::Io(std::io::Error::from(error).to_string()));
     }
-    if let Err(error) = validate_file_handle(&file, "context lock") {
-        if created {
-            drop(file);
-            let _ = rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty());
-        }
-        return Err(error);
-    }
-    Ok(Some(OpenedLock { file, created }))
+    validate_file_handle(&file, "context lock")?;
+    Ok(Some(OpenedLock { file }))
 }
 
 fn lock_file_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
@@ -704,43 +685,15 @@ fn lock_file_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
     lock_name
 }
 
-fn read_file_at(path: &AnchoredPath) -> Result<ContextFile, ConfigError> {
-    if !inspect_regular_entry(&path.parent, &path.name, "context file")? {
+fn read_file_at(context_file: Option<&mut std::fs::File>) -> Result<ContextFile, ConfigError> {
+    let Some(file) = context_file else {
         return Ok(ContextFile {
             contexts: Vec::new(),
             current: None,
         });
-    }
-    let descriptor = match rustix::fs::openat(
-        &path.parent,
-        &path.name,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::CLOEXEC
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::NONBLOCK
-            | rustix::fs::OFlags::NOCTTY,
-        rustix::fs::Mode::empty(),
-    ) {
-        Ok(descriptor) => descriptor,
-        Err(error) if error == rustix::io::Errno::NOENT => {
-            return Ok(ContextFile {
-                contexts: Vec::new(),
-                current: None,
-            })
-        }
-        Err(error) if error == rustix::io::Errno::LOOP => {
-            return Err(ConfigError::Io(
-                "refusing to use a symbolic-link context file".to_owned(),
-            ))
-        }
-        Err(error) => {
-            return Err(ConfigError::Io(std::io::Error::from(error).to_string()));
-        }
     };
-    let mut file: std::fs::File = descriptor.into();
-    validate_file_handle(&file, "context file")?;
     let mut contents = String::new();
-    std::io::Read::read_to_string(&mut file, &mut contents)
+    std::io::Read::read_to_string(file, &mut contents)
         .map_err(|error| ConfigError::Io(error.to_string()))?;
     let file = toml::from_str::<ContextFile>(&contents)
         .map_err(|_| ConfigError::Decode("context document failed typed decoding".to_owned()))?;
@@ -753,8 +706,17 @@ fn validate_existing_file(
     name: &std::ffi::OsStr,
     description: &str,
 ) -> Result<(), ConfigError> {
+    let _ = open_verified_file(parent, name, description)?;
+    Ok(())
+}
+
+fn open_verified_file(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    description: &str,
+) -> Result<Option<std::fs::File>, ConfigError> {
     if !inspect_regular_entry(parent, name, description)? {
-        return Ok(());
+        return Ok(None);
     }
     let descriptor = match rustix::fs::openat(
         parent,
@@ -767,7 +729,7 @@ fn validate_existing_file(
         rustix::fs::Mode::empty(),
     ) {
         Ok(descriptor) => descriptor,
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(()),
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
         Err(error) if error == rustix::io::Errno::LOOP => {
             let message = if description == "context file" {
                 "refusing to use a symbolic-link context file"
@@ -779,7 +741,8 @@ fn validate_existing_file(
         Err(error) => return Err(ConfigError::Io(std::io::Error::from(error).to_string())),
     };
     let file: std::fs::File = descriptor.into();
-    validate_file_handle(&file, description)
+    validate_file_handle(&file, description)?;
+    Ok(Some(file))
 }
 
 fn inspect_regular_entry(
@@ -864,7 +827,8 @@ impl ContextStore for FileContextStore {
         let Some(lock) = SidecarLock::acquire_existing_shared(&path)? else {
             return Ok(Vec::new());
         };
-        let file = read_file_at(&lock.path)?;
+        let mut lock = lock;
+        let file = read_file_at(lock.context_file.as_mut())?;
         Ok(file.contexts)
     }
 
@@ -873,7 +837,8 @@ impl ContextStore for FileContextStore {
         let Some(lock) = SidecarLock::acquire_existing_shared(&path)? else {
             return Err(ConfigError::ContextNotFound);
         };
-        let file = read_file_at(&lock.path)?;
+        let mut lock = lock;
+        let file = read_file_at(lock.context_file.as_mut())?;
         let context = file
             .contexts
             .into_iter()
