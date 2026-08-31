@@ -266,8 +266,46 @@
         "hit": {"type": "boolean"},
         "lookup_ms": {"type": "integer", "minimum": 0},
         "store": {"type": "string"},
-        "miss_reason": {"type": "string"}
+        "miss_reason": {"type": "string"},
+        "physical_bytes_known": {"type": "boolean"},
+        "shared_bytes": {"type": "integer", "minimum": 0},
+        "newly_allocated_bytes": {"type": "integer", "minimum": 0}
       },
+      "allOf": [
+        {
+          "if": {
+            "required": ["physical_bytes_known"],
+            "properties": {"physical_bytes_known": {"const": true}}
+          },
+          "then": {"required": ["shared_bytes", "newly_allocated_bytes"]}
+        },
+        {
+          "if": {
+            "required": ["physical_bytes_known"],
+            "properties": {"physical_bytes_known": {"const": false}}
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["shared_bytes"]},
+                {"required": ["newly_allocated_bytes"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {"required": ["shared_bytes"]},
+              {"required": ["newly_allocated_bytes"]}
+            ]
+          },
+          "then": {
+            "required": ["physical_bytes_known"],
+            "properties": {"physical_bytes_known": {"const": true}}
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "compile_start_fields": {
@@ -342,8 +380,46 @@
       "properties": {
         "digest": {"type": "string"},
         "ms": {"type": "integer", "minimum": 0},
-        "subset": {"type": "string"}
+        "subset": {"type": "string"},
+        "physical_bytes_known": {"type": "boolean"},
+        "shared_bytes": {"type": "integer", "minimum": 0},
+        "newly_allocated_bytes": {"type": "integer", "minimum": 0}
       },
+      "allOf": [
+        {
+          "if": {
+            "required": ["physical_bytes_known"],
+            "properties": {"physical_bytes_known": {"const": true}}
+          },
+          "then": {"required": ["shared_bytes", "newly_allocated_bytes"]}
+        },
+        {
+          "if": {
+            "required": ["physical_bytes_known"],
+            "properties": {"physical_bytes_known": {"const": false}}
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["shared_bytes"]},
+                {"required": ["newly_allocated_bytes"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {"required": ["shared_bytes"]},
+              {"required": ["newly_allocated_bytes"]}
+            ]
+          },
+          "then": {
+            "required": ["physical_bytes_known"],
+            "properties": {"physical_bytes_known": {"const": true}}
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "passive_wait_fields": {
