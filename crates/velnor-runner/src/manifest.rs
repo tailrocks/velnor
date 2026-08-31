@@ -20,6 +20,8 @@ use velnor_cache_service::{
 // Approved composites introduced v8; the native GitHub App token adapter is v9;
 // Kache v0.14.2 admission is v10.
 pub const MANIFEST_VERSION: u32 = 10;
+const MAX_MANIFEST_STEPS: usize = 4096;
+const MAX_MANIFEST_INPUTS: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -1046,14 +1048,9 @@ fn subpath_violation(
     capability: &ActionCapability,
 ) -> Option<CapabilityViolation> {
     let subpath = source_path
-        .map(|value| value.trim().trim_matches('/'))
+        .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    if is_unsafe_subpath(subpath)
-        || !capability
-            .allowed_subpaths
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(subpath))
-    {
+    if is_unsafe_subpath(subpath) || !capability.allowed_subpaths.contains(&subpath) {
         let mut accepted = vec!["<root>".to_string()];
         accepted.extend(capability.allowed_subpaths.iter().map(|s| s.to_string()));
         return Some(violation(
@@ -1143,6 +1140,24 @@ pub fn violations_with_context(
     job: &AgentJobRequestMessage,
     context_data: &[(String, serde_json::Value)],
 ) -> Vec<CapabilityViolation> {
+    violations_with_context_limited(job, context_data, None)
+}
+
+fn violations_with_context_limited(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, serde_json::Value)],
+    limit: Option<usize>,
+) -> Vec<CapabilityViolation> {
+    if job.steps.len() > MAX_MANIFEST_STEPS {
+        return vec![violation(
+            "job preflight",
+            "workflow",
+            "<job>",
+            "steps",
+            "too many",
+            vec![format!("at most {MAX_MANIFEST_STEPS} steps")],
+        )];
+    }
     let mut violations = Vec::new();
     for (index, step) in job
         .steps
@@ -1190,6 +1205,9 @@ pub fn violations_with_context(
             violations.push(violation(
                 &step_name, repository, action_ref, "uses", repository, accepted,
             ));
+            if limit.is_some_and(|limit| violations.len() >= limit) {
+                return violations;
+            }
             continue;
         };
         if !capability
@@ -1209,6 +1227,9 @@ pub fn violations_with_context(
                     .map(|item| format!("{} ({})", item.value, item.release))
                     .collect(),
             ));
+            if limit.is_some_and(|limit| violations.len() >= limit) {
+                return violations;
+            }
         }
         if let Some(error) = subpath_violation(
             &step_name,
@@ -1218,6 +1239,9 @@ pub fn violations_with_context(
             capability,
         ) {
             violations.push(error);
+            if limit.is_some_and(|limit| violations.len() >= limit) {
+                return violations;
+            }
         }
         let inputs = match string_inputs(step) {
             Ok(inputs) => inputs
@@ -1225,7 +1249,7 @@ pub fn violations_with_context(
                 .map(|(name, value)| {
                     (
                         name,
-                        crate::executor::render_context_expressions(&value, context_data),
+                        crate::executor::render_context_expressions_bounded(&value, context_data),
                     )
                 })
                 .collect(),
@@ -1238,6 +1262,9 @@ pub fn violations_with_context(
                     &error.to_string(),
                     Vec::new(),
                 ));
+                if limit.is_some_and(|limit| violations.len() >= limit) {
+                    return violations;
+                }
                 continue;
             }
         };
@@ -1249,6 +1276,9 @@ pub fn violations_with_context(
             capability.inputs,
             &inputs,
         );
+        if limit.is_some_and(|limit| violations.len() >= limit) {
+            return violations;
+        }
     }
     validate_compiler_cache_topology(job, &mut violations);
     validate_attestation_permissions(job, &mut violations);
@@ -1471,6 +1501,17 @@ fn validate_inputs(
     rules: &[InputRule],
     inputs: &BTreeMap<String, String>,
 ) {
+    if inputs.len() > MAX_MANIFEST_INPUTS {
+        violations.push(violation(
+            step,
+            repository,
+            action_ref,
+            "inputs",
+            "too many",
+            vec![format!("at most {MAX_MANIFEST_INPUTS} inputs")],
+        ));
+        return;
+    }
     for (name, value) in inputs {
         match rules
             .iter()
@@ -1558,7 +1599,7 @@ pub fn validate_job_with_context(
     job: &AgentJobRequestMessage,
     context_data: &[(String, serde_json::Value)],
 ) -> Result<()> {
-    if let Some(violation) = violations_with_context(job, context_data)
+    if let Some(violation) = violations_with_context_limited(job, context_data, Some(1))
         .into_iter()
         .next()
     {
