@@ -3655,7 +3655,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
+                DOCKER_NETWORK_INSPECT_FORMAT,
                 id,
             ])
             .filter(|output| output.status.success())
@@ -3686,6 +3686,9 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
     crate::docker_lease::daemon_owns_label(owner, daemon_id)
 }
+
+const DOCKER_NETWORK_INSPECT_FORMAT: &str =
+    r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#;
 
 /// True when a `velnor-net-*` network is safe to remove at startup. Networks
 /// carrying THIS daemon's ownership label are stale by definition (a daemon
@@ -3769,7 +3772,7 @@ fn prune_empty_velnor_networks_with(
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
+                DOCKER_NETWORK_INSPECT_FORMAT,
                 id,
             ]);
             let mut fields = state.trim().splitn(2, '\t');
@@ -12698,6 +12701,14 @@ jobs:
         );
         assert_eq!(pruned.as_deref(), Some("daemon-x"));
         assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn docker_network_inspect_format_uses_go_template_tab_escape() {
+        assert_eq!(
+            DOCKER_NETWORK_INSPECT_FORMAT,
+            r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#
+        );
     }
 
     #[test]
