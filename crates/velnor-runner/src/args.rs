@@ -68,6 +68,8 @@ pub struct ReleaseVerifyRecordArgs {
     pub checksum: Option<PathBuf>,
     pub sha256: Option<String>,
     pub publication: Option<PathBuf>,
+    pub expected_apt_metadata: Option<PathBuf>,
+    pub served_apt_metadata: Option<PathBuf>,
 }
 
 #[derive(Debug)]

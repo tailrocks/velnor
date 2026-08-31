@@ -42,9 +42,12 @@ sequentially:
    digest requires a new review. Stop if the ledger is absent, the group is
    missing/default/inherited/read-only, closure is ambiguous, or a removal has
    no reviewed closure evidence.
-4. Route new verification to GitHub-hosted, cancel older verification runs,
-   drain the Velnor daemon, and prove that no slot is busy. Delete only stale
-   or offline registrations owned by validation.
+4. Route new verification to GitHub-hosted. Before smoke, cancel only older
+   pending/in-progress verification runs owned by this iteration; never cancel
+   protected Release, Package update, Publish apt repo, or workflow_dispatch
+   release workflows/runs, or unrelated runs, and prove each cancellation is
+   terminal. Drain the Velnor daemon and prove that no slot is busy. Delete
+   only stale or offline registrations owned by validation.
 5. After explicit approval of that exact digest, apply only the named
    organization. `apply` writes workflow restrictions first, replaces the
    exact repository set, and requires readback equality:
@@ -181,8 +184,12 @@ fleet-generate` regenerates the per-org policy JSONs under `fleet/policies/`,
    after exact semantic equality. Then start the organization daemon with `--pool-name
    velnor-trusted`, run `velnor-runner doctor`, and collect the pending runner-
    state, full guard-state, routing/denial, and warm-run acceptance evidence.
-5. Cancel every older active verification run before smoke. Dispatch one
-   `lane=both` run, monitor only its returned id, and require a non-empty runner
+5. Before smoke, cancel only older pending/in-progress runs owned by this iteration;
+   never cancel protected Release, Package update, Publish apt repo, or
+   workflow_dispatch release workflows/runs, or unrelated runs, and prove each
+   cancellation is terminal.
+   Dispatch one `lanes=both` run, monitor only its
+   returned id, and require a non-empty runner
    and group assignment within two minutes. Never declare migration complete
    from group readback or daemon health alone.
 
