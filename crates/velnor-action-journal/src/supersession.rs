@@ -138,6 +138,10 @@ impl fmt::Display for KillReason {
 /// The only physical termination seam used by the coordinator.
 pub trait PhysicalActionTerminator {
     /// Kill and reap the physical action identified by its immutable key.
+    ///
+    /// The coordinator may call this more than once after a crash or an
+    /// ambiguous error. Implementations must therefore make termination
+    /// idempotent for the action key (and reason) they receive.
     fn terminate(&mut self, action: &ActionKey, reason: KillReason) -> Result<(), String>;
 }
 
@@ -157,7 +161,7 @@ pub enum Admission {
 enum Candidate {
     AdoptedRunning { record: ActionRecord },
     AdoptedComplete { record: ActionRecord },
-    NeedsProducer,
+    NeedsProducer { consumer_inserted: bool },
 }
 
 /// Result of detaching one logical run.
@@ -184,15 +188,41 @@ pub struct ReapReport {
 
 enum TerminationClaim {
     Claimed,
-    AlreadyClaimed,
+    AlreadyInFlight,
+    /// Physical termination is known complete; only durable finalization
+    /// remains. The executor must not be called again.
+    FinalizationPending,
     BlockedByConsumers(u64),
 }
 
 enum RetentionClaim {
-    Claimed,
-    AlreadyClaimed,
+    Claimed { reason: KillReason },
+    AlreadyInFlight,
     LiveConsumers(u64),
+    SkippedTerminalState,
     Missing,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminationPhase {
+    Unstarted = 0,
+    InFlight = 2,
+    Complete = 1,
+}
+
+#[derive(Clone, Copy)]
+struct PendingTermination {
+    reason: KillReason,
+    /// `0` is unstarted, `2` means termination is in flight or ambiguous, and
+    /// `1` means the executor completed. Phase 2 is retried through the
+    /// idempotent immutable-key terminator seam.
+    phase: TerminationPhase,
+}
+
+impl PendingTermination {
+    fn bypasses_consumers(self) -> bool {
+        self.reason == KillReason::TrustRevoked
+    }
 }
 
 /// Supersession telemetry kind.
@@ -346,39 +376,42 @@ impl<C: Clock> SupersessionCoordinator<C> {
             return Err(SupersessionError::InvalidRunId);
         }
         let digest = action.digest()?;
-        if let Some(reason) = self.revocation_reason(&digest)? {
-            return Err(SupersessionError::TrustRevoked { reason });
-        }
         let latest = self.manager.latest_action(action)?;
         if self.config.enabled && action.execution_policy.adoptable {
             if let Some(record) = latest.clone().filter(is_adoptable_state) {
-                self.attach_and_clear_retention(&digest, run_id)?;
-                self.emit_telemetry(SupersessionTelemetryEvent {
-                    action_key_digest: digest,
-                    run_id: Some(run_id.to_owned()),
-                    at: self.manager.clock().now(),
-                    kind: match record.state {
-                        ActionState::Running => SupersessionEventKind::SupersessionAdopted,
-                        ActionState::Complete => SupersessionEventKind::SupersessionAdopted,
-                        _ => unreachable!(),
-                    },
-                    live_consumers: self.manager.live_consumer_count(action)?,
-                    reason: Some(match record.state {
-                        ActionState::Running => "running".to_owned(),
-                        ActionState::Complete => "complete".to_owned(),
-                        _ => unreachable!(),
-                    }),
-                    retained_until: None,
-                });
-                return Ok(match record.state {
-                    ActionState::Running => Candidate::AdoptedRunning { record },
-                    ActionState::Complete => Candidate::AdoptedComplete { record },
+                let adopted = match record.state {
+                    ActionState::Running => {
+                        self.attach_and_clear_retention(&digest, run_id, true)?
+                    }
+                    ActionState::Complete => {
+                        self.attach_and_clear_retention(&digest, run_id, false)?
+                    }
                     _ => unreachable!(),
-                });
+                };
+                if adopted {
+                    self.emit_telemetry(SupersessionTelemetryEvent {
+                        action_key_digest: digest,
+                        run_id: Some(run_id.to_owned()),
+                        at: self.manager.clock().now(),
+                        kind: SupersessionEventKind::SupersessionAdopted,
+                        live_consumers: self.manager.live_consumer_count(action)?,
+                        reason: Some(match record.state {
+                            ActionState::Running => "running".to_owned(),
+                            ActionState::Complete => "complete".to_owned(),
+                            _ => unreachable!(),
+                        }),
+                        retained_until: None,
+                    });
+                    return Ok(match record.state {
+                        ActionState::Running => Candidate::AdoptedRunning { record },
+                        ActionState::Complete => Candidate::AdoptedComplete { record },
+                        _ => unreachable!(),
+                    });
+                }
             }
         }
-        self.manager.attach_consumer(action, run_id)?;
-        Ok(Candidate::NeedsProducer)
+        let consumer_inserted = self.attach_for_admission(&digest, run_id)?;
+        Ok(Candidate::NeedsProducer { consumer_inserted })
     }
 
     /// Attach/adopt and elect one producer through the durable lease.
@@ -394,31 +427,47 @@ impl<C: Clock> SupersessionCoordinator<C> {
         match self.attach_or_adopt(action, run_id)? {
             Candidate::AdoptedRunning { record } => Ok(Admission::AdoptedRunning { record }),
             Candidate::AdoptedComplete { record } => Ok(Admission::AdoptedComplete { record }),
-            Candidate::NeedsProducer => {
+            Candidate::NeedsProducer { consumer_inserted } => {
                 match self
                     .manager
                     .acquire(action, owner, lease_duration_ms, heartbeat_every_ms)
                 {
                     Ok(lease) => Ok(Admission::Started { lease }),
                     Err(JournalError::LeaseBusy { .. }) => {
-                        let latest = self.manager.latest_action(action)?;
-                        if self.config.enabled
-                            && action.execution_policy.adoptable
-                            && latest.as_ref().is_some_and(is_adoptable_state)
-                        {
-                            return match self.attach_or_adopt(action, run_id)? {
-                                Candidate::AdoptedRunning { record } => {
-                                    Ok(Admission::AdoptedRunning { record })
-                                }
-                                Candidate::AdoptedComplete { record } => {
-                                    Ok(Admission::AdoptedComplete { record })
-                                }
-                                Candidate::NeedsProducer => Ok(Admission::Waiting),
-                            };
+                        let retry = (|| {
+                            let latest = self.manager.latest_action(action)?;
+                            if self.config.enabled
+                                && action.execution_policy.adoptable
+                                && latest.as_ref().is_some_and(is_adoptable_state)
+                            {
+                                return Ok(match self.attach_or_adopt(action, run_id)? {
+                                    Candidate::AdoptedRunning { record } => {
+                                        Admission::AdoptedRunning { record }
+                                    }
+                                    Candidate::AdoptedComplete { record } => {
+                                        Admission::AdoptedComplete { record }
+                                    }
+                                    Candidate::NeedsProducer { .. } => Admission::Waiting,
+                                });
+                            }
+                            Ok(Admission::Waiting)
+                        })();
+                        match retry {
+                            Ok(admission) => Ok(admission),
+                            Err(error) => self.cleanup_admission_error(
+                                action,
+                                run_id,
+                                consumer_inserted,
+                                error,
+                            ),
                         }
-                        Ok(Admission::Waiting)
                     }
-                    Err(error) => Err(error.into()),
+                    Err(error) => self.cleanup_admission_error(
+                        action,
+                        run_id,
+                        consumer_inserted,
+                        error.into(),
+                    ),
                 }
             }
         }
@@ -510,27 +559,33 @@ impl<C: Clock> SupersessionCoordinator<C> {
         };
         for raw_digest in rows {
             let digest = Digest::parse(raw_digest)?;
-            let Some(action) = self.action_for_digest(&digest)? else {
-                self.delete_retention(&digest)?;
-                continue;
+            let (action, latest_state) = match self.action_record_for_digest(&digest)? {
+                Some(record) => (record.action_key, record.state),
+                None => {
+                    let action_key_json: Option<String> = self
+                        .manager
+                        .journal
+                        .connection
+                        .query_row(
+                            "SELECT action_key_json FROM producer_leases
+                             WHERE action_key_digest = ?1",
+                            [digest.to_string()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let action_key_json = action_key_json.ok_or_else(|| {
+                        SupersessionError::InvalidConfig(format!(
+                            "producer lease action key is missing for {digest}"
+                        ))
+                    })?;
+                    crate::verify_stored_action_key(&action_key_json, &digest)?;
+                    (
+                        serde_json::from_str(&action_key_json).map_err(JournalError::from)?,
+                        ActionState::Leased,
+                    )
+                }
             };
-            if matches!(
-                action_state(&self.manager, &action)?,
-                Some(ActionState::Failed | ActionState::Abandoned)
-            ) {
-                self.delete_retention(&digest)?;
-                self.emit_telemetry(SupersessionTelemetryEvent {
-                    action_key_digest: digest,
-                    run_id: None,
-                    at: now,
-                    kind: SupersessionEventKind::RetentionKillSkipped,
-                    live_consumers: 0,
-                    reason: Some("failed_or_abandoned".to_owned()),
-                    retained_until: None,
-                });
-                continue;
-            }
-            match self.claim_due_retention(&digest, now_ms)? {
+            match self.claim_due_retention(&digest, latest_state, now_ms)? {
                 RetentionClaim::LiveConsumers(live_consumers) => {
                     report.skipped_live += 1;
                     self.emit_telemetry(SupersessionTelemetryEvent {
@@ -543,18 +598,19 @@ impl<C: Clock> SupersessionCoordinator<C> {
                         retained_until: None,
                     });
                 }
-                RetentionClaim::Claimed => {
-                    if let Err(error) = self.execute_claimed_termination(
-                        &action,
-                        KillReason::RetentionExpired,
-                        terminator,
-                    ) {
-                        // The durable claim remains incomplete. Restore a
-                        // short, bounded retry deadline so a transient hook
-                        // failure cannot strand physical work forever.
-                        self.restore_retention(&digest, now.saturating_add(TERMINATION_RETRY_MS))?;
-                        return Err(error);
-                    }
+                RetentionClaim::SkippedTerminalState => {
+                    self.emit_telemetry(SupersessionTelemetryEvent {
+                        action_key_digest: digest,
+                        run_id: None,
+                        at: now,
+                        kind: SupersessionEventKind::RetentionKillSkipped,
+                        live_consumers: 0,
+                        reason: Some("failed_or_abandoned".to_owned()),
+                        retained_until: None,
+                    });
+                }
+                RetentionClaim::Claimed { reason } => {
+                    self.execute_claimed_termination_with_retry(&action, reason, terminator)?;
                     report.reaped += 1;
                     self.emit_telemetry(SupersessionTelemetryEvent {
                         action_key_digest: digest,
@@ -562,11 +618,12 @@ impl<C: Clock> SupersessionCoordinator<C> {
                         at: now,
                         kind: SupersessionEventKind::RetainedThenReaped,
                         live_consumers: 0,
-                        reason: Some(KillReason::RetentionExpired.to_string()),
+                        reason: Some(reason.to_string()),
                         retained_until: None,
                     });
                 }
-                RetentionClaim::AlreadyClaimed | RetentionClaim::Missing => {}
+                RetentionClaim::AlreadyInFlight => {}
+                RetentionClaim::Missing => {}
             }
         }
         Ok(report)
@@ -662,14 +719,36 @@ impl<C: Clock> SupersessionCoordinator<C> {
 
     fn recover_incomplete_terminations(&mut self) -> Result<(), SupersessionError> {
         let now = self.manager.clock().now();
-        self.manager.journal.connection.execute(
+        let transaction = self
+            .manager
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let invalid: Option<i64> = transaction
+            .query_row(
+                "SELECT completed FROM action_termination_claims
+                 WHERE completed NOT IN (0, 1, 2) LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(phase) = invalid {
+            return Err(invalid_termination_phase(phase));
+        }
+        transaction.execute(
+            "UPDATE action_termination_claims SET completed = 0
+             WHERE completed = 2",
+            [],
+        )?;
+        transaction.execute(
             "INSERT INTO action_retention(action_key_digest, retained_until_ms)
              SELECT action_key_digest, ?1
              FROM action_termination_claims
-             WHERE completed = 0
+             WHERE completed IN (0, 1)
              ON CONFLICT(action_key_digest) DO NOTHING",
             [sqlite_integer(now.as_millis())?],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -677,21 +756,28 @@ impl<C: Clock> SupersessionCoordinator<C> {
         &mut self,
         digest: &Digest,
         run_id: &str,
-    ) -> Result<(), SupersessionError> {
+        require_active_lease: bool,
+    ) -> Result<bool, SupersessionError> {
         let transaction = self
             .manager
             .journal
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let terminating: Option<i64> = transaction
-            .query_row(
-                "SELECT 1 FROM action_termination_claims WHERE action_key_digest = ?1",
-                [digest.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if terminating.is_some() {
-            return Err(SupersessionError::TerminationClaimed);
+        Self::check_admission_fence(&transaction, digest)?;
+        if require_active_lease {
+            let now_ms = sqlite_integer(self.manager.clock.now().as_millis())?;
+            let active_lease: Option<i64> = transaction
+                .query_row(
+                    "SELECT 1 FROM producer_leases
+                     WHERE action_key_digest = ?1
+                       AND state = 'active' AND expires_at_ms > ?2",
+                    params![digest.to_string(), now_ms],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if active_lease.is_none() {
+                return Ok(false);
+            }
         }
         transaction.execute(
             "INSERT OR IGNORE INTO action_consumers(action_key_digest, run_id)
@@ -704,6 +790,99 @@ impl<C: Clock> SupersessionCoordinator<C> {
         )?;
         transaction.commit()?;
         self.manager.clock().wake_expiry();
+        Ok(true)
+    }
+
+    fn cleanup_admission_error(
+        &mut self,
+        action: &ActionKey,
+        run_id: &str,
+        consumer_inserted: bool,
+        error: SupersessionError,
+    ) -> Result<Admission, SupersessionError> {
+        let lease_abandonable = matches!(
+            &error,
+            SupersessionError::Journal(JournalError::LeaseAbandonable { .. })
+        );
+        if consumer_inserted {
+            self.manager.detach_consumer(action, run_id)?;
+        }
+        if lease_abandonable {
+            let digest = action.digest()?;
+            let phase: Option<i64> = self
+                .manager
+                .journal
+                .connection
+                .query_row(
+                    "SELECT completed FROM action_termination_claims
+                     WHERE action_key_digest = ?1",
+                    [digest.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(phase) = phase {
+                validate_termination_phase(phase)?;
+                return Err(SupersessionError::TerminationClaimed);
+            }
+        }
+        Err(error)
+    }
+
+    /// Attach a producer-needed run behind the same durable admission fence
+    /// used by adoption. A termination claim must not coexist with a new
+    /// consumer that can elect a producer.
+    fn attach_for_admission(
+        &mut self,
+        digest: &Digest,
+        run_id: &str,
+    ) -> Result<bool, SupersessionError> {
+        let transaction = self
+            .manager
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_admission_fence(&transaction, digest)?;
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO action_consumers(action_key_digest, run_id)
+             VALUES (?1, ?2)",
+            params![digest.to_string(), run_id],
+        )? == 1;
+        transaction.commit()?;
+        self.manager.clock().wake_expiry();
+        Ok(inserted)
+    }
+
+    /// Read revocation and termination state while holding the immediate
+    /// transaction that attaches the consumer and clears retention.
+    fn check_admission_fence(
+        transaction: &rusqlite::Transaction<'_>,
+        digest: &Digest,
+    ) -> Result<(), SupersessionError> {
+        let revoked: Option<String> = transaction
+            .query_row(
+                "SELECT reason FROM action_trust_revocations
+                 WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(reason) = revoked {
+            return Err(SupersessionError::TrustRevoked { reason });
+        }
+        let terminating: Option<i64> = transaction
+            .query_row(
+                "SELECT completed FROM action_termination_claims
+                 WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(phase) = terminating {
+            validate_termination_phase(phase)?;
+        }
+        if terminating.is_some() {
+            return Err(SupersessionError::TerminationClaimed);
+        }
         Ok(())
     }
 
@@ -731,13 +910,11 @@ impl<C: Clock> SupersessionCoordinator<C> {
         Ok(())
     }
 
-    fn action_for_digest(&self, digest: &Digest) -> Result<Option<ActionKey>, SupersessionError> {
-        Ok(self
-            .manager
-            .journal
-            .latest()?
-            .remove(digest)
-            .map(|record| record.action_key))
+    fn action_record_for_digest(
+        &self,
+        digest: &Digest,
+    ) -> Result<Option<ActionRecord>, SupersessionError> {
+        Ok(self.manager.journal.latest()?.remove(digest))
     }
 
     fn revocation_reason(&self, digest: &Digest) -> Result<Option<String>, SupersessionError> {
@@ -762,12 +939,11 @@ impl<C: Clock> SupersessionCoordinator<C> {
         let digest = action.digest()?;
         let now = self.manager.clock().now();
         match self.claim_termination(&digest, reason, reason == KillReason::TrustRevoked, now)? {
-            TerminationClaim::BlockedByConsumers(_) | TerminationClaim::AlreadyClaimed => {
-                return Ok(false)
-            }
-            TerminationClaim::Claimed => {}
+            TerminationClaim::BlockedByConsumers(_) => return Ok(false),
+            TerminationClaim::AlreadyInFlight => return Ok(false),
+            TerminationClaim::Claimed | TerminationClaim::FinalizationPending => {}
         }
-        self.execute_claimed_termination(action, reason, terminator)?;
+        self.execute_claimed_termination_with_retry(action, reason, terminator)?;
         Ok(true)
     }
 
@@ -811,6 +987,7 @@ impl<C: Clock> SupersessionCoordinator<C> {
     fn claim_due_retention(
         &mut self,
         digest: &Digest,
+        latest_state: ActionState,
         now_ms: i64,
     ) -> Result<RetentionClaim, SupersessionError> {
         let transaction = self
@@ -833,26 +1010,76 @@ impl<C: Clock> SupersessionCoordinator<C> {
             transaction.commit()?;
             return Ok(RetentionClaim::Missing);
         }
-        let live: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM action_consumers WHERE action_key_digest = ?1",
-            [digest.to_string()],
-            |row| row.get(0),
-        )?;
-        if live > 0 {
+        let pending_termination: Option<PendingTermination> = transaction
+            .query_row(
+                "SELECT reason, completed FROM action_termination_claims
+                 WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .map(|(reason, phase)| {
+                validate_termination_phase(phase).and_then(|phase| {
+                    parse_kill_reason(&reason).map(|reason| PendingTermination { reason, phase })
+                })
+            })
+            .transpose()?;
+        if (latest_state == ActionState::Abandoned
+            && pending_termination
+                .is_some_and(|pending| pending.phase == TerminationPhase::Complete))
+            || (pending_termination.is_none() && latest_state == ActionState::Failed)
+        {
             transaction.execute(
                 "DELETE FROM action_retention WHERE action_key_digest = ?1",
                 [digest.to_string()],
             )?;
             transaction.commit()?;
+            return Ok(RetentionClaim::SkippedTerminalState);
+        }
+        let live: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM action_consumers WHERE action_key_digest = ?1",
+            [digest.to_string()],
+            |row| row.get(0),
+        )?;
+        if live > 0
+            && pending_termination
+                .is_none_or(|pending| pending.phase == TerminationPhase::Unstarted)
+            && !pending_termination.is_some_and(PendingTermination::bypasses_consumers)
+        {
+            if pending_termination.is_some() {
+                transaction.execute(
+                    "UPDATE action_retention SET retained_until_ms = ?1
+                     WHERE action_key_digest = ?2",
+                    params![
+                        now_ms.saturating_add(sqlite_integer(TERMINATION_RETRY_MS)?),
+                        digest.to_string()
+                    ],
+                )?;
+            } else {
+                transaction.execute(
+                    "DELETE FROM action_retention WHERE action_key_digest = ?1",
+                    [digest.to_string()],
+                )?;
+            }
+            transaction.commit()?;
             return Ok(RetentionClaim::LiveConsumers(u64::try_from(live).map_err(
                 |_| SupersessionError::InvalidConfig("consumer count is negative".to_owned()),
             )?));
         }
-        let claim =
-            claim_termination_row(&transaction, digest, KillReason::RetentionExpired, now_ms)?;
+        let reason =
+            pending_termination.map_or(KillReason::RetentionExpired, |pending| pending.reason);
+        let claim = if let Some(pending) = pending_termination {
+            match pending.phase {
+                TerminationPhase::Unstarted => TerminationClaim::Claimed,
+                TerminationPhase::InFlight => TerminationClaim::AlreadyInFlight,
+                TerminationPhase::Complete => TerminationClaim::FinalizationPending,
+            }
+        } else {
+            claim_termination_row(&transaction, digest, reason, now_ms)?
+        };
         if matches!(
             claim,
-            TerminationClaim::Claimed | TerminationClaim::AlreadyClaimed
+            TerminationClaim::Claimed | TerminationClaim::FinalizationPending
         ) {
             transaction.execute(
                 "DELETE FROM action_retention WHERE action_key_digest = ?1",
@@ -861,8 +1088,10 @@ impl<C: Clock> SupersessionCoordinator<C> {
         }
         transaction.commit()?;
         Ok(match claim {
-            TerminationClaim::Claimed => RetentionClaim::Claimed,
-            TerminationClaim::AlreadyClaimed => RetentionClaim::AlreadyClaimed,
+            TerminationClaim::Claimed | TerminationClaim::FinalizationPending => {
+                RetentionClaim::Claimed { reason }
+            }
+            TerminationClaim::AlreadyInFlight => RetentionClaim::AlreadyInFlight,
             TerminationClaim::BlockedByConsumers(count) => RetentionClaim::LiveConsumers(count),
         })
     }
@@ -874,19 +1103,117 @@ impl<C: Clock> SupersessionCoordinator<C> {
         terminator: &mut T,
     ) -> Result<(), SupersessionError> {
         let digest = action.digest()?;
-        terminator
-            .terminate(action, reason)
-            .map_err(SupersessionError::Terminator)?;
-        self.manager.journal.connection.execute(
-            "UPDATE action_termination_claims SET completed = 1 WHERE action_key_digest = ?1",
-            [digest.to_string()],
-        )?;
+        let start = self.mark_termination_started(&digest)?;
+        match start {
+            TerminationStart::AlreadyInFlight => return Ok(()),
+            TerminationStart::Claimed => {
+                if let Err(error) = terminator.terminate(action, reason) {
+                    // Phase 2 remains durable. The call may have had an external
+                    // side effect before reporting an error, so retry through the
+                    // idempotent immutable-key seam instead of resetting to 0.
+                    return Err(SupersessionError::Terminator(error));
+                }
+                self.mark_termination_completed(&digest)?;
+            }
+            TerminationStart::Complete => {}
+        }
         self.delete_retention(&digest)?;
         if let Some(mut record) = self.manager.latest_action(action)? {
             if record.state != ActionState::Abandoned {
                 record.state = ActionState::Abandoned;
                 self.manager.append_action(&record)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Record that the external termination seam is about to run.
+    fn mark_termination_started(
+        &mut self,
+        digest: &Digest,
+    ) -> Result<TerminationStart, SupersessionError> {
+        let transaction = self
+            .manager
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let phase: Option<i64> = transaction
+            .query_row(
+                "SELECT completed FROM action_termination_claims
+                 WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(phase) = phase else {
+            return Err(SupersessionError::InvalidConfig(
+                "termination claim disappeared before execution".to_owned(),
+            ));
+        };
+        let phase = validate_termination_phase(phase)?;
+        let start = match phase {
+            TerminationPhase::Unstarted => {
+                transaction.execute(
+                    "UPDATE action_termination_claims SET completed = 2
+                     WHERE action_key_digest = ?1 AND completed = 0",
+                    [digest.to_string()],
+                )?;
+                TerminationStart::Claimed
+            }
+            TerminationPhase::InFlight => TerminationStart::AlreadyInFlight,
+            TerminationPhase::Complete => TerminationStart::Complete,
+        };
+        transaction.commit()?;
+        Ok(start)
+    }
+
+    fn mark_termination_completed(&mut self, digest: &Digest) -> Result<(), SupersessionError> {
+        let transaction = self
+            .manager
+            .journal
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let phase: i64 = transaction.query_row(
+            "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+            [digest.to_string()],
+            |row| row.get(0),
+        )?;
+        match validate_termination_phase(phase)? {
+            TerminationPhase::InFlight => {
+                transaction.execute(
+                    "UPDATE action_termination_claims SET completed = 1
+                     WHERE action_key_digest = ?1 AND completed = 2",
+                    [digest.to_string()],
+                )?;
+            }
+            TerminationPhase::Complete => {}
+            TerminationPhase::Unstarted => {
+                return Err(SupersessionError::InvalidConfig(
+                    "cannot complete an unstarted termination claim".to_owned(),
+                ));
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn execute_claimed_termination_with_retry<T: PhysicalActionTerminator>(
+        &mut self,
+        action: &ActionKey,
+        reason: KillReason,
+        terminator: &mut T,
+    ) -> Result<(), SupersessionError> {
+        let digest = action.digest()?;
+        if let Err(error) = self.execute_claimed_termination(action, reason, terminator) {
+            // Keep the incomplete durable claim and make it visible to the
+            // reaper after a short bounded retry delay.
+            let retry_at = self
+                .manager
+                .clock()
+                .now()
+                .saturating_add(TERMINATION_RETRY_MS);
+            self.restore_retention(&digest, retry_at)?;
+            return Err(error);
         }
         Ok(())
     }
@@ -905,19 +1232,12 @@ impl<C: Clock> SupersessionCoordinator<C> {
     }
 }
 
-fn action_state<C: Clock>(
-    manager: &LeaseManager<C>,
-    action: &ActionKey,
-) -> Result<Option<ActionState>, SupersessionError> {
-    Ok(manager.latest_action(action)?.map(|record| record.state))
-}
-
 fn claim_termination_row(
     transaction: &rusqlite::Transaction<'_>,
     digest: &Digest,
     reason: KillReason,
     now_ms: i64,
-) -> Result<TerminationClaim, rusqlite::Error> {
+) -> Result<TerminationClaim, SupersessionError> {
     let existing: Option<i64> = transaction
         .query_row(
             "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
@@ -925,9 +1245,10 @@ fn claim_termination_row(
             |row| row.get(0),
         )
         .optional()?;
-    match existing {
-        Some(completed) if completed != 0 => Ok(TerminationClaim::AlreadyClaimed),
-        Some(_) => {
+    match existing.map(validate_termination_phase).transpose()? {
+        Some(TerminationPhase::Complete) => Ok(TerminationClaim::FinalizationPending),
+        Some(TerminationPhase::InFlight) => Ok(TerminationClaim::AlreadyInFlight),
+        Some(TerminationPhase::Unstarted) => {
             // A failed hook leaves an incomplete intent. Retrying is safe
             // because executor termination is idempotent for an action key.
             transaction.execute(
@@ -950,8 +1271,43 @@ fn claim_termination_row(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminationStart {
+    Claimed,
+    AlreadyInFlight,
+    Complete,
+}
+
+fn validate_termination_phase(phase: i64) -> Result<TerminationPhase, SupersessionError> {
+    match phase {
+        0 => Ok(TerminationPhase::Unstarted),
+        1 => Ok(TerminationPhase::Complete),
+        2 => Ok(TerminationPhase::InFlight),
+        _ => Err(invalid_termination_phase(phase)),
+    }
+}
+
+fn invalid_termination_phase(phase: i64) -> SupersessionError {
+    SupersessionError::InvalidConfig(format!(
+        "invalid termination claim phase {phase}; expected 0, 1, or 2"
+    ))
+}
+
 fn is_adoptable_state(record: &ActionRecord) -> bool {
     matches!(record.state, ActionState::Running | ActionState::Complete)
+}
+
+fn parse_kill_reason(value: &str) -> Result<KillReason, SupersessionError> {
+    match value {
+        "no_consumers" => Ok(KillReason::NoConsumers),
+        "retention_expired" => Ok(KillReason::RetentionExpired),
+        "non_adoptable" => Ok(KillReason::NonAdoptable),
+        "failed_action" => Ok(KillReason::FailedAction),
+        "trust_revoked" => Ok(KillReason::TrustRevoked),
+        other => Err(SupersessionError::InvalidConfig(format!(
+            "unknown termination claim reason: {other}"
+        ))),
+    }
 }
 
 fn sqlite_integer(value: u64) -> Result<i64, SupersessionError> {
@@ -963,12 +1319,14 @@ fn sqlite_integer(value: u64) -> Result<i64, SupersessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LeaseStatus;
     use std::{
         collections::{BTreeMap, BTreeSet},
         future::Future,
         pin::Pin,
         sync::{Arc, Mutex},
     };
+    use tempfile::TempDir;
     use velnor_action_model::{ActionTiming, ExecutionPolicy, PlatformIdentity, TrustClass};
 
     #[derive(Clone, Default)]
@@ -1022,11 +1380,13 @@ mod tests {
     struct FailOnceSpy {
         calls: usize,
         failed: bool,
+        reasons: Vec<KillReason>,
     }
 
     impl PhysicalActionTerminator for FailOnceSpy {
-        fn terminate(&mut self, _action: &ActionKey, _reason: KillReason) -> Result<(), String> {
+        fn terminate(&mut self, _action: &ActionKey, reason: KillReason) -> Result<(), String> {
             self.calls += 1;
+            self.reasons.push(reason);
             if !self.failed {
                 self.failed = true;
                 Err("transient executor failure".to_owned())
@@ -1103,6 +1463,10 @@ mod tests {
         let action = action(1);
         coordinator
             .manager_mut()
+            .acquire(&action, "worker-a", 1_000, 250)
+            .unwrap();
+        coordinator
+            .manager_mut()
             .append_action(&record(action.clone(), ActionState::Running))
             .unwrap();
         let mut spy = Spy::default();
@@ -1142,6 +1506,10 @@ mod tests {
             .manager_mut()
             .append_action(&record(action.clone(), ActionState::Running))
             .unwrap();
+        assert_eq!(
+            coordinator.manager().lease_status(&action).unwrap(),
+            Some(LeaseStatus::Active)
+        );
         let second = coordinator
             .admit(&action, "run-b", "worker-b", 1_000, 250)
             .unwrap();
@@ -1150,6 +1518,77 @@ mod tests {
             physical_commands += 1;
         }
         assert_eq!(physical_commands, 1);
+    }
+
+    #[test]
+    fn expired_running_record_is_not_adopted_or_left_attached() {
+        let clock = TestClock::default();
+        let mut coordinator = coordinator(clock.clone());
+        let action = action(21);
+        coordinator
+            .manager_mut()
+            .acquire(&action, "worker-a", 1_000, 250)
+            .unwrap();
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        clock.advance(1_000);
+
+        let result = coordinator.admit(&action, "run-b", "worker-b", 1_000, 250);
+        assert!(matches!(result, Err(SupersessionError::TerminationClaimed)));
+        assert_eq!(
+            coordinator.manager().lease_status(&action).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert_eq!(
+            coordinator.manager().live_consumer_count(&action).unwrap(),
+            0
+        );
+        assert_eq!(
+            coordinator
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Running
+        );
+    }
+
+    #[test]
+    fn abandoned_running_record_is_not_adopted_or_left_attached() {
+        let mut coordinator = coordinator(TestClock::default());
+        let action = action(22);
+        let lease = coordinator
+            .manager_mut()
+            .acquire(&action, "worker-a", 1_000, 250)
+            .unwrap();
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        coordinator.manager_mut().abandon(&lease).unwrap();
+
+        let result = coordinator.admit(&action, "run-b", "worker-b", 1_000, 250);
+        assert!(matches!(result, Err(SupersessionError::TerminationClaimed)));
+        assert_eq!(
+            coordinator.manager().lease_status(&action).unwrap(),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert_eq!(
+            coordinator.manager().live_consumer_count(&action).unwrap(),
+            0
+        );
+        assert_eq!(
+            coordinator
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Running
+        );
     }
 
     #[test]
@@ -1224,15 +1663,531 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_termination_claim_is_retryable() {
+    fn expired_lease_without_action_record_is_reaped_from_persisted_key() {
         let clock = TestClock::default();
-        let mut coordinator = SupersessionCoordinator::open(
-            ":memory:",
+        let mut coordinator = coordinator(clock.clone());
+        let action = action(23);
+        coordinator
+            .manager_mut()
+            .acquire(&action, "worker-a", 1_000, 250)
+            .unwrap();
+        clock.advance(1_000);
+        assert_eq!(coordinator.manager_mut().expire_due().unwrap(), 1);
+        assert!(coordinator
+            .manager()
+            .latest_action(&action)
+            .unwrap()
+            .is_none());
+
+        let digest = action.digest().unwrap();
+        let mut spy = Spy::default();
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 1);
+        assert_eq!(spy.calls, vec![(digest, KillReason::FailedAction)]);
+        assert!(coordinator
+            .manager()
+            .latest_action(&action)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn due_retention_without_producer_lease_fails_closed() {
+        let mut coordinator = coordinator(TestClock::default());
+        let digest = action(24).digest().unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 0)",
+                [digest.to_string()],
+            )
+            .unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO action_termination_claims(
+                     action_key_digest, reason, claimed_at_ms, completed
+                 ) VALUES (?1, 'failed_action', 0, 0)",
+                [digest.to_string()],
+            )
+            .unwrap();
+
+        let mut spy = Spy::default();
+        assert!(coordinator.reap_due(&mut spy).is_err());
+        assert!(spy.calls.is_empty());
+        assert_eq!(
+            coordinator.next_retention().unwrap(),
+            Some(LogicalInstant::from_millis(0))
+        );
+        let phase: i64 = coordinator
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, 0);
+    }
+
+    #[test]
+    fn malformed_producer_lease_key_fails_closed() {
+        let mut coordinator = coordinator(TestClock::default());
+        let digest = action(25).digest().unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO producer_leases(
+                     action_key_digest, action_key_json, generation, owner,
+                     expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
+                 ) VALUES (?1, '{', 1, 'worker-a', 0, 250, 1, 'abandoned')",
+                [digest.to_string()],
+            )
+            .unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 0)",
+                [digest.to_string()],
+            )
+            .unwrap();
+
+        let mut spy = Spy::default();
+        assert!(coordinator.reap_due(&mut spy).is_err());
+        assert!(spy.calls.is_empty());
+        assert_eq!(
+            coordinator.next_retention().unwrap(),
+            Some(LogicalInstant::from_millis(0))
+        );
+    }
+
+    #[test]
+    fn mismatched_producer_lease_key_fails_closed() {
+        let mut coordinator = coordinator(TestClock::default());
+        let expected = action(26);
+        let digest = expected.digest().unwrap();
+        let wrong_json = serde_json::to_string(&action(27)).unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO producer_leases(
+                     action_key_digest, action_key_json, generation, owner,
+                     expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
+                 ) VALUES (?1, ?2, 1, 'worker-a', 0, 250, 1, 'abandoned')",
+                params![digest.to_string(), wrong_json],
+            )
+            .unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 0)",
+                [digest.to_string()],
+            )
+            .unwrap();
+
+        let mut spy = Spy::default();
+        assert!(coordinator.reap_due(&mut spy).is_err());
+        assert!(spy.calls.is_empty());
+        assert_eq!(
+            coordinator.next_retention().unwrap(),
+            Some(LogicalInstant::from_millis(0))
+        );
+    }
+
+    #[test]
+    fn incomplete_termination_claim_is_retryable() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("incomplete-termination-claim.sqlite");
+        let clock = TestClock::default();
+        let action = action(6);
+        let digest = action.digest().unwrap();
+        {
+            let mut coordinator = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            coordinator
+                .manager_mut()
+                .append_action(&record(action.clone(), ActionState::Running))
+                .unwrap();
+            coordinator
+                .manager_mut()
+                .attach_consumer(&action, "run-a")
+                .unwrap();
+            let mut spy = FailOnceSpy {
+                calls: 0,
+                failed: false,
+                reasons: Vec::new(),
+            };
+            assert!(matches!(
+                coordinator.detach(&action, "run-a", &mut spy),
+                Err(SupersessionError::Terminator(_))
+            ));
+            coordinator
+                .revoke_trust(&action, "retry termination", &mut spy)
+                .unwrap();
+            assert_eq!(spy.calls, 1);
+            let phase: i64 = coordinator
+                .manager
+                .journal
+                .connection
+                .query_row(
+                    "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                    [digest.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(phase, TerminationPhase::InFlight as i64);
+            assert_eq!(
+                coordinator
+                    .manager()
+                    .latest_action(&action)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                ActionState::Running
+            );
+        }
+
+        let mut recovered = SupersessionCoordinator::open(
+            &path,
             clock,
             SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
         )
         .unwrap();
-        let action = action(6);
+        let phase: i64 = recovered
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, TerminationPhase::Unstarted as i64);
+        let mut retry_spy = Spy::default();
+        assert_eq!(recovered.reap_due(&mut retry_spy).unwrap().reaped, 1);
+        assert_eq!(retry_spy.calls, vec![(digest, KillReason::NoConsumers)]);
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+    }
+
+    #[test]
+    fn in_flight_claim_retries_physical_termination_after_restart_window() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("in-flight-termination-claim.sqlite");
+        let clock = TestClock::default();
+        let action = action(18);
+        let digest = action.digest().unwrap();
+        {
+            let mut coordinator = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            coordinator
+                .manager_mut()
+                .append_action(&record(action.clone(), ActionState::Running))
+                .unwrap();
+            coordinator
+                .manager
+                .journal
+                .connection
+                .execute(
+                    "INSERT INTO action_termination_claims(
+                         action_key_digest, reason, claimed_at_ms, completed
+                     ) VALUES (?1, 'no_consumers', 0, 2)",
+                    [digest.to_string()],
+                )
+                .unwrap();
+            coordinator
+                .manager
+                .journal
+                .connection
+                .execute(
+                    "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                     VALUES (?1, 0)",
+                    [digest.to_string()],
+                )
+                .unwrap();
+
+            let mut spy = Spy::default();
+            assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+            assert!(spy.calls.is_empty());
+            assert_eq!(
+                coordinator
+                    .manager()
+                    .latest_action(&action)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                ActionState::Running
+            );
+            let phase: i64 = coordinator
+                .manager
+                .journal
+                .connection
+                .query_row(
+                    "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                    [digest.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(phase, TerminationPhase::InFlight as i64);
+        }
+
+        let mut recovered = SupersessionCoordinator::open(
+            &path,
+            clock,
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let phase: i64 = recovered
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, TerminationPhase::Unstarted as i64);
+        let mut retry_spy = Spy::default();
+        assert_eq!(recovered.reap_due(&mut retry_spy).unwrap().reaped, 1);
+        assert_eq!(retry_spy.calls, vec![(digest, KillReason::NoConsumers)]);
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+    }
+
+    #[test]
+    fn already_in_flight_termination_does_not_finalize_without_hook_owner() {
+        let clock = TestClock::default();
+        let mut coordinator = coordinator(clock);
+        let action = action(70);
+        let digest = action.digest().unwrap();
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO action_termination_claims(
+                     action_key_digest, reason, claimed_at_ms, completed
+                 ) VALUES (?1, 'no_consumers', 0, 2)",
+                [digest.to_string()],
+            )
+            .unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 0)",
+                [digest.to_string()],
+            )
+            .unwrap();
+
+        let mut spy = Spy::default();
+        coordinator
+            .execute_claimed_termination(&action, KillReason::NoConsumers, &mut spy)
+            .unwrap();
+
+        assert_eq!(
+            (
+                spy.calls,
+                coordinator.next_retention().unwrap(),
+                coordinator
+                    .manager()
+                    .latest_action(&action)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+            ),
+            (
+                Vec::new(),
+                Some(LogicalInstant::from_millis(0)),
+                ActionState::Running,
+            )
+        );
+    }
+
+    #[test]
+    fn ambiguous_terminator_error_keeps_in_flight_phase_for_bounded_retry() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("ambiguous-terminator.sqlite");
+        let clock = TestClock::default();
+        let action = action(19);
+        let digest = action.digest().unwrap();
+        {
+            let mut coordinator = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            coordinator
+                .manager_mut()
+                .append_action(&record(action.clone(), ActionState::Running))
+                .unwrap();
+            coordinator
+                .manager_mut()
+                .attach_consumer(&action, "run-a")
+                .unwrap();
+            let mut spy = FailOnceSpy {
+                calls: 0,
+                failed: false,
+                reasons: Vec::new(),
+            };
+
+            assert!(matches!(
+                coordinator.detach(&action, "run-a", &mut spy),
+                Err(SupersessionError::Terminator(_))
+            ));
+            let phase: i64 = coordinator
+                .manager
+                .journal
+                .connection
+                .query_row(
+                    "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                    [digest.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(phase, TerminationPhase::InFlight as i64);
+            clock.advance(TERMINATION_RETRY_MS);
+            assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+            assert_eq!(spy.calls, 1);
+            assert_eq!(
+                coordinator
+                    .manager()
+                    .latest_action(&action)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                ActionState::Running
+            );
+        }
+
+        let mut recovered = SupersessionCoordinator::open(
+            &path,
+            clock,
+            SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let phase: i64 = recovered
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, TerminationPhase::Unstarted as i64);
+        let mut retry_spy = Spy::default();
+        assert_eq!(recovered.reap_due(&mut retry_spy).unwrap().reaped, 1);
+        assert_eq!(retry_spy.calls, vec![(digest, KillReason::NoConsumers)]);
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+    }
+
+    #[test]
+    fn corrupt_termination_phase_fails_closed_during_startup_recovery() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("corrupt-termination-phase.sqlite");
+        let clock = TestClock::default();
+        let action = action(20);
+        let digest = action.digest().unwrap();
+        {
+            let coordinator = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            coordinator
+                .manager
+                .journal
+                .connection
+                .execute(
+                    "INSERT INTO action_termination_claims(
+                         action_key_digest, reason, claimed_at_ms, completed
+                     ) VALUES (?1, 'no_consumers', 0, 3)",
+                    [digest.to_string()],
+                )
+                .unwrap();
+        }
+
+        let result = SupersessionCoordinator::open(
+            &path,
+            clock,
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        );
+        assert!(matches!(
+            result,
+            Err(SupersessionError::InvalidConfig(message)) if message.contains("phase 3")
+        ));
+    }
+
+    #[test]
+    fn immediate_detach_failure_schedules_retry_for_reaper_once() {
+        let clock = TestClock::default();
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("immediate-detach-retry.sqlite");
+        let mut coordinator = SupersessionCoordinator::open(
+            &path,
+            clock.clone(),
+            SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let action = action(8);
         coordinator
             .manager_mut()
             .append_action(&record(action.clone(), ActionState::Running))
@@ -1244,15 +2199,554 @@ mod tests {
         let mut spy = FailOnceSpy {
             calls: 0,
             failed: false,
+            reasons: Vec::new(),
         };
+
         assert!(matches!(
             coordinator.detach(&action, "run-a", &mut spy),
             Err(SupersessionError::Terminator(_))
         ));
-        coordinator
-            .revoke_trust(&action, "retry termination", &mut spy)
-            .unwrap();
+        assert_eq!(
+            coordinator.next_retention().unwrap(),
+            Some(LogicalInstant::from_millis(TERMINATION_RETRY_MS))
+        );
+
+        clock.advance(TERMINATION_RETRY_MS);
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+        assert_eq!(spy.calls, 1);
+        assert_eq!(spy.reasons, [KillReason::NoConsumers]);
+        assert_eq!(
+            coordinator
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Running
+        );
+
+        drop(coordinator);
+        let mut recovered = SupersessionCoordinator::open(
+            &path,
+            clock,
+            SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 1);
         assert_eq!(spy.calls, 2);
+        assert_eq!(
+            spy.reasons,
+            [KillReason::NoConsumers, KillReason::NoConsumers]
+        );
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+        assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 0);
+        assert_eq!(spy.calls, 2);
+    }
+
+    #[test]
+    fn trust_revocation_failure_schedules_urgent_retry_for_reaper_once() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("trust-revocation-retry.sqlite");
+        let clock = TestClock::default();
+        let mut coordinator = SupersessionCoordinator::open(
+            &path,
+            clock.clone(),
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let action = action(9);
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        let mut spy = FailOnceSpy {
+            calls: 0,
+            failed: false,
+            reasons: Vec::new(),
+        };
+
+        assert!(matches!(
+            coordinator.revoke_trust(&action, "credential revoked", &mut spy),
+            Err(SupersessionError::Terminator(_))
+        ));
+        assert_eq!(
+            coordinator.next_retention().unwrap(),
+            Some(LogicalInstant::from_millis(TERMINATION_RETRY_MS))
+        );
+
+        clock.advance(TERMINATION_RETRY_MS);
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+        assert_eq!(spy.calls, 1);
+        assert_eq!(spy.reasons, [KillReason::TrustRevoked]);
+        assert_eq!(
+            coordinator
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Running
+        );
+        let phase: i64 = coordinator
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [action.digest().unwrap().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, 2);
+
+        drop(coordinator);
+        let mut recovered = SupersessionCoordinator::open(
+            &path,
+            clock,
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let recovered_phase: i64 = recovered
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [action.digest().unwrap().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recovered_phase, 0);
+        assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 1);
+        assert_eq!(spy.calls, 2);
+        assert_eq!(
+            spy.reasons,
+            [KillReason::TrustRevoked, KillReason::TrustRevoked]
+        );
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+        assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 0);
+        assert_eq!(spy.calls, 2);
+    }
+
+    #[test]
+    fn completion_metadata_failure_repairs_without_reterminating_or_adopting() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("completion-metadata-repair.sqlite");
+        let clock = TestClock::default();
+        let action = action(15);
+        let digest = action.digest().unwrap();
+        {
+            let mut coordinator = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            coordinator
+                .manager_mut()
+                .append_action(&record(action.clone(), ActionState::Running))
+                .unwrap();
+            coordinator
+                .manager_mut()
+                .attach_consumer(&action, "run-a")
+                .unwrap();
+            coordinator
+                .manager
+                .journal
+                .connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_termination_completion
+                     BEFORE UPDATE OF completed ON action_termination_claims
+                     WHEN NEW.completed = 1
+                     BEGIN SELECT RAISE(ABORT, 'completion metadata unavailable'); END",
+                )
+                .unwrap();
+            let mut spy = Spy::default();
+
+            assert!(matches!(
+                coordinator.detach(&action, "run-a", &mut spy).unwrap(),
+                DetachOutcome::Retained { .. }
+            ));
+            clock.advance(DEFAULT_RETENTION_MS);
+            assert!(coordinator.reap_due(&mut spy).is_err());
+            assert_eq!(spy.calls.len(), 1);
+            clock.advance(TERMINATION_RETRY_MS);
+            assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+            assert_eq!(spy.calls.len(), 1);
+            assert!(matches!(
+                coordinator.admit(&action, "run-b", "worker-b", 1_000, 250),
+                Err(SupersessionError::TerminationClaimed)
+            ));
+            let phase: i64 = coordinator
+                .manager
+                .journal
+                .connection
+                .query_row(
+                    "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                    [digest.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(phase, TerminationPhase::InFlight as i64);
+        }
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_termination_completion")
+            .unwrap();
+        drop(connection);
+
+        let mut recovered = SupersessionCoordinator::open(
+            &path,
+            clock,
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let phase: i64 = recovered
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, TerminationPhase::Unstarted as i64);
+        let mut retry_spy = Spy::default();
+        assert_eq!(recovered.reap_due(&mut retry_spy).unwrap().reaped, 1);
+        assert_eq!(
+            retry_spy.calls,
+            vec![(digest.clone(), KillReason::RetentionExpired)]
+        );
+        let phase: i64 = recovered
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, TerminationPhase::Complete as i64);
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+        assert_eq!(recovered.reap_due(&mut retry_spy).unwrap().reaped, 0);
+    }
+
+    #[test]
+    fn abandoned_append_failure_repairs_without_reterminating_or_adopting() {
+        let clock = TestClock::default();
+        let mut coordinator = coordinator(clock.clone());
+        let action = action(16);
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        coordinator
+            .manager_mut()
+            .attach_consumer(&action, "run-a")
+            .unwrap();
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_abandoned_append
+                 BEFORE INSERT ON action_events
+                 WHEN NEW.state = 'abandoned'
+                 BEGIN SELECT RAISE(ABORT, 'abandoned append unavailable'); END",
+            )
+            .unwrap();
+        let mut spy = Spy::default();
+
+        assert!(matches!(
+            coordinator.detach(&action, "run-a", &mut spy).unwrap(),
+            DetachOutcome::Retained { .. }
+        ));
+        clock.advance(DEFAULT_RETENTION_MS);
+        assert!(coordinator.reap_due(&mut spy).is_err());
+        assert_eq!(spy.calls.len(), 1);
+        assert!(matches!(
+            coordinator.admit(&action, "run-b", "worker-b", 1_000, 250),
+            Err(SupersessionError::TerminationClaimed)
+        ));
+        let phase: i64 = coordinator
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT completed FROM action_termination_claims",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, 1);
+
+        coordinator
+            .manager
+            .journal
+            .connection
+            .execute_batch("DROP TRIGGER fail_abandoned_append")
+            .unwrap();
+        clock.advance(TERMINATION_RETRY_MS);
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 1);
+        assert_eq!(spy.calls.len(), 1);
+        assert_eq!(
+            coordinator
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+    }
+
+    #[test]
+    fn finalization_repair_survives_restart_without_reterminating() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("finalization-repair.sqlite");
+        let clock = TestClock::default();
+        let action = action(17);
+        {
+            let mut coordinator = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            coordinator
+                .manager_mut()
+                .append_action(&record(action.clone(), ActionState::Running))
+                .unwrap();
+            coordinator
+                .manager_mut()
+                .attach_consumer(&action, "run-a")
+                .unwrap();
+            coordinator
+                .manager
+                .journal
+                .connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_restart_append
+                     BEFORE INSERT ON action_events
+                     WHEN NEW.state = 'abandoned'
+                     BEGIN SELECT RAISE(ABORT, 'append unavailable'); END",
+                )
+                .unwrap();
+            let mut spy = Spy::default();
+            coordinator.detach(&action, "run-a", &mut spy).unwrap();
+            clock.advance(DEFAULT_RETENTION_MS);
+            assert!(coordinator.reap_due(&mut spy).is_err());
+            assert_eq!(spy.calls.len(), 1);
+        }
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_restart_append")
+            .unwrap();
+        drop(connection);
+
+        let mut restarted = SupersessionCoordinator::open(
+            &path,
+            clock.clone(),
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        clock.advance(TERMINATION_RETRY_MS);
+        let mut spy = Spy::default();
+        assert_eq!(restarted.reap_due(&mut spy).unwrap().reaped, 1);
+        assert!(spy.calls.is_empty());
+        assert_eq!(
+            restarted
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+    }
+
+    #[test]
+    fn trust_revocation_retry_bypasses_live_consumers() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("trust-revocation-live-consumer.sqlite");
+        let clock = TestClock::default();
+        let mut coordinator = SupersessionCoordinator::open(
+            &path,
+            clock.clone(),
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let action = action(12);
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        coordinator
+            .manager_mut()
+            .attach_consumer(&action, "run-a")
+            .unwrap();
+        let mut spy = FailOnceSpy {
+            calls: 0,
+            failed: false,
+            reasons: Vec::new(),
+        };
+
+        assert!(matches!(
+            coordinator.revoke_trust(&action, "credential revoked", &mut spy),
+            Err(SupersessionError::Terminator(_))
+        ));
+        assert_eq!(
+            coordinator.manager().live_consumer_count(&action).unwrap(),
+            1
+        );
+
+        clock.advance(TERMINATION_RETRY_MS);
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+        assert_eq!(spy.calls, 1);
+        assert_eq!(spy.reasons, [KillReason::TrustRevoked]);
+        assert_eq!(
+            coordinator.manager().live_consumer_count(&action).unwrap(),
+            1
+        );
+        assert_eq!(
+            coordinator
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Running
+        );
+
+        drop(coordinator);
+        let mut recovered = SupersessionCoordinator::open(
+            &path,
+            clock,
+            SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 1);
+        assert_eq!(spy.calls, 2);
+        assert_eq!(
+            spy.reasons,
+            [KillReason::TrustRevoked, KillReason::TrustRevoked]
+        );
+        assert_eq!(recovered.manager().live_consumer_count(&action).unwrap(), 1);
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
+        assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 0);
+        assert_eq!(spy.calls, 2);
+    }
+
+    #[test]
+    fn failed_and_abandoned_termination_retries_are_reaped() {
+        let clock = TestClock::default();
+        let temp = TempDir::new().unwrap();
+
+        for (seed, state) in [(13, ActionState::Failed), (14, ActionState::Abandoned)] {
+            let path = temp
+                .path()
+                .join(format!("failed-or-abandoned-{seed}.sqlite"));
+            let mut coordinator = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            let action = action(seed);
+            coordinator
+                .manager_mut()
+                .append_action(&record(action.clone(), state))
+                .unwrap();
+            coordinator
+                .manager_mut()
+                .attach_consumer(&action, "run-a")
+                .unwrap();
+            let mut spy = FailOnceSpy {
+                calls: 0,
+                failed: false,
+                reasons: Vec::new(),
+            };
+
+            assert!(matches!(
+                coordinator.detach(&action, "run-a", &mut spy),
+                Err(SupersessionError::Terminator(_))
+            ));
+            clock.advance(TERMINATION_RETRY_MS);
+            assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 0);
+            assert_eq!(spy.calls, 1);
+            assert_eq!(spy.reasons, [KillReason::FailedAction]);
+            assert_eq!(
+                coordinator
+                    .manager()
+                    .latest_action(&action)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                state
+            );
+
+            drop(coordinator);
+            let mut recovered = SupersessionCoordinator::open(
+                &path,
+                clock.clone(),
+                SupersessionConfig::new(true, DEFAULT_RETENTION_MS).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 1);
+            assert_eq!(spy.calls, 2);
+            assert_eq!(
+                spy.reasons,
+                [KillReason::FailedAction, KillReason::FailedAction]
+            );
+            assert_eq!(
+                recovered
+                    .manager()
+                    .latest_action(&action)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                ActionState::Abandoned
+            );
+            assert_eq!(recovered.reap_due(&mut spy).unwrap().reaped, 0);
+            assert_eq!(spy.calls, 2);
+        }
     }
 
     #[cfg(feature = "virtual-time")]
