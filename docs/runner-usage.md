@@ -66,7 +66,11 @@ that temporary mismatch until the operator activates the new signed record.
   `VELNOR_JOB_CPUS=4` and `VELNOR_JOB_MEMORY=12g`, appended after workflow
   `container.options` so daemon policy wins on shared warm-runner hosts.
   Set either value empty in the daemon env to disable that cap for a trusted
-  scope, or tune per instance.
+  scope, or tune per instance. All job units additionally run under
+  `velnor-jobs.slice`, which hard-caps the aggregate at 95% of host
+  (`CPUQuota=1900%`, `MemoryHigh=90%` throttle, `MemoryMax=95%` kill) so a
+  misconfigured pool cannot OOM the host; daemons and the broker stay in
+  `velnor-control.slice`, outside that cap.
 - Rust compile-cache defaults: every job starts with
   `CARGO_INCREMENTAL=0`, `SCCACHE_CACHE_SIZE=20G`, and
   `SCCACHE_BASEDIRS=/__w:/github/home`. Workflow environment may explicitly

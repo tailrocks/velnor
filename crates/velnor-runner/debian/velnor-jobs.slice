@@ -3,6 +3,14 @@ Description=Velnor job-worker slice
 Documentation=https://github.com/tailrocks/velnor
 
 [Slice]
+# Sentry has 20 logical CPUs. Reserve 5% for the daemon, guardian, and host;
+# the job fleet may consume the remaining 19 CPUs in parallel.
+CPUQuota=1900%
 CPUWeight=100
 IOWeight=100
+# Keep job memory below 95% of installed RAM while throttling before the hard
+# ceiling. Percentage values track hosts with different physical memory sizes.
+MemoryHigh=90%
+MemoryMax=95%
+MemorySwapMax=0
 TasksMax=4096
