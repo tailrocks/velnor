@@ -658,6 +658,15 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
         [],
         |row| row.get(0),
     )?;
+    if version > LATEST_SCHEMA_VERSION {
+        return Err(StoreError::new(
+            ExitClass::Operation,
+            "store.schema.unsupported",
+        )
+        .with_remediation(format!(
+            "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
+        )));
+    }
     if version >= LATEST_SCHEMA_VERSION && !v17_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
@@ -1423,6 +1432,81 @@ mod tests {
             &Some("future-owner".to_owned()),
             &Some("2099-01-01T00:00:00Z".to_owned())
         ));
+    }
+
+    #[test]
+    fn future_schema_version_fails_closed_before_migration_lock_acquisition() {
+        let current = TempDb::new("current-schema");
+        let store = Store::open(&current.path).expect("current schema opens");
+        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        drop(store);
+        let reopened = Store::open(&current.path).expect("existing current schema opens");
+        assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        drop(reopened);
+
+        let temp = TempDb::new("future-schema");
+        let store = Store::open(&temp.path).expect("future-schema fixture opens");
+        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        drop(store);
+
+        let future_version = LATEST_SCHEMA_VERSION + 1;
+        let conn = Connection::open(&temp.path).expect("open current database");
+        conn.execute(
+            "UPDATE schema_version SET version = ?1 WHERE singleton = 0",
+            [future_version],
+        )
+        .unwrap();
+        let sentinel = (
+            "sentinel-owner",
+            "1970-01-01T00:00:00Z",
+            "1970-01-01T00:00:00Z",
+        );
+        conn.execute(
+            "UPDATE migration_lock
+             SET owner = ?1, acquired_at = ?2, heartbeat_at = ?3
+             WHERE singleton = 0",
+            rusqlite::params![sentinel.0, sentinel.1, sentinel.2],
+        )
+        .unwrap();
+
+        let current_error = current_version(&conn).expect_err("future schema must fail closed");
+        assert_eq!(current_error.envelope.class, ExitClass::Operation.as_str());
+        assert_eq!(current_error.envelope.reason, "store.schema.unsupported");
+        let remediation = current_error
+            .envelope
+            .remediation
+            .expect("version guidance");
+        assert!(
+            remediation.contains(&future_version.to_string()),
+            "{remediation}"
+        );
+        assert!(
+            remediation.contains(&LATEST_SCHEMA_VERSION.to_string()),
+            "{remediation}"
+        );
+        drop(conn);
+
+        let open_error = Store::open(&temp.path).expect_err("future schema must block opening");
+        assert_eq!(open_error.envelope.class, ExitClass::Operation.as_str());
+        assert_eq!(open_error.envelope.reason, "store.schema.unsupported");
+
+        let conn = Connection::open(&temp.path).expect("reopen future-version database");
+        let lock: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT owner, acquired_at, heartbeat_at
+                 FROM migration_lock WHERE singleton = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            lock,
+            (
+                Some(sentinel.0.to_owned()),
+                Some(sentinel.1.to_owned()),
+                Some(sentinel.2.to_owned()),
+            )
+        );
     }
 
     #[test]
