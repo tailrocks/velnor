@@ -14,7 +14,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -5573,8 +5573,16 @@ async fn handle_job_request(
             args.work_dir.clone(),
             &job,
         ));
-        let step_logs_publisher =
-            start_step_log_publisher(job.clone(), step_log_receiver, console_log_path);
+        // Every StepLog the executor streams is mirrored here so the
+        // cancellation path (where the executor never returns its final
+        // ScriptJobResult) can still persist the partial job log.
+        let streamed_step_logs = Arc::new(Mutex::new(Vec::new()));
+        let step_logs_publisher = start_step_log_publisher(
+            job.clone(),
+            step_log_receiver,
+            console_log_path,
+            Arc::clone(&streamed_step_logs),
+        );
         let config_dir = config_dir.to_path_buf();
         let teardown_config_dir = config_dir.clone();
         let work_dir = args.work_dir.clone();
@@ -5657,6 +5665,9 @@ async fn handle_job_request(
                         result: TaskResult::Canceled,
                         outputs: BTreeMap::new(),
                         environment_url: None,
+                        // Placeholder: replaced from the streamed StepLog
+                        // mirror after the step publishers drain below, so a
+                        // canceled job still persists its partial log.
                         step_logs: Vec::new(),
                         teardown: None,
                         timings: ExecutionTimings::default(),
@@ -5696,15 +5707,28 @@ async fn handle_job_request(
                 job_result.executed_physical_actions,
             );
         }
-        let outputs = job_result.outputs;
-        let step_logs = job_result.step_logs;
-        let teardown = job_result.teardown;
-        let execution_timings = job_result.timings;
         // Keep terminal completion ordered after best-effort Results Service
         // step updates, matching the official runner. Drain both publishers
         // concurrently so the old 5s + 30s sequential tail is capped at the
-        // slower publisher deadline; abort only a stalled publisher.
+        // slower publisher deadline; abort only a stalled publisher. Drain
+        // BEFORE reading the streamed-step-log mirror so a canceled job's
+        // partial logs below are complete.
         drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
+        let outputs = job_result.outputs;
+        let mut step_logs = job_result.step_logs;
+        if step_logs.is_empty() && matches!(job_result.result, TaskResult::Canceled) {
+            // Cancel path: the executor errored before returning its final
+            // step_logs, but the publisher mirrored every streamed StepLog.
+            // Persist what ran instead of completing with an empty log.
+            let streamed = std::mem::take(
+                &mut *streamed_step_logs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            step_logs = merged_partial_step_logs(streamed);
+        }
+        let teardown = job_result.teardown;
+        let execution_timings = job_result.timings;
         let finalize_started = Instant::now();
         let finalize_span = tracing::info_span!("job-finalize");
         let completion = complete_run_service_job_refreshing(
@@ -6366,6 +6390,7 @@ fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: UnboundedReceiver<StepLog>,
     console_log_path: Option<PathBuf>,
+    streamed_step_logs: Arc<Mutex<Vec<StepLog>>>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -6473,6 +6498,10 @@ fn start_step_log_publisher(
             let mut processed = Vec::with_capacity(logs.len());
             let mut live_batches = Vec::new();
             for log in logs {
+                streamed_step_logs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(log.clone());
                 let masker = job_masks.with_extra(&log.masks);
                 let lines = mask_log_lines_with(&log.lines, &masker);
                 let line_count = lines.len() as i64;
@@ -6564,10 +6593,12 @@ fn start_step_log_publisher(
                             .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
                             .await
                         {
-                            eprintln!(
-                                "Best-effort Results Service log upload failed for '{}': {}",
-                                log.step_id,
-                                sanitized_retry_error(&e)
+                            tracing::warn!(
+                                job_id = %job_id,
+                                blob_kind = "step-log",
+                                step_id = %log.step_id,
+                                error = %sanitized_retry_error(&e),
+                                "best-effort Results Service step-log upload failed"
                             );
                         }
                         // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
@@ -9685,32 +9716,53 @@ fn iso8601_with_blob_precision(rfc3339: &str) -> String {
     }
 }
 
+/// Build the Results Service Twirp client for a job's SystemVssConnection, if
+/// the job message carries a usable ResultsServiceUrl and access token.
+fn results_client_for_job(
+    job: &AgentJobRequestMessage,
+) -> Option<crate::protocol::TwirpResultsClient> {
+    let endpoint = job.system_connection()?;
+    let token = system_connection_access_token(endpoint)?;
+    crate::protocol::TwirpResultsClient::from_endpoint_data(&endpoint.data, &token)
+        .and_then(|r| r.ok())
+}
+
 /// Upload the combined job log to Results Service so GitHub's native job-log
 /// download endpoint has the same backing blob the official runner publishes.
 async fn upload_results_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
     if step_logs.is_empty() {
         return;
     }
-    let Some(endpoint) = job.system_connection() else {
+    let Some(client) = results_client_for_job(job) else {
         return;
     };
-    let Some(token) = system_connection_access_token(endpoint) else {
-        return;
-    };
-    let Some(client) =
-        crate::protocol::TwirpResultsClient::from_endpoint_data(&endpoint.data, &token)
-            .and_then(|r| r.ok())
-    else {
-        return;
-    };
+    match upload_results_job_log_with_client(&client, job, step_logs).await {
+        Ok(()) => println!("Uploaded Results Service job log."),
+        Err(error) => tracing::warn!(
+            job_id = %job.job_id,
+            blob_kind = "job-log",
+            error = %format!("{error:#}"),
+            "best-effort Results Service job-log upload failed"
+        ),
+    }
+}
 
+/// Upload the combined job log through an explicit Results Service client.
+/// Split from `upload_results_job_log` so unit tests drive a loopback server.
+async fn upload_results_job_log_with_client(
+    client: &crate::protocol::TwirpResultsClient,
+    job: &AgentJobRequestMessage,
+    step_logs: &[StepLog],
+) -> Result<()> {
+    if step_logs.is_empty() {
+        return Ok(());
+    }
     let content = build_combined_job_log(job, step_logs);
     let line_count = content.lines().count() as i64;
     if line_count == 0 {
-        return;
+        return Ok(());
     }
-
-    match client
+    client
         .upload_job_log(
             &job.plan.plan_id,
             &job.job_id,
@@ -9718,10 +9770,62 @@ async fn upload_results_job_log(job: &AgentJobRequestMessage, step_logs: &[StepL
             line_count,
         )
         .await
-    {
-        Ok(()) => println!("Uploaded Results Service job log."),
-        Err(e) => eprintln!("Best-effort Results Service job log upload failed: {e:#}"),
+}
+
+/// Upload one step's log blob through an explicit Results Service client, for
+/// the pre-execution failure path that bypasses the live step publisher. Lines
+/// are masked and stamped with the 7-digit timestamp prefix exactly like the
+/// publisher path (docs/log-format-contract.md).
+async fn upload_results_step_log_with_client(
+    client: &crate::protocol::TwirpResultsClient,
+    job: &AgentJobRequestMessage,
+    log: &StepLog,
+) -> Result<()> {
+    let masker = MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks);
+    let lines = mask_log_lines_with(&log.lines, &masker);
+    let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
+    client
+        .upload_step_log(&job.plan.plan_id, &job.job_id, &log.step_id, &timestamped)
+        .await
+}
+
+/// Merge streamed step-log snapshots into one cumulative log per step,
+/// preserving first-seen order. Live chunks (`completed_at` empty) carry only
+/// new lines; a final snapshot (`completed_at` set) is authoritative and
+/// cumulative, so it replaces the accumulated chunks. Steps still running when
+/// the job was canceled have no final snapshot — stamp them so the combined
+/// job log renders their partial output as a finished step.
+fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
+    let mut merged: Vec<StepLog> = Vec::new();
+    let mut index: BTreeMap<String, usize> = BTreeMap::new();
+    for log in streamed {
+        match index.get(&log.step_id) {
+            Some(&slot) => {
+                let target = &mut merged[slot];
+                if log.completed_at.is_empty() {
+                    if target.completed_at.is_empty() {
+                        target.lines.extend(log.lines);
+                        target.masks.extend(log.masks);
+                        target.annotations.extend(log.annotations);
+                        target.telemetry.extend(log.telemetry);
+                    }
+                } else {
+                    *target = log;
+                }
+            }
+            None => {
+                index.insert(log.step_id.clone(), merged.len());
+                merged.push(log);
+            }
+        }
     }
+    let now = unix_now_iso8601();
+    for log in &mut merged {
+        if log.completed_at.is_empty() {
+            log.completed_at = now.clone();
+        }
+    }
+    merged
 }
 
 /// Upload the combined job log as a `job-log.txt` artifact (best-effort). This
@@ -10301,6 +10405,32 @@ async fn complete_acquired_job_outcome(
         let log = failed_acquired_job_step_log(category, &masked_reason);
         if let Err(error) = publish_timeline_step_log(job, &log).await {
             eprintln!("Best-effort Velnor rejection step log upload failed: {error:#}");
+        }
+        // Persist the Results Service blobs too: without them GitHub's native
+        // job-log endpoint answers BlobNotFound for every cleanly failed job,
+        // hiding the rejection reason (homebrew-tablerock run 33344851591,
+        // velnor-actions run 33355064641). Best-effort — completion must not
+        // be blocked by a log upload.
+        if let Some(client) = results_client_for_job(job) {
+            if let Err(error) = upload_results_step_log_with_client(&client, job, &log).await {
+                tracing::warn!(
+                    job_id = %job.job_id,
+                    blob_kind = "step-log",
+                    step_id = %log.step_id,
+                    error = %format!("{error:#}"),
+                    "best-effort Results Service step-log upload failed"
+                );
+            }
+            if let Err(error) =
+                upload_results_job_log_with_client(&client, job, std::slice::from_ref(&log)).await
+            {
+                tracing::warn!(
+                    job_id = %job.job_id,
+                    blob_kind = "job-log",
+                    error = %format!("{error:#}"),
+                    "best-effort Results Service job-log upload failed"
+                );
+            }
         }
     }
     // Plan 066 terminal transition for a job that never reached execution:
@@ -17651,5 +17781,245 @@ runs:
             timeout_minutes: None,
         };
         reject_unguestable_steps(&[ExecutableStep::Checkout(plan)]).unwrap();
+    }
+
+    fn partial_step_log(step_id: &str, lines: &[&str], completed_at: &str) -> StepLog {
+        StepLog {
+            step_id: step_id.to_string(),
+            display_name: step_id.to_string(),
+            order: 1,
+            started_at: "2026-08-31T00:00:00.0000000Z".to_string(),
+            completed_at: completed_at.to_string(),
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn merged_partial_step_logs_fold_chunks_and_stamp_unfinished_steps() {
+        let streamed = vec![
+            partial_step_log("build", &["compiling a"], ""),
+            partial_step_log("build", &["compiling b"], ""),
+            partial_step_log("checkout", &["cloned"], "2026-08-31T00:00:01.0000000Z"),
+            // A late live chunk for a step whose final snapshot already
+            // landed must not duplicate its lines.
+            partial_step_log("checkout", &["cloned"], ""),
+        ];
+        let merged = merged_partial_step_logs(streamed);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].step_id, "build");
+        assert_eq!(merged[0].lines, vec!["compiling a", "compiling b"]);
+        assert!(
+            !merged[0].completed_at.is_empty(),
+            "unfinished step must be stamped at cancellation"
+        );
+        assert_eq!(merged[1].step_id, "checkout");
+        assert_eq!(merged[1].lines, vec!["cloned"]);
+        assert_eq!(merged[1].completed_at, "2026-08-31T00:00:01.0000000Z");
+    }
+
+    #[cfg(feature = "test-support")]
+    fn results_job(results_url: &str) -> crate::job_message::AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Log persistence",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": results_url,
+                    "authorization": { "parameters": { "AccessToken": "token" } },
+                    "data": { "ResultsServiceUrl": results_url }
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn mount_results_job_log_endpoint(
+        server: &wiremock::MockServer,
+        put_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    ) {
+        use wiremock::{matchers::method, Mock, ResponseTemplate};
+
+        let signed_url = format!("{}/blob/job-log", server.uri());
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path(
+                "/twirp/results.services.receiver.Receiver/GetJobLogsSignedBlobURL",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "logs_url": signed_url,
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(wiremock::matchers::path("/blob/job-log"))
+            .respond_with(move |request: &wiremock::Request| {
+                put_bodies
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(request.body.clone());
+                ResponseTemplate::new(201)
+            })
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path(
+                "/twirp/results.services.receiver.Receiver/CreateJobLogsMetadata",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn failed_job_uploads_job_log_with_partial_content() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = wiremock::MockServer::start().await;
+        let put_bodies = Arc::new(Mutex::new(Vec::new()));
+        mount_results_job_log_endpoint(&server, Arc::clone(&put_bodies)).await;
+
+        let job = results_job(&server.uri());
+        let client = crate::protocol::TwirpResultsClient::new(server.uri(), "token").unwrap();
+        let step_logs = vec![partial_step_log(
+            "velnor-pre-execution-pre_execution",
+            &[
+                "##[error]Velnor rejected this job before workflow execution.",
+                "phase: pre_execution",
+            ],
+            "2026-08-31T00:00:01.0000000Z",
+        )];
+        upload_results_job_log_with_client(&client, &job, &step_logs)
+            .await
+            .unwrap();
+
+        let bodies = put_bodies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(bodies.len(), 1, "job-log blob must be PUT exactly once");
+        let body = String::from_utf8(bodies[0].clone()).unwrap();
+        assert!(body.contains("##[error]Velnor rejected this job"), "{body}");
+        assert!(body.contains("phase: pre_execution"), "{body}");
+        server.verify().await;
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn canceled_job_uploads_merged_partial_step_logs() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = wiremock::MockServer::start().await;
+        let put_bodies = Arc::new(Mutex::new(Vec::new()));
+        mount_results_job_log_endpoint(&server, Arc::clone(&put_bodies)).await;
+
+        let job = results_job(&server.uri());
+        let client = crate::protocol::TwirpResultsClient::new(server.uri(), "token").unwrap();
+        let step_logs = merged_partial_step_logs(vec![
+            partial_step_log("build", &["compiling a"], ""),
+            partial_step_log("build", &["compiling b"], ""),
+        ]);
+        upload_results_job_log_with_client(&client, &job, &step_logs)
+            .await
+            .unwrap();
+
+        let bodies = put_bodies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(bodies.len(), 1);
+        let body = String::from_utf8(bodies[0].clone()).unwrap();
+        assert!(body.contains("compiling a"), "{body}");
+        assert!(body.contains("compiling b"), "{body}");
+        server.verify().await;
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn failed_job_log_upload_warns_and_does_not_panic() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        #[derive(Clone, Default)]
+        struct WarnCapture(Arc<Mutex<Vec<String>>>);
+        struct FieldVisitor {
+            text: String,
+        }
+        impl tracing::field::Visit for FieldVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write as _;
+                let _ = write!(self.text, "{}={:?} ", field.name(), value);
+            }
+        }
+        impl<S> tracing_subscriber::Layer<S> for WarnCapture
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    let mut visitor = FieldVisitor {
+                        text: String::new(),
+                    };
+                    event.record(&mut visitor);
+                    self.0
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(visitor.text);
+                }
+            }
+        }
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let capture = WarnCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let job = results_job(&server.uri());
+        let step_logs = vec![partial_step_log(
+            "build",
+            &["partial output"],
+            "2026-08-31T00:00:01.0000000Z",
+        )];
+        // Best-effort: the upload fails against the 500 endpoint, but the
+        // wrapper must surface a daemon-visible warn and never panic.
+        upload_results_job_log(&job, &step_logs).await;
+
+        let warns = capture
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            warns
+                .iter()
+                .any(|text| text.contains("blob_kind=\"job-log\"") && text.contains("job-1")),
+            "expected a job-log upload warning, got: {warns:?}"
+        );
     }
 }
