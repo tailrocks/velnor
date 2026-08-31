@@ -1403,7 +1403,9 @@ unsafe fn clear_errno() {
         target_os = "netbsd"
     ))]
     {
-        *libc::__error() = 0;
+        unsafe {
+            *libc::__error() = 0;
+        }
     }
     #[cfg(not(any(
         target_os = "macos",
@@ -1415,7 +1417,9 @@ unsafe fn clear_errno() {
         target_os = "netbsd"
     )))]
     {
-        *libc::__errno_location() = 0;
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
     }
 }
 
