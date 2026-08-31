@@ -144,11 +144,11 @@ Run this loop for every leaf:
    until fixed or proven blocked.
 5. Verification subagent runs item integration. Before any Actions dispatch,
    cancel only older pending/in-progress validation runs owned by this
-   iteration; never cancel protected release/package/publish-APT workflows or
-   unrelated runs. Delete only stale validation-owned runner registrations, and
-   prove both clean before dispatching once and monitoring only the captured new
-   run ID. Check state within 60 seconds; diagnose unchanged or queued state
-   before two minutes;
+   iteration; never cancel protected Release, Package update, Publish apt repo,
+   or workflow_dispatch release workflows/runs, or unrelated runs. Delete only
+   stale validation-owned runner registrations, and prove both clean before
+   dispatching once and monitoring only the captured new run ID. Check state
+   within 60 seconds; diagnose unchanged or queued state before two minutes;
    never save rendered GitHub HTML. Fixture cleanup is mandatory, not an
    optional validation suggestion.
 6. Dispatch a fresh reviewer subagent. Review the complete diff against scope,

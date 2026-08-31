@@ -166,9 +166,9 @@ Immediate next actions, in order (update this section as work lands):
    focused PR to `main` only at the authorized safe integration point; then
    rerun the complete required gates against the merged SHA. Before any retry,
    cancel only older pending/in-progress validation runs owned by that
-   iteration; never cancel protected release/package/publish-APT workflows or
-   unrelated runs. Clear only validation-owned stale registrations and prove
-   both are clear.
+   iteration; never cancel protected Release, Package update, Publish apt repo,
+   or workflow_dispatch release workflows/runs, or unrelated runs. Clear only
+   validation-owned stale registrations and prove both are clear.
 6. When 079 completes: verify no `velnor-runner` product surface remains; only
    then use the assigned branch's focused PR for the completion gate.
 
