@@ -258,6 +258,11 @@ fn packaged_units_have_no_controller_partof_to_workers() {
         .any(|line| line.starts_with("EnvironmentFile=") && line.contains("secrets.env")));
     assert!(include_str!("../debian/velnor-jobs.slice").contains("job-worker slice"));
     assert!(!include_str!("../debian/velnor-jobs.slice").contains("transitional Docker"));
+    let jobs_slice = include_str!("../debian/velnor-jobs.slice");
+    assert!(jobs_slice.contains("CPUQuota=1900%"));
+    assert!(jobs_slice.contains("MemoryHigh=90%"));
+    assert!(jobs_slice.contains("MemoryMax=95%"));
+    assert!(jobs_slice.contains("MemorySwapMax=0"));
     let guardian_src = include_str!("../src/node/guardian.rs");
     let code = guardian_src
         .split("#[cfg(test)]")
