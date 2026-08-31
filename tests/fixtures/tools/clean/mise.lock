@@ -5,3 +5,7 @@ backend = "aqua:rhysd/actionlint"
 [[tools.gh]]
 version = "2.96.0"
 backend = "aqua:cli/cli"
+
+[[tools.rust]]
+version = "1.97.1"
+backend = "core:rust"

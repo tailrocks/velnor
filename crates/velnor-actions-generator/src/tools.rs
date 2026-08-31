@@ -17,6 +17,20 @@ use toml::Value;
 
 const SCHEMA: u32 = 1;
 
+const REQUIRED_MISE_VERBS: [&str; 6] = ["fmt", "fmt-fix", "lint", "test", "check", "ci"];
+
+/// Tools required by the generator-owned fleet tasks.
+pub const FLEET_TASK_TOOLS: [&str; 3] = ["repolint", "alint", "zizmor"];
+
+const LEGACY_NEXTEST_KEY: &str = "github:nextest-rs/nextest";
+const LEGACY_NEXTEST_VERSION: &str = "cargo-nextest-0.9.140";
+const CANONICAL_NEXTEST_KEY: &str = "aqua:nextest-rs/nextest/cargo-nextest";
+const CANONICAL_NEXTEST_VERSION: &str = "0.9.140";
+const LEGACY_CARGO_AUDIT_KEY: &str = "github:rustsec/rustsec";
+const LEGACY_CARGO_AUDIT_VERSION: &str = "cargo-audit/v0.22.2";
+const CANONICAL_CARGO_AUDIT_KEY: &str = "aqua:rustsec/rustsec/cargo-audit";
+const CANONICAL_CARGO_AUDIT_VERSION: &str = "0.22.2";
+
 /// One generator-owned tool policy entry.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -145,8 +159,27 @@ impl ToolRegistry {
     /// Normalize the `[tools]` section of one consumer file while preserving
     /// all authored settings and tasks outside that section.
     pub fn normalize_mise_file(&self, body: &str) -> Result<String, String> {
+        self.normalize_mise_file_with_tools(body, [])
+    }
+
+    /// Normalize a consumer file and add the generator-owned tools required by
+    /// the supplied task projection. Existing authored tools remain intact.
+    pub fn normalize_mise_file_with_tools<'a, I>(
+        &self,
+        body: &str,
+        required: I,
+    ) -> Result<String, String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
         let effective = self.parse_mise(body, Path::new("mise.toml"))?;
-        let names: Vec<&str> = effective.iter().map(|tool| tool.name.as_str()).collect();
+        let mut names: BTreeSet<&str> = effective.iter().map(|tool| tool.name.as_str()).collect();
+        for name in required {
+            if !self.entries.contains_key(name) {
+                return Err(format!("tool {name:?} is not in the registry"));
+            }
+            names.insert(name);
+        }
         let block = self.render_tools_block(names.iter().copied())?;
         let mut output = String::new();
         let mut in_tools = false;
@@ -181,6 +214,125 @@ impl ToolRegistry {
         Ok(output)
     }
 
+    /// Normalize the exact nextest declaration emitted by older consumer
+    /// repositories before applying the strict registry check.
+    ///
+    /// This compatibility path is intentionally render-only: callers must
+    /// still pass the returned body through `normalize_mise_file_with_tools`.
+    /// No other legacy source or version is accepted.
+    pub(crate) fn migrate_legacy_nextest(body: &str) -> Result<(String, bool), String> {
+        migrate_legacy_tool(
+            body,
+            "nextest",
+            LEGACY_NEXTEST_KEY,
+            LEGACY_NEXTEST_VERSION,
+            CANONICAL_NEXTEST_KEY,
+            CANONICAL_NEXTEST_VERSION,
+        )
+    }
+
+    /// Normalize the exact cargo-audit declaration emitted by older consumer
+    /// repositories before applying the strict registry check.
+    ///
+    /// This compatibility path is intentionally render-only: callers must
+    /// still pass the returned body through `normalize_mise_file_with_tools`.
+    /// No other legacy source or version is accepted.
+    pub(crate) fn migrate_legacy_cargo_audit(body: &str) -> Result<(String, bool), String> {
+        migrate_legacy_tool(
+            body,
+            "cargo-audit",
+            LEGACY_CARGO_AUDIT_KEY,
+            LEGACY_CARGO_AUDIT_VERSION,
+            CANONICAL_CARGO_AUDIT_KEY,
+            CANONICAL_CARGO_AUDIT_VERSION,
+        )
+    }
+
+    /// Project selected tool lock entries from a canonical source lock into a
+    /// consumer lock. Existing non-selected entries are retained, while any
+    /// selected aliases are replaced by the registry's canonical lock key and
+    /// source record. TOML serialization gives the projection one deterministic
+    /// representation independent of the consumer's authored ordering.
+    pub fn project_lock_file<'a, I>(
+        &self,
+        existing: &str,
+        source: &str,
+        selected: I,
+    ) -> Result<String, String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut document: Value = if existing.trim().is_empty() {
+            let mut document = toml::map::Map::new();
+            document.insert("lockfile_version".to_owned(), Value::Integer(1));
+            Value::Table(document)
+        } else {
+            toml::from_str(existing)
+                .map_err(|error| format!("parsing consumer mise.lock: {error}"))?
+        };
+        let source_document: Value = toml::from_str(source)
+            .map_err(|error| format!("parsing generator mise.lock: {error}"))?;
+        let source_tools = source_document
+            .get("tools")
+            .and_then(Value::as_table)
+            .ok_or_else(|| "generator mise.lock is missing [tools] entries".to_owned())?;
+        let tools = document
+            .as_table_mut()
+            .expect("TOML document is a table")
+            .entry("tools".to_owned())
+            .or_insert_with(|| Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .ok_or_else(|| "consumer mise.lock tools is not a table".to_owned())?;
+
+        let selected: BTreeSet<&str> = selected.into_iter().collect();
+        for name in selected {
+            let spec = self
+                .entries
+                .get(name)
+                .ok_or_else(|| format!("tool {name:?} is not in the registry"))?;
+            let canonical_key = if spec.source.contains(':') {
+                spec.source.as_str()
+            } else {
+                name
+            };
+            let mut candidates = vec![
+                name,
+                spec.source.as_str(),
+                spec.backend.as_deref().unwrap_or(""),
+            ];
+            if let Some(legacy_key) = legacy_key_for(name) {
+                candidates.push(legacy_key);
+            }
+            let source_key = candidates
+                .iter()
+                .find(|candidate| source_tools.contains_key(**candidate))
+                .copied()
+                .ok_or_else(|| {
+                    format!("generator mise.lock has no entry for tool {name:?} ({canonical_key})")
+                })?;
+            for candidate in candidates {
+                if !candidate.is_empty() && candidate != canonical_key {
+                    tools.remove(candidate);
+                }
+            }
+            let value = source_tools
+                .get(source_key)
+                .expect("source lock key found above")
+                .clone();
+            tools.insert(canonical_key.to_owned(), value);
+        }
+        let serialized = toml::to_string_pretty(&document)
+            .map_err(|error| format!("rendering projected mise.lock: {error}"))?;
+        let mut output = String::from(
+            "# @generated - this file is auto-generated by `mise lock` https://mise.jdx.dev/dev-tools/mise-lock.html\n\n",
+        );
+        output.push_str(&serialized);
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        Ok(output)
+    }
+
     /// Check one mise file and its lockfile against the registry.
     pub fn check_files(&self, mise: &Path, lock: &Path) -> Result<usize, String> {
         self.check_files_inner(mise, lock)
@@ -189,6 +341,7 @@ impl ToolRegistry {
     /// Check the generator's own mise graph. Rust is derived from the sibling
     /// rust-toolchain.toml; the fleet registry governs the non-Rust tool graph.
     pub fn check_generator_files(&self, mise: &Path, lock: &Path) -> Result<usize, String> {
+        check_mise_vocabulary(mise)?;
         self.check_files_inner(mise, lock)
     }
 
@@ -211,7 +364,7 @@ impl ToolRegistry {
         self.check_rendered_equality(&effective, mise)?;
         let lock_body = fs::read_to_string(lock)
             .map_err(|error| format!("reading lockfile {}: {error}", lock.display()))?;
-        self.check_lock(&effective, &lock_body, lock)?;
+        self.check_lock(&effective, &lock_body, lock, false)?;
         Ok(effective.len())
     }
 
@@ -219,7 +372,10 @@ impl ToolRegistry {
     pub fn check_text(&self, mise: &str, lock: &str) -> Result<usize, String> {
         let effective = self.parse_mise(mise, Path::new("mise.toml"))?;
         self.check_rendered_equality(&effective, Path::new("mise.toml"))?;
-        self.check_lock(&effective, lock, Path::new("mise.lock"))?;
+        // `check_text` intentionally models only the registry-managed portion
+        // of a consumer pair. A filesystem-backed check uses rust-toolchain.toml
+        // and therefore validates the Rust lock entry as well.
+        self.check_lock(&effective, lock, Path::new("mise.lock"), true)?;
         Ok(effective.len())
     }
 
@@ -237,9 +393,9 @@ impl ToolRegistry {
             .get("repository")
             .and_then(Value::as_array)
             .ok_or_else(|| format!("{}: missing [[repository]] entries", fleet_path.display()))?;
-        if repositories.len() != 28 {
+        if repositories.len() < 28 {
             return Err(format!(
-                "{}: expected 28 repositories, found {}",
+                "{}: expected at least 28 repositories, found {}",
                 fleet_path.display(),
                 repositories.len()
             ));
@@ -404,6 +560,7 @@ impl ToolRegistry {
         effective: &[EffectiveTool],
         body: &str,
         path: &Path,
+        allow_unmodeled_rust: bool,
     ) -> Result<(), String> {
         let document: Value = toml::from_str(body)
             .map_err(|error| format!("parsing lockfile {}: {error}", path.display()))?;
@@ -457,7 +614,9 @@ impl ToolRegistry {
         }
         let extras: Vec<_> = tools
             .keys()
-            .filter(|key| !used_keys.contains(*key))
+            .filter(|key| {
+                !used_keys.contains(*key) && !(allow_unmodeled_rust && key.as_str() == "rust")
+            })
             .cloned()
             .collect();
         if let Some(extra) = extras.first() {
@@ -468,6 +627,67 @@ impl ToolRegistry {
         }
         Ok(())
     }
+}
+
+fn migrate_legacy_tool(
+    body: &str,
+    name: &str,
+    legacy_key: &str,
+    legacy_version: &str,
+    canonical_key: &str,
+    canonical_version: &str,
+) -> Result<(String, bool), String> {
+    let document: Value = toml::from_str(body)
+        .map_err(|error| format!("parsing mise file for legacy migration: {error}"))?;
+    let Some(tools) = document.get("tools").and_then(Value::as_table) else {
+        return Ok((body.to_owned(), false));
+    };
+    let Some(value) = tools.get(legacy_key) else {
+        return Ok((body.to_owned(), false));
+    };
+    if tools.contains_key(canonical_key) {
+        return Err(format!(
+            "mise declares both legacy {legacy_key:?} and canonical {canonical_key:?} {name} tools"
+        ));
+    }
+    if value.as_str() != Some(legacy_version) {
+        return Err(format!(
+            "legacy {name} migration accepts only {legacy_key:?} = {legacy_version:?}, found {value:?}"
+        ));
+    }
+
+    let mut output = String::new();
+    let mut in_tools = false;
+    let mut replaced = false;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if header_name(trimmed) == Some("[tools]") {
+            in_tools = true;
+        } else if in_tools && top_level_header(trimmed) {
+            in_tools = false;
+        }
+        if in_tools && is_legacy_assignment(trimmed, legacy_key, legacy_version) {
+            let indentation = &line[..line.len() - line.trim_start().len()];
+            output.push_str(indentation);
+            writeln!(
+                output,
+                "{} = {}",
+                toml_key(canonical_key),
+                toml_string(canonical_version)
+            )
+            .expect("writing a String cannot fail");
+            replaced = true;
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !replaced {
+        return Err(format!(
+            "legacy {name} declaration {legacy_key:?} must be a simple [tools] assignment"
+        ));
+    }
+    Ok((output, true))
 }
 
 fn tool_value(value: &Value, key: &str, path: &Path) -> Result<(String, Option<String>), String> {
@@ -511,6 +731,13 @@ fn validate_name(name: &str) -> Result<(), String> {
 }
 
 fn validate_version(name: &str, version: &str) -> Result<(), String> {
+    if (name == "repolint" || name.contains("tailrocks/repolint"))
+        && version
+            .strip_prefix("rev:")
+            .is_some_and(crate::model::is_sha40)
+    {
+        return Ok(());
+    }
     let exact_numeric_version = version.split('.').count() == 3
         && version.split('.').all(|part| {
             !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
@@ -559,6 +786,19 @@ fn toml_key(value: &str) -> String {
     }
 }
 
+fn is_legacy_assignment(line: &str, key: &str, version: &str) -> bool {
+    let declaration = line.split_once('#').map_or(line, |(prefix, _)| prefix);
+    declaration.trim() == format!("{} = {}", toml_key(key), toml_string(version))
+}
+
+fn legacy_key_for(name: &str) -> Option<&'static str> {
+    match name {
+        "nextest" => Some(LEGACY_NEXTEST_KEY),
+        "cargo-audit" => Some(LEGACY_CARGO_AUDIT_KEY),
+        _ => None,
+    }
+}
+
 fn top_level_header(line: &str) -> bool {
     let Some(header) = header_name(line) else {
         return false;
@@ -590,4 +830,126 @@ fn rust_toolchain_version(path: &Path) -> Result<String, String> {
 /// Validate a registry path without constructing a consumer.
 pub fn check_registry(path: &Path) -> Result<ToolRegistry, String> {
     ToolRegistry::load(path)
+}
+
+/// Validate the repository-owned standard task vocabulary without inspecting
+/// or rewriting task bodies. `release:check` is deliberately conditional on a
+/// repository having a release unit.
+pub fn check_mise_vocabulary(path: &Path) -> Result<(), String> {
+    let body = fs::read_to_string(path)
+        .map_err(|error| format!("reading mise file {}: {error}", path.display()))?;
+    let document: Value = toml::from_str(&body)
+        .map_err(|error| format!("parsing mise file {}: {error}", path.display()))?;
+    let tasks = document
+        .get("tasks")
+        .and_then(Value::as_table)
+        .ok_or_else(|| format!("{}: missing [tasks] table", path.display()))?;
+    for verb in REQUIRED_MISE_VERBS {
+        let task = tasks
+            .get(verb)
+            .ok_or_else(|| format!("{}: missing required mise task {verb:?}", path.display()))?;
+        let table = task
+            .as_table()
+            .ok_or_else(|| format!("{}: task {verb:?} is not a table", path.display()))?;
+        if table
+            .get("description")
+            .and_then(Value::as_str)
+            .is_none_or(|description| description.trim().is_empty())
+        {
+            return Err(format!(
+                "{}: mise task {verb:?} requires a non-empty description",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> ToolRegistry {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        ToolRegistry::load(&root.join("fleet/fleet-tools.toml")).expect("load registry")
+    }
+
+    #[test]
+    fn render_migrates_only_the_exact_legacy_nextest_declaration() {
+        let legacy = "[tools]\n\"github:nextest-rs/nextest\" = \"cargo-nextest-0.9.140\"\n[tasks.fmt]\ndescription = \"fmt\"\n";
+        let (migrated, changed) = ToolRegistry::migrate_legacy_nextest(legacy).unwrap();
+
+        assert!(changed);
+        assert!(migrated.contains("\"aqua:nextest-rs/nextest/cargo-nextest\" = \"0.9.140\""));
+        assert!(!migrated.contains("github:nextest-rs/nextest"));
+        assert!(migrated.contains("[tasks.fmt]\ndescription = \"fmt\""));
+
+        let wrong = legacy.replace("cargo-nextest-0.9.140", "cargo-nextest-0.9.141");
+        let error = ToolRegistry::migrate_legacy_nextest(&wrong).unwrap_err();
+        assert!(error.contains("accepts only"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn render_migrates_only_the_exact_legacy_cargo_audit_declaration() {
+        let legacy = "[tools]\n\"github:rustsec/rustsec\" = \"cargo-audit/v0.22.2\"\n[tasks.fmt]\ndescription = \"fmt\"\n";
+        let (migrated, changed) = ToolRegistry::migrate_legacy_cargo_audit(legacy).unwrap();
+
+        assert!(changed);
+        assert!(migrated.contains("\"aqua:rustsec/rustsec/cargo-audit\" = \"0.22.2\""));
+        assert!(!migrated.contains("github:rustsec/rustsec"));
+        assert!(migrated.contains("[tasks.fmt]\ndescription = \"fmt\""));
+
+        let wrong = legacy.replace("cargo-audit/v0.22.2", "cargo-audit/v0.22.3");
+        let error = ToolRegistry::migrate_legacy_cargo_audit(&wrong).unwrap_err();
+        assert!(error.contains("accepts only"), "unexpected error: {error}");
+
+        let both = legacy.replace(
+            "[tools]\n",
+            "[tools]\n\"aqua:rustsec/rustsec/cargo-audit\" = \"0.22.2\"\n",
+        );
+        let error = ToolRegistry::migrate_legacy_cargo_audit(&both).unwrap_err();
+        assert!(error.contains("both legacy"), "unexpected error: {error}");
+
+        let single_quoted = legacy.replace(
+            "\"github:rustsec/rustsec\" = \"cargo-audit/v0.22.2\"",
+            "'github:rustsec/rustsec' = 'cargo-audit/v0.22.2'",
+        );
+        let error = ToolRegistry::migrate_legacy_cargo_audit(&single_quoted).unwrap_err();
+        assert!(
+            error.contains("simple [tools] assignment"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn render_migration_projects_legacy_nextest_lock_to_canonical_source() {
+        let registry = registry();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_lock = fs::read_to_string(root.join("mise.lock")).unwrap();
+        let legacy_lock = "# @generated\n\nlockfile_version = 1\n\n[[tools.\"github:nextest-rs/nextest\"]]\nversion = \"cargo-nextest-0.9.140\"\nbackend = \"github:nextest-rs/nextest\"\n";
+        let mise = "[tools]\n\"aqua:nextest-rs/nextest/cargo-nextest\" = \"0.9.140\"\n";
+
+        let projected = registry
+            .project_lock_file(legacy_lock, &source_lock, ["nextest"])
+            .unwrap();
+        assert!(projected.contains("tools.\"aqua:nextest-rs/nextest/cargo-nextest\""));
+        assert!(!projected.contains("github:nextest-rs/nextest"));
+        assert_eq!(registry.check_text(mise, &projected).unwrap(), 1);
+    }
+
+    #[test]
+    fn render_migration_projects_legacy_cargo_audit_lock_to_canonical_source() {
+        let registry = registry();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_lock = fs::read_to_string(root.join("mise.lock")).unwrap();
+        let legacy_lock = "# @generated\n\nlockfile_version = 1\n\n[[tools.\"github:rustsec/rustsec\"]]\nversion = \"cargo-audit/v0.22.2\"\nbackend = \"github:rustsec/rustsec\"\n";
+        let mise = "[tools]\n\"aqua:rustsec/rustsec/cargo-audit\" = \"0.22.2\"\n";
+
+        let projected = registry
+            .project_lock_file(legacy_lock, &source_lock, ["cargo-audit"])
+            .unwrap();
+        assert!(projected.contains("tools.\"aqua:rustsec/rustsec/cargo-audit\""));
+        assert!(!projected.contains("github:rustsec/rustsec"));
+        assert_eq!(registry.check_text(mise, &projected).unwrap(), 1);
+    }
 }

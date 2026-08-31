@@ -4,9 +4,10 @@ mod common;
 
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::process::Command;
 
 use velnor_actions_generator::forks::ForkTable;
-use velnor_actions_generator::model::{FleetManifest, is_sha40};
+use velnor_actions_generator::model::{FleetManifest, RepositoryKind, is_sha40};
 use velnor_actions_generator::render::{self, CALVER_PLACEHOLDER, FLEET_SHA_PLACEHOLDER};
 use velnor_actions_generator::{ALL_CLASSES, RepositoryClass, audit, generate};
 
@@ -75,11 +76,93 @@ fn exact_membership_and_counts() {
 }
 
 #[test]
+fn task031_out_of_scope_census_row_is_authoritative() {
+    let manifest = load();
+    let row = manifest
+        .repositories()
+        .iter()
+        .find(|repository| repository.slug == "tailrocks/tailrocks-skills")
+        .expect("TASK-031 repository remains registered");
+    assert_eq!(row.census.kind, RepositoryKind::OutOfScope);
+    assert!(row.census.research);
+}
+
+#[test]
+fn containment_rule_is_scoped_to_path_bearing_build_fields() {
+    let config = velnor_actions_generator::policy::alint_config(RepositoryClass::Code);
+    assert!(config.contains(
+        "(?:^|[{,])\\s*[\"'']?(?:path|paths|build|build_dir|build-directory|directory|dir|workspace|members|manifest|root|context)"
+    ));
+    assert!(!config.contains("pattern: '(?:\\.\\./){2,}'"));
+}
+
+#[test]
+fn containment_rule_allows_package_readme_but_rejects_dependency_path_escape() {
+    if Command::new("alint").arg("--version").output().is_err() {
+        // The locked repository gate runs this behavioral check with alint
+        // installed; plain library-only test runs may not have the external
+        // linter on PATH.
+        return;
+    }
+    let root = common::temp_dir("containment");
+    let config = root.join(".alint.yml");
+    std::fs::write(
+        &config,
+        velnor_actions_generator::policy::alint_config(RepositoryClass::Code),
+    )
+    .unwrap();
+    let cargo_toml = root.join("Cargo.toml");
+    std::fs::write(
+        &cargo_toml,
+        "[package]\nname = \"readme-link\"\nversion = \"0.1.0\"\nreadme = \"../../README.md\"\n",
+    )
+    .unwrap();
+    let pass = Command::new("alint")
+        .args([
+            "check",
+            "--config",
+            config.to_str().unwrap(),
+            "--only",
+            "containment.no-parent-escape",
+            "--fail-on-warning",
+            "--no-gitignore",
+            root.to_str().unwrap(),
+        ])
+        .status()
+        .expect("alint must be available in the locked gate environment");
+    assert!(
+        pass.success(),
+        "README path should not be a containment finding"
+    );
+
+    std::fs::write(
+        &cargo_toml,
+        "[dependencies]\nexternal = { path = \"../../outside\" }\n",
+    )
+    .unwrap();
+    let fail = Command::new("alint")
+        .args([
+            "check",
+            "--config",
+            config.to_str().unwrap(),
+            "--only",
+            "containment.no-parent-escape",
+            "--fail-on-warning",
+            "--no-gitignore",
+            root.to_str().unwrap(),
+        ])
+        .status()
+        .expect("alint must be available in the locked gate environment");
+    assert!(!fail.success(), "dependency path escape must be a finding");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn repository_inventory_bytes_are_exactly_bound() {
     let bytes = std::fs::read(common::repo_root().join("fleet").join("repositories.toml")).unwrap();
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "a3bde20f6fa1a2e74d3ace94f4a39055c5f78a721d57a0ef0ed7a628bbb30655"
+        "e9c5b255fad888d242ba11ad6ab434362fb022b017884d651bbabb61b02d27ab"
     );
 }
 
@@ -108,7 +191,7 @@ fn duplicate_member_rejected() {
     let mut body = canonical_repositories_toml();
     // Duplicate the first member entry — now 25 with a duplicate slug.
     body.push_str(
-        "\n[[repository]]\nslug = \"jackin-project/jackin\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\n",
+        "\n[[repository]]\nslug = \"jackin-project/jackin\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\nresearch = false\nfirst_seen = \"2026-08-30\"\n",
     );
     write_repos(&dir, &body);
     let err = FleetManifest::load(&dir).unwrap_err();
@@ -118,7 +201,7 @@ fn duplicate_member_rejected() {
 #[test]
 fn unknown_class_rejected() {
     let dir = common::temp_dir("unkclass");
-    let body = "[[repository]]\nslug = \"tailrocks/whatever\"\nclass = \"quantum\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\n";
+    let body = "[[repository]]\nslug = \"tailrocks/whatever\"\nclass = \"quantum\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\nresearch = false\nfirst_seen = \"2026-08-30\"\n";
     write_repos(&dir, body);
     let err = FleetManifest::load(&dir).unwrap_err();
     assert!(err.contains("unknown class"), "got: {err}");
@@ -128,7 +211,7 @@ fn unknown_class_rejected() {
 fn wrong_count_rejected() {
     let dir = common::temp_dir("count");
     // Only one code member — wrong count for every class.
-    let body = "[[repository]]\nslug = \"tailrocks/only\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\n";
+    let body = "[[repository]]\nslug = \"tailrocks/only\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\nresearch = false\nfirst_seen = \"2026-08-30\"\n";
     write_repos(&dir, body);
     let err = FleetManifest::load(&dir).unwrap_err();
     assert!(err.contains("expected"), "got: {err}");
@@ -137,8 +220,7 @@ fn wrong_count_rejected() {
 #[test]
 fn bad_sha_rejected() {
     let dir = common::temp_dir("badsha");
-    let body =
-        "[[repository]]\nslug = \"tailrocks/x\"\nclass = \"code\"\nbaseline_sha = \"NOTHEX\"\n";
+    let body = "[[repository]]\nslug = \"tailrocks/x\"\nclass = \"code\"\nbaseline_sha = \"NOTHEX\"\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\nresearch = false\nfirst_seen = \"2026-08-30\"\n";
     write_repos(&dir, body);
     let err = FleetManifest::load(&dir).unwrap_err();
     assert!(err.contains("40 lowercase hex"), "got: {err}");
@@ -147,7 +229,7 @@ fn bad_sha_rejected() {
 #[test]
 fn bad_slug_rejected() {
     let dir = common::temp_dir("badslug");
-    let body = "[[repository]]\nslug = \"no-slash\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\n";
+    let body = "[[repository]]\nslug = \"no-slash\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\nresearch = false\nfirst_seen = \"2026-08-30\"\n";
     write_repos(&dir, body);
     let err = FleetManifest::load(&dir).unwrap_err();
     assert!(err.contains("invalid slug"), "got: {err}");
@@ -156,7 +238,7 @@ fn bad_slug_rejected() {
 #[test]
 fn unknown_organization_rejected() {
     let dir = common::temp_dir("unkorg");
-    let body = "[[repository]]\nslug = \"strangers/x\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\n";
+    let body = "[[repository]]\nslug = \"strangers/x\"\nclass = \"code\"\nbaseline_sha = \"3e6376d213f2aae66b00b376057ff0863c988040\"\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\nresearch = false\nfirst_seen = \"2026-08-30\"\n";
     write_repos(&dir, body);
     let err = FleetManifest::load(&dir).unwrap_err();
     // Count check trips first for this single-member file; either rejection is fine
@@ -595,10 +677,47 @@ fn render_consumer_refuses_leftover_and_second_substitution() {
 }
 
 #[test]
-fn render_consumer_to_dir_writes_only_ci_yml() {
+fn render_consumer_to_dir_writes_envelope_artifacts_without_touching_repo_tasks() {
     let out = common::temp_dir("consumer-out");
+    let root = common::repo_root();
+    std::fs::copy(root.join("README.md"), out.join("README.md")).unwrap();
+    let legacy_mise = std::fs::read_to_string(root.join("mise.toml"))
+        .unwrap()
+        .replace(
+            "\"aqua:nextest-rs/nextest/cargo-nextest\" = \"0.9.140\"",
+            "\"github:nextest-rs/nextest\" = \"cargo-nextest-0.9.140\"",
+        )
+        .replace(
+            "\"aqua:rustsec/rustsec/cargo-audit\" = \"0.22.2\"",
+            "\"github:rustsec/rustsec\" = \"cargo-audit/v0.22.2\"",
+        );
+    assert!(legacy_mise.contains("github:nextest-rs/nextest"));
+    assert!(legacy_mise.contains("github:rustsec/rustsec"));
+    std::fs::write(out.join("mise.toml"), legacy_mise).unwrap();
+    let legacy_lock = std::fs::read_to_string(root.join("mise.lock"))
+        .unwrap()
+        .replace(
+            "tools.\"aqua:nextest-rs/nextest/cargo-nextest\"",
+            "tools.\"github:nextest-rs/nextest\"",
+        )
+        .replace(
+            "backend = \"aqua:nextest-rs/nextest/cargo-nextest\"",
+            "backend = \"github:nextest-rs/nextest\"",
+        )
+        .replace(
+            "tools.\"aqua:rustsec/rustsec/cargo-audit\"",
+            "tools.\"github:rustsec/rustsec\"",
+        )
+        .replace(
+            "backend = \"aqua:rustsec/rustsec/cargo-audit\"",
+            "backend = \"github:rustsec/rustsec\"",
+        );
+    assert!(legacy_lock.contains("github:nextest-rs/nextest"));
+    assert!(legacy_lock.contains("github:rustsec/rustsec"));
+    std::fs::write(out.join("mise.lock"), legacy_lock).unwrap();
+    std::fs::write(out.join("AGENTS.md"), "# Repository rules\n").unwrap();
     let path = velnor_actions_generator::render_consumer_to_dir(
-        &common::repo_root(),
+        &root,
         "tailrocks/velnor",
         [DUMMY_SHA; 3],
         "2026.7.0",
@@ -609,6 +728,50 @@ fn render_consumer_to_dir_writes_only_ci_yml() {
     let body = std::fs::read_to_string(&path).unwrap();
     assert!(body.contains(&format!("@{DUMMY_SHA} # 2026.7.0")));
     assert!(!body.contains(FLEET_SHA_PLACEHOLDER));
+    assert_eq!(
+        std::fs::read_link(out.join("CLAUDE.md")).unwrap(),
+        Path::new("AGENTS.md")
+    );
+    assert!(
+        std::fs::read_to_string(out.join(".ignore"))
+            .unwrap()
+            .contains("target/")
+    );
+    assert!(
+        std::fs::read_to_string(out.join("mise.toml"))
+            .unwrap()
+            .contains("fleet:check")
+    );
+    assert!(
+        std::fs::read_to_string(out.join("mise.toml"))
+            .unwrap()
+            .contains("aqua:nextest-rs/nextest/cargo-nextest\" = \"0.9.140\"")
+    );
+    assert!(
+        std::fs::read_to_string(out.join("mise.toml"))
+            .unwrap()
+            .contains("aqua:rustsec/rustsec/cargo-audit\" = \"0.22.2\"")
+    );
+    assert!(
+        !std::fs::read_to_string(out.join("mise.toml"))
+            .unwrap()
+            .contains("github:nextest-rs/nextest")
+    );
+    assert!(
+        !std::fs::read_to_string(out.join("mise.toml"))
+            .unwrap()
+            .contains("github:rustsec/rustsec")
+    );
+    assert!(
+        !std::fs::read_to_string(out.join("mise.lock"))
+            .unwrap()
+            .contains("github:nextest-rs/nextest")
+    );
+    assert!(
+        !std::fs::read_to_string(out.join("mise.lock"))
+            .unwrap()
+            .contains("github:rustsec/rustsec")
+    );
 }
 
 #[test]
@@ -648,23 +811,23 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
         ),
         (
             ".github/workflows/ci-code.yml",
-            "d39709b2ef7f2093fe2d9b658d17d23528e903a1aba0ad270d570a06310f1380",
+            "14c5cc482b8e10a027ddaa3187c244b659555b44014aadde70547c4345bf48ef",
         ),
         (
             ".github/workflows/ci-native.yml",
-            "18af8c045a9cb2d46436b7eb0bc622115e24035d420967eab0c51aa21eedf2aa",
+            "96337e1beb3659ffa9c25196d00ef4e23c683bb6d75caf99fe6ed7293e9f8925",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "c1f2b9ecfcb5aea28f1be36ed3ba630837d7801427377c957fd5486fb29179c2",
+            "6b8e9c35c347b314946da6132bec58a4786876eb545da71412da9e572adb619a",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "e1d7584a9763000103f7ed897cfb06db6b28fa4ea7644ed7d4458bcdbc03d7fa",
+            "a01a913d9f5e0023a85597bd23bb5f84d45d8f774a3bd4db34453c0b07079bf3",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "e956e746619f7e84ac82d34c049d4fc8b02ab3d80998995fe857ea5a039649ea",
+            "258e66504be29dc9bb6babc9f8a16738ac1a6a2c34b09ad34de4a0ed6be0361b",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();

@@ -588,6 +588,13 @@ jobs:
           disable_annotations: "false"
       - name: Set up mise toolchain
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+      - name: fleet:check gate
+        uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          name: fleet:check
+          command: mise run fleet:check
       - name: install gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
         env:
@@ -842,6 +849,13 @@ jobs:
           disable_annotations: "false"
       - name: Set up mise toolchain
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+      - name: fleet:check gate
+        uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          name: fleet:check
+          command: mise run fleet:check
       - name: install gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
         env:

@@ -6,114 +6,254 @@
 slug = "jackin-project/jackin"
 class = "native"
 baseline_sha = "b234e078eeeb2d0798b8ac75530cc24e2ba2e620"
+tier = "polyglot"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "jackin-project/jackin-the-architect"
 class = "code"
 baseline_sha = "54adb4cbef6a613f0978b3bb5390ddff17afdbbe"
+tier = "workspace"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "jackin-project/jackin-role-action"
 class = "code"
 baseline_sha = "041f17a6d32f8fd2a8ef03c2a63be58346993136"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "jackin-project/jackin-agent-smith"
 class = "code"
 baseline_sha = "9deeba864d9c620f20900fd4aa4cc606b1511eab"
+tier = "workspace"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "jackin-project/jackin-sentinel"
 class = "code"
 baseline_sha = "6b37441224187112747893a50fba88823175234d"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "jackin-project/jackin-dev"
 class = "code"
 baseline_sha = "b841a0c9e73d142b5a2283f704f54f36d7a986f8"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/parallax"
 class = "code"
 baseline_sha = "69754e7dd4baa4eae625991f8c2c3a23bbb47fdc"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/tablerock"
 class = "code"
 baseline_sha = "7463cf43091ff6db955afdc3c79e61c37c2cf163"
+tier = "polyglot"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/velnor"
 class = "code"
 baseline_sha = "d421a836c826cea829077f4f7df4942942f0bee6"
+tier = "workspace"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/holla"
 class = "code"
 baseline_sha = "0c63a9cf43b2a8b5584f1cb1e6a854cefed82ceb"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/ruxel"
 class = "code"
 baseline_sha = "87211e6035470e22496e6ed466237869775386ac"
+tier = "workspace"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/parallax-telemetry-playground"
 class = "code"
 baseline_sha = "177121294dfc14ef2fd10daa1601836071c94da6"
+tier = "polyglot"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/termrock"
 class = "code"
 baseline_sha = "40e3f0e00f0cff2df57ab98217d60b211697c224"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/schemalane"
 class = "code"
 baseline_sha = "dc07de7b4079554417ea1af2005c4b8569cde0c8"
+tier = "workspace"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/pg-bigdecimal"
 class = "code"
 baseline_sha = "3767514e7208f106944d17db296da457b19b1598"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/tracing-request-level"
 class = "code"
 baseline_sha = "cb18b2c44d5aa3b370ecd5a9d523501f7a4d1047"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/tailrocks-skills"
 class = "code"
 baseline_sha = "04987c81e6d2b1e404c1ad56532cefda9da951bf"
+tier = "leaf"
+kind = "out-of-scope"
+visibility = "public"
+research = true
+first_seen = "2026-08-30"
 [[repository]]
 slug = "ChainArgos/java-monorepo"
 class = "code"
 baseline_sha = "eba00cc78f31cd13451433353621a705580a2301"
+tier = "polyglot"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "ChainArgos/jackin-agent-brown"
 class = "code"
 baseline_sha = "395611503aeeee83fe318f12b97d7a17a5cda8aa"
+tier = "leaf"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "ChainArgos/blockchain-nodes"
 class = "code"
 baseline_sha = "21c2031d9fd82756a2da3e3c76aa8f3ad6eb219c"
+tier = "polyglot"
+kind = "app"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 
 [[repository]]
 slug = "jackin-project/homebrew-tap"
 class = "tap"
 baseline_sha = "f6268720aa777fe368e22caa1966fa92cabcf61b"
+tier = "leaf"
+kind = "dist"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/homebrew-tablerock"
 class = "tap"
 baseline_sha = "3b857631bdeefbec3fbdd6c1984326dd5647679b"
+tier = "leaf"
+kind = "dist"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/homebrew-holla"
 class = "tap"
 baseline_sha = "03e4686da678107b91ca25e04f33987906ae27e3"
+tier = "leaf"
+kind = "dist"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/homebrew-parallax"
 class = "tap"
 baseline_sha = "3a5b3c372d45b994c1531001e3fde820788c4c30"
+tier = "leaf"
+kind = "dist"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/homebrew-ruxel"
 class = "tap"
 baseline_sha = "5dadefbe09cbe3becfb49e9308e58deef56a2f1d"
+tier = "leaf"
+kind = "dist"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 
 [[repository]]
 slug = "tailrocks/velnor-apt"
 class = "apt"
 baseline_sha = "9f6f2aa49ce70342bf54a1f9080f33c22dd22f27"
+tier = "leaf"
+kind = "dist"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 [[repository]]
 slug = "tailrocks/holla-apt"
 class = "apt"
 baseline_sha = "f20fec54ceffd92cc478893a1b0de35bf1382300"
+tier = "leaf"
+kind = "dist"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"
 
 [[repository]]
 slug = "tailrocks/velnor-actions-fixture"
 class = "fixture"
 baseline_sha = "c270b04c84fb039a41e92892dbdf4eb5a6efa04f"
+tier = "workspace"
+kind = "ci-producer"
+visibility = "public"
+research = false
+first_seen = "2026-08-30"

@@ -534,6 +534,7 @@ pub fn callable_workflow_for(
             8,
             &format!("uses: jdx/mise-action@{MISE_ACTION_REF} # {MISE_ACTION_VERSION}"),
         );
+        fleet_check_step(&mut b, &run_gate);
         for gate in &contract.gates {
             if gate.applicability == crate::model::Applicability::Github {
                 gate_step(&mut b, gate, &run_gate);
@@ -2136,6 +2137,7 @@ fn lane_steps(
         8,
         &format!("uses: jdx/mise-action@{MISE_ACTION_REF} # {MISE_ACTION_VERSION}"),
     );
+    fleet_check_step(b, run_gate);
     for gate in contract.applicable_gates(lane) {
         if gate.applicability == crate::model::Applicability::Both {
             gate_step(b, gate, run_gate);
@@ -2226,6 +2228,16 @@ fn gate_step(b: &mut Builder, gate: &Gate, run_gate: &str) {
     b.line(8, "with:");
     b.line(10, &format!("name: {}", gate.name));
     b.line(10, &format!("command: {}", gate.command));
+}
+
+fn fleet_check_step(b: &mut Builder, run_gate: &str) {
+    b.line(6, "- name: fleet:check gate");
+    b.line(8, &format!("uses: {run_gate}"));
+    b.line(8, "env:");
+    b.line(10, "GH_TOKEN: ${{ github.token }}");
+    b.line(8, "with:");
+    b.line(10, "name: fleet:check");
+    b.line(10, "command: mise run fleet:check");
 }
 
 /// Fail-closed validator for optional recovery, benchmark, and cache-proof operations.

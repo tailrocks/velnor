@@ -10,7 +10,11 @@ gh = "2.96.0"
 "github:jdx/mise" = "2026.7.12"
 actionlint = "1.7.12"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
+"aqua:rustsec/rustsec/cargo-audit" = "0.22.2"
 "cargo:cargo-deny" = "0.20.2"
+"cargo:alint" = "0.15.2"
+zizmor = "1.29.0"
+"cargo:https://github.com/tailrocks/repolint" = "rev:df4a1011776485853b9bcd2ee32f63dca0b1003b"
 
 # Serialize the one-time mise installation before the parallel gates fan out.
 # Every language and executable used by this repository is installed by mise;
@@ -29,6 +33,11 @@ description = "Check Rust formatting"
 depends = ["_toolchain"]
 run = "cargo fmt --all --check"
 
+[tasks."fmt-fix"]
+description = "Fix Rust formatting"
+depends = ["_toolchain"]
+run = "cargo fmt --all"
+
 [tasks.lint]
 description = "Clippy with warnings denied"
 depends = ["_toolchain"]
@@ -38,6 +47,11 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 description = "Run tests via cargo-nextest"
 depends = ["_toolchain"]
 run = "cargo nextest run --workspace --locked"
+
+[tasks.check]
+description = "Run the Rust workspace check"
+depends = ["_toolchain"]
+run = "cargo check --workspace --locked"
 
 [tasks.actionlint]
 description = "Lint GitHub Actions workflows"
@@ -82,3 +96,27 @@ run = "tools/check-tool-registry.sh --fleet fleet/repositories.toml"
 [tasks.ci]
 description = "Run every repository gate"
 depends = ["fmt", "lint", "test", "actionlint", "deny", "generator-check", "remote-closure-check", "ci:contract"]
+
+[tasks."fleet:check"]
+description = "Run the M1 repository-shape and workflow security gates"
+depends = ["_toolchain"]
+run = [
+  "repolint check",
+  "if test -f repolint.toml && grep -q '^\\[repo\\]$' repolint.toml; then alint check --fail-on-warning; else if alint check --fail-on-warning; then :; else status=$?; case $status in 1|2) echo fleet:check-warning-alint-findings >&2;; *) exit $status;; esac; fi; fi",
+  "if test -f repolint.toml && grep -q '^\\[repo\\]$' repolint.toml; then zizmor .github/workflows; else if zizmor .github/workflows; then :; else status=$?; case $status in 11|12|13|14) echo fleet:check-warning-zizmor-findings >&2;; *) exit $status;; esac; fi; fi",
+]
+
+[tasks."fleet:map"]
+description = "Regenerate the linter-owned README repository map"
+depends = ["_toolchain"]
+run = "repolint map --write"
+
+[tasks."fleet:census"]
+description = "Print the exact registered fleet census"
+depends = ["_toolchain"]
+run = "cargo run --locked -p velnor-actions-generator -- census --root ."
+
+[tasks."fleet:audit"]
+description = "Run the weekly shallow-clone fleet audit and refresh deferred aggregate"
+depends = ["_toolchain"]
+run = "cargo run --locked -p velnor-actions-generator -- fleet-audit --root . --write-deferred"

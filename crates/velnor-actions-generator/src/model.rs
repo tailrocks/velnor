@@ -6,7 +6,7 @@
 //! count, an empty gate command, or an implicit gate applicability all reject
 //! before any output is accepted.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -19,8 +19,9 @@ use crate::forks::ForkTable;
 /// branches on repository slug.
 pub const CODE_STANDARD_COMMAND: &str = "mise run ci";
 
-/// Required member count per class, in canonical [`crate::ALL_CLASSES`] order:
-/// 19 code, 1 native, 5 tap, 2 apt, 1 fixture (total 28).
+/// Baseline member count per class, in canonical [`crate::ALL_CLASSES`] order:
+/// 19 code, 1 native, 5 tap, 2 apt, 1 fixture (total 28). New scaffolded
+/// members may grow these counts; they may never remove an existing class row.
 pub const REQUIRED_COUNTS: [(RepositoryClass, usize); 5] = [
     (RepositoryClass::Code, 19),
     (RepositoryClass::Native, 1),
@@ -31,6 +32,132 @@ pub const REQUIRED_COUNTS: [(RepositoryClass, usize); 5] = [
 
 /// The five ordered universal gate names every class declares.
 pub const GATE_NAMES: [&str; 5] = ["install", "build", "test", "lint", "format"];
+
+/// The repository-owned mise task vocabulary from the unified standard. Class
+/// gates intentionally keep their generator-owned names above; these verbs are
+/// the interface rendered into every adopted consumer.
+pub const MISE_VERBS: [&str; 7] = [
+    "fmt",
+    "fmt-fix",
+    "lint",
+    "test",
+    "check",
+    "ci",
+    "release:check",
+];
+
+/// The exact M1 repolint commit consumed by the Bucket-2 fleet integration.
+pub const REPOLINT_M1_SHA: &str = "df4a1011776485853b9bcd2ee32f63dca0b1003b";
+
+/// Census classification axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryTier {
+    Leaf,
+    Workspace,
+    Polyglot,
+}
+
+impl RepositoryTier {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Leaf => "Leaf",
+            Self::Workspace => "Workspace",
+            Self::Polyglot => "Polyglot",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "leaf" | "Leaf" => Some(Self::Leaf),
+            "workspace" | "Workspace" => Some(Self::Workspace),
+            "polyglot" | "Polyglot" => Some(Self::Polyglot),
+            _ => None,
+        }
+    }
+}
+
+/// Census product-role axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepositoryKind {
+    App,
+    Iac,
+    Dist,
+    CiProducer,
+    OutOfScope,
+}
+
+impl RepositoryKind {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::App => "App",
+            Self::Iac => "IaC",
+            Self::Dist => "dist",
+            Self::CiProducer => "CI-producer",
+            Self::OutOfScope => "out-of-scope",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "app" | "App" => Some(Self::App),
+            "iac" | "IaC" => Some(Self::Iac),
+            "dist" => Some(Self::Dist),
+            "ci-producer" | "CI-producer" => Some(Self::CiProducer),
+            "out-of-scope" => Some(Self::OutOfScope),
+            _ => None,
+        }
+    }
+}
+
+/// Census visibility axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Visibility {
+    Public,
+    Private,
+    Internal,
+}
+
+impl Visibility {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Internal => "internal",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "public" => Some(Self::Public),
+            "private" => Some(Self::Private),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+}
+
+/// Generator-owned repository census metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CensusMetadata {
+    pub tier: RepositoryTier,
+    pub kind: RepositoryKind,
+    pub visibility: Visibility,
+    pub research: bool,
+    pub first_seen: String,
+}
+
+/// Exact independent census counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CensusCounts {
+    pub total: usize,
+    pub tiers: BTreeMap<&'static str, usize>,
+    pub kinds: BTreeMap<&'static str, usize>,
+    pub visibilities: BTreeMap<&'static str, usize>,
+    pub research: usize,
+}
 
 /// One lane selector. `Velnor` is the safe default; `Both` reports each lane
 /// independently.
@@ -162,6 +289,8 @@ pub struct Repository {
     pub class: RepositoryClass,
     /// The immutable 40-hex default-branch baseline commit.
     pub baseline_sha: String,
+    /// Census classification and first-seen clock.
+    pub census: CensusMetadata,
 }
 
 impl Repository {
@@ -174,7 +303,8 @@ impl Repository {
     }
 }
 
-/// The fully validated fleet: 28 repositories and five class contracts.
+/// The fully validated fleet: at least the current 28 repositories and five
+/// class contracts. The census is intentionally growable through `scaffold`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetManifest {
     repositories: Vec<Repository>,
@@ -201,7 +331,7 @@ impl FleetManifest {
         })
     }
 
-    /// All 28 repositories, in declaration order.
+    /// All registered repositories, in declaration order.
     #[must_use]
     pub fn repositories(&self) -> &[Repository] {
         &self.repositories
@@ -229,6 +359,32 @@ impl FleetManifest {
             .iter()
             .filter(|r| r.class == class)
             .collect()
+    }
+
+    /// Compute exact counts for the registered census rows.
+    #[must_use]
+    pub fn census_counts(&self) -> CensusCounts {
+        let mut tiers = BTreeMap::new();
+        let mut kinds = BTreeMap::new();
+        let mut visibilities = BTreeMap::new();
+        let mut research = 0;
+        for repository in &self.repositories {
+            *tiers.entry(repository.census.tier.token()).or_insert(0) += 1;
+            *kinds.entry(repository.census.kind.token()).or_insert(0) += 1;
+            *visibilities
+                .entry(repository.census.visibility.token())
+                .or_insert(0) += 1;
+            if repository.census.research {
+                research += 1;
+            }
+        }
+        CensusCounts {
+            total: self.repositories.len(),
+            tiers,
+            kinds,
+            visibilities,
+            research,
+        }
     }
 }
 
@@ -261,6 +417,11 @@ struct RepoEntry {
     slug: String,
     class: String,
     baseline_sha: String,
+    tier: String,
+    kind: String,
+    visibility: String,
+    research: bool,
+    first_seen: String,
 }
 
 fn load_repositories(path: &Path, forks: &ForkTable) -> Result<Vec<Repository>, String> {
@@ -291,6 +452,17 @@ fn load_repositories(path: &Path, forks: &ForkTable) -> Result<Vec<Repository>, 
                 entry.slug, entry.class
             )
         })?;
+        let tier = RepositoryTier::parse(&entry.tier)
+            .ok_or_else(|| format!("member {:?} has unknown tier {:?}", entry.slug, entry.tier))?;
+        let kind = RepositoryKind::parse(&entry.kind)
+            .ok_or_else(|| format!("member {:?} has unknown kind {:?}", entry.slug, entry.kind))?;
+        let visibility = Visibility::parse(&entry.visibility).ok_or_else(|| {
+            format!(
+                "member {:?} has unknown visibility {:?}",
+                entry.slug, entry.visibility
+            )
+        })?;
+        validate_date(&entry.first_seen, "first_seen", &entry.slug)?;
         if !seen.insert(entry.slug.clone()) {
             return Err(format!("duplicate member {:?}", entry.slug));
         }
@@ -299,22 +471,29 @@ fn load_repositories(path: &Path, forks: &ForkTable) -> Result<Vec<Repository>, 
             organization: owner.to_string(),
             class,
             baseline_sha: entry.baseline_sha,
+            census: CensusMetadata {
+                tier,
+                kind,
+                visibility,
+                research: entry.research,
+                first_seen: entry.first_seen,
+            },
         });
     }
 
     for &(class, want) in &REQUIRED_COUNTS {
         let have = repositories.iter().filter(|r| r.class == class).count();
-        if have != want {
+        if have < want {
             return Err(format!(
-                "class {} has {have} members, expected {want}",
+                "class {} has {have} members, expected at least {want}",
                 class.code()
             ));
         }
     }
     let total: usize = REQUIRED_COUNTS.iter().map(|&(_, n)| n).sum();
-    if repositories.len() != total {
+    if repositories.len() < total {
         return Err(format!(
-            "fleet has {} members, expected {total}",
+            "fleet has {} members, expected at least {total}",
             repositories.len()
         ));
     }
@@ -330,6 +509,22 @@ fn load_repositories(path: &Path, forks: &ForkTable) -> Result<Vec<Repository>, 
     }
 
     Ok(repositories)
+}
+
+fn validate_date(value: &str, field: &str, slug: &str) -> Result<(), String> {
+    let valid = value.len() == 10
+        && value.as_bytes()[4] == b'-'
+        && value.as_bytes()[7] == b'-'
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit());
+    if !valid {
+        return Err(format!(
+            "member {slug:?} {field} {value:?} is not YYYY-MM-DD"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_class(token: &str) -> Option<RepositoryClass> {

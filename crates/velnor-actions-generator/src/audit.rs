@@ -8,13 +8,14 @@
 //! composite run-script body — fails the audit.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache::CacheContract;
 use crate::composite;
 use crate::forks::ForkTable;
-use crate::model::{FleetManifest, is_sha40};
+use crate::model::{FleetManifest, RepositoryKind, is_sha40};
 use crate::package::{self, PackagePolicy};
 use crate::releases::ReleaseTable;
 use crate::render::{self, ACTIONS_REPO, CALVER_PLACEHOLDER, FLEET_SHA_PLACEHOLDER};
@@ -24,6 +25,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const REMOTE_CLOSURE_SCHEMA: u32 = 1;
+const DEFERRED_MAX_AGE_DAYS: u64 = 180;
+const ZIZMOR_FIRST_FINDINGS_EXIT_CODE: i32 = 11;
+const ZIZMOR_LAST_FINDINGS_EXIT_CODE: i32 = 14;
 
 #[derive(Debug, Deserialize)]
 struct RemoteClosure {
@@ -50,6 +54,702 @@ struct RemoteFile {
 const AUDIT_RELEASE_SHA: &str = "0000000000000000000000000000000000000000";
 const AUDIT_CALVER: &str = "2026.7.0";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdoptionState {
+    Adopted,
+    Unadopted,
+}
+
+struct ScratchGuard(Option<PathBuf>);
+
+impl ScratchGuard {
+    fn new() -> Result<Self, String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("system clock before Unix epoch: {e}"))?;
+        let path = std::env::temp_dir().join(format!(
+            "velnor-actions-fleet-audit-{}-{}",
+            std::process::id(),
+            now.as_nanos()
+        ));
+        std::fs::create_dir(&path)
+            .map_err(|e| format!("creating audit scratch {}: {e}", path.display()))?;
+        Ok(Self(Some(path)))
+    }
+
+    fn path(&self) -> &Path {
+        self.0.as_deref().expect("scratch guard has a path")
+    }
+}
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+/// Run the scheduled census audit. `offline` retains deterministic policy and
+/// aggregate checks for local gates; the generated workflow always uses the
+/// online path, which shallow-clones every registered repository.
+pub fn fleet_audit(root: &Path, write_deferred: bool, offline: bool) -> Result<String, String> {
+    // `audit` is the canonical regen-into-memory-and-diff proof. Keeping it in
+    // this scheduled path prevents the fleet audit from checking remote repos
+    // against stale local generator outputs.
+    audit(root)?;
+    let manifest = FleetManifest::load(root)?;
+    let forks = ForkTable::load(root)?;
+    let mut deferred = Vec::new();
+    let scratch = (!offline).then(ScratchGuard::new).transpose()?;
+    for repository in manifest.repositories() {
+        let checkout = scratch
+            .as_ref()
+            .map(|scratch| scratch.path().join(repository.slug.replace('/', "--")));
+        if !offline {
+            let checkout = checkout.as_deref().expect("online audit has scratch");
+            let status = Command::new("git")
+                .args([
+                    "clone",
+                    "--depth=1",
+                    "--no-tags",
+                    &format!("https://github.com/{}", repository.slug),
+                ])
+                .arg(checkout)
+                .status()
+                .map_err(|e| format!("cloning {}: {e}", repository.slug))?;
+            if !status.success() {
+                return Err(format!("shallow clone failed for {}", repository.slug));
+            }
+            if repository.census.kind == RepositoryKind::OutOfScope {
+                eprintln!(
+                    "fleet audit: skipping adoption and tool invariants for out-of-scope {}",
+                    repository.slug
+                );
+                continue;
+            }
+            let adoption = cross_check_local_repo(repository, checkout)?;
+            if let Err(error) = audit_cloned_consumer(repository, checkout, &forks) {
+                if adoption == AdoptionState::Adopted {
+                    return Err(error);
+                }
+                eprintln!("fleet audit warning: {error}");
+            }
+            run_fleet_tool(
+                repository,
+                checkout,
+                adoption,
+                "repolint",
+                &["check"],
+                false,
+            )?;
+            run_fleet_tool(
+                repository,
+                checkout,
+                adoption,
+                "alint",
+                if adoption == AdoptionState::Adopted {
+                    &["check", "--fail-on-warning"]
+                } else {
+                    &["check"]
+                },
+                true,
+            )?;
+            run_fleet_tool(
+                repository,
+                checkout,
+                adoption,
+                "zizmor",
+                &[".github/workflows"],
+                false,
+            )?;
+            if adoption == AdoptionState::Unadopted {
+                enforce_first_seen(repository)?;
+            }
+            deferred.extend(read_deferred(repository, checkout)?);
+        } else {
+            if repository.census.kind != RepositoryKind::OutOfScope {
+                enforce_first_seen(repository)?;
+            }
+        }
+    }
+    if !offline {
+        // ReleaseTable is the source of the current CalVer and signer slots;
+        // release_check verifies the same table against every owner mirror's
+        // immutable tag/tree before the aggregate is accepted.
+        release_check(root, None)?;
+    }
+    let aggregate = render_deferred_aggregate(&deferred);
+    let aggregate_path = root.join("fleet").join("deferred.toml");
+    if write_deferred {
+        std::fs::write(&aggregate_path, &aggregate)
+            .map_err(|e| format!("writing {}: {e}", aggregate_path.display()))?;
+    } else {
+        let committed = std::fs::read_to_string(&aggregate_path)
+            .map_err(|e| format!("reading {}: {e}", aggregate_path.display()))?;
+        if committed != aggregate {
+            return Err(format!(
+                "{}: generated deferred aggregate is stale; rerun fleet-audit --write-deferred",
+                aggregate_path.display()
+            ));
+        }
+    }
+    Ok(format!(
+        "fleet audit valid: {} repositories, {} deferred items",
+        manifest.repositories().len(),
+        deferred.len()
+    ))
+}
+
+fn audit_cloned_consumer(
+    repository: &crate::model::Repository,
+    checkout: &Path,
+    forks: &ForkTable,
+) -> Result<(), String> {
+    let path = checkout.join(".github").join("workflows").join("ci.yml");
+    let actual = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "{}: reading cloned consumer {}: {e}",
+            repository.slug,
+            path.display()
+        )
+    })?;
+    let (shas, calver) = materialized_binding(&actual, repository.class, forks, &repository.slug)?;
+    let template = render::consumer_template_for(repository.class, forks);
+    let refs: Vec<&str> = shas.iter().map(String::as_str).collect();
+    let expected = render::render_consumer_for(&template, forks, &refs, &calver)?;
+    require_equal(
+        &actual,
+        &expected,
+        &format!("{}:.github/workflows/ci.yml", repository.slug),
+    )
+}
+
+fn materialized_binding(
+    actual: &str,
+    class: RepositoryClass,
+    forks: &ForkTable,
+    repository: &str,
+) -> Result<(Vec<String>, String), String> {
+    let file = render::callable_file_name(class);
+    let mut shas = Vec::with_capacity(forks.len());
+    let mut calver = None;
+    for fork in forks.forks() {
+        let prefix = format!(
+            "uses: {}/{}/.github/workflows/{file}@",
+            fork.owner(),
+            ACTIONS_REPO
+        );
+        let rows: Vec<_> = actual
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|line| line.strip_prefix(&prefix))
+            .collect();
+        if rows.len() != 1 {
+            return Err(format!(
+                "{repository}: cloned ci.yml must contain exactly one {prefix}<sha> # <calver> call"
+            ));
+        }
+        let (sha, version) = rows[0].split_once(" # ").ok_or_else(|| {
+            format!("{repository}: cloned {prefix} call must bind SHA and CalVer together")
+        })?;
+        if !is_sha40(sha) || version.is_empty() || version.contains('#') {
+            return Err(format!(
+                "{repository}: cloned {prefix} call has invalid SHA/CalVer binding"
+            ));
+        }
+        if let Some(previous) = &calver {
+            if previous != version {
+                return Err(format!(
+                    "{repository}: cloned ci.yml uses mixed CalVer release bindings"
+                ));
+            }
+        } else {
+            calver = Some(version.to_owned());
+        }
+        shas.push(sha.to_owned());
+    }
+    Ok((
+        shas,
+        calver.ok_or_else(|| format!("{repository}: cloned ci.yml has no release binding"))?,
+    ))
+}
+
+fn cross_check_local_repo(
+    repository: &crate::model::Repository,
+    checkout: &Path,
+) -> Result<AdoptionState, String> {
+    let config_path = checkout.join("repolint.toml");
+    if !config_path.is_file() {
+        return Ok(AdoptionState::Unadopted);
+    }
+    let body = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("reading {}: {e}", config_path.display()))?;
+    let document: toml::Value =
+        toml::from_str(&body).map_err(|e| format!("parsing {}: {e}", config_path.display()))?;
+    let Some(repo) = document.get("repo").and_then(toml::Value::as_table) else {
+        return Ok(AdoptionState::Unadopted);
+    };
+    let expected = [
+        ("tier", repository.census.tier.token().to_ascii_lowercase()),
+        ("kind", repository.census.kind.token().to_ascii_lowercase()),
+        (
+            "visibility",
+            repository.census.visibility.token().to_owned(),
+        ),
+    ];
+    for (field, expected) in expected {
+        let actual = repo
+            .get(field)
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("{}: adopted [repo] is missing {field}", repository.slug))?;
+        if actual != expected {
+            return Err(format!(
+                "{}: [repo].{field}={actual:?} disagrees with census {expected:?}",
+                repository.slug
+            ));
+        }
+    }
+    let actual_research = repo
+        .get("research")
+        .and_then(toml::Value::as_bool)
+        .ok_or_else(|| format!("{}: adopted [repo] is missing research", repository.slug))?;
+    if actual_research != repository.census.research {
+        return Err(format!(
+            "{}: [repo].research disagrees with census",
+            repository.slug
+        ));
+    }
+    Ok(AdoptionState::Adopted)
+}
+
+fn run_fleet_tool(
+    repository: &crate::model::Repository,
+    checkout: &Path,
+    adoption: AdoptionState,
+    tool: &str,
+    args: &[&str],
+    alint_allows_missing_config: bool,
+) -> Result<(), String> {
+    let status = Command::new(tool)
+        .args(args)
+        .current_dir(checkout)
+        .status()
+        .map_err(|e| format!("running {tool} for {}: {e}", repository.slug))?;
+    if status.success() {
+        return Ok(());
+    }
+    let code = status.code();
+    let missing_alint_config = tool == "alint"
+        && alint_allows_missing_config
+        && !checkout.join(".alint.yml").is_file()
+        && code == Some(2);
+    let pre_adoption_warning = is_pre_adoption_warning(adoption, tool, code, missing_alint_config);
+    if pre_adoption_warning {
+        eprintln!(
+            "fleet audit warning: {tool} reported for {}",
+            repository.slug
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{tool} failed for {} with exit status {code:?}",
+        repository.slug
+    ))
+}
+
+fn is_pre_adoption_warning(
+    adoption: AdoptionState,
+    tool: &str,
+    code: Option<i32>,
+    missing_alint_config: bool,
+) -> bool {
+    adoption == AdoptionState::Unadopted
+        && ((tool != "zizmor" && code == Some(1))
+            || (tool == "zizmor"
+                && code.is_some_and(|code| {
+                    (ZIZMOR_FIRST_FINDINGS_EXIT_CODE..=ZIZMOR_LAST_FINDINGS_EXIT_CODE)
+                        .contains(&code)
+                }))
+            || missing_alint_config)
+}
+
+fn read_deferred(
+    repository: &crate::model::Repository,
+    checkout: &Path,
+) -> Result<Vec<toml::Value>, String> {
+    let path = checkout.join("repolint.toml");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let body =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let document: toml::Value =
+        toml::from_str(&body).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    let rows = document
+        .get("deferred")
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get("item"))
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let today = today_days()?;
+    rows.into_iter()
+        .map(|mut row| {
+            validate_deferred_row(repository, checkout, &row, today)?;
+            let table = row
+                .as_table_mut()
+                .ok_or_else(|| format!("{}: deferred item is not a table", repository.slug))?;
+            table.insert(
+                "repository".to_owned(),
+                toml::Value::String(repository.slug.clone()),
+            );
+            Ok(row)
+        })
+        .collect()
+}
+
+fn validate_deferred_row(
+    repository: &crate::model::Repository,
+    checkout: &Path,
+    row: &toml::Value,
+    today: u64,
+) -> Result<(), String> {
+    let table = row
+        .as_table()
+        .ok_or_else(|| format!("{}: deferred item is not a table", repository.slug))?;
+    const ALLOWED_FIELDS: [&str; 8] = [
+        "item",
+        "registered",
+        "last_deferred",
+        "reason",
+        "effort",
+        "trigger",
+        "blocking_gate",
+        "steps",
+    ];
+    if let Some(field) = table
+        .keys()
+        .find(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
+    {
+        return Err(format!(
+            "{}: deferred item has unknown field {field:?}",
+            repository.slug
+        ));
+    }
+    let text = |field: &str| {
+        table
+            .get(field)
+            .and_then(toml::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("{}: deferred item missing {field}", repository.slug))
+    };
+    let item = text("item")?;
+    let registered = text("registered")?;
+    let last_deferred = text("last_deferred")?;
+    let _reason = text("reason")?;
+    let effort = text("effort")?;
+    let trigger = text("trigger")?;
+    let registered_days = date_days(registered)?;
+    let last_deferred_days = date_days(last_deferred)?;
+    if registered_days > today || last_deferred_days > today {
+        return Err(format!(
+            "{}: deferred item {item:?} has a future date",
+            repository.slug
+        ));
+    }
+    if last_deferred_days < registered_days {
+        return Err(format!(
+            "{}: deferred item {item:?} last_deferred predates registered",
+            repository.slug
+        ));
+    }
+    if let Some(blocking_gate) = table.get("blocking_gate")
+        && (!blocking_gate.is_str()
+            || blocking_gate
+                .as_str()
+                .is_some_and(|value| value.trim().is_empty()))
+    {
+        return Err(format!(
+            "{}: deferred item {item:?} has an invalid blocking_gate",
+            repository.slug
+        ));
+    }
+    match effort {
+        "S" | "M" => {
+            if today.saturating_sub(registered_days) > DEFERRED_MAX_AGE_DAYS {
+                return Err(format!(
+                    "{}: deferred item {item:?} is older than {DEFERRED_MAX_AGE_DAYS} days",
+                    repository.slug
+                ));
+            }
+            if table.contains_key("steps") {
+                return Err(format!(
+                    "{}: S/M deferred item {item:?} cannot declare steps",
+                    repository.slug
+                ));
+            }
+            let trigger = validate_trigger(trigger, repository, item)?;
+            if !checkout_contains_trigger(checkout, trigger)? {
+                return Err(format!(
+                    "{}: deferred item {item:?} trigger {trigger:?} is stale",
+                    repository.slug
+                ));
+            }
+        }
+        "L" => {
+            let steps = table
+                .get("steps")
+                .and_then(toml::Value::as_array)
+                .filter(|steps| !steps.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "{}: L deferred item {item:?} requires non-empty steps",
+                        repository.slug
+                    )
+                })?;
+            for (index, step) in steps.iter().enumerate() {
+                let step = step.as_table().ok_or_else(|| {
+                    format!(
+                        "{}: deferred item {item:?} step {index} is not a table",
+                        repository.slug
+                    )
+                })?;
+                if let Some(field) = step
+                    .keys()
+                    .find(|field| !["step", "date"].contains(&field.as_str()))
+                {
+                    return Err(format!(
+                        "{}: deferred item {item:?} step {index} has unknown field {field:?}",
+                        repository.slug
+                    ));
+                }
+                let step_name = step
+                    .get("step")
+                    .and_then(toml::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: deferred item {item:?} step {index} missing step",
+                            repository.slug
+                        )
+                    })?;
+                let date = step
+                    .get("date")
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: deferred item {item:?} step {index} missing date",
+                            repository.slug
+                        )
+                    })?;
+                let date = date_days(date)?;
+                if date <= today {
+                    return Err(format!(
+                        "{}: deferred item {item:?} step {step_name:?} is overdue",
+                        repository.slug
+                    ));
+                }
+            }
+        }
+        other => {
+            return Err(format!(
+                "{}: deferred item {item:?} has invalid effort {other:?}",
+                repository.slug
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_trigger<'a>(
+    trigger: &'a str,
+    repository: &crate::model::Repository,
+    item: &str,
+) -> Result<&'a str, String> {
+    if trigger.starts_with('/')
+        || trigger.contains('\n')
+        || trigger
+            .split('/')
+            .any(|part| part.is_empty() || part == "..")
+    {
+        return Err(format!(
+            "{}: deferred item {item:?} has unsafe trigger {trigger:?}",
+            repository.slug
+        ));
+    }
+    Ok(trigger
+        .strip_prefix("./")
+        .unwrap_or(trigger)
+        .trim_end_matches('/'))
+}
+
+fn checkout_contains_trigger(checkout: &Path, trigger: &str) -> Result<bool, String> {
+    if trigger.is_empty() || trigger == "." {
+        return Ok(true);
+    }
+    let mut paths = Vec::new();
+    collect_checkout_paths(checkout, checkout, &mut paths)?;
+    Ok(paths.iter().any(|path| glob_matches(trigger, path)))
+}
+
+fn collect_checkout_paths(
+    root: &Path,
+    current: &Path,
+    paths: &mut Vec<String>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(current).map_err(|e| {
+        format!(
+            "reading deferred target directory {}: {e}",
+            current.display()
+        )
+    })? {
+        let entry = entry.map_err(|e| format!("reading deferred target entry: {e}"))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| format!("relative deferred target path: {e}"))?;
+        if relative.components().next() == Some(Component::Normal(std::ffi::OsStr::new(".git"))) {
+            continue;
+        }
+        let relative = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        paths.push(relative);
+        if path.is_dir() && !path.is_symlink() {
+            collect_checkout_paths(root, &path, paths)?;
+        }
+    }
+    Ok(())
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    fn matches(pattern: &[u8], value: &[u8], p: usize, v: usize) -> bool {
+        if p == pattern.len() {
+            return v == value.len();
+        }
+        if pattern[p] == b'*' {
+            let double = p + 1 < pattern.len() && pattern[p + 1] == b'*';
+            if double {
+                let next = p + 2;
+                if next < pattern.len()
+                    && pattern[next] == b'/'
+                    && matches(pattern, value, next + 1, v)
+                {
+                    return true;
+                }
+                return matches(pattern, value, next, v)
+                    || (v < value.len() && matches(pattern, value, p, v + 1));
+            }
+            return matches(pattern, value, p + 1, v)
+                || (v < value.len() && value[v] != b'/' && matches(pattern, value, p, v + 1));
+        }
+        if pattern[p] == b'?' {
+            return v < value.len() && value[v] != b'/' && matches(pattern, value, p + 1, v + 1);
+        }
+        v < value.len() && pattern[p] == value[v] && matches(pattern, value, p + 1, v + 1)
+    }
+    matches(pattern.as_bytes(), value.as_bytes(), 0, 0)
+}
+
+fn render_deferred_aggregate(rows: &[toml::Value]) -> String {
+    let mut output = String::from(
+        "# Generated by velnor-actions-generator fleet-audit. DO NOT EDIT.\n\nschema = 1\n",
+    );
+    for row in rows {
+        output.push('\n');
+        output.push_str("[[item]]\n");
+        if let Some(table) = row.as_table() {
+            for (key, value) in table {
+                output.push_str(&format!("{key} = {}\n", toml_value(value)));
+            }
+        }
+        output.push('\n');
+    }
+    output
+}
+
+fn toml_value(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(value) => format!("{value:?}"),
+        toml::Value::Integer(value) => value.to_string(),
+        toml::Value::Float(value) => value.to_string(),
+        toml::Value::Boolean(value) => value.to_string(),
+        toml::Value::Datetime(value) => value.to_string(),
+        toml::Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(toml_value).collect::<Vec<_>>().join(", ")
+        ),
+        toml::Value::Table(values) => format!(
+            "{{ {} }}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{key} = {}", toml_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn enforce_first_seen(repository: &crate::model::Repository) -> Result<(), String> {
+    let today = today_days()?;
+    let seen = date_days(&repository.census.first_seen)?;
+    if today.saturating_sub(seen) > DEFERRED_MAX_AGE_DAYS {
+        return Err(format!(
+            "{}: un-adopted census row is older than 180 days",
+            repository.slug
+        ));
+    }
+    Ok(())
+}
+
+fn date_days(value: &str) -> Result<u64, String> {
+    if value.len() != 10
+        || value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+        || !value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return Err(format!("invalid date {value:?}"));
+    }
+    let year: i64 = value[0..4]
+        .parse()
+        .map_err(|_| format!("invalid date {value:?}"))?;
+    let month: i64 = value[5..7]
+        .parse()
+        .map_err(|_| format!("invalid date {value:?}"))?;
+    let day: i64 = value[8..10]
+        .parse()
+        .map_err(|_| format!("invalid date {value:?}"))?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if !(1..=12).contains(&month) || !(1..=days_in_month).contains(&day) {
+        return Err(format!("invalid date {value:?}"));
+    }
+    let y = year - i64::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let year_of_era = y - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Ok((era * 146_097 + day_of_era - 719_468) as u64)
+}
+
+fn today_days() -> Result<u64, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock before Unix epoch: {e}"))
+        .map(|duration| duration.as_secs() / 86_400)
+}
+
 /// Run the full fleet audit under `root`. Returns the exact summary line on
 /// success.
 ///
@@ -64,6 +764,8 @@ pub fn audit(root: &Path) -> Result<String, String> {
     let packages = PackagePolicy::load(root, &forks)?;
     let registry = ToolRegistry::load(&tools::registry_path(root))?;
     let remote_closure = load_remote_closure(root)?;
+    let releases = ReleaseTable::load(root)?;
+    audit_release_table_bindings(&packages, &releases, forks.len())?;
 
     // Composite building blocks must exist and match their canonical bytes exactly
     // (body included), so a neutered run-script fails the audit.
@@ -77,7 +779,22 @@ pub fn audit(root: &Path) -> Result<String, String> {
         let committed = read_committed(&template_path(root, class))?;
         require_equal(&committed, &rendered, &template_path_display(class))?;
         audit_consumer_structure(class, &rendered, &forks)?;
+        let alint_path = root.join("templates").join(class.code()).join(".alint.yml");
+        let alint = read_committed(&alint_path)?;
+        require_equal(
+            &alint,
+            &crate::policy::alint_config(class),
+            &alint_path.display().to_string(),
+        )?;
     }
+
+    let fleet_audit_workflow = root.join(".github/workflows/fleet-audit.yml");
+    let committed = read_committed(&fleet_audit_workflow)?;
+    require_equal(
+        &committed,
+        crate::policy::FLEET_AUDIT_WORKFLOW,
+        &fleet_audit_workflow.display().to_string(),
+    )?;
 
     let tools_template = root.join("templates").join("tools").join("mise.toml");
     let tool_names = registry.entries().keys().map(String::as_str);
@@ -151,6 +868,42 @@ pub fn audit(root: &Path) -> Result<String, String> {
         manifest.classes().len(),
         ALL_CLASSES.len(),
     ))
+}
+
+fn audit_release_table_bindings(
+    packages: &PackagePolicy,
+    releases: &ReleaseTable,
+    fork_count: usize,
+) -> Result<(), String> {
+    let release = releases.current();
+    let release_shas = [AUDIT_RELEASE_SHA; 3];
+    if fork_count != release_shas.len() {
+        return Err(format!(
+            "release table binding fixture has {} forks, expected {}",
+            fork_count,
+            release_shas.len()
+        ));
+    }
+    for slot in release.signers() {
+        let rendered = packages.render_consumer(slot.consumer(), release_shas, release.calver())?;
+        if !rendered.contains(slot.current_digest()) {
+            return Err(format!(
+                "release {} current signer digest for {} is not rendered",
+                release.calver(),
+                slot.consumer()
+            ));
+        }
+        if let Some(old_digest) = slot.old_digest()
+            && !rendered.contains(old_digest)
+        {
+            return Err(format!(
+                "release {} old signer digest for {} is not rendered",
+                release.calver(),
+                slot.consumer()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn audit_immutable_uses(workflow: &str, path: &Path) -> Result<(), String> {
@@ -1052,5 +1805,176 @@ mod remote_closure_tests {
                 .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fleet_audit_tests {
+    use super::*;
+    use crate::model::{CensusMetadata, RepositoryKind, RepositoryTier, Visibility};
+
+    fn repository() -> crate::model::Repository {
+        crate::model::Repository {
+            slug: "tailrocks/example".to_owned(),
+            organization: "tailrocks".to_owned(),
+            class: RepositoryClass::Code,
+            baseline_sha: "0000000000000000000000000000000000000000".to_owned(),
+            census: CensusMetadata {
+                tier: RepositoryTier::Leaf,
+                kind: RepositoryKind::App,
+                visibility: Visibility::Public,
+                research: false,
+                first_seen: "2026-08-30".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn deferred_glob_requires_a_live_target() {
+        assert!(glob_matches("backend*/**", "backend-rust/src/lib.rs"));
+        assert!(glob_matches("**/*.rs", "src/lib.rs"));
+        assert!(!glob_matches("backend*/**", "services/rust/src/lib.rs"));
+    }
+
+    #[test]
+    fn deferred_rows_validate_age_and_staleness() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-actions-deferred-test-{}-{}",
+            std::process::id(),
+            today_days().unwrap()
+        ));
+        std::fs::create_dir_all(root.join("backend-rust")).unwrap();
+        std::fs::write(root.join("backend-rust").join("README.md"), "legacy\n").unwrap();
+        let today = today_days().unwrap();
+        let valid = toml::Value::Table(toml::toml! {
+            item = "legacy backend layout"
+            registered = "2026-08-30"
+            last_deferred = "2026-08-30"
+            reason = "migration requires a coordinated release"
+            effort = "M"
+            trigger = "backend-rust/**"
+        });
+        validate_deferred_row(&repository(), &root, &valid, today).unwrap();
+
+        let stale = toml::Value::Table(toml::toml! {
+            item = "removed layout"
+            registered = "2026-08-30"
+            last_deferred = "2026-08-30"
+            reason = "old"
+            effort = "S"
+            trigger = "missing/**"
+        });
+        let error = validate_deferred_row(&repository(), &root, &stale, today).unwrap_err();
+        assert!(error.contains("stale"), "got: {error}");
+
+        let old = toml::Value::Table(toml::toml! {
+            item = "ancient layout"
+            registered = "2020-01-01"
+            last_deferred = "2020-01-01"
+            reason = "old"
+            effort = "S"
+            trigger = "backend-rust/**"
+        });
+        let error = validate_deferred_row(&repository(), &root, &old, today).unwrap_err();
+        assert!(error.contains("older than"), "got: {error}");
+        let unknown = toml::Value::Table(toml::toml! {
+            item = "unknown field"
+            registered = "2026-08-30"
+            last_deferred = "2026-08-30"
+            reason = "old"
+            effort = "S"
+            trigger = "backend-rust/**"
+            owner = "not allowed"
+        });
+        let error = validate_deferred_row(&repository(), &root, &unknown, today).unwrap_err();
+        assert!(error.contains("unknown field"), "got: {error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adopted_repo_requires_all_census_cache_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-actions-adoption-test-{}-{}",
+            std::process::id(),
+            today_days().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("repolint.toml"),
+            "[repo]\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\n",
+        )
+        .unwrap();
+        let error = cross_check_local_repo(&repository(), &root).unwrap_err();
+        assert!(error.contains("research"), "got: {error}");
+        std::fs::write(
+            root.join("repolint.toml"),
+            "[repo]\ntier = \"leaf\"\nkind = \"app\"\nvisibility = \"public\"\nresearch = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cross_check_local_repo(&repository(), &root).unwrap(),
+            AdoptionState::Adopted
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cloned_consumer_comparison_reads_actual_workflow_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-actions-cloned-consumer-test-{}-{}",
+            std::process::id(),
+            today_days().unwrap()
+        ));
+        let workflow = root.join(".github/workflows");
+        std::fs::create_dir_all(&workflow).unwrap();
+        let forks = ForkTable::canonical();
+        let template = render::consumer_template_for(RepositoryClass::Code, &forks);
+        let expected =
+            render::render_consumer_for(&template, &forks, &[AUDIT_RELEASE_SHA; 3], AUDIT_CALVER)
+                .unwrap();
+        std::fs::write(workflow.join("ci.yml"), expected).unwrap();
+        audit_cloned_consumer(&repository(), &root, &forks).unwrap();
+
+        std::fs::write(workflow.join("ci.yml"), "name: tampered\n").unwrap();
+        let error = audit_cloned_consumer(&repository(), &root, &forks).unwrap_err();
+        assert!(
+            error.contains("exactly one") || error.contains("diverges"),
+            "got: {error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zizmor_findings_are_warn_only_before_adoption() {
+        assert!(is_pre_adoption_warning(
+            AdoptionState::Unadopted,
+            "zizmor",
+            Some(ZIZMOR_LAST_FINDINGS_EXIT_CODE),
+            false
+        ));
+        assert!(!is_pre_adoption_warning(
+            AdoptionState::Adopted,
+            "zizmor",
+            Some(ZIZMOR_LAST_FINDINGS_EXIT_CODE),
+            false
+        ));
+        assert!(!is_pre_adoption_warning(
+            AdoptionState::Unadopted,
+            "repolint",
+            Some(ZIZMOR_LAST_FINDINGS_EXIT_CODE),
+            false
+        ));
+        assert!(is_pre_adoption_warning(
+            AdoptionState::Unadopted,
+            "zizmor",
+            Some(ZIZMOR_FIRST_FINDINGS_EXIT_CODE),
+            false
+        ));
+        assert!(!is_pre_adoption_warning(
+            AdoptionState::Unadopted,
+            "zizmor",
+            Some(2),
+            false
+        ));
     }
 }

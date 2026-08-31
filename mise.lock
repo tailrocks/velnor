@@ -34,10 +34,35 @@ checksum = "sha256:58e0a722f9444078fab447783f322acf15a2a771ba785b3fbbe8bacda31c3
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-universal-apple-darwin.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/467468113"
 
+[[tools."aqua:rustsec/rustsec/cargo-audit"]]
+version = "0.22.2"
+backend = "aqua:rustsec/rustsec/cargo-audit"
+specifiers = ["0.22.2"]
+
+[tools."aqua:rustsec/rustsec/cargo-audit"."platforms.linux-x64"]
+checksum = "sha256:ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39"
+url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz"
+url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439291614"
+
+[tools."aqua:rustsec/rustsec/cargo-audit"."platforms.macos-arm64"]
+checksum = "sha256:847831323de932155b226ab60ee4a180e13e5d007a019f0d4b7b4d89a6de2ab2"
+url = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-apple-darwin-v0.22.2.tgz"
+url_api = "https://api.github.com/repos/rustsec/rustsec/releases/assets/439292734"
+
+[[tools."cargo:alint"]]
+version = "0.15.2"
+backend = "cargo:alint"
+specifiers = ["0.15.2"]
+
 [[tools."cargo:cargo-deny"]]
 version = "0.20.2"
 backend = "cargo:cargo-deny"
 specifiers = ["0.20.2"]
+
+[[tools."cargo:https://github.com/tailrocks/repolint"]]
+version = "rev:df4a1011776485853b9bcd2ee32f63dca0b1003b"
+backend = "cargo:https://github.com/tailrocks/repolint"
+specifiers = ["rev:df4a1011776485853b9bcd2ee32f63dca0b1003b"]
 
 [[tools.gh]]
 version = "2.96.0"
@@ -81,3 +106,20 @@ specifiers = ["1.97.1"]
 
 [tools.rust.options]
 components = "clippy,rustfmt"
+
+[[tools.zizmor]]
+version = "1.29.0"
+backend = "aqua:zizmorcore/zizmor"
+specifiers = ["1.29.0"]
+
+[tools.zizmor."platforms.linux-x64"]
+checksum = "sha256:dd96df044a6e8538d5f423790f453bdd03d49e5b2bcc38214acc41a2f1297839"
+url = "https://github.com/zizmorcore/zizmor/releases/download/v1.29.0/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/zizmorcore/zizmor/releases/assets/498263145"
+provenance = "github-attestations"
+
+[tools.zizmor."platforms.macos-arm64"]
+checksum = "sha256:720322fade9e83a9c7953944c438f2ba942636b86b96a8f0e6b15ce94c8a6b6f"
+url = "https://github.com/zizmorcore/zizmor/releases/download/v1.29.0/zizmor-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/zizmorcore/zizmor/releases/assets/498263141"
+provenance = "github-attestations"
