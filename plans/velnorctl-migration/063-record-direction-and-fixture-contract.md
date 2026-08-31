@@ -1,12 +1,11 @@
 # Plan 063: Record the velnorctl direction and fixture control contract
 
-> **Executor instructions**: Complete this plan before product implementation.
-> Update both repositories through normal reviewed changes. Do not weaken any
-> existing fixture. If the fixture baseline cannot pass unchanged, diagnose and
-> fix Velnor first; do not hide the failure in the new workflow.
+> **Historical record notice (Plan status: DONE):** This plan records completed
+> historical work only. It is historical and non-authoritative; do not execute
+> its procedure or derive current selector requirements from it. Current
+> execution follows the active repository contract and current coordination
+> instructions.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- AGENTS.md .github/AGENTS.md README.md docs/vision.md docs/roadmap.md docs/prompt.md plans/README.md crates/velnor-tools/src/main.rs scripts`
-> Compare live text with the evidence below before editing.
 > Reconciled 2026-08-24 at Velnor b57b036; generator ce23409 emits sole `lane`; fixture pin dc4204c green (compat run 32675488430).
 
 ## Status
@@ -27,11 +26,14 @@ plane inspection. Every later task needs one stable integration corpus.
 
 ## Current state
 
-Refreshed 2026-08-24 at Velnor `aed09eb`; the original planning-time gaps in
-steps 1–2 are already closed on the campaign branch, and the citations below
-are live anchors:
+Historical snapshot refreshed 2026-08-24 at Velnor `aed09eb`; the original
+planning-time gaps in steps 1–2 were closed during that historical campaign.
+Current execution follows the operator-assigned branch/focused-PR topology
+recorded in external `../COORDINATION.md`, anchored to 2026-08-31 at main SHA
+`c6e4ed8c290b0029d859d1c749c52e6ab856827a`; the citations below are live
+anchors:
 
-- `docs/vision.md:70-83` records the authoritative direction: performance,
+- `docs/vision.md:92-105` records the authoritative direction: performance,
   native adapters, and UX stay active, and the velnorctl migration names the
   final crate layout (`velnorctl`, service-only `daemon` entrypoint,
   `velnor-model`/`velnor-control`/`velnor-client`/`velnor-render`,
@@ -41,21 +43,31 @@ are live anchors:
 - `docs/prompt.md:19-24` scopes the active surface to exactly the marked
   unified-CI contract, the tracked goal graph, and the `plans/TASKS.md`
   mirror; no earlier prompt or plan is active.
-- `.github/AGENTS.md:5-10` instructs the sole `lane=github|velnor|both`
-  selector with organization-derived defaults and no universal Velnor default;
-  lines 15–17 separate runner group `velnor-trusted` from selection label
-  `velnor-target-mvp`; lines 21–24 name final `velnorctl` binary/package
-  ownership with `velnor-runner` interim until Plan 079.
-- `crates/velnor-tools/src/main.rs:18` defaults fixture tooling to
+- `.github/AGENTS.md:5-10` records the canonical plural `lanes` choice
+  (`velnor | github | both`) with organization-derived defaults; callable
+  reusable workflows keep singular `lane`, derived by callers from
+  `inputs.lanes`; lines 18–20 separate runner group `velnor-trusted` from
+  selection label `velnor-target-mvp`; lines 24–27 name final `velnorctl`
+  binary/package ownership with `velnor-runner` interim until Plan 079.
+- `crates/velnor-tools/src/main.rs:20-21` defaults fixture tooling to
   `tailrocks/velnor-actions-fixture`.
-- Fixture `compat.yml` covers real execution semantics. It lacks deterministic
+- Fixture `tailrocks/velnor-actions-fixture` is pinned here for reproducibility:
+  main commit `3a01651d12f1285f92a7cdd4ec9087433bdea10c` and
+  `.github/workflows/compat.yml` blob `13f7aa6227c36f39498800e392cdb75508f11e0f`;
+  `.github/workflows/control-plane.yml` blob
+  `be95f5e4895579f4c5baa1238590a7f9440ea67d` (verified 2026-08-31). It covers
+  real execution semantics but lacks deterministic
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
-  validation. Its current manual input is `lanes`, which conflicts with the
-  marked contract's sole selector `lane`.
+  validation. Its current manual input is `lanes`, matching the canonical
+  plural selector contract; callable workflows derive singular `lane` from
+  `inputs.lanes`.
 
-## Drift reconciliation 2026-08-24
+## Historical drift reconciliation 2026-08-24
 
 Reconciled at Velnor b57b036 against live repository state:
+
+> This dated reconciliation is historical and non-authoritative for current
+> execution or selector requirements.
 
 - The canonical fixture-class generator (`tailrocks/velnor-actions`) at
   committed state ce23409 already emits the sole `lane` input in all five class
@@ -72,10 +84,11 @@ Reconciled at Velnor b57b036 against live repository state:
   compat/control-plane aligned to sole `lane`, and live proof. Never a hand
   fork of `compat.yml`.
 - Fixture pin dc4204c is clean and green (compat main run 32675488430).
-- `plans/README.md` now contains the `velnorctl-migration` category row and
-  already orders Plan 063 first; no index reconciliation is required here.
+- At that historical snapshot, `plans/README.md` contained the
+  `velnorctl-migration` category row and ordered Plan 063 first. The current
+  index state is maintained in `plans/README.md` and `plans/TASKS.md`.
 
-### Execution reconciliation 2026-08-24 (at Velnor aed09eb)
+### Historical execution reconciliation 2026-08-24 (at Velnor aed09eb)
 
 Recorded during Plan 063 execution; supersedes the stale spans above where
 they disagree:
@@ -102,7 +115,7 @@ they disagree:
   stopped per step 3 until both external gaps close; live dispatch evidence
   for step 4 remains gated behind it.
 
-### Execution closeout 2026-08-24 (at Velnor 82b15f5)
+### Historical execution closeout 2026-08-24 (at Velnor 82b15f5)
 
 **LANED**: docs direction verified at aed09eb; generator sole-lane fix landed in
 `tailrocks/velnor-actions` branch `campaign/sole-lane-package-update` commit
@@ -131,7 +144,7 @@ literally (expression-parity observation).
 **Status**: DONE (2026-08-24). The queue-isolation gap is closed by validation
 run r2 on dedicated runner `cp-queue-validation-154447` (registration 5540):
 all eight control scenarios report `CP_VERDICT=match`. Full mapping in
-[Evidence (2026-08-24)](#evidence-2026-08-24) below.
+[Historical evidence (2026-08-24)](#historical-evidence-2026-08-24) below.
 
 ### Supersession 2026-08-24 (operator ruling): plural lanes restored
 
@@ -165,7 +178,7 @@ Consequences for the evidence above:
 restoration merged to fixture main as PR #93 squash `1661158`, and the
 isolated queue proof landed in `.velnor-compare/plan063-r2-queue-validation/`
 (8/8 `CP_VERDICT=match`). Full mapping in
-[Evidence (2026-08-24)](#evidence-2026-08-24) below.
+[Historical evidence (2026-08-24)](#historical-evidence-2026-08-24) below.
 
 ## Scope
 
@@ -186,7 +199,13 @@ isolated queue proof landed in `.velnor-compare/plan063-r2-queue-validation/`
 **Out of scope**: runner behavior, capability manifest changes, systemd,
 packaging, removal of any existing fixture job.
 
-## Steps
+## Steps (HISTORICAL / NON-AUTHORITATIVE)
+
+> **Historical procedure notice (Plan status: DONE):** The procedure below is
+> retained as execution evidence only. It is historical and non-authoritative;
+> do not execute it or derive current selector requirements from it. Its
+> singular-dispatch wording is superseded by the canonical plural `lanes`
+> contract stated in the current criteria and evidence below.
 
 ### 1. Make the direction authoritative
 
@@ -265,7 +284,7 @@ markers report expected reuse. Record run URLs and sanitized JSON only.
 failure fails at its named step with logs, and hold cancellation terminates with
 no orphaned runner registration.
 
-## Test plan
+## Historical test plan
 
 - Unit tests for corrected default fixture slug and dispatch input validation.
 - Fixture static tests for every scenario and lane.
@@ -274,7 +293,8 @@ no orphaned runner registration.
 ## Done criteria
 
 - [x] Direction files and prompt agree on complete `velnor-runner` removal.
-- [x] Root and `.github` instructions agree on sole `lane` selector, runner
+- [x] Root and `.github` instructions agree on the canonical plural `lanes`
+      selector, callable singular `lane` derived from `inputs.lanes`, runner
       group/label distinction, and class-derived defaults.
 - [x] Direction files agree that apt/dpkg exclusively own installed-version
       management and no Velnor release command/resource/API remains.
@@ -286,8 +306,8 @@ no orphaned runner registration.
 ## STOP conditions
 
 - Existing fixture is not green before the new workflow is added.
-- Canonical fixture-class generation still emits `lanes` or cannot produce the
-  byte-identical `lane` contract.
+- Canonical fixture-class generation still emits a noncanonical selector rather
+  than the byte-identical plural `lanes` contract.
 - New fixture needs an unapproved capability or weakens an existing assertion.
 - Direction documents disagree about final binary/package ownership.
 
@@ -297,7 +317,10 @@ Later tasks may extend control scenarios, but must preserve success, failure,
 hold, and cancellation semantics. Workflow dispatch cleanup rules remain
 mandatory for every migration task.
 
-## Evidence (2026-08-24)
+## Historical evidence (2026-08-24)
+
+> **Historical evidence notice:** The dated evidence below is historical and is
+> not current execution authority.
 
 Mapping of each done criterion to concrete, machine-verifiable pointers.
 All selector statements below reflect the canonical plural `lanes` choice

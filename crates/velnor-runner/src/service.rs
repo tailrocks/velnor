@@ -320,9 +320,15 @@ pub struct ReleaseVerifyRecordArgs {
     /// Independent checksum as a bare 64-hex string.
     #[arg(long)]
     pub sha256: Option<String>,
-    /// Optional APT publication record to cross-check binds this source record.
+    /// APT publication record; claim files are required with this option.
     #[arg(long)]
     pub publication: Option<PathBuf>,
+    /// Expected preverified APT metadata claims JSON; not a raw-byte verifier.
+    #[arg(long)]
+    pub expected_apt_metadata: Option<PathBuf>,
+    /// Served preverified APT metadata claims JSON; not a raw-byte verifier.
+    #[arg(long)]
+    pub served_apt_metadata: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -472,7 +478,9 @@ fwd_release!(
         record,
         checksum,
         sha256,
-        publication
+        publication,
+        expected_apt_metadata,
+        served_apt_metadata
     }
 );
 fwd_release!(
@@ -609,5 +617,38 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
         assert!(error.to_string().contains("--generation"));
+    }
+
+    #[test]
+    fn service_release_verify_record_parses_apt_metadata_paths() {
+        let parsed = ServiceCli::try_parse_from([
+            "velnor-runner",
+            "release",
+            "verify-record",
+            "--record",
+            "/tmp/record.json",
+            "--sha256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--expected-apt-metadata",
+            "/tmp/expected.json",
+            "--served-apt-metadata",
+            "/tmp/served.json",
+        ])
+        .expect("release verification arguments should parse");
+
+        let ServiceCommand::Release(ReleaseArgs {
+            command: ReleaseCommand::VerifyRecord(args),
+        }) = parsed.command
+        else {
+            panic!("expected release verify-record command");
+        };
+        assert_eq!(
+            args.expected_apt_metadata,
+            Some(PathBuf::from("/tmp/expected.json"))
+        );
+        assert_eq!(
+            args.served_apt_metadata,
+            Some(PathBuf::from("/tmp/served.json"))
+        );
     }
 }

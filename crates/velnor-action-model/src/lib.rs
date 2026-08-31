@@ -5,6 +5,8 @@
 //! is additive-only: object keys are sorted recursively before hashing so
 //! equivalent field-order permutations produce the same bytes.
 
+#![forbid(unsafe_code)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, str::FromStr};

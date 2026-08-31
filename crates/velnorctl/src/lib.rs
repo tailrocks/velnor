@@ -569,7 +569,7 @@ fn control_api_unavailable(command: &str) -> CommandError {
 fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, CommandError> {
     use velnor_control::config::ContextStore;
 
-    let contexts = context_store().list()?;
+    let contexts = context_store()?.list()?;
     let endpoint = if let Some(context_name) = &globals.context {
         let context = contexts
             .iter()
@@ -1164,7 +1164,8 @@ fn execute_config(args: commands::ConfigArgs) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn context_store() -> velnor_control::config::FileContextStore {
+fn context_store(
+) -> Result<velnor_control::config::FileContextStore, velnor_control::config::ConfigError> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -1180,7 +1181,7 @@ fn execute_context(args: commands::ContextArgs) -> Result<(), CommandError> {
     use velnor_control::config::ContextStore;
     use velnor_model::{ContextConfig, SanitizedUrl};
 
-    let store = context_store();
+    let store = context_store()?;
     match args.command {
         commands::ContextCommand::List => {
             print_json(store.list()?)?;

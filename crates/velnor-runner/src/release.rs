@@ -7,6 +7,11 @@
 //! emit/verify/activate primitives the release workflow, the APT publisher, and
 //! the host activation scripts all agree on.
 //!
+//! The APT publication function is a coherence boundary, not an authenticity
+//! primitive. It accepts typed claims produced by the trusted publisher-side
+//! verifier; it does not parse raw APT files, hash served bytes, or verify GPG.
+//! Untrusted JSON must never be supplied as either metadata claim.
+//!
 //! ## Acyclicity
 //!
 //! A [`ReleaseRecord`] never contains its own digest and never sits inside bytes
@@ -42,6 +47,7 @@ use crate::args::{
 /// Schema tags. A consumer refuses an unknown shape before trusting any field.
 pub const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
 pub const PUBLICATION_RECORD_SCHEMA: &str = "velnor.publication-record/v1";
+pub const APT_PUBLICATION_METADATA_SCHEMA: &str = "velnor.apt-publication-metadata/v1";
 pub const DEPLOYED_IDENTITY_SCHEMA: &str = "velnor.deployed-identity/v1";
 
 /// Canonical source repository the release chain is anchored to.
@@ -148,6 +154,10 @@ impl Sha256Hex {
     }
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0.bytes().all(|byte| byte == b'0')
     }
 }
 impl TryFrom<String> for Sha256Hex {
@@ -317,6 +327,84 @@ pub struct PackagesIndex {
     pub sha256: Sha256Hex,
 }
 
+/// Preverified metadata for bytes served by the APT repository. The size is
+/// kept beside the digest so the trusted byte-verification boundary can reject
+/// truncation or concatenation before constructing this claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AptArtifactMetadata {
+    pub sha256: Sha256Hex,
+    pub size: u64,
+}
+
+/// Metadata parsed from the APT `Release` file. A Release file must not list
+/// itself in its checksum sections: that is circular and cannot be trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AptReleaseMetadata {
+    pub artifact: AptArtifactMetadata,
+    pub package_indexes: Vec<AptPackageIndexMetadata>,
+    pub self_row: Option<AptArtifactMetadata>,
+    pub self_row_checked: bool,
+}
+
+/// Preverified metadata for a signed APT artifact (`InRelease` or detached
+/// `Release.gpg`). The publisher-side signature verifier must construct the
+/// claim and bind it to the exact served `Release` bytes before admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AptSignatureMetadata {
+    pub artifact: AptArtifactMetadata,
+    pub signed_release_sha256: Sha256Hex,
+    pub signer_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AptPackageMetadata {
+    pub arch: Arch,
+    pub path: String,
+    pub artifact: AptArtifactMetadata,
+}
+
+/// A `Packages` file covered by a signed APT `Release` checksum section. The
+/// path is relative to the suite directory, exactly as encoded by `Release`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AptPackageIndexMetadata {
+    pub arch: Arch,
+    pub path: String,
+    pub artifact: AptArtifactMetadata,
+}
+
+/// Expected metadata claims supplied by the trusted publication verifier. It is
+/// intentionally separate from [`PublicationRecord`], whose v1 schema predates
+/// exact APT file sizes and the detached-signature binding. This type does not
+/// authenticate its JSON representation; the publisher-side verifier owns that
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedAptPublicationMetadata {
+    pub schema: String,
+    pub release: AptReleaseMetadata,
+    pub inrelease: AptSignatureMetadata,
+    pub release_gpg: AptSignatureMetadata,
+    pub packages: Vec<AptPackageMetadata>,
+}
+
+/// Served metadata claims are optional at every trust boundary so a caller
+/// cannot accidentally turn a partial fetch or parse into a successful
+/// coherence check. The caller must authenticate the source bytes first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActualAptPublicationMetadata {
+    pub schema: String,
+    pub release: Option<AptReleaseMetadata>,
+    pub inrelease: Option<AptSignatureMetadata>,
+    pub release_gpg: Option<AptSignatureMetadata>,
+    pub packages: Option<Vec<AptPackageMetadata>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PreviousPointer {
@@ -422,6 +510,22 @@ pub enum CoherenceError {
     PublicationPackageArch,
     #[error("publication previous pointer references the current release")]
     PublicationPrevious,
+    #[error("publication contains an empty digest")]
+    PublicationDigestEmpty,
+    #[error("APT publication metadata is incomplete")]
+    PublicationMetadataMissing,
+    #[error("APT publication metadata contains an empty artifact")]
+    PublicationMetadataEmpty,
+    #[error("APT Release contains a self-referential checksum row")]
+    PublicationReleaseSelfRow,
+    #[error("APT publication metadata disagrees with expected artifact metadata")]
+    PublicationMetadataMismatch,
+    #[error("APT signature metadata does not bind the expected Release or signer")]
+    PublicationSignature,
+    #[error("APT package metadata does not bind the publication")]
+    PublicationPackageMetadata,
+    #[error("APT metadata does not bind the publication record")]
+    PublicationMetadataBinding,
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +645,13 @@ pub fn verify_record_bytes(
     Ok(record)
 }
 
+fn is_full_fingerprint(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
+}
+
 /// Cross-check the on-host deployed identity against the active record and the
 /// installed binary's own digest. Fails on any single-field drift so a mixed
 /// old/new tuple can never start.
@@ -610,11 +721,15 @@ pub fn verify_publication_binds(
     {
         return Err(CoherenceError::PublicationVersion);
     }
-    if publication.signer_fingerprint.is_empty() {
+    if !is_full_fingerprint(&publication.signer_fingerprint) {
         return Err(CoherenceError::EmptyField("publication.signer_fingerprint"));
     }
-    // The published index must cover at least one architecture, each drawn from
-    // the release's supported set.
+    if publication.inrelease_sha256.is_zero() {
+        return Err(CoherenceError::PublicationDigestEmpty);
+    }
+    // The published index must cover exactly the release's supported
+    // architectures. A partial index is not a coherent publication.
+    let mut seen = Vec::with_capacity(publication.packages.len());
     if publication.packages.is_empty() {
         return Err(CoherenceError::EmptyField("publication.packages"));
     }
@@ -622,11 +737,21 @@ pub fn verify_publication_binds(
         if !REQUIRED_ARCHES.contains(&index.arch) || record.architecture(index.arch).is_none() {
             return Err(CoherenceError::PublicationPackageArch);
         }
-        // `index.sha256` and `publication.inrelease_sha256` are validated hex by
-        // construction; require them present (never the empty/placeholder digest).
-        if index.sha256 == publication.inrelease_sha256 {
+        if seen.contains(&index.arch) {
             return Err(CoherenceError::PublicationPackageArch);
         }
+        seen.push(index.arch);
+        // `index.sha256` and `publication.inrelease_sha256` are validated hex by
+        // construction; require them present (never the empty/placeholder digest).
+        if index.sha256.is_zero() || index.sha256 == publication.inrelease_sha256 {
+            return Err(CoherenceError::PublicationPackageArch);
+        }
+    }
+    seen.sort();
+    let mut required = REQUIRED_ARCHES.to_vec();
+    required.sort();
+    if seen != required {
+        return Err(CoherenceError::PublicationPackageArch);
     }
     if let Some(previous) = &publication.previous {
         match previous {
@@ -646,6 +771,232 @@ pub fn verify_publication_binds(
         }
     }
     Ok(())
+}
+
+fn verify_apt_artifact(
+    expected: &AptArtifactMetadata,
+    actual: &AptArtifactMetadata,
+) -> std::result::Result<(), CoherenceError> {
+    if expected.size == 0
+        || actual.size == 0
+        || expected
+            .sha256
+            .as_str()
+            .chars()
+            .all(|character| character == '0')
+        || actual
+            .sha256
+            .as_str()
+            .chars()
+            .all(|character| character == '0')
+    {
+        return Err(CoherenceError::PublicationMetadataEmpty);
+    }
+    if expected != actual {
+        return Err(CoherenceError::PublicationMetadataMismatch);
+    }
+    Ok(())
+}
+
+fn verify_apt_package_metadata(
+    record: &ReleaseRecord,
+    expected: &[AptPackageMetadata],
+    actual: &[AptPackageMetadata],
+) -> std::result::Result<(), CoherenceError> {
+    if expected.is_empty() || actual.is_empty() {
+        return Err(CoherenceError::PublicationMetadataEmpty);
+    }
+    if expected.len() != actual.len() || expected.len() != REQUIRED_ARCHES.len() {
+        return Err(CoherenceError::PublicationPackageMetadata);
+    }
+
+    for package in expected {
+        if !REQUIRED_ARCHES.contains(&package.arch)
+            || record.architecture(package.arch).is_none()
+            || expected
+                .iter()
+                .filter(|item| item.arch == package.arch)
+                .count()
+                != 1
+        {
+            return Err(CoherenceError::PublicationPackageMetadata);
+        }
+        let served = actual
+            .iter()
+            .find(|item| item.arch == package.arch)
+            .ok_or(CoherenceError::PublicationPackageMetadata)?;
+        let expected_path = apt_deb_path(record, package.arch);
+        if package.path != expected_path || served.path != expected_path {
+            return Err(CoherenceError::PublicationPackageMetadata);
+        }
+        verify_apt_artifact(&package.artifact, &served.artifact)
+            .map_err(|_| CoherenceError::PublicationPackageMetadata)?;
+        let record_arch = record
+            .architecture(package.arch)
+            .ok_or(CoherenceError::PublicationPackageMetadata)?;
+        if served.artifact.sha256 != record_arch.deb_sha256 {
+            return Err(CoherenceError::PublicationPackageMetadata);
+        }
+    }
+
+    for package in actual {
+        if !REQUIRED_ARCHES.contains(&package.arch)
+            || record.architecture(package.arch).is_none()
+            || actual
+                .iter()
+                .filter(|item| item.arch == package.arch)
+                .count()
+                != 1
+            || expected.iter().all(|item| item.arch != package.arch)
+        {
+            return Err(CoherenceError::PublicationPackageMetadata);
+        }
+    }
+    Ok(())
+}
+
+fn apt_packages_path(record: &ReleaseRecord, arch: Arch) -> String {
+    format!("{}/binary-{}/Packages", record.apt.component, arch.as_str())
+}
+
+fn apt_deb_path(record: &ReleaseRecord, arch: Arch) -> String {
+    format!(
+        "pool/{}/v/velnor-runner/velnor-runner_{}_{}.deb",
+        record.apt.component,
+        record.build.debian_version,
+        arch.as_str()
+    )
+}
+
+fn verify_apt_package_indexes(
+    publication: &PublicationRecord,
+    record: &ReleaseRecord,
+    expected: &[AptPackageIndexMetadata],
+    actual: &[AptPackageIndexMetadata],
+) -> std::result::Result<(), CoherenceError> {
+    if expected.len() != actual.len() || expected.len() != REQUIRED_ARCHES.len() {
+        return Err(CoherenceError::PublicationPackageMetadata);
+    }
+    for index in expected {
+        if !REQUIRED_ARCHES.contains(&index.arch)
+            || expected
+                .iter()
+                .filter(|item| item.arch == index.arch)
+                .count()
+                != 1
+        {
+            return Err(CoherenceError::PublicationPackageMetadata);
+        }
+        let served = actual
+            .iter()
+            .find(|item| item.arch == index.arch)
+            .ok_or(CoherenceError::PublicationPackageMetadata)?;
+        let expected_path = apt_packages_path(record, index.arch);
+        if index.path != expected_path || served.path != expected_path {
+            return Err(CoherenceError::PublicationPackageMetadata);
+        }
+        verify_apt_artifact(&index.artifact, &served.artifact)
+            .map_err(|_| CoherenceError::PublicationPackageMetadata)?;
+        let published = publication
+            .packages
+            .iter()
+            .find(|item| item.arch == index.arch)
+            .ok_or(CoherenceError::PublicationPackageMetadata)?;
+        if published.sha256 != served.artifact.sha256 {
+            return Err(CoherenceError::PublicationPackageMetadata);
+        }
+    }
+    if actual.iter().any(|index| {
+        !REQUIRED_ARCHES.contains(&index.arch)
+            || actual.iter().filter(|item| item.arch == index.arch).count() != 1
+            || expected.iter().all(|item| item.arch != index.arch)
+    }) {
+        return Err(CoherenceError::PublicationPackageMetadata);
+    }
+    Ok(())
+}
+
+/// Verify preverified APT metadata claims against trusted expected values and
+/// the source-side publication record. This function deliberately does not
+/// hash raw bytes or verify GPG signatures; its caller must obtain these typed
+/// claims from the trusted publisher-side byte/signature verifier first.
+/// Optional fields in [`ActualAptPublicationMetadata`] deliberately make a
+/// partial fetch fail closed.
+pub fn verify_apt_publication_metadata(
+    publication: &PublicationRecord,
+    record: &ReleaseRecord,
+    expected: &ExpectedAptPublicationMetadata,
+    actual: &ActualAptPublicationMetadata,
+) -> std::result::Result<(), CoherenceError> {
+    verify_publication_binds(publication, record)?;
+    if expected.schema != APT_PUBLICATION_METADATA_SCHEMA
+        || actual.schema != APT_PUBLICATION_METADATA_SCHEMA
+    {
+        return Err(CoherenceError::Schema {
+            want: APT_PUBLICATION_METADATA_SCHEMA,
+        });
+    }
+
+    let release = actual
+        .release
+        .as_ref()
+        .ok_or(CoherenceError::PublicationMetadataMissing)?;
+    let inrelease = actual
+        .inrelease
+        .as_ref()
+        .ok_or(CoherenceError::PublicationMetadataMissing)?;
+    let release_gpg = actual
+        .release_gpg
+        .as_ref()
+        .ok_or(CoherenceError::PublicationMetadataMissing)?;
+    let packages = actual
+        .packages
+        .as_ref()
+        .ok_or(CoherenceError::PublicationMetadataMissing)?;
+
+    if !expected.release.self_row_checked || !release.self_row_checked {
+        return Err(CoherenceError::PublicationMetadataMissing);
+    }
+    if expected.release.self_row.is_some() || release.self_row.is_some() {
+        return Err(CoherenceError::PublicationReleaseSelfRow);
+    }
+    verify_apt_artifact(&expected.release.artifact, &release.artifact)?;
+    verify_apt_package_indexes(
+        publication,
+        record,
+        &expected.release.package_indexes,
+        &release.package_indexes,
+    )?;
+    verify_apt_artifact(&expected.inrelease.artifact, &inrelease.artifact)?;
+    verify_apt_artifact(&expected.release_gpg.artifact, &release_gpg.artifact)?;
+
+    if !is_full_fingerprint(&expected.inrelease.signer_fingerprint)
+        || !is_full_fingerprint(&expected.release_gpg.signer_fingerprint)
+        || !is_full_fingerprint(&inrelease.signer_fingerprint)
+        || !is_full_fingerprint(&release_gpg.signer_fingerprint)
+    {
+        return Err(CoherenceError::PublicationMetadataEmpty);
+    }
+    if expected.inrelease.signed_release_sha256 != expected.release.artifact.sha256
+        || expected.release_gpg.signed_release_sha256 != expected.release.artifact.sha256
+        || inrelease.signed_release_sha256 != release.artifact.sha256
+        || release_gpg.signed_release_sha256 != release.artifact.sha256
+        || inrelease.signed_release_sha256 != expected.inrelease.signed_release_sha256
+        || release_gpg.signed_release_sha256 != expected.release_gpg.signed_release_sha256
+        || inrelease.signer_fingerprint != expected.inrelease.signer_fingerprint
+        || release_gpg.signer_fingerprint != expected.release_gpg.signer_fingerprint
+        || expected.inrelease.signer_fingerprint != expected.release_gpg.signer_fingerprint
+        || inrelease.signer_fingerprint != release_gpg.signer_fingerprint
+    {
+        return Err(CoherenceError::PublicationSignature);
+    }
+    if publication.inrelease_sha256 != expected.inrelease.artifact.sha256
+        || publication.signer_fingerprint != expected.inrelease.signer_fingerprint
+    {
+        return Err(CoherenceError::PublicationMetadataBinding);
+    }
+
+    verify_apt_package_metadata(record, &expected.packages, packages)
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1329,38 @@ fn assemble_command(args: ReleaseAssembleArgs) -> Result<()> {
     Ok(())
 }
 
+fn read_distinct_apt_metadata_sources(
+    expected_path: &Path,
+    served_path: &Path,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut expected_file = fs::File::open(expected_path)
+        .with_context(|| format!("read expected APT metadata {}", expected_path.display()))?;
+    let mut served_file = fs::File::open(served_path)
+        .with_context(|| format!("read served APT metadata {}", served_path.display()))?;
+
+    let expected_metadata = expected_file.metadata()?;
+    let served_metadata = served_file.metadata()?;
+    #[cfg(unix)]
+    if std::os::unix::fs::MetadataExt::dev(&expected_metadata)
+        == std::os::unix::fs::MetadataExt::dev(&served_metadata)
+        && std::os::unix::fs::MetadataExt::ino(&expected_metadata)
+            == std::os::unix::fs::MetadataExt::ino(&served_metadata)
+    {
+        bail!("expected and served APT metadata must use different files");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (expected_path, served_path);
+        bail!("APT metadata source identity checks require a Unix platform");
+    }
+
+    let mut expected_bytes = Vec::new();
+    let mut served_bytes = Vec::new();
+    expected_file.read_to_end(&mut expected_bytes)?;
+    served_file.read_to_end(&mut served_bytes)?;
+    Ok((expected_bytes, served_bytes))
+}
+
 fn verify_record_command(args: ReleaseVerifyRecordArgs) -> Result<()> {
     let bytes =
         fs::read(&args.record).with_context(|| format!("read {}", args.record.display()))?;
@@ -987,18 +1370,59 @@ fn verify_record_command(args: ReleaseVerifyRecordArgs) -> Result<()> {
         (None, None) => bail!("provide --checksum <file> or --sha256 <hex>"),
     };
     let record = verify_record_bytes(&bytes, &expected).map_err(anyhow::Error::from)?;
-    if let Some(path) = &args.publication {
-        let publication: PublicationRecord = serde_json::from_slice(
-            &fs::read(path).with_context(|| format!("read publication {}", path.display()))?,
+    let publication = if let Some(path) = &args.publication {
+        Some(
+            serde_json::from_slice::<PublicationRecord>(
+                &fs::read(path).with_context(|| format!("read publication {}", path.display()))?,
+            )
+            .with_context(|| format!("parse publication {}", path.display()))?,
         )
-        .with_context(|| format!("parse publication {}", path.display()))?;
-        verify_publication_binds(&publication, &record).map_err(anyhow::Error::from)?;
+    } else {
+        None
+    };
+
+    let apt_claims_checked = match (&args.expected_apt_metadata, &args.served_apt_metadata) {
+        (None, None) if publication.is_some() => {
+            bail!("--publication requires preverified APT claims for coherence checking")
+        }
+        (None, None) => {
+            // Record-only verification is intentionally separate from
+            // publication acceptance and needs no publication input.
+            false
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            bail!("provide both --expected-apt-metadata and --served-apt-metadata")
+        }
+        (Some(expected_path), Some(served_path)) => {
+            let publication = publication.as_ref().context(
+                "--publication is required with preverified APT claims coherence checking",
+            )?;
+            let (expected_bytes, served_bytes) =
+                read_distinct_apt_metadata_sources(expected_path, served_path)?;
+            let expected: ExpectedAptPublicationMetadata = serde_json::from_slice(&expected_bytes)
+                .with_context(|| {
+                    format!("parse expected APT metadata {}", expected_path.display())
+                })?;
+            let served: ActualAptPublicationMetadata = serde_json::from_slice(&served_bytes)
+                .with_context(|| format!("parse served APT metadata {}", served_path.display()))?;
+            verify_apt_publication_metadata(publication, &record, &expected, &served)
+                .map_err(anyhow::Error::from)?;
+            true
+        }
+    };
+    if apt_claims_checked {
+        println!(
+            "release record and preverified APT publication claims for {} are coherent (digest {})",
+            record.build.tag,
+            record.digest()
+        );
+    } else {
+        println!(
+            "release record for {} is coherent (digest {})",
+            record.build.tag,
+            record.digest()
+        );
     }
-    println!(
-        "release record for {} is coherent (digest {})",
-        record.build.tag,
-        record.digest()
-    );
     Ok(())
 }
 

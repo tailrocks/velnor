@@ -45,7 +45,7 @@ lines.
   - `runner::tests::unix_now_iso8601_is_github_strippable`
 - Any change to these helpers, their call sites, or the feed/upload clients
   MUST update this document and the guard tests in the same commit, and MUST
-  be verified visually: dispatch a fixture `lane=velnor-only` run and watch
+be verified visually: dispatch a fixture `lanes=both` run and watch
   a step's logs WHILE RUNNING (live view) and AFTER COMPLETION (blob view)
   side-by-side with a GitHub-hosted job.
 - When Velnor output differs from GitHub-hosted output in the UI, the bug is

@@ -84,6 +84,7 @@ jobs:
     outputs:
       lane: ${{ needs.lane-admission.outputs.lanes }}
       version: ${{ steps.gate.outputs.version }}
+      tag_ref: ${{ steps.gate.outputs.tag_ref }}
       # Downstream provenance is bound to the exact default-branch snapshot
       # accepted below, not to an independently re-resolved tag ref.
       commit: ${{ steps.gate.outputs.default_branch_commit }}
@@ -106,10 +107,19 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::tag $TAG must match v[0-9]*" >&2; exit 1 ;;
+          esac
+          tag_ref="refs/tags/$TAG"
+          git show-ref --verify --quiet "$tag_ref" || {
+            echo "::error::tag ref $tag_ref does not exist" >&2
+            exit 1
+          }
           version="${TAG#v}"
 
           # Peel annotated OR lightweight tags to exactly one commit object.
-          tag_commit="$(git rev-list -n 1 "$TAG")"
+          tag_commit="$(git rev-list -n 1 "$tag_ref")"
           case "$tag_commit" in
             *[!0-9a-f]*|'') echo "::error::tag $TAG did not peel to lowercase hex" >&2; exit 1 ;;
           esac
@@ -154,6 +164,7 @@ jobs:
 
           {
             echo "version=$version"
+            echo "tag_ref=$tag_ref"
             echo "tag_commit=$tag_commit"
             echo "default_branch_commit=$default_branch_commit"
           } >> "$GITHUB_OUTPUT"
@@ -168,6 +179,7 @@ jobs:
     runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
       default_branch_commit: ${{ steps.gate.outputs.default_branch_commit }}
+      tag_ref: ${{ steps.gate.outputs.tag_ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -182,8 +194,53 @@ jobs:
           EXPECTED_DEFAULT_BRANCH_COMMIT: ${{ needs.identity.outputs.default_branch_commit }}
           EXPECTED_RELEASE_COMMIT: ${{ needs.identity.outputs.commit }}
           EXPECTED_TAG_COMMIT: ${{ needs.identity.outputs.tag_commit }}
+          EXPECTED_TAG_REF: ${{ needs.identity.outputs.tag_ref }}
         run: |
           set -euo pipefail
+          if ! remote_tag_refs="$(git ls-remote --exit-code origin 'refs/tags/v*')"; then
+            echo "::error::could not resolve remote v* tags" >&2
+            exit 1
+          fi
+          remote_tag_commit="$(printf '%s\n' "$remote_tag_refs" | awk -v expected="$EXPECTED_TAG_REF" '
+            $2 == expected "^{}" { peeled=$1; found_peeled=1; next }
+            $2 == expected && !found_peeled { raw=$1 }
+            END {
+              if (found_peeled) print peeled
+              else if (raw != "") print raw
+            }
+          ')"
+          case "$remote_tag_commit" in
+            *[!0-9a-f]*|'') echo "::error::remote tag $EXPECTED_TAG_REF did not resolve to lowercase hex" >&2; exit 1 ;;
+          esac
+          [ "${#remote_tag_commit}" -eq 40 ] || { echo "::error::remote tag $EXPECTED_TAG_REF did not resolve to a 40-hex commit" >&2; exit 1; }
+          [ "$remote_tag_commit" = "$EXPECTED_TAG_COMMIT" ] || {
+            echo "::error::remote tag $EXPECTED_TAG_REF moved to $remote_tag_commit; expected $EXPECTED_TAG_COMMIT" >&2
+            exit 1
+          }
+          tags_here="$(printf '%s\n' "$remote_tag_refs" | awk -v target="$remote_tag_commit" '
+            {
+              ref=$2
+              if (ref ~ /\^\{\}$/) {
+                sub(/\^\{\}$/, "", ref)
+                peeled[ref]=$1
+              } else {
+                raw[ref]=$1
+              }
+              seen[ref]=1
+            }
+            END {
+              count=0
+              for (ref in seen) {
+                if (ref ~ /^refs\/tags\/v[0-9]/) {
+                  commit=(ref in peeled) ? peeled[ref] : raw[ref]
+                  if (commit == target) count++
+                }
+              }
+              print count
+            }
+          ')"
+          [ "$tags_here" = "1" ] || { echo "::error::expected exactly one v[0-9]* tag at $remote_tag_commit, found $tags_here" >&2; exit 1; }
+
           remote_default_branch="$(git ls-remote --exit-code --heads origin "refs/heads/$DEFAULT_BRANCH")"
           default_branch_commit="$(printf '%s\n' "$remote_default_branch" | awk 'NF == 2 { print $1 }')"
           case "$default_branch_commit" in
@@ -203,6 +260,7 @@ jobs:
             exit 1
           }
           echo "default_branch_commit=$default_branch_commit" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=$EXPECTED_TAG_REF" >> "$GITHUB_OUTPUT"
 
   metadata:
     needs: [identity, release_gate]
@@ -479,6 +537,17 @@ jobs:
             --guest-agent target/release/velnor-guest-agent
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
+          test -s target/release/velnor-guest-agent
+          test -x target/release/velnor-guest-agent
+          # shellcheck disable=SC2209
+          stat_output="$(DEBUGFS_PAGER=cat debugfs -R 'stat /usr/bin/velnor-guest-agent' dist/microvm/rootfs.ext4 2>&1)"
+          printf '%s\n' "$stat_output" | grep -Eq 'Type: regular[[:space:]]+Mode:[[:space:]]+0755([[:space:]]|$)' \
+            || { echo "::error::rootfs guest agent must be a regular file with mode 0755" >&2; exit 1; }
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" dist/microvm/rootfs.ext4 >/dev/null
+          cmp -- "$agent_dump" target/release/velnor-guest-agent
           sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -953,11 +1022,11 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@c222e52030fee9ea6eae573a5769770be01d8438 # 2026.8.32
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.tar.gz
-      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
+      source-ref: ${{ needs.release_gate.outputs.tag_ref }}
 
   sign-arm64-tar:
     needs: [identity, release_gate, release]
@@ -965,11 +1034,11 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@c222e52030fee9ea6eae573a5769770be01d8438 # 2026.8.32
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.tar.gz
-      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
+      source-ref: ${{ needs.release_gate.outputs.tag_ref }}
 
   sign-amd64-deb:
     needs: [identity, release_gate, release]
@@ -977,11 +1046,11 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@c222e52030fee9ea6eae573a5769770be01d8438 # 2026.8.32
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.deb
-      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
+      source-ref: ${{ needs.release_gate.outputs.tag_ref }}
 
   sign-arm64-deb:
     needs: [identity, release_gate, release]
@@ -989,11 +1058,11 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@c222e52030fee9ea6eae573a5769770be01d8438 # 2026.8.32
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
-      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
+      source-ref: ${{ needs.release_gate.outputs.tag_ref }}
 
   # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
   # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).

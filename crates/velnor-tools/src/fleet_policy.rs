@@ -21,7 +21,7 @@ use std::{
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
-        unix::ffi::OsStrExt,
+        unix::ffi::{OsStrExt, OsStringExt},
     },
 };
 use std::{
@@ -1090,7 +1090,8 @@ fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
     let pending = policy_directory_components(path)?;
 
     // Keep stable root and working-directory descriptors. Every component is
-    // opened relative to a descriptor and must be an ordinary directory.
+    // opened relative to a descriptor; aliases are expanded only from a
+    // target captured by readlinkat, never by rebuilding a canonical path.
     let root_c = CString::new("/").expect("static path has no NUL");
     let root_fd = unsafe {
         libc::open(
@@ -1125,7 +1126,7 @@ fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
         });
     }
 
-    let result = open_policy_directory_components(current, pending, create, path);
+    let result = open_policy_directory_components(current, root_fd, pending, create, path);
     let root_close = unsafe { libc::close(root_fd) };
     match result {
         Ok(directory_fd) if root_close == 0 => Ok(directory_fd),
@@ -1196,15 +1197,183 @@ fn open_policy_directory_component(
 }
 
 #[cfg(unix)]
+fn read_link_at(directory: RawFd, name: &OsStr) -> io::Result<OsString> {
+    // Capture once. A size-probing loop could observe a replacement on its
+    // second read and make the walk follow a different alias than the one
+    // that produced ELOOP.
+    const MAX_TARGET_BYTES: usize = 64 * 1024;
+    let name_c = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fleet policy output directory contains NUL",
+        )
+    })?;
+    let before = policy_symlink_identity(directory, &name_c)?;
+    let mut buffer = vec![0_u8; MAX_TARGET_BYTES];
+    let length = unsafe {
+        libc::readlinkat(
+            directory,
+            name_c.as_ptr(),
+            buffer.as_mut_ptr().cast::<libc::c_char>(),
+            buffer.len(),
+        )
+    };
+    if length < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let length = length as usize;
+    if length == buffer.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory symlink target exceeds 64 KiB",
+        ));
+    }
+    let after = policy_symlink_identity(directory, &name_c)?;
+    if before != after {
+        return Err(io::Error::from_raw_os_error(libc::EAGAIN));
+    }
+    buffer.truncate(length);
+    if buffer.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "directory symlink target is empty",
+        ));
+    }
+    Ok(OsString::from_vec(buffer))
+}
+
+#[cfg(unix)]
+fn policy_symlink_identity(directory: RawFd, name: &CString) -> io::Result<(u64, u64, u64)> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            directory,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    Ok((stat.st_dev as _, stat.st_ino, stat.st_mode as u64))
+}
+
+#[cfg(unix)]
 fn open_policy_directory_components(
     mut current: RawFd,
+    root_fd: RawFd,
     mut pending: VecDeque<OsString>,
     create: bool,
     path: &Path,
 ) -> Result<RawFd> {
+    const MAX_SYMLINK_HOPS: usize = 40;
+    let mut symlink_hops = 0;
+
     while let Some(component) = pending.pop_front() {
+        let is_final = pending.is_empty();
         let next = match open_policy_directory_component(current, &component, create) {
             Ok(next) => next,
+            Err(error)
+                if !is_final
+                    && matches!(
+                        error.raw_os_error(),
+                        Some(libc::ELOOP) | Some(libc::ENOTDIR)
+                    ) =>
+            {
+                let component_c = match CString::new(component.as_bytes()) {
+                    Ok(component_c) => component_c,
+                    Err(error) => {
+                        unsafe { libc::close(current) };
+                        return Err(anyhow::Error::new(error));
+                    }
+                };
+                let is_symlink = match policy_symlink_identity(current, &component_c) {
+                    Ok(_) => true,
+                    Err(identity_error)
+                        if matches!(
+                            identity_error.raw_os_error(),
+                            Some(libc::EINVAL) | Some(libc::ENOENT)
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(identity_error) => {
+                        unsafe { libc::close(current) };
+                        return Err(identity_error).with_context(|| {
+                            format!(
+                                "inspecting symlinked fleet policy directory component {}/{}",
+                                path.display(),
+                                component.to_string_lossy()
+                            )
+                        });
+                    }
+                };
+                if !is_symlink {
+                    unsafe { libc::close(current) };
+                    return Err(error).with_context(|| {
+                        format!(
+                            "opening component {} in fleet policy directory {}",
+                            component.to_string_lossy(),
+                            path.display()
+                        )
+                    });
+                }
+                if symlink_hops == MAX_SYMLINK_HOPS {
+                    unsafe { libc::close(current) };
+                    return Err(io::Error::from_raw_os_error(libc::ELOOP)).with_context(|| {
+                        format!("resolving fleet policy directory {}", path.display())
+                    });
+                }
+                let target = match read_link_at(current, &component) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        unsafe { libc::close(current) };
+                        return Err(error).with_context(|| {
+                            format!(
+                                "capturing symlinked fleet policy directory component {}/{}",
+                                path.display(),
+                                component.to_string_lossy()
+                            )
+                        });
+                    }
+                };
+                let target_path = Path::new(&target);
+                let mut target_components = match policy_directory_components(target_path) {
+                    Ok(components) => components,
+                    Err(error) => {
+                        unsafe { libc::close(current) };
+                        return Err(error);
+                    }
+                };
+                let replacement_base = unsafe {
+                    libc::dup(if target_path.is_absolute() {
+                        root_fd
+                    } else {
+                        current
+                    })
+                };
+                if replacement_base < 0 {
+                    let error = io::Error::last_os_error();
+                    unsafe { libc::close(current) };
+                    return Err(error).with_context(|| {
+                        format!(
+                            "duplicating symlink base for fleet policy directory {}",
+                            path.display()
+                        )
+                    });
+                }
+                unsafe { libc::close(current) };
+                target_components.append(&mut pending);
+                pending = target_components;
+                current = replacement_base;
+                symlink_hops += 1;
+                continue;
+            }
             Err(error) => {
                 unsafe { libc::close(current) };
                 return Err(error).with_context(|| {
@@ -2443,9 +2612,7 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = fs::canonicalize(std::env::temp_dir())
-                .expect("resolve test temp dir")
-                .join(format!("velnor-policy-gen-{tag}-{nonce}"));
+            let path = std::env::temp_dir().join(format!("velnor-policy-gen-{tag}-{nonce}"));
             fs::create_dir_all(&path).expect("create policy dir");
             Self { path }
         }
@@ -2845,7 +3012,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn policy_write_rejects_symlinked_ancestor_directory() {
+    fn policy_write_anchors_existing_symlinked_ancestor_directory() {
         let root = PolicyDir::new("nofollow-ancestor");
         let real = root.path.join("real");
         fs::create_dir(&real).expect("real directory");
@@ -2854,12 +3021,11 @@ mod tests {
         let alias = root.path.join("alias");
         std::os::unix::fs::symlink(&real, &alias).expect("ancestor symlink");
 
-        let err = write_policy_file(&alias.join("child"), "policy.json", b"must not land")
-            .expect_err("symlinked ancestor must fail closed");
-        assert!(!err.to_string().is_empty(), "failure should be actionable");
-        assert!(
-            !child.join("policy.json").exists(),
-            "symlinked ancestor must not redirect the write"
+        write_policy_file(&alias.join("child"), "policy.json", b"anchored")
+            .expect("stable ancestor alias resolves before descriptor walk");
+        assert_eq!(
+            fs::read(child.join("policy.json")).expect("anchored file"),
+            b"anchored"
         );
     }
 

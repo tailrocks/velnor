@@ -317,17 +317,56 @@ fn persist_in_flight_job(
         fs::remove_file(&temporary).ok();
         return Err(error).context("write temporary in-flight job lease");
     }
+    OpenOptions::new()
+        .read(true)
+        .open(&temporary)
+        .with_context(|| format!("open {} for sync", temporary.display()))?
+        .sync_all()
+        .with_context(|| format!("sync {}", temporary.display()))?;
     if let Err(error) = fs::rename(&temporary, &path) {
         fs::remove_file(&temporary).ok();
         return Err(error).context("publish in-flight job lease");
     }
+    sync_directory(path.parent())?;
+    Ok(())
+}
+
+fn sync_directory(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .with_context(|| format!("open directory {} for sync", path.display()))?
+            .sync_all()
+            .with_context(|| format!("sync directory {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
 fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
     let path = in_flight_job_path(config_dir);
-    if !path.exists() {
-        return Ok(None);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "in-flight job marker must not be a symlink: {}",
+                path.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            bail!(
+                "in-flight job marker is not a regular file: {}",
+                path.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let record = serde_json::from_slice(&bytes).context("parse in-flight job")?;
@@ -336,8 +375,25 @@ fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
 
 fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
     let path = in_flight_job_path(config_dir);
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "in-flight job marker must not be a symlink: {}",
+                path.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            bail!(
+                "in-flight job marker is not a regular file: {}",
+                path.display()
+            )
+        }
+        Ok(_) => {
+            fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+            sync_directory(path.parent())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
     Ok(())
 }
@@ -441,7 +497,7 @@ fn queued_jobs_to_cancel(
         .collect()
 }
 
-async fn complete_recorded_in_flight_job(
+pub(crate) async fn complete_recorded_in_flight_job(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
 ) -> Result<bool> {
@@ -470,6 +526,143 @@ async fn complete_recorded_in_flight_job(
         "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
     )
     .await?;
+    cleanup_recorded_in_flight_job(slot_dir)?;
+    Ok(true)
+}
+
+/// Replay a durable `Completing` payload byte-for-byte after a worker crash.
+///
+/// The completion intent and outbox are already durable, so this path must not
+/// manufacture a replacement failure payload. The journal acknowledgement is
+/// committed only after the exact payload is accepted remotely.
+pub(crate) async fn replay_recorded_completion(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    journal_dir: &Path,
+) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
+    let (generation, payload_sha256) = {
+        let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+        let state = journal
+            .materialized_state()
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.job_id.0 == record.job_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "recorded completing job {} is absent from the materialized journal",
+                    record.job_id
+                )
+            })?;
+        if job.phase != velnor_model::ActorPhase::Completing {
+            bail!(
+                "recorded completion job {} is in journal phase {:?}",
+                record.job_id,
+                job.phase
+            );
+        }
+        let row = state
+            .outbox
+            .iter()
+            .find(|row| {
+                row.job_id.0 == record.job_id
+                    && row.generation == job.generation
+                    && row.intended
+                    && !row.remote_acked
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "recorded completing job {} has no pending durable outbox row",
+                    record.job_id
+                )
+            })?;
+        (job.generation, row.payload_sha256.clone())
+    };
+    let payload =
+        load_recorded_completion_payload(journal_dir, &record, generation, &payload_sha256)?;
+    let token = oauth_access_token(stored).await?;
+    let client = RunServiceClient::new(token.token)?;
+    client
+        .complete_job_payload(&record.run_service_url, payload)
+        .await
+        .context("replay exact recorded completion payload")?;
+
+    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let acknowledged = journal.apply(velnor_control::journal::Event::RemoteAcked {
+        job_id: velnor_model::JobId(record.job_id.clone()),
+        generation,
+    })?;
+    if acknowledged.rejected {
+        bail!(
+            "remote acknowledgement rejected for recorded job {}",
+            record.job_id
+        );
+    }
+    crate::node::cleanup::remove_outbox(journal_dir, &record.job_id, generation.0)
+        .context("remove acknowledged recorded completion outbox")?;
+    cleanup_recorded_in_flight_job(slot_dir)?;
+    Ok(true)
+}
+
+fn load_recorded_completion_payload(
+    journal_dir: &Path,
+    record: &InFlightJobRecord,
+    generation: Generation,
+    expected_sha256: &str,
+) -> Result<Vec<u8>> {
+    let payload = crate::node::cleanup::read_outbox(journal_dir, &record.job_id, generation.0)?;
+    let actual_sha256 = velnor_control::journal::payload_checksum(&payload);
+    if actual_sha256 != expected_sha256 {
+        bail!(
+            "completion outbox checksum mismatch for job {}",
+            record.job_id
+        );
+    }
+    let value: Value = serde_json::from_slice(&payload).context("parse recorded completion")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("recorded completion payload must be a JSON object"))?;
+    let plan_id = object
+        .get("planId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("recorded completion payload has no planId"))?;
+    if plan_id != record.plan_id {
+        bail!(
+            "recorded completion plan {} does not match marker plan {}",
+            plan_id,
+            record.plan_id
+        );
+    }
+    let job_id = object
+        .get("jobId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("recorded completion payload has no jobId"))?;
+    if job_id != record.job_id {
+        bail!(
+            "recorded completion payload job {} does not match marker job {}",
+            job_id,
+            record.job_id
+        );
+    }
+    Ok(payload)
+}
+
+/// Finish local cleanup after a prior terminal remote acknowledgement.
+///
+/// The journal removes the job at `RemoteAcked`, before this local cleanup can
+/// run. A crash or storage error in that gap must remain retryable from the
+/// durable marker; callers must invoke this only after the journal proves the
+/// remote terminal transition.
+pub(crate) fn cleanup_recorded_in_flight_job(slot_dir: &Path) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
     let sink = crate::ops::global().ok_or_else(|| {
         anyhow::anyhow!(
             "operational store sink unavailable while releasing stale reservation for job {}",
@@ -480,6 +673,14 @@ async fn complete_recorded_in_flight_job(
         .context("release stale in-flight job storage reservation")?;
     clear_in_flight_job(slot_dir)?;
     Ok(true)
+}
+
+pub(crate) fn recorded_in_flight_job_exists(slot_dir: &Path) -> Result<bool> {
+    Ok(load_in_flight_job(slot_dir)?.is_some())
+}
+
+pub(crate) fn recorded_in_flight_job_id(slot_dir: &Path) -> Result<Option<String>> {
+    Ok(load_in_flight_job(slot_dir)?.map(|record| record.job_id))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,17 +807,10 @@ fn emit_plan_summary_telemetry(
 /// Instance slug naming this daemon in the shared operational store:
 /// hostname when resolvable, sanitized to the store's slug charset.
 fn instance_slug_for_store() -> String {
-    let mut buffer = [0u8; 256];
-    let host = unsafe {
-        // POSIX gethostname: writes at most `buffer.len()` bytes, always
-        // NUL-terminated on glibc/musl/Darwin for this buffer size.
-        if libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len()) == 0 {
-            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
-            String::from_utf8_lossy(&buffer[..end]).into_owned()
-        } else {
-            String::new()
-        }
-    };
+    #[cfg(unix)]
+    let host = String::from_utf8_lossy(rustix::system::uname().nodename().to_bytes()).into_owned();
+    #[cfg(not(unix))]
+    let host = String::new();
     crate::ops::sanitize_slug_for_instance(&host)
 }
 
@@ -3662,7 +3856,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
+                DOCKER_NETWORK_INSPECT_FORMAT,
                 id,
             ])
             .filter(|output| output.status.success())
@@ -3693,6 +3887,9 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
     crate::docker_lease::daemon_owns_label(owner, daemon_id)
 }
+
+const DOCKER_NETWORK_INSPECT_FORMAT: &str =
+    r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#;
 
 /// True when a `velnor-net-*` network is safe to remove at startup. Networks
 /// carrying THIS daemon's ownership label are stale by definition (a daemon
@@ -3776,7 +3973,7 @@ fn prune_empty_velnor_networks_with(
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
+                DOCKER_NETWORK_INSPECT_FORMAT,
                 id,
             ]);
             let mut fields = state.trim().splitn(2, '\t');
@@ -9915,9 +10112,9 @@ async fn send_guarded_run_service_complete(
         &job_id,
         generation,
         &payload,
-        async {
+        |payload| async move {
             client
-                .complete_job(run_service_url, completion)
+                .complete_job_payload(run_service_url, payload)
                 .await
                 .context("complete run-service job")
         },
@@ -11156,7 +11353,16 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
                 runner.status.as_deref(),
                 runner.busy,
             ),
-            None => load_in_flight_job(&slot_dir).ok().flatten().is_some(),
+            None => match load_in_flight_job(&slot_dir) {
+                Ok(record) => record.is_some(),
+                Err(error) => {
+                    eprintln!(
+                        "doctor: refusing to recover unreadable in-flight marker {}: {error:#}",
+                        in_flight_job_path(&slot_dir).display()
+                    );
+                    false
+                }
+            },
         };
         if !should_complete {
             continue;
@@ -11507,6 +11713,43 @@ mod tests {
     fn empty_network_sweep_is_noop_without_owned_containerless_networks() {
         let removed = prune_empty_velnor_networks_with("daemon-a", |_| None);
         assert_eq!(removed, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_flight_marker_symlink_fails_closed() {
+        let dir = unique_temp_dir("in-flight-marker-symlink");
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("missing-record.json", in_flight_job_path(&dir)).unwrap();
+
+        let error = recorded_in_flight_job_exists(&dir).unwrap_err();
+        assert!(error.to_string().contains("must not be a symlink"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recorded_completion_payload_is_checksum_and_identity_bound() {
+        let dir = unique_temp_dir("recorded-completion-payload");
+        fs::create_dir_all(&dir).unwrap();
+        let record = InFlightJobRecord {
+            plan_id: "plan-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            run_service_url: "https://example.test/_apis/v1/AgentPools/1".to_owned(),
+            billing_owner_id: None,
+        };
+        let payload = br#"{"planId":"plan-1","jobId":"job-1","conclusion":"succeeded","outputs":{"answer":{"value":"kept","isSecret":false}}}"#.to_vec();
+        let checksum = velnor_control::journal::payload_checksum(&payload);
+        crate::node::cleanup::write_outbox(&dir, &record.job_id, 1, &payload).unwrap();
+
+        let loaded =
+            load_recorded_completion_payload(&dir, &record, Generation(1), &checksum).unwrap();
+        assert_eq!(loaded, payload);
+
+        let error =
+            load_recorded_completion_payload(&dir, &record, Generation(1), "wrong").unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -12705,6 +12948,14 @@ jobs:
         );
         assert_eq!(pruned.as_deref(), Some("daemon-x"));
         assert_eq!(reclaimed.as_deref(), Some("daemon-x"));
+    }
+
+    #[test]
+    fn docker_network_inspect_format_uses_go_template_tab_escape() {
+        assert_eq!(
+            DOCKER_NETWORK_INSPECT_FORMAT,
+            r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#
+        );
     }
 
     #[test]
@@ -16976,6 +17227,42 @@ runs:
     }
 
     #[test]
+    fn step_log_result_reports_success_for_continue_on_error_failure() {
+        // actions/runner parity (ExecutionContext.ApplyContinueOnError): a failed
+        // step with continue-on-error keeps outcome=failure internally but its
+        // reported timeline/Results-Service conclusion is success.
+        // Regression: jackin-project/jackin Hygiene run 33319391723.
+        use crate::executor::StepLog;
+        use crate::protocol::TaskResult;
+
+        let failed_ignored = StepLog {
+            step_id: "miri-step".to_string(),
+            display_name: "miri crate".to_string(),
+            order: 9,
+            started_at: "2026-08-30T16:43:00Z".to_string(),
+            completed_at: "2026-08-30T17:24:12Z".to_string(),
+            lines: vec!["error: test failed".to_string()],
+            masks: vec![],
+            annotations: vec![],
+            telemetry: vec![],
+            exit_code: 101,
+            skipped: false,
+            failure_ignored: true,
+            error_count: 1,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+        assert_eq!(step_log_result(&failed_ignored), TaskResult::Succeeded);
+
+        let failed_plain = StepLog {
+            failure_ignored: false,
+            ..failed_ignored.clone()
+        };
+        assert_eq!(step_log_result(&failed_plain), TaskResult::Failed);
+    }
+
+    #[test]
     fn run_service_step_result_uses_per_step_completed_at_not_job_finish() {
         // RunServiceStepResult.completed_at must come from StepLog.completed_at (the
         // actual step finish time), NOT from a single job-level completion_time.
@@ -17331,8 +17618,7 @@ runs:
     }
 
     #[cfg(unix)]
-    #[test]
-    fn abandoned_precreated_environment_cleanup_takes_lease() {
+    fn abandoned_precreated_environment_cleanup_takes_lease_impl() {
         // An unclaimed pre-created environment is cleaned up by Drop; the
         // pre-create thread's guard must be handed to that cleanup so the
         // proxy outlives the container removal (and is gone afterwards).
@@ -17342,11 +17628,6 @@ runs:
         // `docker rm --force` hangs for DEFAULT_STEP_TIMEOUT (6h). Point
         // docker CLI at a missing socket so cleanup fails fast as the
         // comment below assumed.
-        // SAFETY: this test owns the process environment value for the external
-        // docker probe and does not expose it to Rust library code.
-        unsafe {
-            std::env::set_var("DOCKER_HOST", "unix:///tmp/velnor-test-no-docker.sock");
-        }
         let root = std::env::temp_dir().join(format!("velnor-lease-drop-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let (socket_dir, listen) = short_lease_socket("drop");
@@ -17375,6 +17656,30 @@ runs:
         );
         fs::remove_dir_all(&socket_dir).ok();
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_precreated_environment_cleanup_takes_lease() {
+        let test_binary = std::env::current_exe().expect("test binary path");
+        let status = Command::new(test_binary)
+            .args([
+                "--exact",
+                "runner::tests::abandoned_precreated_environment_cleanup_takes_lease_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("DOCKER_HOST", "unix:///tmp/velnor-test-no-docker.sock")
+            .status()
+            .expect("spawn isolated cleanup test");
+        assert!(status.success(), "isolated cleanup test failed: {status}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "launched by abandoned_precreated_environment_cleanup_takes_lease"]
+    fn abandoned_precreated_environment_cleanup_takes_lease_child() {
+        abandoned_precreated_environment_cleanup_takes_lease_impl();
     }
 
     #[test]

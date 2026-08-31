@@ -9,6 +9,8 @@
 //! RFC 3339 [`Timestamp`] under a numeric [`SCHEMA_VERSION`]. Tables are
 //! views of these types, never the source of truth.
 
+#![forbid(unsafe_code)]
+
 pub mod cli_meta;
 pub mod condition;
 pub mod configuration;

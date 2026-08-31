@@ -1467,9 +1467,7 @@ fn open_source_file_nonblocking_no_follow_at(
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use std::{
-        ffi::CString, io::Read, os::unix::ffi::OsStrExt, sync::mpsc, thread, time::Duration,
-    };
+    use std::{io::Read, sync::mpsc, thread, time::Duration};
 
     use super::*;
 
@@ -1551,16 +1549,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let fifo = root.join("source.fifo");
-        let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        // SAFETY: `fifo_path` is a live, NUL-terminated pathname and mode has
-        // no pointer or lifetime requirements.
-        let result = unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) };
-        assert_eq!(
-            result,
-            0,
-            "create FIFO: {}",
-            std::io::Error::last_os_error()
-        );
+        let status = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo must be available on Unix");
+        assert!(status.success(), "create FIFO: {status}");
 
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || {

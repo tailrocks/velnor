@@ -151,6 +151,17 @@ jobs:
             --guest-agent target/release/velnor-guest-agent
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
+          test -s target/release/velnor-guest-agent
+          test -x target/release/velnor-guest-agent
+          # shellcheck disable=SC2209
+          stat_output="$(DEBUGFS_PAGER=cat debugfs -R 'stat /usr/bin/velnor-guest-agent' dist/microvm/rootfs.ext4 2>&1)"
+          printf '%s\n' "$stat_output" | grep -Eq 'Type: regular[[:space:]]+Mode:[[:space:]]+0755([[:space:]]|$)' \
+            || { echo "::error::rootfs guest agent must be a regular file with mode 0755" >&2; exit 1; }
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" dist/microvm/rootfs.ext4 >/dev/null
+          cmp -- "$agent_dump" target/release/velnor-guest-agent
           (
             cd dist/microvm
             sha256sum vmlinux rootfs.ext4 | tee SHA256SUMS
