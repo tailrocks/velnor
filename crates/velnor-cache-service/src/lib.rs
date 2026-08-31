@@ -30,6 +30,8 @@ pub const KACHE_VERSION: &str = "0.14.2";
 pub const SCCACHE_VERSION: &str = "0.16.0";
 const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
+const OUTPUT_ROOT_DIGEST: &str = "output_root";
+const RESULT_DIGEST: &str = "compiler_cache_result";
 
 /// One mutually exclusive compiler-cache implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,10 +147,12 @@ impl CompilerCacheConfig {
                 "compiler-cache owner must not be empty".into(),
             ));
         }
-        if self.lease_duration_ms == 0 || self.heartbeat_every_ms > self.lease_duration_ms {
+        if self.lease_duration_ms == 0
+            || self.heartbeat_every_ms == 0
+            || self.heartbeat_every_ms >= self.lease_duration_ms
+        {
             return Err(CacheError::InvalidConfig(
-                "compiler-cache lease duration must be positive and heartbeat must not exceed it"
-                    .into(),
+                "compiler-cache lease duration and heartbeat must be positive and heartbeat must be strictly less than lease duration".into(),
             ));
         }
         Ok(())
@@ -168,6 +172,12 @@ pub trait CompilerCache: Send + Sync {
 
     /// Fence one producer for a cache key.
     async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError>;
+
+    /// Renew one producer lease before its persisted deadline.
+    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError>;
+
+    /// Abandon one producer lease so it cannot publish a result.
+    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError>;
 
     /// Publish one result under its still-valid producer lease.
     async fn publish(&self, lease: ProducerLease, result: CompilerResult)
@@ -318,6 +328,7 @@ impl<C: Clock> CompilerCacheService<C> {
         fs::create_dir_all(&storage_root)?;
         let cas = CasStore::new(storage_root.join("cas"))?;
         let metadata = Connection::open(storage_root.join("metadata.sqlite"))?;
+        metadata.busy_timeout(std::time::Duration::from_secs(5))?;
         initialize_metadata(&metadata)?;
         let journal = LeaseManager::open(storage_root.join("journal.sqlite"), clock)?;
         Ok(Self {
@@ -424,28 +435,56 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         }
         self.ensure_trust_scope(key)?;
         let expected_key_json = canonical_key_json(key)?;
-        let journal = self.lock_journal()?;
-        let Some(record) = journal.latest_action(key)? else {
+        let record = {
+            let journal = self.lock_journal()?;
+            let Some(record) = journal.latest_action(key)? else {
+                self.record_miss();
+                return Ok(None);
+            };
+            if record.state != ActionState::Complete {
+                self.record_miss();
+                return Ok(None);
+            }
+            if record.trust_class != key.execution_policy.trust_class {
+                return Err(CacheError::TrustMismatch);
+            }
+            record
+        };
+        let key_digest = key.digest()?.to_string();
+        let Some(result_digest) = record.output_digests.get(RESULT_DIGEST) else {
             self.record_miss();
             return Ok(None);
         };
-        if record.state != ActionState::Complete {
-            self.record_miss();
-            return Ok(None);
-        }
-        if record.trust_class != key.execution_policy.trust_class {
-            return Err(CacheError::TrustMismatch);
-        }
-        let metadata = self.lock_metadata()?;
-        let Some(entry) = read_metadata(&metadata, &key.digest()?.to_string())? else {
-            self.record_miss();
-            return Ok(None);
+        let result_digest = result_digest.clone();
+        let output_digest = record_output_digest(&record)?;
+        let metadata_entry = {
+            let metadata = self.lock_metadata()?;
+            read_metadata(&metadata, &key_digest)?
         };
-        verify_metadata(&entry, key, &expected_key_json, &record)?;
-        let result_digest = Digest::parse(entry.result_digest)?;
         let bytes = self.cas.get(&result_digest).map_err(CacheError::from)?;
         let result: CompilerResult = serde_json::from_slice(&bytes)
             .map_err(|error| CacheError::CorruptEntry(error.to_string()))?;
+        if result.action_key != *key
+            || result.action_key.execution_policy.trust_class != key.execution_policy.trust_class
+            || result.output_root != *output_digest
+        {
+            return Err(CacheError::CorruptEntry(
+                "published compiler result does not match its journal record".into(),
+            ));
+        }
+        let entry = match metadata_entry {
+            Some(entry) => entry,
+            None => {
+                let mut metadata = self.lock_metadata()?;
+                finalize_metadata(&mut metadata, key, &record, &result_digest)?;
+                read_metadata(&metadata, &key_digest)?.ok_or_else(|| {
+                    CacheError::InvalidMetadata(
+                        "metadata finalization committed no cache entry".into(),
+                    )
+                })?
+            }
+        };
+        verify_metadata(&entry, key, &expected_key_json, &record, &result_digest)?;
         if result.exit_code != 0 {
             return Err(CacheError::CorruptEntry(
                 "failed compiler result cannot be a cache hit".into(),
@@ -459,8 +498,6 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
                 "published compiler result does not match its metadata".into(),
             ));
         }
-        drop(metadata);
-        drop(journal);
         self.record_hit();
         Ok(Some(result))
     }
@@ -471,7 +508,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         }
         self.ensure_trust_scope(key)?;
         let mut journal = self.lock_journal()?;
-        let lease = journal.acquire(
+        let lease = journal.acquire_or_takeover(
             key,
             self.owner.clone(),
             self.lease_duration_ms,
@@ -492,6 +529,26 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
             return Err(error.into());
         }
         Ok(lease)
+    }
+
+    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.renew(lease)?;
+        Ok(())
+    }
+
+    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.abandon(lease)?;
+        Ok(())
     }
 
     async fn publish(
@@ -518,52 +575,28 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         }
         let result_bytes = serde_json::to_vec(&result)?;
         let result_digest = self.cas.put(&result_bytes)?;
-        let key_digest = lease.action.digest()?.to_string();
-        let key_json = canonical_key_json(&lease.action)?;
-        let trust_json = serde_json::to_string(&lease.action.execution_policy.trust_class)?;
         let complete = ActionRecord {
             action_key: lease.action.clone(),
             state: ActionState::Complete,
             producer_lease_ref: Some(lease_reference(&lease)),
             consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::from([(
-                String::from("output_root"),
-                result.output_root.clone(),
-            )]),
+            output_digests: BTreeMap::from([
+                (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
+                (RESULT_DIGEST.into(), result_digest.clone()),
+            ]),
             timing: result.timing,
             worker_id: Some(lease.owner.clone()),
             trust_class: lease.action.execution_policy.trust_class,
         };
 
+        // Journal completion is the fencing point. Metadata follows it, and
+        // the durable result digest lets lookup finish after a crash.
         let mut journal = self.lock_journal()?;
-        let mut metadata = self.lock_metadata()?;
-        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO compiler_cache_entries(
-                 action_key_digest, action_key_json, result_digest, output_digest,
-                 trust_class, schema_version, lease_generation
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(action_key_digest) DO UPDATE SET
-                 action_key_json = excluded.action_key_json,
-                 result_digest = excluded.result_digest,
-                 output_digest = excluded.output_digest,
-                 trust_class = excluded.trust_class,
-                 schema_version = excluded.schema_version,
-                 lease_generation = excluded.lease_generation",
-            params![
-                key_digest,
-                key_json,
-                result_digest.to_string(),
-                result.output_root.to_string(),
-                trust_json,
-                i64::from(COMPILER_CACHE_SCHEMA_VERSION),
-                i64::try_from(lease.generation)
-                    .map_err(|_| CacheError::InvalidMetadata("lease generation overflow".into()))?,
-            ],
-        )?;
-        transaction.commit()?;
-        drop(metadata);
         journal.append_action_and_release(&lease, &complete)?;
+        drop(journal);
+
+        let mut metadata = self.lock_metadata()?;
+        finalize_metadata(&mut metadata, &lease.action, &complete, &result_digest)?;
         Ok(())
     }
 }
