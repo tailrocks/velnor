@@ -68,6 +68,7 @@ pub async fn run(args: SlotArgs) -> anyhow::Result<()> {
     let pid = std::process::id();
     let mut sequence: u64 = 0;
     let mut ready_announced = false;
+    eprintln!("slot {} starting heartbeat loop", id.0);
     loop {
         sequence = sequence.wrapping_add(1);
         if let Err(error) = write_heartbeat(
@@ -82,6 +83,9 @@ pub async fn run(args: SlotArgs) -> anyhow::Result<()> {
             eprintln!("slot {} heartbeat publish error: {error}", id.0);
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
+        }
+        if !ready_announced {
+            eprintln!("slot {} published first heartbeat", id.0);
         }
         let _ = feed_after_cycle(LocalCycle::finished(), !ready_announced);
         ready_announced = true;
