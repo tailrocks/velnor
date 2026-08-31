@@ -1,6 +1,6 @@
 [package]
 name = "velnor-runner"
-version = "0.1.245"
+version = "0.1.247"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -48,7 +48,7 @@ priority = "optional"
 # info for a cross-built (arm64) binary on an amd64 host. OpenSSL is vendored,
 # so the runtime surface is just glibc + libgcc (>= 2.34 covers every "latest
 # Debian/Ubuntu" this package targets).
-depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, util-linux (>= 2.37.2)"
+depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, util-linux (>= 2.37.2), systemd-tmpfiles | systemd"
 recommends = "docker.io | docker-ce"
 conf-files = ["/etc/velnor/velnor.env", "/etc/velnor/execution.toml"]
 maintainer-scripts = "debian/"
@@ -74,6 +74,10 @@ assets = [
   ["../velnor-tools/debian/velnor-fleet-policy-audit.service", "lib/systemd/system/velnor-fleet-policy-audit.service", "644"],
   ["../velnor-tools/debian/velnor-fleet-policy-audit.timer", "lib/systemd/system/velnor-fleet-policy-audit.timer", "644"],
   ["../../fleet/release-refs.toml", "usr/share/velnor/fleet/release-refs.toml", "644"],
+  # Recreates /run/velnor + the package-transaction lock on every boot; /run is
+  # tmpfs, so without this the preinst/postinst lock gates fail closed after a
+  # reboot until an operator manually creates the path.
+  ["debian/velnor-runner.tmpfiles", "usr/lib/tmpfiles.d/velnor-runner.conf", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
   ["debian/execution.toml", "etc/velnor/execution.toml", "644"],
   ["../../microvm/guest.toml", "usr/share/velnor/microvm/guest.toml", "644"],
