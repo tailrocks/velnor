@@ -309,10 +309,6 @@ evidence and requires a fresh baseline.
   `Release`, `InRelease`, and
   `Release.gpg` metadata dated `2026-08-29T17:48:19Z`, but only versions
   `0.1.242` and `0.1.244`; no current-main package is published.
-- Post-capture update at `2026-08-31T01:50:27Z`: PR #504 is at exact head
-  `674be4acc283aa30a9a23c7cb23badb3b0f77ad0`; its prior run `33348766734`
-  was canceled by the new push and run `33348790013` was queued. This update
-  is external state only and does not alter the captured source baseline above.
 - Local release prerequisites remain incomplete: GitHub authentication is
   available, no local GPG secret key was found, and the configured
   `ssh sentry` path lacks the pinned host-fingerprint/provenance proof required
