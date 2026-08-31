@@ -287,13 +287,14 @@ evidence and requires a fresh baseline.
 
 ### Current baseline — 2026-08-31T01:29:35Z
 
-- Repository: assigned branch `velnor1`, HEAD
+- Repository: baseline captured from assigned branch `velnor1` at source HEAD
   `f2f03637df1c173d014344f47dae8fd5fdb4f3b2`; `origin/main`
-  `2a6853ae395fd6c2401b48d989b6077c77d534d0`; `origin/velnor1` is the same
-  HEAD. The worktree is clean and its tree equals `origin/main`; branch-only
-  history records the rejected Ajv pin, its safe revert, and the normal main
-  reconciliation merge. No source, fixture, workflow, package, APT, or Sentry
-  mutation is present on this branch.
+  `2a6853ae395fd6c2401b48d989b6077c77d534d0`; `origin/velnor1` was the same
+  HEAD. The worktree was clean and its tree equaled `origin/main`; the
+  docs-only ledger commit is `5facff7c183f56960cb5a78d6e147c16a5c756df`.
+  Branch-only history records the rejected Ajv pin, its safe revert, and the
+  normal main reconciliation merge. No source, fixture, workflow, package,
+  APT, or Sentry mutation is present on this branch.
 - Historical/unverified, not current proof: tag `v0.1.247` peels to
   `738f18f68472c15e30645d81a7d2d664f29e5cab` and is unsigned; release runs
   `33344114108` and `33344405790` were cancelled. PR #502 was closed unmerged
@@ -301,10 +302,11 @@ evidence and requires a fresh baseline.
   successful run `33346617510` applies only to that rejected head.
 - Plan 066 is `IN PROGRESS`; root campaign remains 4/94 done; Plan 039 remains
   in progress; Plan 079 and the final signed-release gates remain incomplete.
-- Current external snapshot: open peer PRs are #498, #499, #500, and #503.
-  PR #500's release-owner run `33347662040` was active at this snapshot; no
-  PR from `velnor1` is open. No runner-registration cleanup or Sentry mutation
-  was performed. Public `velnor-apt` serves signed `Release`, `InRelease`, and
+- Current external snapshot: at capture, open peer PRs were #498, #499, #500,
+  and #503; this ledger correction is now PR #504 from `velnor1`. PR #500's
+  release-owner run `33347662040` was active at capture. No runner-registration
+  cleanup or Sentry mutation was performed. Public `velnor-apt` serves signed
+  `Release`, `InRelease`, and
   `Release.gpg` metadata dated `2026-08-29T17:48:19Z`, but only versions
   `0.1.242` and `0.1.244`; no current-main package is published.
 - Local release prerequisites remain incomplete: GitHub authentication is
