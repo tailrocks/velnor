@@ -69,9 +69,11 @@ mergeable.
 
 Every Velnor blocker iteration must verify the deployed source/package
 identity, service health, rollback predecessor, and all three lane modes:
-`velnor`, `github`, and `both`. Before any retry, cancel older pending or
-running validation runs, remove only validation-owned stale registrations,
-prove both are clear, and monitor only the new run ID. After each push,
+`velnor`, `github`, and `both`. Before any retry, cancel only older pending or
+running validation runs owned by this iteration; never cancel protected
+release/package/publish-APT workflows or unrelated runs. Remove only
+validation-owned stale registrations, prove both are clear, and monitor only
+the new run ID. After each push,
 fresh security, performance, goal/acceptance, verifier, and reviewer
 subagents audit the exact pushed diff; a failed audit keeps the iteration
 open.

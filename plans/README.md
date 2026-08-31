@@ -30,9 +30,11 @@ its authorized safe integration checkpoint. If urgent Sentry validation is
 explicitly authorized while the PR is unmergeable, release the exact branch
 SHA through the signed `velnor-apt` path and install only that signed version over
 `ssh sentry`; never copy binaries or install local packages. Verify exact
-identity, health, rollback, and `velnor`, `github`, and `both` lanes. Cancel
-older validation runs and validation-owned stale registrations before every
-retry. Fresh security, performance, goal/acceptance, verifier, and reviewer
+identity, health, rollback, and `velnor`, `github`, and `both` lanes. Before
+every retry, cancel only older validation runs owned by this iteration; never
+cancel protected release/package/publish-APT workflows or unrelated runs.
+Remove only validation-owned stale registrations and prove both are clear.
+Fresh security, performance, goal/acceptance, verifier, and reviewer
 subagents audit every pushed iteration.
 
 Operator execution selection is `[execution] backend = "docker" | "microvm"`

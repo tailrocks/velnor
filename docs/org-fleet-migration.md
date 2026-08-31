@@ -42,9 +42,11 @@ sequentially:
    digest requires a new review. Stop if the ledger is absent, the group is
    missing/default/inherited/read-only, closure is ambiguous, or a removal has
    no reviewed closure evidence.
-4. Route new verification to GitHub-hosted, cancel older verification runs,
-   drain the Velnor daemon, and prove that no slot is busy. Delete only stale
-   or offline registrations owned by validation.
+4. Route new verification to GitHub-hosted. Before smoke, cancel only
+   validation-owned pending/in-progress verification runs; never cancel
+   protected release/package/publish-APT workflows or unrelated runs, and prove
+   each cancellation is terminal. Drain the Velnor daemon and prove that no slot
+   is busy. Delete only stale or offline registrations owned by validation.
 5. After explicit approval of that exact digest, apply only the named
    organization. `apply` writes workflow restrictions first, replaces the
    exact repository set, and requires readback equality:
