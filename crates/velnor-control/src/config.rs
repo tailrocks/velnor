@@ -396,13 +396,14 @@ impl SidecarLock {
         })?;
         let context_exists = inspect_regular_entry(&path.parent, &path.name, "context file")?;
         let lock_name = lock_file_name(&path.name);
-        let opened = open_lock(&path.parent, &lock_name, !context_exists)?.ok_or_else(|| {
-            if context_exists {
-                ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
-            } else {
-                ConfigError::Io("context lock disappeared while opening it".to_owned())
-            }
-        })?;
+        let opened =
+            open_lock(&path.parent, &lock_name, !context_exists, true)?.ok_or_else(|| {
+                if context_exists {
+                    ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+                } else {
+                    ConfigError::Io("context lock disappeared while opening it".to_owned())
+                }
+            })?;
         let file = opened.file;
         file.lock()
             .map_err(|error| ConfigError::Io(error.to_string()))?;
@@ -419,7 +420,7 @@ impl SidecarLock {
             return Ok(None);
         };
         let lock_name = lock_file_name(&path.name);
-        let Some(opened) = open_lock(&path.parent, &lock_name, false)? else {
+        let Some(opened) = open_lock(&path.parent, &lock_name, false, false)? else {
             if inspect_regular_entry(&path.parent, &path.name, "context file")? {
                 return Err(ConfigError::Io(
                     "refusing to use context file without sidecar lock".to_owned(),
@@ -621,11 +622,17 @@ fn open_lock(
     parent: &std::fs::File,
     name: &std::ffi::OsStr,
     create: bool,
+    writable: bool,
 ) -> Result<Option<OpenedLock>, ConfigError> {
     if !create && !inspect_regular_entry(parent, name, "context lock")? {
         return Ok(None);
     }
-    let flags = rustix::fs::OFlags::RDWR
+    let access = if writable {
+        rustix::fs::OFlags::RDWR
+    } else {
+        rustix::fs::OFlags::RDONLY
+    };
+    let flags = access
         | rustix::fs::OFlags::CLOEXEC
         | rustix::fs::OFlags::NOFOLLOW
         | rustix::fs::OFlags::NONBLOCK
@@ -646,17 +653,8 @@ fn open_lock(
             Err(error) => Err(error),
         }
     } else {
-        rustix::fs::openat(
-            parent,
-            name,
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::CLOEXEC
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::NOCTTY,
-            rustix::fs::Mode::empty(),
-        )
-        .map(|descriptor| (descriptor, false))
+        rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty())
+            .map(|descriptor| (descriptor, false))
     };
     let (descriptor, created) = match descriptor {
         Ok(descriptor) => descriptor,
