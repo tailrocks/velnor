@@ -34,8 +34,11 @@ struct ReservationRecord {
 /// leaked file left behind after a job-path panic or incomplete Drop. Age is
 /// the host-wide safety net. Override with `VELNOR_RESERVATION_TTL_SECS`.
 pub fn reservation_ttl() -> Duration {
-    let secs = std::env::var("VELNOR_RESERVATION_TTL_SECS")
-        .ok()
+    reservation_ttl_from(std::env::var("VELNOR_RESERVATION_TTL_SECS").ok().as_deref())
+}
+
+fn reservation_ttl_from(value: Option<&str>) -> Duration {
+    let secs = value
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(6 * 3600);
     Duration::from_secs(secs.max(60))
@@ -485,8 +488,11 @@ fn reservation_is_stale(record: &ReservationRecord, ttl: Duration) -> bool {
 }
 
 fn reservation_bytes(dir: &Path) -> Result<u64> {
+    reservation_bytes_with_ttl(dir, reservation_ttl())
+}
+
+fn reservation_bytes_with_ttl(dir: &Path, ttl: Duration) -> Result<u64> {
     let mut total = 0u64;
-    let ttl = reservation_ttl();
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().is_none_or(|extension| extension != "json") {
@@ -503,12 +509,16 @@ fn reservation_bytes(dir: &Path) -> Result<u64> {
 }
 
 pub fn reservation_summary(run_root: &Path) -> Result<(usize, u64)> {
+    reservation_summary_with_ttl(run_root, reservation_ttl())
+}
+
+fn reservation_summary_with_ttl(run_root: &Path, ttl: Duration) -> Result<(usize, u64)> {
     let dir = run_root.join("reservations");
     if !dir.exists() {
         return Ok((0, 0));
     }
     let count = fs::read_dir(&dir)?.count();
-    Ok((count, reservation_bytes(&dir)?))
+    Ok((count, reservation_bytes_with_ttl(&dir, ttl)?))
 }
 
 fn unix_now() -> u64 {
@@ -666,12 +676,12 @@ mod tests {
         )
         .unwrap();
         file.flush().unwrap();
-        // TTL default is hours; force a short one for the test.
-        // SAFETY: single-threaded test, restored below.
-        std::env::set_var("VELNOR_RESERVATION_TTL_SECS", "60");
-        assert_eq!(reservation_bytes(&dir).unwrap(), 0);
+        // TTL default is hours; use a short one for the test.
+        assert_eq!(
+            reservation_bytes_with_ttl(&dir, Duration::from_secs(60)).unwrap(),
+            0
+        );
         assert!(!path.exists());
-        std::env::remove_var("VELNOR_RESERVATION_TTL_SECS");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -696,13 +706,15 @@ mod tests {
         )
         .unwrap();
         file.flush().unwrap();
-        std::env::set_var("VELNOR_RESERVATION_TTL_SECS", "60");
-        let (count_before_reap, bytes) = reservation_summary(&root).unwrap();
+        let (count_before_reap, bytes) =
+            reservation_summary_with_ttl(&root, Duration::from_secs(60)).unwrap();
         assert_eq!(count_before_reap, 1, "summary counts the file before reap");
         assert_eq!(bytes, 0, "stale reservation bytes must not block admission");
         assert!(!path.exists(), "leaked reservation file must be removed");
-        assert_eq!(reservation_summary(&root).unwrap(), (0, 0));
-        std::env::remove_var("VELNOR_RESERVATION_TTL_SECS");
+        assert_eq!(
+            reservation_summary_with_ttl(&root, Duration::from_secs(60)).unwrap(),
+            (0, 0)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

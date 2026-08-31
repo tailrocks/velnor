@@ -37,7 +37,10 @@ pub(crate) async fn github_http_transport_env() -> GithubHttpTransportEnvGuard {
 #[cfg(test)]
 impl GithubHttpTransportEnvGuard {
     pub(crate) fn set_native(&self) {
-        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        // SAFETY: the guard holds the process-wide environment lock.
+        unsafe {
+            std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        }
     }
 }
 
@@ -45,8 +48,14 @@ impl GithubHttpTransportEnvGuard {
 impl Drop for GithubHttpTransportEnvGuard {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, value),
-            None => std::env::remove_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV),
+            Some(value) => unsafe {
+                // SAFETY: the guard holds the process-wide environment lock.
+                std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, value)
+            },
+            None => unsafe {
+                // SAFETY: the guard holds the process-wide environment lock.
+                std::env::remove_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV)
+            },
         }
     }
 }

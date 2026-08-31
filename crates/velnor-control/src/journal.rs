@@ -269,10 +269,10 @@ fn oldest_queued_job_seconds(jobs: &[JobRecord]) -> u64 {
 }
 
 fn stamp_event(event: &mut Event) {
-    if let Event::JobOwned { accepted_unix, .. } = event {
-        if *accepted_unix == 0 {
-            *accepted_unix = unix_now();
-        }
+    if let Event::JobOwned { accepted_unix, .. } = event
+        && *accepted_unix == 0
+    {
+        *accepted_unix = unix_now();
     }
 }
 
@@ -947,18 +947,19 @@ impl Journal {
     /// Missing parent, SQLite older than the WAL-reset fix, or schema setup.
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.is_dir() {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Unavailable,
-                    "journal.parent.missing",
-                )
-                .with_remediation(format!(
-                    "create directory {} before opening {}",
-                    parent.display(),
-                    path.display()
-                )));
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.is_dir()
+        {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Unavailable,
+                "journal.parent.missing",
+            )
+            .with_remediation(format!(
+                "create directory {} before opening {}",
+                parent.display(),
+                path.display()
+            )));
         }
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -1835,7 +1836,7 @@ mod tests {
         JobId(id.to_owned())
     }
 
-    fn gen() -> Generation {
+    fn r#gen() -> Generation {
         Generation::INITIAL
     }
 
@@ -1848,7 +1849,7 @@ mod tests {
 
     fn prime_ready(journal: &mut Journal, id: &str) {
         let s = slot(id);
-        let g = gen();
+        let g = r#gen();
         for event in [
             Event::ControlLive,
             Event::JournalWritable,
@@ -1899,7 +1900,7 @@ mod tests {
                 },
                 Event::SlotHeartbeat {
                     slot_id: slot("scope-1"),
-                    generation: gen(),
+                    generation: r#gen(),
                     pid: 456,
                 },
             ])
@@ -1928,11 +1929,11 @@ mod tests {
             .apply_many([
                 Event::ExecutorProven {
                     slot_id: slot("scope-1"),
-                    generation: gen(),
+                    generation: r#gen(),
                 },
                 Event::SessionLive {
                     slot_id: slot("scope-1"),
-                    generation: gen(),
+                    generation: r#gen(),
                 },
                 Event::Routing {
                     valid: true,
@@ -1956,7 +1957,7 @@ mod tests {
             !journal
                 .apply(Event::ReadyAttempt {
                     slot_id: slot_id.clone(),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -1967,7 +1968,7 @@ mod tests {
                 .apply(Event::Assigned {
                     slot_id: slot_id.clone(),
                     job_id: job("job-1"),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -1981,7 +1982,7 @@ mod tests {
                     job_id: job("job-1"),
                     slot_id,
                     attempt: 1,
-                    generation: gen(),
+                    generation: r#gen(),
                     worker: "worker-1".to_owned(),
                     accepted_unix: 1,
                 })
@@ -1997,7 +1998,7 @@ mod tests {
     fn apply_many_persists_command_bearing_registration_intent() {
         let (dir, mut journal) = open_tmp("batch-command-bearing");
         let s = slot("scope-1");
-        let g = gen();
+        let g = r#gen();
         for event in [
             Event::ControlLive,
             Event::JournalWritable,
@@ -2069,7 +2070,7 @@ mod tests {
             let outcome = journal
                 .apply(Event::PermitReserved {
                     slot_id: slot(slot_id),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap();
             assert!(!outcome.rejected);
@@ -2264,7 +2265,7 @@ mod tests {
                     Event::DesiredCapacity { ready: 2 },
                     Event::SlotHeartbeat {
                         slot_id: slot("scope-3"),
-                        generation: gen(),
+                        generation: r#gen(),
                         pid: 123,
                     },
                 ])
@@ -2506,7 +2507,7 @@ mod tests {
                 !journal
                     .apply(Event::PermitReserved {
                         slot_id: slot(slot_id),
-                        generation: gen(),
+                        generation: r#gen(),
                     })
                     .unwrap()
                     .rejected
@@ -2539,7 +2540,7 @@ mod tests {
         let error = reopened
             .apply(Event::SlotHeartbeat {
                 slot_id: slot("scope-extra"),
-                generation: gen(),
+                generation: r#gen(),
                 pid: 123,
             })
             .unwrap_err();
@@ -2576,7 +2577,7 @@ mod tests {
             !journal
                 .apply(Event::PermitReserved {
                     slot_id: slot("scope-1"),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -2632,7 +2633,7 @@ mod tests {
             !journal
                 .apply(Event::ReadyAttempt {
                     slot_id: slot("scope-1"),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -2643,7 +2644,7 @@ mod tests {
                 .apply(Event::Assigned {
                     slot_id: slot("scope-1"),
                     job_id: job_id.clone(),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -2654,7 +2655,7 @@ mod tests {
                     job_id,
                     slot_id: slot("scope-1"),
                     attempt: 1,
-                    generation: gen(),
+                    generation: r#gen(),
                     worker: "worker-1".to_owned(),
                     accepted_unix: 1_234,
                 })
@@ -2733,7 +2734,7 @@ mod tests {
     fn newer_permit_generation_resets_fenced_actor_identity_and_proofs() {
         let (_dir, mut journal) = open_tmp("new-generation-reset");
         let slot_id = slot("scope-1");
-        let generation = gen();
+        let generation = r#gen();
         prime_ready(&mut journal, "scope-1");
         assert!(
             !journal
@@ -2801,7 +2802,7 @@ mod tests {
     fn fenced_slot_rejects_readiness_resurrection_events() {
         let (_dir, mut journal) = open_tmp("fenced-resurrection");
         let slot_id = slot("scope-1");
-        let generation = gen();
+        let generation = r#gen();
         prime_ready(&mut journal, "scope-1");
         assert!(
             !journal
@@ -2850,7 +2851,7 @@ mod tests {
     fn permit_rotation_rejects_active_job_on_slot() {
         let (_dir, mut journal) = open_tmp("fenced-active-job");
         let slot_id = slot("scope-1");
-        let generation = gen();
+        let generation = r#gen();
         prime_ready(&mut journal, "scope-1");
         assert!(
             !journal
@@ -2916,7 +2917,7 @@ mod tests {
             !journal
                 .apply(Event::ReadyAttempt {
                     slot_id: slot_id.clone(),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -2927,7 +2928,7 @@ mod tests {
                 .apply(Event::Assigned {
                     slot_id: slot_id.clone(),
                     job_id: job_id.clone(),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -2938,7 +2939,7 @@ mod tests {
                     job_id,
                     slot_id,
                     attempt: 1,
-                    generation: gen(),
+                    generation: r#gen(),
                     worker: "worker-1".to_owned(),
                     accepted_unix: 123,
                 })
@@ -3021,7 +3022,7 @@ mod tests {
         let outcome = journal
             .apply(Event::RegistrationLost {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(!outcome.rejected);
@@ -3043,7 +3044,7 @@ mod tests {
         let (dir, mut journal) = open_tmp("active-registration-lost");
         let slot_id = slot("scope-1");
         let job_id = job("job-1");
-        let generation = gen();
+        let generation = r#gen();
         prime_ready(&mut journal, "scope-1");
         for event in [
             Event::ReadyAttempt {
@@ -3203,7 +3204,7 @@ mod tests {
     fn ready_requires_permit_routing_session_and_executor() {
         let (_dir, mut journal) = open_tmp("not-ready");
         let s = slot("scope-1");
-        let g = gen();
+        let g = r#gen();
         journal.apply(Event::ControlLive).unwrap();
         journal.apply(Event::JournalWritable).unwrap();
         journal
@@ -3243,7 +3244,7 @@ mod tests {
     fn registration_without_ready_proof_is_rejected() {
         let (_dir, mut journal) = open_tmp("reg-no-proof");
         let s = slot("scope-1");
-        let g = gen();
+        let g = r#gen();
         journal.apply(Event::ControlLive).unwrap();
         journal.apply(Event::JournalWritable).unwrap();
         journal
@@ -3266,7 +3267,7 @@ mod tests {
     fn registration_intent_is_durable_before_register_command() {
         let (dir, mut journal) = open_tmp("reg-intent");
         let s = slot("scope-1");
-        let g = gen();
+        let g = r#gen();
         for event in [
             Event::ControlLive,
             Event::JournalWritable,
@@ -3327,14 +3328,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         let outcome = journal
@@ -3342,7 +3343,7 @@ mod tests {
                 job_id: job("job-1"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "velnor-job@job-1".to_owned(),
                 accepted_unix: 0,
             })
@@ -3367,14 +3368,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
@@ -3382,7 +3383,7 @@ mod tests {
                 job_id: job("job-1"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "w".to_owned(),
                 accepted_unix: 0,
             })
@@ -3392,7 +3393,7 @@ mod tests {
         journal
             .apply(Event::CompletionIntended {
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
                 payload_sha256: checksum.clone(),
             })
             .unwrap();
@@ -3401,7 +3402,7 @@ mod tests {
         journal
             .apply(Event::CompletionSendStarted {
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         drop(journal);
@@ -3415,7 +3416,7 @@ mod tests {
         let outcome = recovered
             .apply(Event::RemoteObservedTerminal {
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(
@@ -3446,14 +3447,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
@@ -3461,7 +3462,7 @@ mod tests {
                 job_id: job("job-1"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "w".to_owned(),
                 accepted_unix: 0,
             })
@@ -3471,7 +3472,7 @@ mod tests {
         let outcome = journal
             .apply(Event::JobWorkerLost {
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(!outcome.rejected);
@@ -3495,7 +3496,7 @@ mod tests {
         let repeat = journal
             .apply(Event::JobWorkerLost {
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(repeat.rejected);
@@ -3508,14 +3509,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
@@ -3523,7 +3524,7 @@ mod tests {
                 job_id: job("job-1"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "w".to_owned(),
                 accepted_unix: 0,
             })
@@ -3531,7 +3532,7 @@ mod tests {
         journal
             .apply(Event::JobWorkerLost {
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         let newer = Generation(2);
@@ -3544,7 +3545,7 @@ mod tests {
         let complete = journal
             .apply(Event::CompletionIntended {
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
                 payload_sha256: payload_checksum(b"nope"),
             })
             .unwrap();
@@ -3553,7 +3554,7 @@ mod tests {
             .apply(Event::CleanupIntended {
                 slot_id: slot("scope-1"),
                 isolation_id: "job-1".to_owned(),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(cleanup.rejected);
@@ -3567,7 +3568,7 @@ mod tests {
             state,
             Event::RegistrationIntended {
                 slot_id: slot("x"),
-                generation: gen(),
+                generation: r#gen(),
             },
         );
         assert!(outcome.rejected);
@@ -3625,7 +3626,7 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(
@@ -3633,7 +3634,7 @@ mod tests {
                 .apply(Event::Assigned {
                     slot_id: slot("scope-1"),
                     job_id: job("guid-1"),
-                    generation: gen(),
+                    generation: r#gen(),
                 })
                 .unwrap()
                 .rejected
@@ -3644,7 +3645,7 @@ mod tests {
                     job_id: job("guid-1"),
                     slot_id: slot("scope-1"),
                     attempt: 1,
-                    generation: gen(),
+                    generation: r#gen(),
                     worker: "w".into(),
                     accepted_unix: 0,
                 })
@@ -3656,7 +3657,7 @@ mod tests {
                 job_id: job("424242"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "w2".into(),
                 accepted_unix: 0,
             })
@@ -3675,14 +3676,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
@@ -3690,7 +3691,7 @@ mod tests {
                 job_id: job("guid-1"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "w".into(),
                 accepted_unix: 0,
             })
@@ -3700,7 +3701,7 @@ mod tests {
         journal
             .apply(Event::CompletionIntended {
                 job_id: job("guid-1"),
-                generation: gen(),
+                generation: r#gen(),
                 payload_sha256: payload_checksum(b"ok"),
             })
             .unwrap();
@@ -3716,14 +3717,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
@@ -3731,7 +3732,7 @@ mod tests {
                 job_id: job("guid-1"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "w".into(),
                 accepted_unix: 0,
             })
@@ -3739,14 +3740,14 @@ mod tests {
         journal
             .apply(Event::CompletionIntended {
                 job_id: job("guid-1"),
-                generation: gen(),
+                generation: r#gen(),
                 payload_sha256: payload_checksum(b"ok"),
             })
             .unwrap();
         let acked = journal
             .apply(Event::RemoteAcked {
                 job_id: job("guid-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(!acked.rejected);
@@ -3763,14 +3764,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         let first = journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(!first.rejected);
@@ -3778,7 +3779,7 @@ mod tests {
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("job-2"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         assert!(second.rejected);
@@ -3791,14 +3792,14 @@ mod tests {
         journal
             .apply(Event::ReadyAttempt {
                 slot_id: slot("scope-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
             .apply(Event::Assigned {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
-                generation: gen(),
+                generation: r#gen(),
             })
             .unwrap();
         journal
@@ -3806,7 +3807,7 @@ mod tests {
                 job_id: job("job-1"),
                 slot_id: slot("scope-1"),
                 attempt: 1,
-                generation: gen(),
+                generation: r#gen(),
                 worker: "w".into(),
                 accepted_unix: 0,
             })

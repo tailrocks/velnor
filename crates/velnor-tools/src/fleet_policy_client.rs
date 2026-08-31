@@ -226,10 +226,10 @@ impl FleetHttp for ReqwestFleetHttp {
         let status = response.status().as_u16();
         let mut headers = BTreeMap::new();
         for name in ["retry-after", "x-ratelimit-remaining"] {
-            if let Some(value) = response.headers().get(name) {
-                if let Ok(text) = value.to_str() {
-                    headers.insert(name.to_owned(), text.to_owned());
-                }
+            if let Some(value) = response.headers().get(name)
+                && let Ok(text) = value.to_str()
+            {
+                headers.insert(name.to_owned(), text.to_owned());
             }
         }
         // 204 No Content and empty bodies decode to Null instead of failing.

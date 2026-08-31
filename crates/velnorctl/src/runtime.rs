@@ -116,7 +116,9 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     // The control process and every supervised runner slot must derive the
     // same operational and telemetry paths. Child slot processes inherit this
     // already-resolved path through the existing runner environment contract.
-    std::env::set_var("VELNOR_STATE_DB", &state_path);
+    // SAFETY: this resolves the process-wide child-inheritance setting before
+    // the daemon starts its supervised runner slots.
+    unsafe { std::env::set_var("VELNOR_STATE_DB", &state_path) };
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
     let services =
         velnor_control::application::ApplicationServices::with_store(Arc::clone(&store), instance)?;

@@ -491,19 +491,17 @@ impl Store {
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = query_slot_state(&transaction, &identity.instance_slug, &identity.slot_id)?;
 
-        if let Some(current) = current.as_ref() {
-            if current.identity.host != identity.host
+        if let Some(current) = current.as_ref()
+            && (current.identity.host != identity.host
                 || current.identity.slot_index != identity.slot_index
-                || current.identity.slot_kind != identity.slot_kind
-            {
-                return Err(StoreError::new(
-                    ExitClass::Conflict,
-                    "store.slot.identity.mismatch",
-                )
-                .with_remediation(
+                || current.identity.slot_kind != identity.slot_kind)
+        {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.slot.identity.mismatch")
+                    .with_remediation(
                     "reuse the original host, index, and slot kind for this stable slot identity",
-                ));
-            }
+                ),
+            );
         }
 
         let existing = transaction
@@ -545,16 +543,16 @@ impl Store {
             ));
         }
 
-        if let Some(current) = current.as_ref() {
-            if request.generation < current.generation {
-                return Err(
-                    StoreError::new(ExitClass::Conflict, "store.slot.generation.stale")
-                        .with_remediation(format!(
-                            "slot {} is owned by generation {}; generation {} cannot mutate it",
-                            identity.slot_id.0, current.generation.0, request.generation.0
-                        )),
-                );
-            }
+        if let Some(current) = current.as_ref()
+            && request.generation < current.generation
+        {
+            return Err(
+                StoreError::new(ExitClass::Conflict, "store.slot.generation.stale")
+                    .with_remediation(format!(
+                        "slot {} is owned by generation {}; generation {} cannot mutate it",
+                        identity.slot_id.0, current.generation.0, request.generation.0
+                    )),
+            );
         }
 
         let sequence = match current.as_ref() {
@@ -1579,10 +1577,10 @@ pub(crate) fn validate_event_contract(
             return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
         }
     }
-    if let Some(value) = correlation_id {
-        if Slug::validate("correlation_id", value).is_err() {
-            return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
-        }
+    if let Some(value) = correlation_id
+        && Slug::validate("correlation_id", value).is_err()
+    {
+        return Err(StoreError::new(ExitClass::Usage, "store.event.identity"));
     }
     if required
         .iter()
@@ -1700,12 +1698,12 @@ fn decode_escaped_text_once(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            if let Some((decoded, consumed)) = decode_escape(bytes, index) {
-                normalized.push(decoded);
-                index += consumed;
-                continue;
-            }
+        if bytes[index] == b'\\'
+            && let Some((decoded, consumed)) = decode_escape(bytes, index)
+        {
+            normalized.push(decoded);
+            index += consumed;
+            continue;
         }
         if let Some(character) = value[index..].chars().next() {
             normalized.push(character);

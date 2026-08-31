@@ -288,13 +288,13 @@ fn enforce_strict_capability_env_from(
             );
         }
     }
-    if let Some(value) = lookup("VELNOR_CAPABILITY_VALIDATION") {
-        if value != "strict" {
-            anyhow::bail!(
-                "VELNOR_CAPABILITY_VALIDATION must be 'strict' (received a non-strict value); \
+    if let Some(value) = lookup("VELNOR_CAPABILITY_VALIDATION")
+        && value != "strict"
+    {
+        anyhow::bail!(
+            "VELNOR_CAPABILITY_VALIDATION must be 'strict' (received a non-strict value); \
                  strict is the only supported capability-validation mode."
-            );
-        }
+        );
     }
     Ok(())
 }

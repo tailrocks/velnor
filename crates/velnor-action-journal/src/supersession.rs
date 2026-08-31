@@ -350,32 +350,33 @@ impl<C: Clock> SupersessionCoordinator<C> {
             return Err(SupersessionError::TrustRevoked { reason });
         }
         let latest = self.manager.latest_action(action)?;
-        if self.config.enabled && action.execution_policy.adoptable {
-            if let Some(record) = latest.clone().filter(is_adoptable_state) {
-                self.attach_and_clear_retention(&digest, run_id)?;
-                self.emit_telemetry(SupersessionTelemetryEvent {
-                    action_key_digest: digest,
-                    run_id: Some(run_id.to_owned()),
-                    at: self.manager.clock().now(),
-                    kind: match record.state {
-                        ActionState::Running => SupersessionEventKind::SupersessionAdopted,
-                        ActionState::Complete => SupersessionEventKind::SupersessionAdopted,
-                        _ => unreachable!(),
-                    },
-                    live_consumers: self.manager.live_consumer_count(action)?,
-                    reason: Some(match record.state {
-                        ActionState::Running => "running".to_owned(),
-                        ActionState::Complete => "complete".to_owned(),
-                        _ => unreachable!(),
-                    }),
-                    retained_until: None,
-                });
-                return Ok(match record.state {
-                    ActionState::Running => Candidate::AdoptedRunning { record },
-                    ActionState::Complete => Candidate::AdoptedComplete { record },
+        if self.config.enabled
+            && action.execution_policy.adoptable
+            && let Some(record) = latest.clone().filter(is_adoptable_state)
+        {
+            self.attach_and_clear_retention(&digest, run_id)?;
+            self.emit_telemetry(SupersessionTelemetryEvent {
+                action_key_digest: digest,
+                run_id: Some(run_id.to_owned()),
+                at: self.manager.clock().now(),
+                kind: match record.state {
+                    ActionState::Running => SupersessionEventKind::SupersessionAdopted,
+                    ActionState::Complete => SupersessionEventKind::SupersessionAdopted,
                     _ => unreachable!(),
-                });
-            }
+                },
+                live_consumers: self.manager.live_consumer_count(action)?,
+                reason: Some(match record.state {
+                    ActionState::Running => "running".to_owned(),
+                    ActionState::Complete => "complete".to_owned(),
+                    _ => unreachable!(),
+                }),
+                retained_until: None,
+            });
+            return Ok(match record.state {
+                ActionState::Running => Candidate::AdoptedRunning { record },
+                ActionState::Complete => Candidate::AdoptedComplete { record },
+                _ => unreachable!(),
+            });
         }
         self.manager.attach_consumer(action, run_id)?;
         Ok(Candidate::NeedsProducer)
@@ -499,10 +500,9 @@ impl<C: Clock> SupersessionCoordinator<C> {
             let mut statement = self.manager.journal.connection.prepare(
                 "SELECT action_key_digest FROM action_retention WHERE retained_until_ms <= ?1",
             )?;
-            let values = statement
+            statement
                 .query_map([now_ms], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            values
+                .collect::<Result<Vec<_>, _>>()?
         };
         let mut report = ReapReport {
             reaped: 0,
@@ -882,11 +882,11 @@ impl<C: Clock> SupersessionCoordinator<C> {
             [digest.to_string()],
         )?;
         self.delete_retention(&digest)?;
-        if let Some(mut record) = self.manager.latest_action(action)? {
-            if record.state != ActionState::Abandoned {
-                record.state = ActionState::Abandoned;
-                self.manager.append_action(&record)?;
-            }
+        if let Some(mut record) = self.manager.latest_action(action)?
+            && record.state != ActionState::Abandoned
+        {
+            record.state = ActionState::Abandoned;
+            self.manager.append_action(&record)?;
         }
         Ok(())
     }

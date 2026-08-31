@@ -1,1 +1,0 @@
-mandoc: .velnor-compare/2026-08-24-C005-fixture-proof/man-combined-stdout.roff:1:17: WARNING: cannot parse date, using it verbatim: TH 0.1.0
