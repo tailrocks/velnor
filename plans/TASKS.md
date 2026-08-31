@@ -49,7 +49,7 @@ microVM backend. See `docs/adr/0001-firecracker-production-microvm.md`.
 
 ### Shared architecture (execute in order)
 
-- [x] **063** - Record direction and fixture control contract (P1) - first; unblocks everything
+- [x] **063** - Record direction and fixture control contract (P1) - DONE; direction gate for later work
 - [x] **064** - Scaffold workspace and CLI seams (P1, deps 063)
 - [x] **065** - Resources, rendering, global conventions (P1, deps 064)
 - [~] **066** - Persist sanitized operational history and events (P1, deps 065)
@@ -154,13 +154,14 @@ microVM backend. See `docs/adr/0001-firecracker-production-microvm.md`.
 Immediate next actions, in order (update this section as work lands):
 
 1. Reconcile drift anchors: every command file cites excerpts predating current
-   HEAD; refresh per-file before execution (playbook requirement), starting
-   with 063.
-2. Execute **063** first (direction + fixture control contract); repository
-   policy forbids product implementation before direction docs agree.
+   HEAD; refresh each owned file before execution (playbook requirement). Plan
+   063 is complete; its historical procedure is not an executable work item.
+2. Continue the currently claimed ready row through its assigned branch and
+   focused PR, or claim the highest-priority unowned ready row in the external
+   coordination ledger.
 3. Run **039** in parallel via its own subagent lane; live apply waits for
    reviewed digest + explicit operator authorization.
-4. After 063: dispatch 064, then follow the Track B order above.
+4. Follow the Track B dependency order above; 063 and 064-065 are already DONE.
 5. Keep each assigned branch synchronized and push every iteration. Merge its
    focused PR to `main` only at the authorized safe integration point; then
    rerun the complete required gates against the merged SHA. Before any retry,

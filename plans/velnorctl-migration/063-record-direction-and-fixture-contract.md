@@ -33,7 +33,7 @@ recorded in external `../COORDINATION.md`, anchored to 2026-08-31 at main SHA
 `66bc127175aaaf416049dd425ad6f6879b80fe44`; the citations below are live
 anchors:
 
-- `docs/vision.md:70-83` records the authoritative direction: performance,
+- `docs/vision.md:92-105` records the authoritative direction: performance,
   native adapters, and UX stay active, and the velnorctl migration names the
   final crate layout (`velnorctl`, service-only `daemon` entrypoint,
   `velnor-model`/`velnor-control`/`velnor-client`/`velnor-render`,
@@ -46,12 +46,17 @@ anchors:
 - `.github/AGENTS.md:5-10` records the canonical plural `lanes` choice
   (`velnor | github | both`) with organization-derived defaults; callable
   reusable workflows keep singular `lane`, derived by callers from
-  `inputs.lanes`; lines 15–17 separate runner group `velnor-trusted` from
-  selection label `velnor-target-mvp`; lines 21–24 name final `velnorctl`
+  `inputs.lanes`; lines 18–20 separate runner group `velnor-trusted` from
+  selection label `velnor-target-mvp`; lines 24–27 name final `velnorctl`
   binary/package ownership with `velnor-runner` interim until Plan 079.
-- `crates/velnor-tools/src/main.rs:18` defaults fixture tooling to
+- `crates/velnor-tools/src/main.rs:20-21` defaults fixture tooling to
   `tailrocks/velnor-actions-fixture`.
-- Fixture `compat.yml` covers real execution semantics. It lacks deterministic
+- Fixture `tailrocks/velnor-actions-fixture` is pinned here for reproducibility:
+  main commit `9ab34d754fd6e079d71d4da17a972cc30a1bb81c` and
+  `.github/workflows/compat.yml` blob `37ab0a30ddce460febe8fc6a51598814e49c86ea`;
+  `.github/workflows/control-plane.yml` blob
+  `125cc81874a7f7f46c79e4ea5985c604159ad7dd` (verified 2026-08-31). It covers
+  real execution semantics but lacks deterministic
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
   validation. Its current manual input is `lanes`, matching the canonical
   plural selector contract; callable workflows derive singular `lane` from
@@ -79,8 +84,9 @@ Reconciled at Velnor b57b036 against live repository state:
   compat/control-plane aligned to sole `lane`, and live proof. Never a hand
   fork of `compat.yml`.
 - Fixture pin dc4204c is clean and green (compat main run 32675488430).
-- `plans/README.md` now contains the `velnorctl-migration` category row and
-  already orders Plan 063 first; no index reconciliation is required here.
+- At that historical snapshot, `plans/README.md` contained the
+  `velnorctl-migration` category row and ordered Plan 063 first. The current
+  index state is maintained in `plans/README.md` and `plans/TASKS.md`.
 
 ### Historical execution reconciliation 2026-08-24 (at Velnor aed09eb)
 
