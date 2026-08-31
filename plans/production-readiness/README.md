@@ -58,8 +58,8 @@ green local test, a shared commit, or partial workflow success.
 - Every mutation requires a pre-state and post-state snapshot. Explicit
   authorization is required for cancellation, runner deletion, drain, restart,
   merge, tag, publish, install, rollback, policy changes, and re-admission.
-- Before every validation retry, cancel only older pending/in-progress runs
-  owned by the current iteration; never cancel protected `Release`, `Package
+- Before every validation retry, cancel only older pending/in-progress validation
+  runs owned by the current iteration; never cancel protected `Release`, `Package
   update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs,
   or unrelated runs. Delete only validation-owned stale registrations, prove
   both run and registration state are clear, and monitor only the new run ID.
