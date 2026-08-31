@@ -191,7 +191,13 @@ isolated queue proof landed in `.velnor-compare/plan063-r2-queue-validation/`
 **Out of scope**: runner behavior, capability manifest changes, systemd,
 packaging, removal of any existing fixture job.
 
-## Steps
+## Steps (HISTORICAL / NON-AUTHORITATIVE)
+
+> **Historical procedure notice (Plan status: DONE):** The procedure below is
+> retained as execution evidence only. It is historical and non-authoritative;
+> do not execute it or derive current selector requirements from it. Its
+> singular-dispatch wording is superseded by the canonical plural `lanes`
+> contract stated in the current criteria and evidence below.
 
 ### 1. Make the direction authoritative
 
@@ -279,7 +285,8 @@ no orphaned runner registration.
 ## Done criteria
 
 - [x] Direction files and prompt agree on complete `velnor-runner` removal.
-- [x] Root and `.github` instructions agree on sole `lane` selector, runner
+- [x] Root and `.github` instructions agree on the canonical plural `lanes`
+      selector, callable singular `lane` derived from `inputs.lanes`, runner
       group/label distinction, and class-derived defaults.
 - [x] Direction files agree that apt/dpkg exclusively own installed-version
       management and no Velnor release command/resource/API remains.
@@ -291,8 +298,8 @@ no orphaned runner registration.
 ## STOP conditions
 
 - Existing fixture is not green before the new workflow is added.
-- Canonical fixture-class generation still emits `lanes` or cannot produce the
-  byte-identical `lane` contract.
+- Canonical fixture-class generation still emits a noncanonical selector rather
+  than the byte-identical plural `lanes` contract.
 - New fixture needs an unapproved capability or weakens an existing assertion.
 - Direction documents disagree about final binary/package ownership.
 
