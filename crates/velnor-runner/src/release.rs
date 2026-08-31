@@ -367,7 +367,8 @@ pub struct AptPackageMetadata {
     pub artifact: AptArtifactMetadata,
 }
 
-/// A `Packages` file covered by a signed APT `Release` checksum section.
+/// A `Packages` file covered by a signed APT `Release` checksum section. The
+/// path is relative to the suite directory, exactly as encoded by `Release`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AptPackageIndexMetadata {
@@ -855,12 +856,7 @@ fn verify_apt_package_metadata(
 }
 
 fn apt_packages_path(record: &ReleaseRecord, arch: Arch) -> String {
-    format!(
-        "dists/{}/{}/binary-{}/Packages",
-        record.apt.suite,
-        record.apt.component,
-        arch.as_str()
-    )
+    format!("{}/binary-{}/Packages", record.apt.component, arch.as_str())
 }
 
 fn apt_deb_path(record: &ReleaseRecord, arch: Arch) -> String {
