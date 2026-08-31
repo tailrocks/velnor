@@ -296,17 +296,14 @@ impl FileContextStore {
 }
 
 struct SidecarLock {
+    directory: std::fs::File,
     _file: std::fs::File,
 }
 
 #[cfg(unix)]
 fn current_effective_uid() -> u32 {
-    unsafe extern "C" {
-        fn geteuid() -> std::ffi::c_uint;
-    }
-
     // SAFETY: `geteuid` has no preconditions and cannot fail.
-    unsafe { geteuid() }
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(unix)]
@@ -321,9 +318,15 @@ fn validate_file_metadata(
             "refusing to use {description} not owned by the current user"
         )));
     }
-    if metadata.permissions().mode() & 0o022 != 0 {
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode & 0o022 != 0 {
         return Err(ConfigError::Io(format!(
             "refusing to use {description} writable by group or other"
+        )));
+    }
+    if mode != 0o600 {
+        return Err(ConfigError::Io(format!(
+            "refusing to use {description} not private mode 0600"
         )));
     }
     Ok(())
@@ -370,100 +373,74 @@ fn validate_directory_metadata(
 
 impl SidecarLock {
     fn acquire(config_path: &std::path::Path) -> Result<Self, ConfigError> {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let parent = ensure_parent(config_path)?;
-        inspect_final_file(config_path)?;
-        let name = context_file_name(config_path)?;
-        let path = parent.join(format!(".{name}.lock"));
-        inspect_lock_path(&path)?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        validate_file_metadata(&metadata, "context lock")?;
-        if !metadata.is_file() {
-            return Err(ConfigError::Io(
-                "refusing to use a non-regular context lock".to_owned(),
-            ));
-        }
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
+        let parent_path = context_parent(config_path)?;
+        let directory = open_directory_path(parent_path, true)?.ok_or_else(|| {
+            ConfigError::Io("context directory could not be opened".to_owned())
+        })?;
+        let (name, lock_name) = context_entry_names(config_path)?;
+        inspect_entry_at(&directory, &name, "context file")?;
+        let file = open_lock_for_write(&directory, &lock_name)?;
         file.lock()
             .map_err(|error| ConfigError::Io(error.to_string()))?;
-        Ok(Self { _file: file })
+        Ok(Self {
+            directory,
+            _file: file,
+        })
     }
 
     fn acquire_existing_shared(config_path: &std::path::Path) -> Result<Option<Self>, ConfigError> {
-        let Some(parent) = inspect_read_parent(config_path)? else {
+        let parent_path = context_parent(config_path)?;
+        let Some(directory) = open_directory_path(parent_path, false)? else {
             return Ok(None);
         };
-        inspect_final_file(config_path)?;
-        let name = context_file_name(config_path)?;
-        let path = parent.join(format!(".{name}.lock"));
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(ConfigError::Io(
-                    "refusing to use a symbolic-link context lock".to_owned(),
-                ));
-            }
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(ConfigError::Io(
-                    "refusing to use a non-regular context lock".to_owned(),
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ConfigError::Io(error.to_string())),
+        let (name, lock_name) = context_entry_names(config_path)?;
+        inspect_entry_at(&directory, &name, "context file")?;
+        if !inspect_entry_at(&directory, &lock_name, "context lock")? {
+            return Ok(None);
         }
-
-        let file = match std::fs::OpenOptions::new().read(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ConfigError::Io(error.to_string())),
-        };
-        let metadata = file
-            .metadata()
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        validate_file_metadata(&metadata, "context lock")?;
-        if !metadata.is_file() {
-            return Err(ConfigError::Io(
-                "refusing to use a non-regular context lock".to_owned(),
-            ));
-        }
+        let file = open_existing_at(&directory, &lock_name, libc::O_RDONLY, "context lock")?
+            .ok_or_else(|| ConfigError::Io("context lock disappeared".to_owned()))?;
+        validate_opened_file(&file, "context lock")?;
         file.lock_shared()
             .map_err(|error| ConfigError::Io(error.to_string()))?;
-        Ok(Some(Self { _file: file }))
+        Ok(Some(Self {
+            directory,
+            _file: file,
+        }))
     }
 }
 
-fn read_file(path: &std::path::Path) -> Result<ContextFile, ConfigError> {
-    inspect_read_path(path)?;
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            toml::from_str(&contents).map_err(|error| ConfigError::Decode(error.to_string()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ContextFile {
+fn read_file(directory: &std::fs::File, name: &std::ffi::CStr) -> Result<ContextFile, ConfigError> {
+    if !inspect_entry_at(directory, name, "context file")? {
+        return Ok(ContextFile {
             contexts: Vec::new(),
             current: None,
-        }),
-        Err(error) => Err(ConfigError::Io(error.to_string())),
+        });
     }
+    let handle = open_existing_at(directory, name, libc::O_RDONLY, "context file")?
+        .ok_or_else(|| ConfigError::Io("context file disappeared".to_owned()))?;
+    validate_opened_file(&handle, "context file")?;
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut &handle, &mut contents)
+        .map_err(|error| ConfigError::Io(error.to_string()))?;
+    let file = toml::from_str(&contents).map_err(|error| ConfigError::Decode(error.to_string()))?;
+    validate_context_file(&file)?;
+    Ok(file)
 }
 
-fn write_file(path: &std::path::Path, file: &ContextFile) -> Result<(), ConfigError> {
-    let parent = ensure_parent(path)?;
-    inspect_final_file(path)?;
-    let name = context_file_name(path)?;
-    let temp = parent.join(format!(".{name}.tmp-{}", uuid::Uuid::new_v4().simple()));
-    write_file_with_temp_path(path, parent, file, &temp)
+fn write_file(
+    directory: &std::fs::File,
+    name: &std::ffi::CStr,
+    file: &ContextFile,
+) -> Result<(), ConfigError> {
+    validate_context_file(file)?;
+    let temp = std::ffi::CString::new(format!(
+        ".{}.tmp-{}",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ))
+    .map_err(|_| ConfigError::Io("context temporary file name contains NUL".to_owned()))?;
+    write_file_in_directory(directory, name, file, &temp)
 }
 
 fn write_file_with_temp_path(
@@ -472,104 +449,23 @@ fn write_file_with_temp_path(
     file: &ContextFile,
     temp: &std::path::Path,
 ) -> Result<(), ConfigError> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let mut owns_temp = false;
-    let result = (|| {
-        let mut handle = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(temp)
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        owns_temp = true;
-        let metadata = handle
-            .metadata()
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        validate_file_metadata(&metadata, "context temporary file")?;
-        if !metadata.is_file() {
-            return Err(ConfigError::Io(
-                "refusing to use a non-regular context temporary file".to_owned(),
-            ));
-        }
-        handle
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        let contents =
-            toml::to_string_pretty(file).map_err(|error| ConfigError::Decode(error.to_string()))?;
-        handle
-            .write_all(contents.as_bytes())
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        handle
-            .sync_all()
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        drop(handle);
-        std::fs::rename(temp, path).map_err(|error| ConfigError::Io(error.to_string()))?;
-        owns_temp = false;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| ConfigError::Io(error.to_string()))
-    })();
-    if owns_temp && result.is_err() {
-        let _ = std::fs::remove_file(temp);
+    if temp.parent() != Some(parent) {
+        return Err(ConfigError::Io(
+            "context temporary file must share its parent directory".to_owned(),
+        ));
     }
-    result
-}
-
-fn ensure_parent(path: &std::path::Path) -> Result<&std::path::Path, ConfigError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ConfigError::Io("context path has no parent".to_owned()))?;
-    inspect_directory_chain(parent, true)?;
-    std::fs::create_dir_all(parent).map_err(|error| ConfigError::Io(error.to_string()))?;
-    inspect_directory_chain(parent, false)?;
-    Ok(parent)
-}
-
-fn inspect_read_path(path: &std::path::Path) -> Result<(), ConfigError> {
-    let _ = inspect_read_parent(path)?;
-    inspect_final_file(path)
-}
-
-fn inspect_read_parent(path: &std::path::Path) -> Result<Option<&std::path::Path>, ConfigError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ConfigError::Io("context path has no parent".to_owned()))?;
-    inspect_directory_chain(parent, true)?;
-    if parent.exists() {
-        Ok(Some(parent))
-    } else {
-        Ok(None)
-    }
-}
-
-fn inspect_final_file(path: &std::path::Path) -> Result<(), ConfigError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(ConfigError::Io(
-            "refusing to use a symbolic-link context file".to_owned(),
-        )),
-        Ok(metadata) if !metadata.is_file() => Err(ConfigError::Io(
-            "refusing to use a non-regular context file".to_owned(),
-        )),
-        Ok(metadata) => validate_file_metadata(&metadata, "context file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ConfigError::Io(error.to_string())),
-    }
-}
-
-fn inspect_lock_path(path: &std::path::Path) -> Result<(), ConfigError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(ConfigError::Io(
-            "refusing to use a symbolic-link context lock".to_owned(),
-        )),
-        Ok(metadata) if !metadata.is_file() => Err(ConfigError::Io(
-            "refusing to use a non-regular context lock".to_owned(),
-        )),
-        Ok(metadata) => validate_file_metadata(&metadata, "context lock"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ConfigError::Io(error.to_string())),
-    }
+    let directory = open_directory_path(parent, true)?.ok_or_else(|| {
+        ConfigError::Io("context directory could not be opened".to_owned())
+    })?;
+    let name = std::ffi::CString::new(context_file_name(path)?.as_bytes())
+        .map_err(|_| ConfigError::Io("context file name contains NUL".to_owned()))?;
+    let temp = std::ffi::CString::new(
+        temp.file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| ConfigError::Io("context temporary file has no valid name".to_owned()))?,
+    )
+    .map_err(|_| ConfigError::Io("context temporary file name contains NUL".to_owned()))?;
+    write_file_in_directory(&directory, &name, file, &temp)
 }
 
 fn context_file_name(path: &std::path::Path) -> Result<&str, ConfigError> {
@@ -578,7 +474,19 @@ fn context_file_name(path: &std::path::Path) -> Result<&str, ConfigError> {
         .ok_or_else(|| ConfigError::Io("context path has no valid file name".to_owned()))
 }
 
-fn inspect_directory_chain(path: &std::path::Path, allow_missing: bool) -> Result<(), ConfigError> {
+fn context_parent(path: &std::path::Path) -> Result<&std::path::Path, ConfigError> {
+    path.parent()
+        .ok_or_else(|| ConfigError::Io("context path has no parent".to_owned()))
+}
+
+#[cfg(unix)]
+fn open_directory_path(
+    path: &std::path::Path,
+    create: bool,
+) -> Result<Option<std::fs::File>, ConfigError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
     for component in path.components() {
         if !matches!(
             component,
@@ -590,30 +498,70 @@ fn inspect_directory_chain(path: &std::path::Path, allow_missing: bool) -> Resul
         }
     }
 
-    let mut current = std::path::PathBuf::from("/");
+    let start = if path.is_absolute() { "/" } else { "." };
+    let start = std::ffi::CString::new(start)
+        .map_err(|_| ConfigError::Io("context directory start contains NUL".to_owned()))?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    let fd = unsafe { libc::open(start.as_ptr(), flags) };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if !create && error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(ConfigError::Io(error.to_string()));
+    }
+    let mut directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    validate_opened_directory(&directory)?;
+
     for component in path.components() {
         if component == std::path::Component::RootDir {
             continue;
         }
         let std::path::Component::Normal(name) = component else {
-            unreachable!("directory components were validated above");
-        };
-        current.push(name);
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(())
-            }
-            Err(error) => return Err(ConfigError::Io(error.to_string())),
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ConfigError::Io(
-                "context directory contains a symlink or non-directory".to_owned(),
+                "context directory contains a non-canonical component".to_owned(),
             ));
-        }
-        validate_directory_metadata(&metadata, "context directory")?;
+        };
+        let name = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| ConfigError::Io("context directory component contains NUL".to_owned()))?;
+        let next = loop {
+            let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+            if fd >= 0 {
+                break unsafe { std::fs::File::from_raw_fd(fd) };
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound && create {
+                let result = unsafe {
+                    libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700)
+                };
+                if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST)
+                {
+                    continue;
+                }
+                return Err(ConfigError::Io(std::io::Error::last_os_error().to_string()));
+            }
+            if !create && error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(ConfigError::Io(error.to_string()));
+        };
+        validate_opened_directory(&next)?;
+        directory = next;
     }
-    Ok(())
+    Ok(Some(directory))
+}
+
+#[cfg(unix)]
+fn validate_opened_directory(directory: &std::fs::File) -> Result<(), ConfigError> {
+    let metadata = directory
+        .metadata()
+        .map_err(|error| ConfigError::Io(error.to_string()))?;
+    if !metadata.is_dir() {
+        return Err(ConfigError::Io(
+            "context directory contains a symlink or non-directory".to_owned(),
+        ));
+    }
+    validate_directory_metadata(&metadata, "context directory")
 }
 
 impl ContextStore for FileContextStore {

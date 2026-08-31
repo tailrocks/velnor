@@ -3653,6 +3653,7 @@ name = "velnor-control"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
