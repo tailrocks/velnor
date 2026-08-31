@@ -14,8 +14,11 @@ green local test, a shared commit, or partial workflow success.
 
 1. Reconcile authority, scope, status, approvals, branch state, and external
    state. Regenerate the stale progress ledger before mutation.
-2. Capture baseline evidence. Cancel or delete only explicitly authorized,
-   owned, inactive validation resources; unresolved ownership is `BLOCKED`.
+2. Capture baseline evidence. Cancel only older pending/in-progress validation
+   runs owned by the current iteration; never cancel protected `Release`,
+   `Package update`, `Publish apt repo`, or `workflow_dispatch` release
+   workflows/runs, or unrelated runs. Delete only explicitly authorized,
+   validation-owned stale registrations; unresolved ownership is `BLOCKED`.
 3. Resolve lifecycle and correctness blockers in Velnor. Do not work around
    Velnor gaps in repositories or in `velnor-actions-fixture`. Commit and push
    each fix on its operator-assigned branch (`velnor1` through `velnor10`),
@@ -55,11 +58,14 @@ green local test, a shared commit, or partial workflow success.
 - Every mutation requires a pre-state and post-state snapshot. Explicit
   authorization is required for cancellation, runner deletion, drain, restart,
   merge, tag, publish, install, rollback, policy changes, and re-admission.
-- Before every validation retry, cancel older pending/in-progress runs, delete
-  only validation-owned stale registrations, prove both are clear, and monitor
-  only the new run ID. Every Sentry validation records exact source/package
-  identity, host/user, health, rollback predecessor, and `velnor`, `github`,
-  and `both` lane results.
+- Before every validation retry, cancel only older pending/in-progress runs
+  owned by the current iteration; never cancel protected `Release`, `Package
+  update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs,
+  or unrelated runs. Delete only validation-owned stale registrations, prove
+  both run and registration state are clear, and monitor only the new run ID.
+  Every Sentry validation records exact source/package identity, host/user,
+  health, rollback predecessor, and `velnor`, `github`, and `both` lane
+  results.
 - Evidence must be sanitized. Never commit secrets, credentials, unsanitized
   logs, or rendered GitHub HTML.
 - Run a final machine check: every row is `DONE`, every dependency is `DONE`,
@@ -124,8 +130,12 @@ green local test, a shared commit, or partial workflow success.
 - [x] Inventory Sentry runners, stale registrations, active jobs, Docker
   resources, Velnor-owned caches, disk pressure, systemd units, package
   version, backend, and health state without deleting anything.
-- [ ] Cancel pending/in-progress runs from prior verification attempts and
-  remove stale runner registrations before dispatching new verification.
+- [ ] Before dispatching verification, cancel only older pending/in-progress
+  validation runs owned by the current iteration; never cancel protected
+  `Release`, `Package update`, `Publish apt repo`, or `workflow_dispatch`
+  release workflows/runs, or unrelated runs, and prove each cancellation is
+  terminal. Remove only validation-owned stale registrations, prove both run
+  and registration state are clear, then monitor only the new run ID.
 - [ ] Classify every failure as protocol, workflow, expression, adapter,
   checkout, container, executor, artifact/results, cache, storage, lifecycle,
   watchdog, release, permissions, or repository configuration.
