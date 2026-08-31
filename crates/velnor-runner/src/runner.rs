@@ -441,7 +441,7 @@ fn queued_jobs_to_cancel(
         .collect()
 }
 
-async fn complete_recorded_in_flight_job(
+pub(crate) async fn complete_recorded_in_flight_job(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
 ) -> Result<bool> {
@@ -480,6 +480,10 @@ async fn complete_recorded_in_flight_job(
         .context("release stale in-flight job storage reservation")?;
     clear_in_flight_job(slot_dir)?;
     Ok(true)
+}
+
+pub(crate) fn recorded_in_flight_job_exists(slot_dir: &Path) -> Result<bool> {
+    Ok(load_in_flight_job(slot_dir)?.is_some())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
