@@ -1613,10 +1613,8 @@ fn is_repository_surface(path: &Path, mode: u32) -> bool {
 }
 
 fn audit_legacy_runner_group_text(file: &str, text: &str, findings: &mut Vec<Finding>) {
-    let file_marked_historical = text
-        .lines()
-        .take(8)
-        .any(|line| markdown_heading_level(line).is_none() && is_explicit_historical_marker(line));
+    let markdown = is_markdown_file(file);
+    let file_marked_historical = markdown && markdown_file_marked_historical(text);
     let mut historical_section_level = None;
     let mut fence = None;
     let mut historical_fence_pending = false;
@@ -1630,7 +1628,7 @@ fn audit_legacy_runner_group_text(file: &str, text: &str, findings: &mut Vec<Fin
                 fence = None;
                 continue;
             }
-            let explicit = is_explicit_historical_marker(line);
+            let explicit = markdown && is_markdown_fence_historical_marker(line);
             let active = !current.historical && !explicit;
             append_logical_command(
                 file,
@@ -1640,15 +1638,13 @@ fn audit_legacy_runner_group_text(file: &str, text: &str, findings: &mut Vec<Fin
                 active,
                 findings,
             );
-            if explicit {
-                if let Some(current) = fence.as_mut() {
-                    current.historical = true;
-                }
+            if explicit && let Some(current) = fence.as_mut() {
+                current.historical = true;
             }
             continue;
         }
 
-        if let Some((marker, length)) = markdown_fence_opener(line) {
+        if markdown && let Some((marker, length)) = markdown_fence_opener(line) {
             flush_logical_command(file, &mut logical_command, findings);
             fence = Some(MarkdownFence {
                 marker,
@@ -1661,15 +1657,17 @@ fn audit_legacy_runner_group_text(file: &str, text: &str, findings: &mut Vec<Fin
             continue;
         }
 
-        let heading_level = markdown_heading_level(line);
-        if let Some(level) = heading_level {
-            if is_historical_section_marker(line) {
-                historical_section_level = Some(level);
-            } else if historical_section_level.is_some_and(|section| level <= section) {
-                historical_section_level = None;
+        if markdown {
+            let heading_level = markdown_heading_level(line);
+            if let Some(level) = heading_level {
+                if is_historical_section_marker(line) {
+                    historical_section_level = Some(level);
+                } else if historical_section_level.is_some_and(|section| level <= section) {
+                    historical_section_level = None;
+                }
             }
         }
-        let explicit = is_explicit_historical_marker(line);
+        let explicit = markdown && is_markdown_historical_marker(line);
         if !explicit && !line.trim().is_empty() {
             historical_fence_pending = false;
         }
@@ -1687,6 +1685,60 @@ fn audit_legacy_runner_group_text(file: &str, text: &str, findings: &mut Vec<Fin
         }
     }
     flush_logical_command(file, &mut logical_command, findings);
+}
+
+fn is_markdown_file(file: &str) -> bool {
+    Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("mdx")
+        })
+}
+
+fn markdown_file_marked_historical(text: &str) -> bool {
+    let mut fence = None;
+    for line in text.lines().take(8) {
+        if let Some(current) = fence {
+            if markdown_fence_closes(line, current) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some((marker, length)) = markdown_fence_opener(line) {
+            fence = Some(MarkdownFence {
+                marker,
+                length,
+                historical: false,
+            });
+            continue;
+        }
+        if is_markdown_historical_marker(line) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_markdown_historical_marker(line: &str) -> bool {
+    markdown_heading_level(line).is_none()
+        && !contains_active_legacy_runner_group_command(line)
+        && is_explicit_historical_marker(line)
+}
+
+fn is_markdown_fence_historical_marker(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let is_comment = trimmed.starts_with("# ")
+        || trimmed.starts_with("// ")
+        || trimmed.starts_with("; ")
+        || trimmed.starts_with("<!--");
+    is_comment
+        && !contains_active_legacy_runner_group_command(line)
+        && is_explicit_historical_marker(line)
+}
+
+fn contains_active_legacy_runner_group_command(line: &str) -> bool {
+    line.contains(LEGACY_RUNNER_GROUP_DOCTOR) || direct_runner_group_mutation(line).is_some()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1790,15 +1842,14 @@ fn direct_runner_group_mutation(command: &str) -> Option<&'static str> {
             && tokens
                 .get(index + 1)
                 .is_some_and(|token| token.eq_ignore_ascii_case("api"))
+            && let Some(method) = runner_group_api_mutation(&tokens[index + 2..], command, false)
         {
-            if let Some(method) = runner_group_api_mutation(&tokens[index + 2..], command, false) {
-                return Some(method);
-            }
+            return Some(method);
         }
-        if client.eq_ignore_ascii_case("curl") {
-            if let Some(method) = runner_group_api_mutation(&tokens[index + 1..], command, true) {
-                return Some(method);
-            }
+        if client.eq_ignore_ascii_case("curl")
+            && let Some(method) = runner_group_api_mutation(&tokens[index + 1..], command, true)
+        {
+            return Some(method);
         }
     }
     None
@@ -4475,5 +4526,21 @@ scripts/runner_group_doctor.sh
         audit_legacy_runner_group_text("docs/example.md", text, &mut findings);
 
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn legacy_runner_group_guard_keeps_non_markdown_fence_like_text_active() {
+        let text = r#"Historical direct REST examples — non-executable.
+
+```sh
+scripts/runner_group_doctor.sh
+```
+"#;
+        let mut findings = Vec::new();
+        audit_legacy_runner_group_text("config/runner.env", text, &mut findings);
+
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "legacy-runner-group-surface");
+        assert_eq!(findings[0].path, "line 4");
     }
 }
