@@ -17,8 +17,10 @@ green local test, a shared commit, or partial workflow success.
 2. Capture baseline evidence. Cancel only older pending/in-progress validation
    runs owned by the current iteration; never cancel protected `Release`,
    `Package update`, `Publish apt repo`, or `workflow_dispatch` release
-   workflows/runs, or unrelated runs. Delete only explicitly authorized,
-   validation-owned stale registrations; unresolved ownership is `BLOCKED`.
+   workflows/runs, or unrelated runs, and prove each cancellation is terminal.
+   Delete only explicitly authorized, validation-owned stale registrations;
+   prove both run and registration state are clear. Unresolved ownership is
+   `BLOCKED`.
 3. Resolve lifecycle and correctness blockers in Velnor. Do not work around
    Velnor gaps in repositories or in `velnor-actions-fixture`. Commit and push
    each fix on its operator-assigned branch (`velnor1` through `velnor10`),
