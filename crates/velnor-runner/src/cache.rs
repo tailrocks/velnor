@@ -1306,7 +1306,10 @@ mod tests {
         }
 
         assert_eq!(report.freed_bytes, 32);
-        assert_eq!(report.deleted, vec![cache, compiler_cache]);
+        assert_eq!(
+            report.deleted,
+            vec![cache, compiler_cache.parent().unwrap().to_path_buf()]
+        );
         assert!(report.failures.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
