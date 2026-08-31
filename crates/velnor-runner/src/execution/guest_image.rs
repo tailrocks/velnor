@@ -261,7 +261,7 @@ pub fn build_guest_image_cli(
     output_dir: &Path,
     arch: GuestArch,
     kernel_tarball: &[u8],
-    guest_agent: Option<&[u8]>,
+    guest_agent: &[u8],
 ) -> Result<(PathBuf, PathBuf), MicroVmPreflightFailure> {
     let mut runner = crate::executor::ProcessCommandRunner;
     build_guest_image(
@@ -286,7 +286,7 @@ pub struct GuestImageRequest<'a> {
     pub kernel_tarball: &'a [u8],
     pub isolation_fragment: &'a str,
     pub guest_toml: &'a str,
-    pub guest_agent: Option<&'a [u8]>,
+    pub guest_agent: &'a [u8],
 }
 
 /// Linux-only kernel+rootfs build from the pinned tarball and spec.
@@ -429,7 +429,7 @@ fn build_rootfs(
     work_dir: &Path,
     output: &Path,
     arch: GuestArch,
-    guest_agent: Option<&[u8]>,
+    guest_agent: &[u8],
 ) -> Result<(), MicroVmPreflightFailure> {
     let tree = work_dir.join("rootfs-tree");
     let includes = ROOTFS_PACKAGES
@@ -494,17 +494,7 @@ fn build_rootfs(
             "rootfs contains sshd; production guest has no SSH server",
         ));
     }
-    if let Some(bytes) = guest_agent {
-        let dest = tree.join("usr/bin/velnor-guest-agent");
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                MicroVmPreflightFailure::new("guest.agent", format!("create bin: {error}"))
-            })?;
-        }
-        std::fs::write(&dest, bytes).map_err(|error| {
-            MicroVmPreflightFailure::new("guest.agent", format!("write guest-agent: {error}"))
-        })?;
-    }
+    install_guest_agent(&tree, guest_agent)?;
     for relative in [
         "var/cache/apt/archives",
         "var/lib/apt/lists",
@@ -640,6 +630,44 @@ fn build_rootfs(
         ],
         "guest.rootfs",
     )?;
+    Ok(())
+}
+
+fn install_guest_agent(tree: &Path, guest_agent: &[u8]) -> Result<(), MicroVmPreflightFailure> {
+    if guest_agent.is_empty() {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.agent",
+            "guest-agent binary is empty",
+        ));
+    }
+    let dest = tree.join("usr/bin/velnor-guest-agent");
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            MicroVmPreflightFailure::new("guest.agent", format!("create bin: {error}"))
+        })?;
+    }
+    std::fs::write(&dest, guest_agent).map_err(|error| {
+        MicroVmPreflightFailure::new("guest.agent", format!("write guest-agent: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).map_err(
+            |error| {
+                MicroVmPreflightFailure::new(
+                    "guest.agent",
+                    format!("chmod usr/bin/velnor-guest-agent: {error}"),
+                )
+            },
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.agent",
+            "setting guest-agent executable mode requires Unix",
+        ));
+    }
     Ok(())
 }
 
@@ -829,6 +857,26 @@ mod tests {
     }
 
     #[test]
+    fn install_guest_agent_embeds_exact_bytes_with_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tree = std::env::temp_dir().join(format!(
+            "velnor-guest-image-agent-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let bytes = b"guest-agent-exact-bytes";
+        install_guest_agent(&tree, bytes).unwrap();
+        let dest = tree.join("usr/bin/velnor-guest-agent");
+        assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(dest).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        std::fs::remove_dir_all(tree).unwrap();
+    }
+
+    #[test]
     fn build_fails_closed_off_linux_without_invoking_make() {
         let mut runner = RecordingCommands {
             next: CommandResult {
@@ -847,7 +895,7 @@ mod tests {
                 kernel_tarball: b"tarball",
                 isolation_fragment: include_str!("../../../../microvm/kernel.config"),
                 guest_toml: include_str!("../../../../microvm/guest.toml"),
-                guest_agent: None,
+                guest_agent: b"guest-agent",
             },
         )
         .unwrap_err();

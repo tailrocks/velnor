@@ -7,7 +7,7 @@ use velnor_runner::execution::{
     KERNEL_TARBALL,
 };
 
-const USAGE: &str = "usage: velnor-guest-image stage --root DIR --arch ARCH [--rootfs-sha256 HEX] [--guest-agent-sha256 HEX] | build --arch ARCH --out DIR --tarball PATH [--guest-agent PATH]";
+const USAGE: &str = "usage: velnor-guest-image stage --root DIR --arch ARCH [--rootfs-sha256 HEX] [--guest-agent-sha256 HEX] | build --arch ARCH --out DIR --tarball PATH --guest-agent PATH";
 
 fn main() {
     if let Err(error) = run() {
@@ -131,16 +131,12 @@ fn build(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let tarball_path = tarball.ok_or("missing --tarball")?;
     let tarball_bytes = std::fs::read(&tarball_path)
         .map_err(|error| format!("read {}: {error}", tarball_path.display()))?;
-    let agent_bytes = match guest_agent {
-        Some(path) => Some(
-            std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?,
-        ),
-        None => None,
-    };
+    let guest_agent_path = guest_agent.ok_or("missing --guest-agent")?;
+    let agent_bytes = std::fs::read(&guest_agent_path)
+        .map_err(|error| format!("read {}: {error}", guest_agent_path.display()))?;
     let work = out.join("work");
-    let (kernel, rootfs) =
-        build_guest_image_cli(&work, &out, arch, &tarball_bytes, agent_bytes.as_deref())
-            .map_err(|error| error.to_string())?;
+    let (kernel, rootfs) = build_guest_image_cli(&work, &out, arch, &tarball_bytes, &agent_bytes)
+        .map_err(|error| error.to_string())?;
     println!("built {} and {}", kernel.display(), rootfs.display());
     println!("kernel source {KERNEL_TARBALL}");
     Ok(())
@@ -198,6 +194,20 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(error.contains("--rootfs-sha256"), "{error}");
+    }
+
+    #[test]
+    fn build_requires_guest_agent() {
+        let error = build(&mut strings(&[
+            "--arch",
+            "x86_64",
+            "--out",
+            "/x",
+            "--tarball",
+            "/missing",
+        ]))
+        .unwrap_err();
+        assert_eq!(error, "missing --guest-agent");
     }
 
     #[test]

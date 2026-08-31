@@ -151,6 +151,11 @@ jobs:
             --guest-agent target/release/velnor-guest-agent
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$verify_dir"' EXIT
+          debugfs -R "dump /usr/bin/velnor-guest-agent $verify_dir/velnor-guest-agent" \
+            dist/microvm/rootfs.ext4 >/dev/null
+          cmp -- target/release/velnor-guest-agent "$verify_dir/velnor-guest-agent"
           (
             cd dist/microvm
             sha256sum vmlinux rootfs.ext4 | tee SHA256SUMS
