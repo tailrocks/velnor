@@ -17,6 +17,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1372,43 +1373,6 @@ fn is_host_bind_source(path: &str) -> bool {
         || path.starts_with("~/")
 }
 
-/// Docker Engine 29 keeps HTTP/1.1 connections open after a response. This
-/// proxy handles one request then `io::copy` until host EOF, so a keepalive
-/// engine deadlocks the guest `docker` CLI on the second request (`docker
-/// version` prints Client then hangs on Server; `docker login` never returns).
-/// Forcing `Connection: close` on non-upgrade traffic matches that one-shot
-/// architecture: dockerd EOFs, `io::copy` returns, the CLI reconnects.
-fn with_connection_close(request: &[u8]) -> Result<Vec<u8>> {
-    let header_end = request
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)
-        .context("Docker API request is missing header terminator")?;
-    let header_text =
-        std::str::from_utf8(&request[..header_end]).context("Docker API headers must be UTF-8")?;
-    let mut lines = header_text.split("\r\n");
-    let request_line = lines.next().context("Docker API request line")?;
-    let mut out = Vec::new();
-    out.extend_from_slice(request_line.as_bytes());
-    out.extend_from_slice(b"\r\n");
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        if line
-            .split_once(':')
-            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("connection"))
-        {
-            continue;
-        }
-        out.extend_from_slice(line.as_bytes());
-        out.extend_from_slice(b"\r\n");
-    }
-    out.extend_from_slice(b"Connection: close\r\n\r\n");
-    out.extend_from_slice(&request[header_end..]);
-    Ok(out)
-}
-
 #[cfg(unix)]
 fn without_expect_continue(request: &[u8]) -> Result<Vec<u8>> {
     let header_end = request
@@ -2084,30 +2048,97 @@ fn handle_client_with(
     if conns.is_shutdown() {
         return Ok(());
     }
-    let request = match read_http_request_with_budget(&mut client, Some(&conns)) {
-        Ok(request) => request,
-        Err(_) if conns.is_shutdown() => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let HttpRequest {
-        bytes,
-        remainder,
-        mut budget,
-    } = request;
-    let upgrade = request_is_upgrade(&bytes);
-    let forwarded = transform_request_buffer(bytes, &mut budget, |request| {
-        rewrite_docker_api_request(request, job_id, daemon_id)
-    })?;
-    let forwarded = transform_request_buffer(forwarded, &mut budget, without_expect_continue)?;
-    let forwarded = if upgrade {
-        forwarded
-    } else {
-        transform_request_buffer(forwarded, &mut budget, with_connection_close)?
-    };
-    if conns.is_shutdown() {
-        return Ok(());
+    let mut client_prefix = Vec::new();
+    let mut host_state: Option<(UnixStream, WatchedStream)> = None;
+    let mut host_buffer = Vec::new();
+    loop {
+        let request =
+            match read_http_request_with_budget_from(&mut client, client_prefix, Some(&conns)) {
+                Ok(request) => request,
+                Err(_) if conns.is_shutdown() => return Ok(()),
+                Err(error) => return Err(error),
+            };
+        let HttpRequest {
+            bytes,
+            remainder,
+            mut budget,
+        } = request;
+        let request_method = http_request_method(&bytes)?.to_owned();
+        let request_wants_close = http_request_wants_close(&bytes);
+        let upgrade = request_is_upgrade(&bytes);
+        let forwarded = transform_request_buffer(bytes, &mut budget, |request| {
+            rewrite_docker_api_request(request, job_id, daemon_id)
+        })?;
+        let forwarded = transform_request_buffer(forwarded, &mut budget, without_expect_continue)?;
+        if conns.is_shutdown() {
+            return Ok(());
+        }
+        if upgrade {
+            let (mut host, _host_watch) = connect_lease_host(host_socket, &conns)?;
+            host.write_all(&forwarded)
+                .context("forward Docker API request through job lease")?;
+            // Keep the same idle timeout on hijacked streams. Clearing it
+            // would let an abandoned attach/build session hold one of the
+            // bounded lease connections forever.
+            if !remainder.is_empty() {
+                host.write_all(&remainder)
+                    .context("forward buffered Docker upgrade bytes")?;
+            }
+            return proxy_until_closed(host, client);
+        }
+
+        if host_state.is_none() {
+            host_state = Some(connect_lease_host(host_socket, &conns)?);
+        }
+        let reusable = {
+            let (host, _) = host_state.as_mut().expect("host state initialized");
+            if let Err(error) = host
+                .write_all(&forwarded)
+                .context("forward Docker API request through job lease")
+            {
+                if conns.is_shutdown() {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            match forward_http_response(host, &mut host_buffer, &mut client, &request_method) {
+                Ok(reusable) => reusable,
+                Err(error) if error.downcast_ref::<GuestClosed>().is_some() => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        };
+        drop(forwarded);
+        drop(budget);
+        if !reusable || request_wants_close {
+            return Ok(());
+        }
+        client_prefix = remainder;
+        if conns.is_shutdown() {
+            return Ok(());
+        }
     }
-    let mut host = UnixStream::connect(host_socket).with_context(|| {
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct GuestClosed;
+
+#[cfg(unix)]
+impl fmt::Display for GuestClosed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("guest Docker client closed while awaiting response")
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for GuestClosed {}
+
+#[cfg(unix)]
+fn connect_lease_host(
+    host_socket: &Path,
+    conns: &Arc<LeaseConnSet>,
+) -> Result<(std::os::unix::net::UnixStream, WatchedStream)> {
+    let host = std::os::unix::net::UnixStream::connect(host_socket).with_context(|| {
         format!(
             "connect job Docker lease to host engine {}",
             host_socket.display()
@@ -2117,31 +2148,58 @@ fn handle_client_with(
         .context("configure host Docker lease idle timeout")?;
     host.set_write_timeout(Some(PROXY_IDLE_TIMEOUT))
         .context("configure host Docker lease write timeout")?;
-    let _host_watch = conns.watch(&host);
+    let watch = conns.watch(&host);
     if conns.is_shutdown() {
-        return Ok(());
+        return Ok((host, watch));
     }
-    if let Err(error) = host
-        .write_all(&forwarded)
-        .context("forward Docker API request through job lease")
-    {
-        if conns.is_shutdown() {
-            return Ok(());
+    Ok((host, watch))
+}
+
+#[cfg(unix)]
+fn http_request_method(request: &[u8]) -> Result<&str> {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("Docker API request is missing header terminator")?;
+    let request_line = std::str::from_utf8(&request[..header_end])?
+        .split_once("\r\n")
+        .map_or_else(
+            || std::str::from_utf8(&request[..header_end]),
+            |(line, _)| Ok(line),
+        )?;
+    request_line
+        .split_ascii_whitespace()
+        .next()
+        .context("Docker API request has no method")
+}
+
+#[cfg(unix)]
+fn http_request_wants_close(request: &[u8]) -> bool {
+    let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return true;
+    };
+    let Ok(header) = std::str::from_utf8(&request[..header_end]) else {
+        return true;
+    };
+    let mut lines = header.split("\r\n");
+    let version = lines
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(2));
+    let mut keep_alive = false;
+    let mut close = false;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("connection") {
+            continue;
         }
-        return Err(error);
-    }
-    if upgrade {
-        // Keep the same idle timeout on hijacked streams. Clearing it would
-        // let an abandoned attach/build session hold one of the bounded lease
-        // connections forever.
-        if !remainder.is_empty() {
-            host.write_all(&remainder)
-                .context("forward buffered Docker upgrade bytes")?;
+        for token in value.split(',').map(str::trim) {
+            close |= token.eq_ignore_ascii_case("close");
+            keep_alive |= token.eq_ignore_ascii_case("keep-alive");
         }
-        proxy_until_closed(host, client)
-    } else {
-        proxy_response_until_closed(host, client)
     }
+    close || (version == Some("HTTP/1.0") && !keep_alive)
 }
 
 #[cfg(unix)]
@@ -2255,34 +2313,311 @@ fn proxy_until_closed(
     Ok(())
 }
 
-/// Forward one ordinary HTTP response while discarding any later guest bytes.
-/// The lease handles one request per connection; forwarding a pipelined second
-/// request raw would bypass ownership and cgroup rewriting.
+/// Forward framed ordinary HTTP responses while keeping the guest and Engine
+/// connections reusable. A response without HTTP framing remains a bounded
+/// one-shot fallback because its end is defined by host EOF.
 #[cfg(unix)]
-fn proxy_response_until_closed(
-    host: std::os::unix::net::UnixStream,
-    client: std::os::unix::net::UnixStream,
+fn forward_http_response(
+    host: &mut std::os::unix::net::UnixStream,
+    host_buffer: &mut Vec<u8>,
+    client: &mut std::os::unix::net::UnixStream,
+    request_method: &str,
+) -> Result<bool> {
+    loop {
+        let head = read_http_response_head(host, host_buffer, client, request_method)?;
+        client
+            .write_all(&head.bytes)
+            .context("forward Docker API response headers through job lease")?;
+        if head.no_body {
+            if (100..200).contains(&head.status) && head.status != 101 {
+                continue;
+            }
+            return Ok(!head.close && head.status != 101);
+        }
+        if head.chunked {
+            forward_chunked_response(host, host_buffer, client)?;
+        } else if let Some(content_length) = head.content_length {
+            forward_exact_response_body(host, host_buffer, client, content_length)?;
+        } else {
+            if !host_buffer.is_empty() {
+                client
+                    .write_all(host_buffer)
+                    .context("forward unframed Docker API response body")?;
+                host_buffer.clear();
+            }
+            forward_unframed_response(host, client)?;
+            return Ok(false);
+        }
+        if (100..200).contains(&head.status) && head.status != 101 {
+            continue;
+        }
+        return Ok(!head.close && head.status != 101);
+    }
+}
+
+#[cfg(unix)]
+struct HttpResponseHead {
+    bytes: Vec<u8>,
+    status: u16,
+    content_length: Option<usize>,
+    chunked: bool,
+    close: bool,
+    no_body: bool,
+}
+
+#[cfg(unix)]
+fn read_http_response_head(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut Vec<u8>,
+    client: &mut std::os::unix::net::UnixStream,
+    request_method: &str,
+) -> Result<HttpResponseHead> {
+    let header_end = loop {
+        if let Some(relative) = buffered.windows(4).position(|window| window == b"\r\n\r\n") {
+            let end = relative + 4;
+            if end > MAX_PROXY_HEADER {
+                bail!("Docker API response headers exceed lease proxy limit");
+            }
+            break end;
+        }
+        if buffered.len() > MAX_PROXY_HEADER {
+            bail!("Docker API response headers exceed lease proxy limit");
+        }
+        wait_for_host_response(host, client)?;
+        let mut scratch = [0_u8; 8192];
+        let read = host
+            .read(&mut scratch)
+            .context("read Docker API response headers")?;
+        if read == 0 {
+            bail!("host Docker API closed before response headers finished");
+        }
+        buffered.extend_from_slice(&scratch[..read]);
+    };
+    let header_bytes = buffered[..header_end].to_vec();
+    let remainder = buffered.split_off(header_end);
+    *buffered = remainder;
+    let header_text =
+        std::str::from_utf8(&header_bytes).context("Docker API response headers must be UTF-8")?;
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines.next().context("Docker API response status line")?;
+    let mut status_parts = status_line.split_ascii_whitespace();
+    let version = status_parts.next().context("Docker API response version")?;
+    if !version.eq_ignore_ascii_case("HTTP/1.0") && !version.eq_ignore_ascii_case("HTTP/1.1") {
+        bail!("unsupported Docker API response version {version:?}");
+    }
+    let status: u16 = status_parts
+        .next()
+        .context("Docker API response status code")?
+        .parse()
+        .context("parse Docker API response status code")?;
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut close = version.eq_ignore_ascii_case("HTTP/1.0");
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            bail!("malformed Docker API response header");
+        };
+        if name.trim().is_empty() {
+            bail!("Docker API response header has no field name");
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let length = value
+                .trim()
+                .parse()
+                .context("parse Docker API response Content-Length")?;
+            if content_length.replace(length).is_some() {
+                bail!("refusing Docker API response with duplicate Content-Length");
+            }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                bail!("refusing Docker API response with unsupported Transfer-Encoding");
+            }
+            chunked = true;
+        } else if name.eq_ignore_ascii_case("connection") {
+            close |= value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("close"));
+        }
+    }
+    if chunked && content_length.is_some() {
+        bail!("refusing Docker API response with both Content-Length and Transfer-Encoding");
+    }
+    let no_body = request_method.eq_ignore_ascii_case("HEAD")
+        || (100..200).contains(&status)
+        || matches!(status, 204 | 304);
+    Ok(HttpResponseHead {
+        bytes: header_bytes,
+        status,
+        content_length,
+        chunked,
+        close,
+        no_body,
+    })
+}
+
+#[cfg(unix)]
+fn forward_exact_response_body(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut Vec<u8>,
+    client: &mut std::os::unix::net::UnixStream,
+    mut remaining: usize,
 ) -> Result<()> {
-    let mut host_read = host.try_clone().context("clone host Docker lease stream")?;
-    let mut client_write = client
-        .try_clone()
-        .context("clone job Docker lease stream")?;
-    let mut client_read = client
-        .try_clone()
-        .context("clone job Docker lease stream")?;
-    let up = std::thread::Builder::new()
-        .name("velnor-docker-lease-response".into())
-        .spawn(move || {
-            let result = io::copy(&mut host_read, &mut client_write);
-            let _ = client_write.shutdown(std::net::Shutdown::Write);
-            result
-        })
-        .context("start job Docker lease response thread")?;
-    let _ = io::copy(&mut client_read, &mut io::sink());
-    // Guest EOF cancels a request; do not leave the Engine request in flight.
-    let _ = host.shutdown(std::net::Shutdown::Write);
-    let _ = up.join();
+    if !buffered.is_empty() && remaining != 0 {
+        let take = remaining.min(buffered.len());
+        client
+            .write_all(&buffered[..take])
+            .context("forward buffered Docker API response body")?;
+        buffered.drain(..take);
+        remaining -= take;
+    }
+    let mut scratch = [0_u8; 8192];
+    while remaining != 0 {
+        let read_len = remaining.min(scratch.len());
+        wait_for_host_response(host, client)?;
+        let read = host
+            .read(&mut scratch[..read_len])
+            .context("read Docker API response body")?;
+        if read == 0 {
+            bail!("host Docker API closed before response body finished");
+        }
+        client
+            .write_all(&scratch[..read])
+            .context("forward Docker API response body")?;
+        remaining -= read;
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn read_response_line(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut Vec<u8>,
+    client: &mut std::os::unix::net::UnixStream,
+) -> Result<Vec<u8>> {
+    loop {
+        if let Some(relative) = buffered.windows(2).position(|window| window == b"\r\n") {
+            let end = relative + 2;
+            let line = buffered[..end].to_vec();
+            buffered.drain(..end);
+            return Ok(line);
+        }
+        if buffered.len() > MAX_PROXY_LINE {
+            bail!("Docker API response framing line exceeds lease proxy limit");
+        }
+        wait_for_host_response(host, client)?;
+        let mut scratch = [0_u8; 8192];
+        let read = host
+            .read(&mut scratch)
+            .context("read Docker API response framing")?;
+        if read == 0 {
+            bail!("host Docker API closed during chunked response framing");
+        }
+        buffered.extend_from_slice(&scratch[..read]);
+    }
+}
+
+#[cfg(unix)]
+fn forward_chunked_response(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut Vec<u8>,
+    client: &mut std::os::unix::net::UnixStream,
+) -> Result<()> {
+    loop {
+        let line = read_response_line(host, buffered, client)?;
+        client
+            .write_all(&line)
+            .context("forward Docker API chunk header")?;
+        let line_text = std::str::from_utf8(&line[..line.len() - 2])
+            .context("Docker API response chunk-size line must be UTF-8")?;
+        let size_text = line_text
+            .split_once(';')
+            .map_or(line_text, |(size, _)| size)
+            .trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .context("parse Docker API response chunk-size line")?;
+        forward_exact_response_body(host, buffered, client, size)?;
+        let terminator = read_response_line(host, buffered, client)?;
+        if terminator != b"\r\n" {
+            bail!("Docker API response chunk is missing its terminating CRLF");
+        }
+        client
+            .write_all(&terminator)
+            .context("forward Docker API chunk terminator")?;
+        if size != 0 {
+            continue;
+        }
+        loop {
+            let trailer = read_response_line(host, buffered, client)?;
+            client
+                .write_all(&trailer)
+                .context("forward Docker API response trailer")?;
+            if trailer == b"\r\n" {
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn forward_unframed_response(
+    host: &mut std::os::unix::net::UnixStream,
+    client: &mut std::os::unix::net::UnixStream,
+) -> Result<()> {
+    let mut scratch = [0_u8; 8192];
+    loop {
+        wait_for_host_response(host, client)?;
+        let read = host
+            .read(&mut scratch)
+            .context("read unframed Docker API response")?;
+        if read == 0 {
+            return Ok(());
+        }
+        client
+            .write_all(&scratch[..read])
+            .context("forward unframed Docker API response")?;
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_host_response(
+    host: &std::os::unix::net::UnixStream,
+    client: &std::os::unix::net::UnixStream,
+) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut poll_fds = [
+        libc::pollfd {
+            fd: host.as_raw_fd(),
+            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: client.as_raw_fd(),
+            events: libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        },
+    ];
+    loop {
+        let polled = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, -1) };
+        if polled < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(io::Error::last_os_error()).context("poll Docker lease response streams");
+        }
+        if poll_fds[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            let _ = host.shutdown(std::net::Shutdown::Both);
+            return Err(GuestClosed.into());
+        }
+        if poll_fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+            != 0
+        {
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2318,31 +2653,39 @@ fn transform_request_buffer(
 
 #[cfg(all(test, unix))]
 fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<HttpRequest> {
-    read_http_request_with_budget(stream, None)
+    read_http_request_with_budget_from(stream, Vec::new(), None)
 }
 
 #[cfg(unix)]
-fn read_http_request_with_budget(
+fn read_http_request_with_budget_from(
     stream: &mut std::os::unix::net::UnixStream,
+    prefix: Vec<u8>,
     set: Option<&Arc<LeaseConnSet>>,
 ) -> Result<HttpRequest> {
     let mut budget = RequestByteBudget::new(set);
-    let mut buf = Vec::new();
+    budget.reserve(prefix.len())?;
+    let mut buf = prefix;
     let mut chunk = [0_u8; 8192];
-    let mut header_end = None;
-    loop {
+    let header_end = loop {
+        if let Some(relative) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            let end = relative + 4;
+            if end > MAX_PROXY_HEADER {
+                bail!("Docker API request headers exceed lease proxy limit");
+            }
+            break end;
+        }
+        if buf.len() > MAX_PROXY_HEADER {
+            bail!("Docker API request headers exceed lease proxy limit");
+        }
+        let previous_len = buf.len();
         let read = stream
             .read(&mut chunk)
             .context("read Docker API request header")?;
         if read == 0 {
             bail!("client closed Docker API request before headers finished");
         }
-        let previous_len = buf.len();
         budget.reserve(read)?;
         buf.extend_from_slice(&chunk[..read]);
-        if header_end.is_none() && buf.len() > MAX_PROXY_HEADER {
-            bail!("Docker API request headers exceed lease proxy limit");
-        }
         let search_start = previous_len.saturating_sub(3);
         if let Some(relative) = buf[search_start..]
             .windows(4)
@@ -2352,11 +2695,9 @@ fn read_http_request_with_budget(
             if end > MAX_PROXY_HEADER {
                 bail!("Docker API request headers exceed lease proxy limit");
             }
-            header_end = Some(end);
-            break;
+            break end;
         }
-    }
-    let header_end = header_end.context("Docker API request is missing header terminator")?;
+    };
     let header_text =
         std::str::from_utf8(&buf[..header_end]).context("Docker API headers must be UTF-8")?;
     let mut content_length = None;
@@ -2950,13 +3291,16 @@ mod tests {
     }
 
     #[test]
-    fn with_connection_close_replaces_keepalive_and_preserves_body() {
-        let request = b"POST /auth HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}";
-        let closed = with_connection_close(request).unwrap();
-        let text = String::from_utf8(closed).unwrap();
-        assert!(text.contains("Connection: close\r\n\r\n{}"));
-        assert!(!text.to_ascii_lowercase().contains("keep-alive"));
-        assert_eq!(text.matches("Connection:").count(), 1);
+    fn request_keepalive_policy_honors_http_versions_and_close_tokens() {
+        assert!(!http_request_wants_close(
+            b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\n\r\n"
+        ));
+        assert!(http_request_wants_close(
+            b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
+        ));
+        assert!(http_request_wants_close(
+            b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n"
+        ));
     }
 
     #[cfg(unix)]
@@ -3668,7 +4012,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
     #[cfg(unix)]
     #[test]
-    fn handle_client_finishes_when_engine_honors_injected_connection_close() {
+    fn handle_client_reuses_keepalive_connection_for_sequential_requests() {
         use std::os::unix::net::{UnixListener, UnixStream};
         use std::sync::mpsc;
         use std::time::Duration;
@@ -3684,18 +4028,28 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         std::fs::create_dir_all(&dir).unwrap();
         let engine_path = dir.join("engine.sock");
         let engine = UnixListener::bind(&engine_path).unwrap();
+        fn read_response(stream: &mut UnixStream) -> Vec<u8> {
+            let mut response = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !response.ends_with(b"\r\n\r\nOK") {
+                let read = stream.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "response stream closed before the body arrived");
+                response.extend_from_slice(&chunk[..read]);
+            }
+            response
+        }
         let engine_thread = std::thread::spawn(move || {
             let (mut sock, _) = engine.accept().unwrap();
-            let mut buf = vec![0_u8; 4096];
-            let n = sock.read(&mut buf).unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            let first = read_http_request(&mut sock).unwrap();
+            assert!(String::from_utf8_lossy(&first.bytes).contains("GET /_ping"));
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK",
+            )
+            .unwrap();
+            let second = read_http_request(&mut sock).unwrap();
+            assert!(String::from_utf8_lossy(&second.bytes).contains("GET /version"));
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
                 .unwrap();
-            if req.contains("connection: close") {
-                let _ = sock.shutdown(std::net::Shutdown::Both);
-            } else {
-                std::thread::sleep(Duration::from_secs(30));
-            }
         });
 
         let (mut client, proxy_client) = UnixStream::pair().unwrap();
@@ -3712,19 +4066,28 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let mut buf = [0_u8; 256];
-        let n = client.read(&mut buf).unwrap();
+        let first_response = read_response(&mut client);
         assert!(
-            std::str::from_utf8(&buf[..n]).unwrap().contains("200 OK"),
+            std::str::from_utf8(&first_response)
+                .unwrap()
+                .contains("200 OK"),
             "guest should receive the ping response, got {}",
-            String::from_utf8_lossy(&buf[..n])
+            String::from_utf8_lossy(&first_response)
         );
-        // The proxy EOFs our read side (Engine closed after `Connection:
-        // close`); a real CLI then closes the socket. Do the same so the
-        // proxy's guest→host copy can finish.
+        client
+            .write_all(b"GET /version HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let second_response = read_response(&mut client);
+        assert!(
+            std::str::from_utf8(&second_response)
+                .unwrap()
+                .contains("200 OK"),
+            "guest should receive the version response, got {}",
+            String::from_utf8_lossy(&second_response)
+        );
         drop(client);
         rx.recv_timeout(Duration::from_secs(2))
-            .expect("handle_client must return after injecting Connection: close; keepalive io::copy deadlocks docker CLI")
+            .expect("keepalive proxy must finish after the client requests close")
             .unwrap();
         engine_thread.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -3732,7 +4095,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
     #[cfg(unix)]
     #[test]
-    fn handle_client_does_not_forward_pipelined_request_after_ordinary_response() {
+    fn handle_client_forwards_pipelined_requests_with_rewrite() {
         use std::os::unix::net::{UnixListener, UnixStream};
         use std::sync::mpsc;
         use std::time::Duration;
@@ -3740,15 +4103,18 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         let dir = unique_unix_dir("velnor-lease-pipeline");
         let engine_path = dir.join("engine.sock");
         let engine = UnixListener::bind(&engine_path).unwrap();
-        let (seen_tx, seen_rx) = mpsc::channel();
+        let (seen_tx, seen_rx) = mpsc::channel::<Vec<Vec<u8>>>();
         let engine_thread = std::thread::spawn(move || {
             let (mut sock, _) = engine.accept().unwrap();
-            let mut buf = vec![0_u8; 4096];
-            let n = sock.read(&mut buf).unwrap();
-            seen_tx.send(buf[..n].to_vec()).unwrap();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            let first = read_http_request(&mut sock).unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK",
+            )
+            .unwrap();
+            let second = read_http_request(&mut sock).unwrap();
+            seen_tx.send(vec![first.bytes, second.bytes]).unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
                 .unwrap();
-            let _ = sock.shutdown(std::net::Shutdown::Both);
         });
 
         let (mut client, proxy_client) = UnixStream::pair().unwrap();
@@ -3768,18 +4134,24 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let mut response = [0_u8; 256];
-        let n = client.read(&mut response).unwrap();
-        assert!(String::from_utf8_lossy(&response[..n]).contains("200 OK"));
-        drop(client);
+        let mut responses = Vec::new();
+        client.read_to_end(&mut responses).unwrap();
 
         done_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("ordinary response proxy must finish after guest disconnect")
+            .expect("ordinary keepalive proxy must finish after response close")
             .unwrap();
-        let seen = String::from_utf8(seen_rx.recv().unwrap()).unwrap();
-        assert!(seen.contains("GET /_ping"));
-        assert!(!seen.contains("/containers/create"));
+        let seen = seen_rx.recv().unwrap();
+        assert!(String::from_utf8_lossy(&seen[0]).contains("GET /_ping"));
+        let second = String::from_utf8_lossy(&seen[1]);
+        assert!(second.contains("/containers/create"));
+        assert!(second.contains("velnor.job-id"));
+        assert_eq!(
+            String::from_utf8_lossy(&responses)
+                .matches("200 OK")
+                .count(),
+            2
+        );
         engine_thread.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
