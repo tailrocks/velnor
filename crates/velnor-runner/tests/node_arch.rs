@@ -584,15 +584,15 @@ impl SupervisedProcessGuard {
     }
 
     fn discover_slot_pids(&mut self) {
-        if let Ok(journal) = Journal::open(self.dir.join("journal.db")) {
-            if let Ok(state) = journal.load_state() {
-                let pids = state
-                    .slots
-                    .iter()
-                    .filter_map(|slot| slot.pid)
-                    .collect::<Vec<_>>();
-                self.record_slot_pids(&pids);
-            }
+        if let Ok(journal) = Journal::open(self.dir.join("journal.db"))
+            && let Ok(state) = journal.load_state()
+        {
+            let pids = state
+                .slots
+                .iter()
+                .filter_map(|slot| slot.pid)
+                .collect::<Vec<_>>();
+            self.record_slot_pids(&pids);
         }
     }
 

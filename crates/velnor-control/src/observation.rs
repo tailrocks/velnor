@@ -150,12 +150,13 @@ impl WatchPort for EventStream {
                     request.limit,
                 )
                 .map_err(|_| durable_error("event read"))?;
-            if let Some(first) = window.first_retained_id {
-                if after != 0 && after.saturating_add(1) < first {
-                    return Err(PortError::Conflict {
-                        operation: "event cursor expired; resnapshot required".to_owned(),
-                    });
-                }
+            if let Some(first) = window.first_retained_id
+                && after != 0
+                && after.saturating_add(1) < first
+            {
+                return Err(PortError::Conflict {
+                    operation: "event cursor expired; resnapshot required".to_owned(),
+                });
             }
             if window.high_water_id.is_some_and(|last| after > last) {
                 return Err(PortError::Invalid {
@@ -193,12 +194,13 @@ impl WatchPort for EventStream {
                 .collect());
         }
         let state = self.state.read().map_err(|_| unavailable())?;
-        if let Some(first) = state.events.front() {
-            if after != 0 && after.saturating_add(1) < first.version {
-                return Err(PortError::Conflict {
-                    operation: "event cursor expired; resnapshot required".to_owned(),
-                });
-            }
+        if let Some(first) = state.events.front()
+            && after != 0
+            && after.saturating_add(1) < first.version
+        {
+            return Err(PortError::Conflict {
+                operation: "event cursor expired; resnapshot required".to_owned(),
+            });
         }
         Ok(state
             .events

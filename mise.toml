@@ -30,7 +30,7 @@ run = "cargo nextest run --workspace --locked --features velnor-runner/test-supp
 
 [tasks.test-focused]
 description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
-run = "cargo nextest run --locked --features velnor-runner/test-support --color=always"
+run = "cargo nextest run --locked --color=always"
 
 [tasks.test-focused-runner]
 description = "Runner tests with loopback fixture support"
@@ -48,6 +48,21 @@ if cargo check -p velnor-runner --release --locked --features test-support; then
   echo "test-support unexpectedly compiled in a release profile" >&2
   exit 1
 fi
+"""
+
+[tasks."release:check"]
+description = "Validate the tagged release unit and signed velnor-apt train"
+run = """
+set -eu
+workflow=.github/workflows/release.yml
+docs=docs/debian-apt-repo.md
+test -f "$workflow"
+test -f "$docs"
+grep -q "^  push:" "$workflow"
+grep -q "      - 'v\\[0-9\\]\\*'" "$workflow"
+grep -q -- "--features release-build" "$workflow"
+grep -q "tailrocks/velnor-actions/.github/workflows/package-signer.yml@" "$workflow"
+grep -q "tailrocks/velnor-apt" "$docs"
 """
 
 [tasks.actionlint]
