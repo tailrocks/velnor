@@ -3711,6 +3711,9 @@ fn stale_network_prunable(owner: &str, connected_endpoints: usize, daemon_id: &s
 
 /// How often an idle slot sweeps for its daemon's orphaned job networks.
 const EMPTY_JOB_NETWORK_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+/// Bound every Docker CLI invocation of the sweep: a stalled dockerd must
+/// never park an idle slot's broker poll loop indefinitely.
+const EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Remove this daemon's `velnor-net-*` networks that no longer have any
 /// attached container. Reconciliation runs while the daemon serves jobs — not
@@ -3727,11 +3730,34 @@ const EMPTY_JOB_NETWORK_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// co-located daemons are untouched. Best-effort — never fails the slot.
 fn prune_empty_velnor_networks(daemon_id: &str) -> usize {
     prune_empty_velnor_networks_with(daemon_id, |args| {
-        std::process::Command::new("docker")
-            .args(args)
-            .output()
-            .ok()
+        let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
+        // Bounded execution: the sweep runs beside the async broker poll loop,
+        // so an unbounded Docker CLI wait there would also stall message
+        // polling, credential refresh, and drain observation for the slot.
+        crate::docker_lease::run_host_docker_bounded(
+            &owned,
+            crate::docker_lease::docker_cli_timeout(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT),
+        )
+        .ok()
+        .map(|stdout| std::process::Output {
+            status: success_exit_status(),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        })
     })
+}
+
+/// A successful `std::process::Output` status for results produced by the
+/// bounded Docker runner, which already reports failures via `Err`.
+fn success_exit_status() -> std::process::ExitStatus {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::from_raw(0)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::process::ExitStatusExt::from_raw(0)
+    }
 }
 
 fn prune_empty_velnor_networks_with(
@@ -4173,7 +4199,15 @@ async fn run_v2(
 
                 if last_network_sweep.elapsed() >= EMPTY_JOB_NETWORK_SWEEP_INTERVAL {
                     last_network_sweep = Instant::now();
-                    maybe_prune_empty_velnor_networks(slot_backend, &slot_daemon_id);
+                    // Offload the blocking Docker sweep from the async poll
+                    // task: a slow sweep must never stop this slot from
+                    // polling messages, refreshing credentials, or observing
+                    // drain.
+                    let sweep_backend = slot_backend;
+                    let sweep_daemon_id = slot_daemon_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        maybe_prune_empty_velnor_networks(sweep_backend, &sweep_daemon_id);
+                    });
                 }
 
                 tokio::time::sleep(Duration::from_secs(2)).await;

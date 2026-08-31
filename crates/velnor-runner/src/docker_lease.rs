@@ -1174,7 +1174,10 @@ pub fn run_host_docker(args: &[String]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn run_host_docker_bounded(args: &[String], timeout: std::time::Duration) -> Result<String> {
+pub(crate) fn run_host_docker_bounded(
+    args: &[String],
+    timeout: std::time::Duration,
+) -> Result<String> {
     let rm_claim = claim_docker_container_rm(args);
     if let Some(claim) = rm_claim.as_ref() {
         if claim.ids.is_empty() {
