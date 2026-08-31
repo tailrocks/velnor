@@ -186,7 +186,7 @@ pub fn run_validated_job(
         session.prepare(plan, world)?;
         session.start(world)?;
         if plan.cancel_requested {
-            session.cancel(world)?;
+            session.cancel(plan, world)?;
         } else {
             session.execute(plan, world)?;
         }

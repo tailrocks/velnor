@@ -12,7 +12,11 @@ use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMes
 use super::artifacts::hex_sha256;
 use super::backend::ExecutionEvent;
 use super::VsockChannel;
-use crate::docker_lease::{DAEMON_ID_LABEL, JOB_ID_LABEL};
+use crate::docker_lease::{
+    list_daemon_owned_containers_state_args, list_daemon_owned_networks_args,
+    owned_container_ids_for_name, parse_docker_id_list, remove_one_container_args,
+    stale_owned_container_ids_for_name, DAEMON_ID_LABEL, JOB_ID_LABEL,
+};
 use crate::executor::{CommandResult, CommandRunner, JobExecutionState, StepExecutionResult};
 use crate::script_step::StepCommandState;
 
@@ -363,27 +367,19 @@ pub fn execute_guest_plan(
         return Ok(exit_code);
     }
     let label = plan.isolation_label();
-    let job_label = format!("{JOB_ID_LABEL}={}", plan.job_id);
-    let daemon_label = format!("{DAEMON_ID_LABEL}={}", plan.daemon_id);
     let network = format!("velnor-net-{}", plan.isolation_id);
-    docker(
+    // Arm teardown before create: Docker can create the object and lose the
+    // response, so a create error must still reclaim the exact labeled network.
+    let mut teardown = GuestDockerTeardown::new(
         runner,
         events,
         host_docker,
-        &[
-            "network",
-            "create",
-            "--label",
-            &label,
-            "--label",
-            &job_label,
-            "--label",
-            &daemon_label,
-            &network,
-        ],
-    )?;
+        network,
+        plan.job_id.clone(),
+        plan.daemon_id.clone(),
+    );
+    teardown.create_network(&label)?;
     let job_name = format!("velnor-job-{}", plan.job_id);
-    let mut teardown = GuestDockerTeardown::new(runner, events, host_docker, network);
     let code = match teardown.execute_steps(plan, &job_name) {
         Ok(code) => code,
         Err(error) => {
@@ -413,6 +409,8 @@ pub fn execute_guest_plan(
 /// error must not become a permanent `velnor-net-*` leak: enough leaked
 /// networks exhaust Docker's address pools and reject every later job.
 const GUEST_TEARDOWN_ATTEMPTS: usize = 3;
+const GUEST_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(20);
+const GUEST_NETWORK_INSPECT_FORMAT: &str = r#"{{.Name}}{{ "\t" }}{{ index .Labels "velnor.job-id" }}{{ "\t" }}{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#;
 
 /// Failure-atomic teardown guard for guest-plan Docker objects. Owns the
 /// command runner and event sink for the rest of the job so any early return
@@ -423,8 +421,11 @@ struct GuestDockerTeardown<'a> {
     events: &'a mut Vec<ExecutionEvent>,
     host_docker: bool,
     network: String,
+    job_id: String,
+    daemon_id: String,
     /// Created container names, job container last; removal iterates in
-    /// reverse so the job container exits before its services.
+    /// reverse so the job container exits before its services. Names are only
+    /// role selectors after exact ownership and lifecycle snapshots.
     containers: Vec<String>,
     armed: bool,
 }
@@ -435,12 +436,16 @@ impl<'a> GuestDockerTeardown<'a> {
         events: &'a mut Vec<ExecutionEvent>,
         host_docker: bool,
         network: String,
+        job_id: String,
+        daemon_id: String,
     ) -> Self {
         Self {
             runner,
             events,
             host_docker,
             network,
+            job_id,
+            daemon_id,
             containers: Vec::new(),
             armed: true,
         }
@@ -450,6 +455,8 @@ impl<'a> GuestDockerTeardown<'a> {
     /// guard armed so Drop tears down everything created so far.
     fn execute_steps(&mut self, plan: &GuestJobPlan, job_name: &str) -> Result<i32, String> {
         let label = plan.isolation_label();
+        let job_label = format!("{JOB_ID_LABEL}={}", self.job_id);
+        let daemon_label = format!("{DAEMON_ID_LABEL}={}", self.daemon_id);
         for service in &plan.services {
             let mut args = vec![
                 "run".into(),
@@ -460,6 +467,10 @@ impl<'a> GuestDockerTeardown<'a> {
                 self.network.clone(),
                 "--label".into(),
                 label.clone(),
+                "--label".into(),
+                job_label.clone(),
+                "--label".into(),
+                daemon_label.clone(),
             ];
             if !service.network_alias.is_empty() {
                 args.extend(["--network-alias".into(), service.network_alias.clone()]);
@@ -484,6 +495,10 @@ impl<'a> GuestDockerTeardown<'a> {
                 self.network.clone(),
                 "--label".into(),
                 label.clone(),
+                "--label".into(),
+                job_label,
+                "--label".into(),
+                daemon_label,
             ];
             for env in &plan.env {
                 args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
@@ -642,7 +657,10 @@ impl<'a> GuestDockerTeardown<'a> {
                 exec.push(format!("VELNOR_INPUT_{name}={}", input.value));
             }
             exec.extend([job_name.to_string(), "sh".into(), "-c".into(), script]);
-            let result = docker_owned_timeout(
+            // A step's exit code is guest data, not a Docker-management
+            // failure. Keep it available for continue-on-error and outcome
+            // handling while all other Docker commands remain strict.
+            let result = docker_step_timeout(
                 self.runner,
                 self.events,
                 self.host_docker,
@@ -734,10 +752,33 @@ impl<'a> GuestDockerTeardown<'a> {
         Ok(code)
     }
 
-    /// Remove created containers (job container first) then the job network,
-    /// retrying the whole sequence a bounded number of times. Best-effort: a
-    /// teardown failure is logged, never changes the job result, and the
-    /// ownership labels plus startup reconcile reclaim any remainder.
+    fn create_network(&mut self, isolation_label: &str) -> Result<(), String> {
+        let job_label = format!("{JOB_ID_LABEL}={}", self.job_id);
+        let daemon_label = format!("{DAEMON_ID_LABEL}={}", self.daemon_id);
+        docker(
+            self.runner,
+            self.events,
+            self.host_docker,
+            &[
+                "network",
+                "create",
+                "--label",
+                isolation_label,
+                "--label",
+                &job_label,
+                "--label",
+                &daemon_label,
+                &self.network,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Stop and remove created containers (job container first) by immutable
+    /// IDs, then remove the job network. Every lookup and deletion is bounded;
+    /// only exact job+daemon-owned containers in reclaim-safe states are
+    /// removed. Best-effort: a teardown failure is logged, never changes the
+    /// job result, and startup reconcile can reclaim any remainder.
     fn run_teardown(&mut self) {
         if !self.armed {
             return;
@@ -746,28 +787,14 @@ impl<'a> GuestDockerTeardown<'a> {
         let mut removed = false;
         for attempt in 1..=GUEST_TEARDOWN_ATTEMPTS {
             let mut remaining = Vec::new();
-            for name in self.containers.iter().rev() {
-                let gone = docker(
-                    self.runner,
-                    self.events,
-                    self.host_docker,
-                    &["rm", "-f", name],
-                )
-                .map(|result| result.code == 0)
-                .unwrap_or(false);
+            for name in self.containers.iter().rev().cloned().collect::<Vec<_>>() {
+                let gone = self.teardown_container(&name);
                 if !gone {
-                    remaining.push(name.clone());
+                    remaining.push(name);
                 }
             }
             self.containers = remaining;
-            let network_gone = docker(
-                self.runner,
-                self.events,
-                self.host_docker,
-                &["network", "rm", &self.network],
-            )
-            .map(|result| result.code == 0)
-            .unwrap_or(false);
+            let network_gone = self.teardown_network();
             removed = self.containers.is_empty() && network_gone;
             if removed || attempt == GUEST_TEARDOWN_ATTEMPTS {
                 break;
@@ -782,6 +809,243 @@ impl<'a> GuestDockerTeardown<'a> {
             )));
         }
     }
+
+    fn teardown_network(&mut self) -> bool {
+        let list_args = list_daemon_owned_networks_args(&self.job_id, &self.daemon_id);
+        let listed = match docker_owned_timeout(
+            self.runner,
+            self.events,
+            self.host_docker,
+            list_args.clone(),
+            GUEST_TEARDOWN_TIMEOUT,
+        ) {
+            Ok(result) if result.code == 0 => result.stdout,
+            _ => return false,
+        };
+
+        let mut candidate_ids = Vec::new();
+        for id in parse_docker_id_list(&listed) {
+            let Some((name, job_id, daemon_id, endpoint_count)) = self.inspect_network(&id) else {
+                return false;
+            };
+            if name != self.network || job_id != self.job_id || daemon_id != self.daemon_id {
+                continue;
+            }
+            if endpoint_count != 0 {
+                return false;
+            }
+            candidate_ids.push(id);
+        }
+
+        for id in candidate_ids {
+            let Some((name, job_id, daemon_id, endpoint_count)) = self.inspect_network(&id) else {
+                return false;
+            };
+            if name != self.network
+                || job_id != self.job_id
+                || daemon_id != self.daemon_id
+                || endpoint_count != 0
+            {
+                return false;
+            }
+            let Ok(result) = docker_owned_timeout(
+                self.runner,
+                self.events,
+                self.host_docker,
+                vec!["network".into(), "rm".into(), id],
+                GUEST_TEARDOWN_TIMEOUT,
+            ) else {
+                return false;
+            };
+            if result.code != 0 {
+                return self.network_is_gone(&list_args);
+            }
+        }
+
+        self.network_is_gone(&list_args)
+    }
+
+    fn inspect_network(&mut self, id: &str) -> Option<(String, String, String, usize)> {
+        let result = docker_owned_timeout(
+            self.runner,
+            self.events,
+            self.host_docker,
+            vec![
+                "network".into(),
+                "inspect".into(),
+                "--format".into(),
+                GUEST_NETWORK_INSPECT_FORMAT.into(),
+                id.into(),
+            ],
+            GUEST_TEARDOWN_TIMEOUT,
+        )
+        .ok()?;
+        if result.code != 0 {
+            return None;
+        }
+        let mut fields = result.stdout.trim().split('\t');
+        let name = fields.next()?.to_string();
+        let job_id = fields.next()?.to_string();
+        let daemon_id = fields.next()?.to_string();
+        let endpoint_count = fields.next()?.parse().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        Some((name, job_id, daemon_id, endpoint_count))
+    }
+
+    fn network_is_gone(&mut self, list_args: &[String]) -> bool {
+        let Ok(result) = docker_owned_timeout(
+            self.runner,
+            self.events,
+            self.host_docker,
+            list_args.to_vec(),
+            GUEST_TEARDOWN_TIMEOUT,
+        ) else {
+            return false;
+        };
+        if result.code != 0 {
+            return false;
+        }
+        for id in parse_docker_id_list(&result.stdout) {
+            let Some((name, job_id, daemon_id, _)) = self.inspect_network(&id) else {
+                return false;
+            };
+            if name == self.network && job_id == self.job_id && daemon_id == self.daemon_id {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn teardown_container(&mut self, name: &str) -> bool {
+        let list_args = list_daemon_owned_containers_state_args(&self.job_id, &self.daemon_id);
+        let initial = match docker_owned_timeout(
+            self.runner,
+            self.events,
+            self.host_docker,
+            list_args.clone(),
+            GUEST_TEARDOWN_TIMEOUT,
+        ) {
+            Ok(result) if result.code == 0 => result,
+            _ => return false,
+        };
+        if snapshot_has_unreclaimable_owned_container(
+            &initial.stdout,
+            &self.job_id,
+            &self.daemon_id,
+            name,
+        ) {
+            return false;
+        }
+        let candidate_ids =
+            owned_container_ids_for_name(&initial.stdout, &self.job_id, &self.daemon_id, name);
+        if candidate_ids.is_empty() {
+            return true;
+        }
+
+        // Stop only IDs selected from the exact ownership snapshot. Stopped
+        // candidates return a nonzero stop status and are revalidated below.
+        for id in &candidate_ids {
+            let _ = docker_owned_timeout(
+                self.runner,
+                self.events,
+                self.host_docker,
+                vec!["stop".into(), "--time".into(), "10".into(), id.clone()],
+                GUEST_TEARDOWN_TIMEOUT,
+            );
+        }
+
+        let after_stop = match docker_owned_timeout(
+            self.runner,
+            self.events,
+            self.host_docker,
+            list_args.clone(),
+            GUEST_TEARDOWN_TIMEOUT,
+        ) {
+            Ok(result) if result.code == 0 => result,
+            _ => return false,
+        };
+        if snapshot_has_unreclaimable_owned_container(
+            &after_stop.stdout,
+            &self.job_id,
+            &self.daemon_id,
+            name,
+        ) {
+            return false;
+        }
+        let safe_ids = stale_owned_container_ids_for_name(
+            &after_stop.stdout,
+            &self.job_id,
+            &self.daemon_id,
+            name,
+        );
+        let safe_ids = safe_ids
+            .into_iter()
+            .filter(|id| candidate_ids.binary_search(id).is_ok())
+            .collect::<Vec<_>>();
+        if safe_ids.is_empty() {
+            return owned_container_ids_for_name(
+                &after_stop.stdout,
+                &self.job_id,
+                &self.daemon_id,
+                name,
+            )
+            .is_empty();
+        }
+
+        for id in safe_ids {
+            let Ok(result) = docker_owned_timeout(
+                self.runner,
+                self.events,
+                self.host_docker,
+                remove_one_container_args(&id),
+                GUEST_TEARDOWN_TIMEOUT,
+            ) else {
+                return false;
+            };
+            if result.code != 0 {
+                return false;
+            }
+        }
+
+        let verified = match docker_owned_timeout(
+            self.runner,
+            self.events,
+            self.host_docker,
+            list_args,
+            GUEST_TEARDOWN_TIMEOUT,
+        ) {
+            Ok(result) if result.code == 0 => result,
+            _ => return false,
+        };
+        owned_container_ids_for_name(&verified.stdout, &self.job_id, &self.daemon_id, name)
+            .is_empty()
+    }
+}
+
+fn snapshot_has_unreclaimable_owned_container(
+    formatted: &str,
+    job_id: &str,
+    daemon_id: &str,
+    name: &str,
+) -> bool {
+    formatted.lines().any(|line| {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() < 4
+            || fields[1].trim() != name
+            || fields[2].trim() != job_id
+            || fields[3].trim() != daemon_id
+        {
+            return false;
+        }
+        fields.len() != 5
+            || fields[0].trim().is_empty()
+            || !matches!(
+                fields[4].trim().to_ascii_lowercase().as_str(),
+                "created" | "running" | "restarting" | "removing" | "paused" | "exited" | "dead"
+            )
+    })
 }
 
 impl Drop for GuestDockerTeardown<'_> {
@@ -1314,6 +1578,36 @@ fn docker_owned_timeout(
     owned: Vec<String>,
     timeout: Duration,
 ) -> Result<CommandResult, String> {
+    let result = docker_owned_raw(runner, events, host_docker, owned.clone(), timeout)?;
+    if result.code != 0 {
+        return Err(format!(
+            "docker {} exited with code {}; stdout: {:?}; stderr: {:?}",
+            owned.join(" "),
+            result.code,
+            result.stdout,
+            result.stderr
+        ));
+    }
+    Ok(result)
+}
+
+fn docker_step_timeout(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    owned: Vec<String>,
+    timeout: Duration,
+) -> Result<CommandResult, String> {
+    docker_owned_raw(runner, events, host_docker, owned, timeout)
+}
+
+fn docker_owned_raw(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    owned: Vec<String>,
+    timeout: Duration,
+) -> Result<CommandResult, String> {
     if owned.iter().any(|arg| arg.contains("docker.sock")) {
         return Err("guest plan refused a docker.sock mount".into());
     }
@@ -1457,6 +1751,30 @@ mod tests {
             args.windows(2)
                 .any(|w| w == ["--network-alias", "postgres"])
         }));
+        let service_run = runner
+            .calls
+            .iter()
+            .find(|(_, args)| args.windows(2).any(|w| w == ["--name", "pg"]))
+            .map(|(_, args)| args)
+            .expect("guest plan started the service container");
+        assert!(service_run
+            .windows(2)
+            .any(|w| w == ["--label", "velnor.job-id=job-1"]));
+        assert!(service_run
+            .windows(2)
+            .any(|w| w == ["--label", "velnor.daemon-id=test-daemon"]));
+        let job_run = runner
+            .calls
+            .iter()
+            .find(|(_, args)| args.windows(2).any(|w| w == ["--name", "velnor-job-job-1"]))
+            .map(|(_, args)| args)
+            .expect("guest plan started the job container");
+        assert!(job_run
+            .windows(2)
+            .any(|w| w == ["--label", "velnor.job-id=job-1"]));
+        assert!(job_run
+            .windows(2)
+            .any(|w| w == ["--label", "velnor.daemon-id=test-daemon"]));
         assert!(runner
             .calls
             .iter()
@@ -1493,6 +1811,53 @@ mod tests {
     }
 
     #[test]
+    fn docker_owned_timeout_rejects_nonzero_exit_with_full_result() {
+        let mut runner = RecordingCommands {
+            next: CommandResult {
+                code: 17,
+                stdout: "partial output".into(),
+                stderr: "daemon rejected request".into(),
+            },
+            ..RecordingCommands::default()
+        };
+        let error = docker_owned_timeout(
+            &mut runner,
+            &mut Vec::new(),
+            false,
+            vec!["network".into(), "inspect".into(), "network-id".into()],
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("exited with code 17"), "{error}");
+        assert!(error.contains("partial output"), "{error}");
+        assert!(error.contains("daemon rejected request"), "{error}");
+    }
+
+    #[test]
+    fn guest_step_exit_code_remains_a_guest_outcome() {
+        let mut plan = sample_plan();
+        plan.services.clear();
+        plan.outputs.clear();
+        let mut runner = RecordingCommands {
+            codes: vec![0, 0, 0, 7], // create, job, init, guest step
+            ..RecordingCommands::default()
+        };
+        let mut events = Vec::new();
+
+        let code = execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
+
+        assert_eq!(code, 7);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::JobCompleted {
+                conclusion: JobConclusion::Failure,
+                exit_code: 7
+            }
+        )));
+    }
+
+    #[test]
     fn guest_teardown_removes_network_and_containers_on_early_failure() {
         // Step 2 fails validation mid-flight (the host-Docker backend path
         // validates lazily), after the network, service, and job container
@@ -1509,77 +1874,597 @@ mod tests {
             continue_on_error: false,
             timeout_ms: None,
         });
-        let mut runner = RecordingCommands {
-            next: CommandResult {
-                code: 0,
-                stdout: "ok".into(),
-                stderr: String::new(),
-            },
-            ..RecordingCommands::default()
-        };
+        let mut runner = OwnershipAwareRunner::default();
         let mut events = Vec::new();
         let error = execute_guest_plan(&plan, &mut runner, &mut events, true).unwrap_err();
         assert!(error.contains("script"), "{error}");
-        assert!(runner.calls.iter().any(|(_, args)| args
-            .windows(3)
-            .any(|w| w == ["rm", "-f", "velnor-job-job-1"])));
         assert!(runner
             .calls
             .iter()
-            .any(|(_, args)| args.windows(3).any(|w| w == ["rm", "-f", "pg"])));
-        assert!(runner.calls.iter().any(|(_, args)| args
-            .windows(3)
-            .any(|w| w == ["network", "rm", "velnor-net-job-1"])));
+            .any(|(_, args)| { args == &["rm".to_string(), "velnor-job-job-1-id".to_string()] }));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| args == &["rm".to_string(), "pg-id".to_string()]));
+        assert!(runner
+            .calls
+            .iter()
+            .all(|(_, args)| args.first().map(String::as_str) != Some("rm")
+                || args.get(1).map(String::as_str) != Some("--force")));
+        assert!(runner.container_exists("foreign-live-id"));
+        assert!(runner.container_exists("unlabeled-id"));
+        assert!(!runner.container_exists("velnor-job-job-1-id"));
+        assert!(!runner.container_exists("pg-id"));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| { args == &list_daemon_owned_networks_args("job-1", "test-daemon") }));
+        assert!(!runner.calls.iter().any(|(_, args)| {
+            args == &vec![
+                "network".to_string(),
+                "rm".to_string(),
+                "velnor-net-job-1".to_string(),
+            ]
+        }));
     }
 
-    /// Fails the first `docker network rm` with a transient nonzero exit.
-    struct FlakyNetworkRm {
+    #[test]
+    fn guest_teardown_requires_fresh_selection_for_replacement_container() {
+        let mut runner = OwnershipAwareRunner {
+            replace_on_stop: true,
+            ..OwnershipAwareRunner::default()
+        };
+        runner.containers.push(OwnedTestContainer {
+            id: "original-id".into(),
+            name: "pg".into(),
+            job_id: "job-1".into(),
+            daemon_id: "test-daemon".into(),
+            state: "running".into(),
+        });
+        let mut events = Vec::new();
+        let mut teardown = GuestDockerTeardown::new(
+            &mut runner,
+            &mut events,
+            true,
+            "velnor-net-job-1".into(),
+            "job-1".into(),
+            "test-daemon".into(),
+        );
+        teardown.containers.push("pg".into());
+        teardown.run_teardown();
+        drop(teardown);
+
+        assert_eq!(runner.stopped_ids, ["original-id", "replacement-id"]);
+        assert_eq!(runner.removed_ids, ["replacement-id"]);
+    }
+
+    #[test]
+    fn guest_teardown_keeps_exact_owned_unknown_state() {
+        let mut runner = OwnershipAwareRunner::default();
+        runner.containers.push(OwnedTestContainer {
+            id: "unknown-state-id".into(),
+            name: "pg".into(),
+            job_id: "job-1".into(),
+            daemon_id: "test-daemon".into(),
+            state: "future-state".into(),
+        });
+        let mut events = Vec::new();
+        let mut teardown = GuestDockerTeardown::new(
+            &mut runner,
+            &mut events,
+            true,
+            "velnor-net-job-1".into(),
+            "job-1".into(),
+            "test-daemon".into(),
+        );
+        teardown.containers.push("pg".into());
+        teardown.run_teardown();
+        drop(teardown);
+
+        assert!(runner.container_exists("unknown-state-id"));
+        assert!(runner.removed_ids.is_empty());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::Log { line, .. } if line.contains("teardown left")
+        )));
+    }
+
+    #[derive(Clone, Debug)]
+    struct OwnedTestContainer {
+        id: String,
+        name: String,
+        job_id: String,
+        daemon_id: String,
+        state: String,
+    }
+
+    #[derive(Debug)]
+    struct OwnershipAwareRunner {
         calls: Vec<(String, Vec<String>)>,
-        network_rm_failures_left: usize,
+        containers: Vec<OwnedTestContainer>,
+        replace_on_stop: bool,
+        replacement_done: bool,
+        stopped_ids: Vec<String>,
+        removed_ids: Vec<String>,
     }
 
-    impl FlakyNetworkRm {
-        fn failing(failures: usize) -> Self {
+    impl Default for OwnershipAwareRunner {
+        fn default() -> Self {
             Self {
                 calls: Vec::new(),
-                network_rm_failures_left: failures,
+                containers: vec![
+                    OwnedTestContainer {
+                        id: "foreign-live-id".into(),
+                        name: "pg".into(),
+                        job_id: "other-job".into(),
+                        daemon_id: "test-daemon".into(),
+                        state: "running".into(),
+                    },
+                    OwnedTestContainer {
+                        id: "unlabeled-id".into(),
+                        name: "pg".into(),
+                        job_id: String::new(),
+                        daemon_id: String::new(),
+                        state: "exited".into(),
+                    },
+                ],
+                replace_on_stop: false,
+                replacement_done: false,
+                stopped_ids: Vec::new(),
+                removed_ids: Vec::new(),
             }
+        }
+    }
+
+    impl OwnershipAwareRunner {
+        fn container_exists(&self, id: &str) -> bool {
+            self.containers.iter().any(|container| container.id == id)
+        }
+
+        fn label(args: &[String], name: &str) -> String {
+            args.windows(2)
+                .find(|window| window[0] == "--label" && window[1].starts_with(name))
+                .and_then(|window| window[1].split_once('='))
+                .map(|(_, value)| value.to_string())
+                .unwrap_or_default()
+        }
+
+        fn list_output(&self) -> String {
+            self.containers
+                .iter()
+                .map(|container| {
+                    format!(
+                        "{}\t{}\t{}\t{}\t{}\n",
+                        container.id,
+                        container.name,
+                        container.job_id,
+                        container.daemon_id,
+                        container.state
+                    )
+                })
+                .collect()
+        }
+    }
+
+    impl CommandRunner for OwnershipAwareRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            match args.first().map(String::as_str) {
+                Some("run") => {
+                    let name = args
+                        .windows(2)
+                        .find(|window| window[0] == "--name")
+                        .map(|window| window[1].clone())
+                        .unwrap_or_default();
+                    self.containers.push(OwnedTestContainer {
+                        id: format!("{name}-id"),
+                        name,
+                        job_id: Self::label(args, "velnor.job-id="),
+                        daemon_id: Self::label(args, "velnor.daemon-id="),
+                        state: "running".into(),
+                    });
+                    Ok(CommandResult {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+                Some("ps") => Ok(CommandResult {
+                    code: 0,
+                    stdout: self.list_output(),
+                    stderr: String::new(),
+                }),
+                Some("stop") => {
+                    if let Some(id) = args.last() {
+                        self.stopped_ids.push(id.clone());
+                        if self.replace_on_stop && !self.replacement_done {
+                            if let Some(container) = self
+                                .containers
+                                .iter()
+                                .find(|container| &container.id == id)
+                                .cloned()
+                            {
+                                self.replacement_done = true;
+                                self.containers.retain(|candidate| &candidate.id != id);
+                                self.containers.push(OwnedTestContainer {
+                                    id: "replacement-id".into(),
+                                    state: "exited".into(),
+                                    ..container
+                                });
+                            }
+                        } else if let Some(container) = self
+                            .containers
+                            .iter_mut()
+                            .find(|container| &container.id == id)
+                        {
+                            container.state = "exited".into();
+                        }
+                    }
+                    Ok(CommandResult {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+                Some("rm") if args.len() == 2 => {
+                    self.removed_ids.push(args[1].clone());
+                    self.containers.retain(|container| container.id != args[1]);
+                    Ok(CommandResult {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+                _ => Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                }),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestNetwork {
+        id: String,
+        name: String,
+        job_id: String,
+        daemon_id: String,
+        endpoints: usize,
+    }
+
+    /// Docker double for ownership-scoped network teardown.
+    struct NetworkOnlyRunner {
+        calls: Vec<(String, Vec<String>)>,
+        networks: Vec<TestNetwork>,
+        network_rm_failures_left: usize,
+        activate_before_remove: bool,
+        activate_on_second_inspect: bool,
+        network_inspects: usize,
+        ambiguous_create: bool,
+    }
+
+    impl NetworkOnlyRunner {
+        fn with_networks(networks: Vec<TestNetwork>) -> Self {
+            Self {
+                calls: Vec::new(),
+                networks,
+                network_rm_failures_left: 0,
+                activate_before_remove: false,
+                activate_on_second_inspect: false,
+                network_inspects: 0,
+                ambiguous_create: false,
+            }
+        }
+
+        fn owned_network(endpoints: usize) -> TestNetwork {
+            TestNetwork {
+                id: "owned-network-id".into(),
+                name: "velnor-net-job-1".into(),
+                job_id: "job-1".into(),
+                daemon_id: "test-daemon".into(),
+                endpoints,
+            }
+        }
+
+        fn failing(mut self, failures: usize) -> Self {
+            self.network_rm_failures_left = failures;
+            self
+        }
+
+        fn active_before_remove(mut self) -> Self {
+            self.activate_before_remove = true;
+            self
+        }
+
+        fn active_on_second_inspect(mut self) -> Self {
+            self.activate_on_second_inspect = true;
+            self
+        }
+
+        fn ambiguous_create(mut self) -> Self {
+            self.ambiguous_create = true;
+            self
         }
 
         fn network_rm_calls(&self) -> usize {
             self.calls
                 .iter()
-                .filter(|(_, args)| args.windows(2).any(|w| w == ["network", "rm"]))
+                .filter(|(_, args)| {
+                    args.first().map(String::as_str) == Some("network")
+                        && args.get(1).map(String::as_str) == Some("rm")
+                })
                 .count()
         }
     }
 
-    impl CommandRunner for FlakyNetworkRm {
+    impl CommandRunner for NetworkOnlyRunner {
         fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
-            if args.windows(2).any(|w| w == ["network", "rm"]) && self.network_rm_failures_left > 0
-            {
-                self.network_rm_failures_left -= 1;
-                return Ok(CommandResult {
-                    code: 1,
+            match args.first().map(String::as_str) {
+                Some("network") if args.get(1).map(String::as_str) == Some("create") => {
+                    if self.ambiguous_create {
+                        self.networks.push(Self::owned_network(0));
+                        return Err(anyhow::anyhow!("Docker response lost after create"));
+                    }
+                    Ok(CommandResult {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+                Some("network") if args.get(1).map(String::as_str) == Some("ls") => {
+                    Ok(CommandResult {
+                        code: 0,
+                        stdout: self
+                            .networks
+                            .iter()
+                            .map(|network| format!("{}\n", network.id))
+                            .collect(),
+                        stderr: String::new(),
+                    })
+                }
+                Some("network")
+                    if args.get(1).map(String::as_str) == Some("inspect") && args.len() == 5 =>
+                {
+                    self.network_inspects += 1;
+                    if self.activate_on_second_inspect && self.network_inspects == 2 {
+                        if let Some(network) = self.networks.first_mut() {
+                            network.endpoints = 1;
+                        }
+                    }
+                    let Some(network) = self
+                        .networks
+                        .iter()
+                        .find(|network| args.last().is_some_and(|id| id == &network.id))
+                    else {
+                        return Ok(CommandResult {
+                            code: 1,
+                            stdout: String::new(),
+                            stderr: "network not found".into(),
+                        });
+                    };
+                    Ok(CommandResult {
+                        code: 0,
+                        stdout: format!(
+                            "{}\t{}\t{}\t{}\n",
+                            network.name, network.job_id, network.daemon_id, network.endpoints
+                        ),
+                        stderr: String::new(),
+                    })
+                }
+                Some("network")
+                    if args.get(1).map(String::as_str) == Some("rm") && args.len() == 3 =>
+                {
+                    if self.activate_before_remove {
+                        self.activate_before_remove = false;
+                        if let Some(network) = self
+                            .networks
+                            .iter_mut()
+                            .find(|network| args.last().is_some_and(|id| id == &network.id))
+                        {
+                            network.endpoints = 1;
+                        }
+                        return Ok(CommandResult {
+                            code: 1,
+                            stdout: String::new(),
+                            stderr: "active endpoints".into(),
+                        });
+                    }
+                    if self.network_rm_failures_left > 0 {
+                        self.network_rm_failures_left -= 1;
+                        return Ok(CommandResult {
+                            code: 1,
+                            stdout: String::new(),
+                            stderr: "transient daemon error".into(),
+                        });
+                    }
+                    let Some(network) = self
+                        .networks
+                        .iter()
+                        .find(|network| args.last().is_some_and(|id| id == &network.id))
+                    else {
+                        return Ok(CommandResult {
+                            code: 1,
+                            stdout: String::new(),
+                            stderr: "network not found".into(),
+                        });
+                    };
+                    if network.endpoints != 0 {
+                        return Ok(CommandResult {
+                            code: 1,
+                            stdout: String::new(),
+                            stderr: "active endpoints".into(),
+                        });
+                    }
+                    let id = args[2].clone();
+                    self.networks.retain(|network| network.id != id);
+                    Ok(CommandResult {
+                        code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+                _ => Ok(CommandResult {
+                    code: 0,
                     stdout: String::new(),
-                    stderr: "transient daemon error".into(),
-                });
+                    stderr: String::new(),
+                }),
             }
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
         }
     }
 
     #[test]
-    fn guest_teardown_retries_transient_network_removal_failure() {
-        let mut runner = FlakyNetworkRm::failing(1);
+    fn guest_teardown_removes_only_exact_owned_network_id() {
+        let mut runner = NetworkOnlyRunner::with_networks(vec![
+            NetworkOnlyRunner::owned_network(0),
+            TestNetwork {
+                id: "foreign-network-id".into(),
+                name: "velnor-net-job-1".into(),
+                job_id: "other-job".into(),
+                daemon_id: "test-daemon".into(),
+                endpoints: 0,
+            },
+            TestNetwork {
+                id: "unlabeled-network-id".into(),
+                name: "velnor-net-job-1".into(),
+                job_id: String::new(),
+                daemon_id: String::new(),
+                endpoints: 0,
+            },
+        ]);
         let mut events = Vec::new();
-        let code = execute_guest_plan(&sample_plan(), &mut runner, &mut events, false).unwrap();
-        assert_eq!(code, 0);
+        let mut teardown = GuestDockerTeardown::new(
+            &mut runner,
+            &mut events,
+            true,
+            "velnor-net-job-1".into(),
+            "job-1".into(),
+            "test-daemon".into(),
+        );
+        teardown.run_teardown();
+        drop(teardown);
+        assert_eq!(runner.network_rm_calls(), 1, "{:?}", runner.calls);
+        assert!(runner
+            .networks
+            .iter()
+            .any(|network| network.id == "foreign-network-id"));
+        assert!(runner
+            .networks
+            .iter()
+            .any(|network| network.id == "unlabeled-network-id"));
+        assert!(runner.calls.iter().all(|(_, args)| {
+            !(args.first().map(String::as_str) == Some("network")
+                && args.get(1).map(String::as_str) == Some("rm")
+                && matches!(
+                    args.get(2).map(String::as_str),
+                    Some("foreign-network-id" | "unlabeled-network-id")
+                ))
+        }));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            ExecutionEvent::Log { line, .. } if line.contains("teardown left")
+        )));
+    }
+
+    #[test]
+    fn guest_network_create_ambiguous_failure_reclaims_exact_owned_network() {
+        let mut runner = NetworkOnlyRunner::with_networks(Vec::new()).ambiguous_create();
+        let error =
+            execute_guest_plan(&sample_plan(), &mut runner, &mut Vec::new(), false).unwrap_err();
+
+        assert!(
+            error.contains("Docker response lost after create"),
+            "{error}"
+        );
+        assert!(
+            runner.networks.is_empty(),
+            "network leaked: {:?}",
+            runner.calls
+        );
+        assert_eq!(runner.network_rm_calls(), 1, "{:?}", runner.calls);
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.first().map(String::as_str) == Some("network")
+                && args.get(1).map(String::as_str) == Some("rm")
+                && args.get(2).map(String::as_str) == Some("owned-network-id")
+        }));
+    }
+
+    #[test]
+    fn guest_teardown_active_endpoint_fails_safely_without_force() {
+        let mut runner =
+            NetworkOnlyRunner::with_networks(vec![NetworkOnlyRunner::owned_network(0)])
+                .active_before_remove();
+        let mut events = Vec::new();
+        let mut teardown = GuestDockerTeardown::new(
+            &mut runner,
+            &mut events,
+            true,
+            "velnor-net-job-1".into(),
+            "job-1".into(),
+            "test-daemon".into(),
+        );
+        teardown.run_teardown();
+        drop(teardown);
+        assert_eq!(runner.network_rm_calls(), 1, "{:?}", runner.calls);
+        assert!(runner
+            .networks
+            .iter()
+            .any(|network| network.id == "owned-network-id" && network.endpoints == 1));
+        assert!(runner.calls.iter().all(|(_, args)| {
+            !(args.first().map(String::as_str) == Some("network")
+                && args.get(1).map(String::as_str) == Some("rm")
+                && args.get(2).map(String::as_str) == Some("--force"))
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::Log { line, .. } if line.contains("teardown left")
+        )));
+    }
+
+    #[test]
+    fn guest_teardown_revalidates_network_before_removal() {
+        let mut runner =
+            NetworkOnlyRunner::with_networks(vec![NetworkOnlyRunner::owned_network(0)])
+                .active_on_second_inspect();
+        let mut events = Vec::new();
+        let mut teardown = GuestDockerTeardown::new(
+            &mut runner,
+            &mut events,
+            true,
+            "velnor-net-job-1".into(),
+            "job-1".into(),
+            "test-daemon".into(),
+        );
+        teardown.run_teardown();
+        drop(teardown);
+
+        assert_eq!(runner.network_rm_calls(), 0, "network changed before rm");
+        assert!(runner
+            .networks
+            .iter()
+            .any(|network| network.id == "owned-network-id" && network.endpoints == 1));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::Log { line, .. } if line.contains("teardown left")
+        )));
+    }
+
+    #[test]
+    fn guest_teardown_retries_transient_network_removal_failure() {
+        let mut runner =
+            NetworkOnlyRunner::with_networks(vec![NetworkOnlyRunner::owned_network(0)]).failing(1);
+        let mut events = Vec::new();
+        let mut teardown = GuestDockerTeardown::new(
+            &mut runner,
+            &mut events,
+            true,
+            "velnor-net-job-1".into(),
+            "job-1".into(),
+            "test-daemon".into(),
+        );
+        teardown.run_teardown();
+        drop(teardown);
         assert_eq!(runner.network_rm_calls(), 2, "{:?}", runner.calls);
         assert!(events.iter().all(|event| !matches!(
             event,
@@ -1589,10 +2474,20 @@ mod tests {
 
     #[test]
     fn guest_teardown_is_bounded_and_warns_after_exhausting_retries() {
-        let mut runner = FlakyNetworkRm::failing(GUEST_TEARDOWN_ATTEMPTS + 1);
+        let mut runner =
+            NetworkOnlyRunner::with_networks(vec![NetworkOnlyRunner::owned_network(0)])
+                .failing(GUEST_TEARDOWN_ATTEMPTS + 1);
         let mut events = Vec::new();
-        let code = execute_guest_plan(&sample_plan(), &mut runner, &mut events, false).unwrap();
-        assert_eq!(code, 0);
+        let mut teardown = GuestDockerTeardown::new(
+            &mut runner,
+            &mut events,
+            true,
+            "velnor-net-job-1".into(),
+            "job-1".into(),
+            "test-daemon".into(),
+        );
+        teardown.run_teardown();
+        drop(teardown);
         assert_eq!(runner.network_rm_calls(), GUEST_TEARDOWN_ATTEMPTS);
         assert!(events.iter().any(|event| matches!(
             event,

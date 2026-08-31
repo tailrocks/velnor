@@ -881,7 +881,11 @@ impl BackendSession {
 
     /// # Errors
     /// Cancel is allowed from started/executing; other phases fail.
-    pub fn cancel(&mut self, world: &mut ExecutionWorld<'_>) -> Result<(), ExecutionError> {
+    pub fn cancel(
+        &mut self,
+        plan: &ValidatedPlan,
+        world: &mut ExecutionWorld<'_>,
+    ) -> Result<(), ExecutionError> {
         if !matches!(
             self.phase,
             BackendPhase::Started | BackendPhase::Executing | BackendPhase::Prepared
@@ -894,7 +898,7 @@ impl BackendSession {
         match self.kind {
             ExecutionBackendKind::Docker => {
                 if let Some(docker) = &mut self.docker {
-                    docker.cancel(&self.isolation, world, &mut self.events)?;
+                    docker.cancel(plan, &self.isolation, world, &mut self.events)?;
                 }
             }
             ExecutionBackendKind::MicroVm => {

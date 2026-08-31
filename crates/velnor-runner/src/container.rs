@@ -223,9 +223,12 @@ impl JobContainerSpec {
         // Daemon-owned compiler-cache variables are appended after workflow
         // variables so a job cannot replace the selected wrapper or store.
         self.append_compiler_cache_environment(&mut args);
-        self.append_ownership_labels(&mut args);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
+        // createOptions may contain duplicate or foreign ownership labels.
+        // Keep normal option output, but append the runner-owned values after
+        // every workflow and daemon option so Docker's final value is ours.
+        self.append_ownership_labels(&mut args);
 
         // Docker Engine 29 inherits systemd's 1024-file descriptor default
         // when no container limit is explicit. Large Rust/Zig links open one
@@ -899,7 +902,7 @@ pub struct ServiceContainerSpec {
 }
 
 impl ServiceContainerSpec {
-    pub fn start_args(&self) -> Vec<String> {
+    pub fn start_args(&self, job_id: &str, daemon_id: &str) -> Vec<String> {
         let mut args = vec![
             "run".into(),
             "--detach".into(),
@@ -913,6 +916,12 @@ impl ServiceContainerSpec {
             args.extend(["-p".into(), port.clone()]);
         }
         args.extend(self.options.iter().cloned());
+        args.extend([
+            "--label".into(),
+            format!("velnor.daemon-id={daemon_id}"),
+            "--label".into(),
+            format!("velnor.job-id={job_id}"),
+        ]);
         // Runner-owned network policy must win over any network-shaped token
         // present in the expanded service options. Docker uses the final
         // occurrence, so append the per-job network and workflow service key
@@ -1329,6 +1338,35 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn last_option_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
+        args.windows(2)
+            .filter(|pair| pair[0] == option)
+            .map(|pair| pair[1].as_str())
+            .chain(args.iter().filter_map(|arg| {
+                arg.strip_prefix(&format!("{option}="))
+            }))
+            .last()
+    }
+
+    fn last_label_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+        let mut last = None;
+        for (index, arg) in args.iter().enumerate() {
+            let value = if arg == "--label" {
+                args.get(index + 1).map(String::as_str)
+            } else {
+                arg.strip_prefix("--label=")
+            };
+            let Some(value) = value else { continue };
+            let Some((label_key, label_value)) = value.split_once('=') else {
+                continue;
+            };
+            if label_key.eq_ignore_ascii_case(key) {
+                last = Some(label_value);
+            }
+        }
+        last
     }
 
     #[test]
@@ -2094,7 +2132,7 @@ mod tests {
         };
 
         assert_eq!(
-            service.start_args(),
+            service.start_args("velnor-job-1", "test-daemon"),
             vec![
                 "run",
                 "--detach",
@@ -2106,6 +2144,10 @@ mod tests {
                 "5432:5432",
                 "--health-cmd",
                 "pg_isready",
+                "--label",
+                "velnor.daemon-id=test-daemon",
+                "--label",
+                "velnor.job-id=velnor-job-1",
                 "--network",
                 "velnor-net-1",
                 "--network-alias",
@@ -2138,7 +2180,7 @@ mod tests {
             ports: Vec::new(),
             options: vec!["--network".into(), "unexpected".into()],
         };
-        let args = service.start_args();
+        let args = service.start_args("velnor-job-1", "test-daemon");
         assert_eq!(
             &args[args.len() - 5..],
             [
@@ -2164,6 +2206,65 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_job_options_cannot_override_ownership_or_network() {
+        let mut job = spec();
+        job.options = vec![
+            "--label".into(),
+            "velnor.daemon-id=foreign-daemon".into(),
+            "--label=VELNOR.JOB-ID=foreign-job".into(),
+            "--network".into(),
+            "foreign-network".into(),
+            "--network=foreign-network-equals".into(),
+        ];
+
+        let args = job.start_args();
+        assert_eq!(
+            last_label_value(&args, "velnor.daemon-id"),
+            Some("test-daemon")
+        );
+        assert_eq!(
+            last_label_value(&args, "velnor.job-id"),
+            Some("velnor-job-1")
+        );
+        assert_eq!(last_option_value(&args, "--network"), Some("velnor-net-1"));
+    }
+
+    #[test]
+    fn untrusted_service_options_cannot_override_ownership_or_network() {
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-owned".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: vec![
+                "--label".into(),
+                "velnor.job-id=foreign-job".into(),
+                "--label=VELNOR.DAEMON-ID=foreign-daemon".into(),
+                "--network".into(),
+                "foreign-network".into(),
+                "--network-alias=foreign-alias".into(),
+            ],
+        };
+
+        let args = service.start_args("velnor-job-1", "test-daemon");
+        assert_eq!(
+            last_label_value(&args, "velnor.daemon-id"),
+            Some("test-daemon")
+        );
+        assert_eq!(
+            last_label_value(&args, "velnor.job-id"),
+            Some("velnor-job-1")
+        );
+        assert_eq!(last_option_value(&args, "--network"), Some("velnor-net-owned"));
+        assert_eq!(
+            last_option_value(&args, "--network-alias"),
+            Some("postgres")
+        );
+    }
+
+    #[test]
     fn container_job_reaches_service_by_shared_network_alias() {
         let job = spec();
         let service = ServiceContainerSpec {
@@ -2176,7 +2277,7 @@ mod tests {
             options: Vec::new(),
         };
         let job_args = job.start_args();
-        let service_args = service.start_args();
+        let service_args = service.start_args(&job.name, &job.daemon_id);
         assert!(job_args
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
@@ -2186,6 +2287,12 @@ mod tests {
         assert!(service_args
             .windows(2)
             .any(|pair| pair == ["--network-alias", "postgres"]));
+        assert!(service_args
+            .windows(2)
+            .any(|pair| pair == ["--label", "velnor.job-id=velnor-job-1"]));
+        assert!(service_args
+            .windows(2)
+            .any(|pair| pair == ["--label", "velnor.daemon-id=test-daemon"]));
     }
 
     #[test]

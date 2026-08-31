@@ -1,6 +1,7 @@
 use super::*;
-use crate::executor::CommandResult;
+use crate::executor::{CommandResult, CommandRunner};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use velnor_model::{ExecutionBackendKind, ExecutionFile};
 
 #[test]
@@ -142,14 +143,17 @@ fn socket_for(kind: ExecutionBackendKind) -> PathBuf {
     }
 }
 
-fn world<'a>(
+fn world<'a, Runner>(
     fs: &'a mut MemoryFs,
-    runner: &'a mut RecordingCommands,
+    runner: &'a mut Runner,
     api: &'a mut RecordingFirecracker,
     kvm: &'a Path,
     artifacts: &'a Path,
     docker: &'a Path,
-) -> ExecutionWorld<'a> {
+) -> ExecutionWorld<'a>
+where
+    Runner: CommandRunner,
+{
     ExecutionWorld {
         kvm,
         artifact_root: artifacts,
@@ -161,6 +165,40 @@ fn world<'a>(
         vsock: None,
         docker_engine: None,
         allow_inline_guest_plan: true,
+    }
+}
+
+#[derive(Debug, Default)]
+struct BoundedDockerCommands {
+    calls: Vec<(String, Vec<String>)>,
+    timeouts: Vec<Duration>,
+    container_listing: String,
+    failure_code: Option<i32>,
+}
+
+impl CommandRunner for BoundedDockerCommands {
+    fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
+        self.calls.push((program.to_string(), args.to_vec()));
+        let stdout = if program == "docker" && args.first().map(String::as_str) == Some("ps") {
+            self.container_listing.clone()
+        } else {
+            String::new()
+        };
+        Ok(CommandResult {
+            code: self.failure_code.unwrap_or(0),
+            stdout,
+            stderr: String::new(),
+        })
+    }
+
+    fn run_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> anyhow::Result<CommandResult> {
+        self.timeouts.push(timeout);
+        self.run(program, args)
     }
 }
 
@@ -362,7 +400,7 @@ fn docker_backend_execute_runs_network_service_and_job_containers() {
 }
 
 #[test]
-fn docker_backend_cancel_runs_docker_rm_force() {
+fn docker_backend_cancel_is_label_scoped() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
     let docker = socket_for(ExecutionBackendKind::Docker);
@@ -370,7 +408,7 @@ fn docker_backend_cancel_runs_docker_rm_force() {
     let mut runner = RecordingCommands {
         next: CommandResult {
             code: 0,
-            stdout: "ok".into(),
+            stdout: String::new(),
             stderr: String::new(),
         },
         ..RecordingCommands::default()
@@ -390,18 +428,131 @@ fn docker_backend_cancel_runs_docker_rm_force() {
         session.reserve(&mut world).unwrap();
         session.prepare(&plan, &mut world).unwrap();
         session.start(&mut world).unwrap();
-        session.cancel(&mut world).unwrap();
+        session.cancel(&plan, &mut world).unwrap();
     }
-    assert!(
-        runner.calls.iter().any(|(program, args)| {
-            program == "docker"
-                && args.contains(&"rm".to_string())
-                && args.contains(&"--force".to_string())
-                && args.iter().any(|arg| arg.contains("job-cancel-docker"))
-        }),
-        "docker cancel must rm --force the job container, got {:?}",
-        runner.calls
+    let list = crate::docker_lease::list_daemon_owned_containers_state_args(
+        "velnor-job-job-cancel-docker",
+        "test-daemon",
     );
+    assert!(runner
+        .calls
+        .iter()
+        .any(|(program, args)| { program == "docker" && args == &list }));
+    assert!(!runner.calls.iter().any(|(program, args)| {
+        program == "docker"
+            && (args
+                == &vec![
+                    "rm".to_string(),
+                    "--force".to_string(),
+                    "velnor-job-job-cancel-docker".to_string(),
+                ]
+                || args
+                    == &vec![
+                        "kill".to_string(),
+                        "velnor-job-job-cancel-docker".to_string(),
+                    ])
+    }));
+}
+
+fn cancel_with_bounded_runner(
+    runner: &mut BoundedDockerCommands,
+) -> (Result<(), ExecutionError>, Vec<ExecutionEvent>) {
+    let mut fs = MemoryFs::default();
+    let docker = socket_for(ExecutionBackendKind::Docker);
+    fs.write(&docker, b"socket").unwrap();
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let artifacts = PathBuf::from("/microvm");
+    let plan = ValidatedPlan::example_success("job-cancel-docker");
+    let isolation = IsolationIdentity::new("job-cancel-docker", 1);
+    let mut backend = DockerBackend::default();
+    let mut events = Vec::new();
+    let result = {
+        let mut world = world(&mut fs, runner, &mut api, &kvm, &artifacts, &docker);
+        backend.cancel(&plan, &isolation, &mut world, &mut events)
+    };
+    (result, events)
+}
+
+#[test]
+fn docker_backend_cancel_removes_owned_live_container_through_bounded_cleanup() {
+    let job_id = "velnor-job-job-cancel-docker";
+    let daemon_id = "test-daemon";
+    let mut runner = BoundedDockerCommands {
+        container_listing: format!(
+            "owned-id\t{job_id}\t{job_id}\t{daemon_id}\trunning\n\
+             foreign-id\t{job_id}\t{job_id}\tforeign-daemon\trunning\n\
+             unlabeled-id\t{job_id}\t\t{daemon_id}\trunning\n"
+        ),
+        ..BoundedDockerCommands::default()
+    };
+
+    let (result, events) = cancel_with_bounded_runner(&mut runner);
+    result.unwrap();
+
+    let expected_list =
+        crate::docker_lease::list_daemon_owned_containers_state_args(job_id, daemon_id);
+    let expected_remove = crate::docker_lease::force_remove_container_args(&["owned-id".into()]);
+    assert_eq!(runner.timeouts, vec![Duration::from_secs(20); 4]);
+    assert!(runner
+        .calls
+        .iter()
+        .any(|(program, args)| program == "docker" && args == &expected_list));
+    assert!(runner
+        .calls
+        .iter()
+        .any(|(program, args)| program == "docker" && args == &expected_remove));
+    assert!(!runner.calls.iter().any(|(_, args)| {
+        args.iter()
+            .any(|arg| arg == "foreign-id" || arg == "unlabeled-id")
+    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ExecutionEvent::JobCompleted {
+            conclusion: velnor_model::JobConclusion::Cancelled,
+            exit_code: 1,
+        }
+    )));
+}
+
+#[test]
+fn docker_backend_cancel_never_removes_foreign_or_unlabeled_resources() {
+    let job_id = "velnor-job-job-cancel-docker";
+    let mut runner = BoundedDockerCommands {
+        container_listing: format!(
+            "foreign-id\t{job_id}\t{job_id}\tforeign-daemon\trunning\n\
+             unlabeled-id\t{job_id}\t\t\trunning\n"
+        ),
+        ..BoundedDockerCommands::default()
+    };
+
+    let (result, _) = cancel_with_bounded_runner(&mut runner);
+    result.unwrap();
+
+    assert_eq!(runner.timeouts, vec![Duration::from_secs(20); 3]);
+    assert!(!runner.calls.iter().any(|(_, args)| {
+        args.first().map(String::as_str) == Some("rm")
+            || (args.first().map(String::as_str) == Some("network")
+                && args.get(1).map(String::as_str) == Some("rm"))
+            || (args.first().map(String::as_str) == Some("volume")
+                && args.get(1).map(String::as_str) == Some("rm"))
+    }));
+}
+
+#[test]
+fn docker_backend_cancel_reports_bounded_cleanup_failure() {
+    let mut runner = BoundedDockerCommands {
+        failure_code: Some(124),
+        ..BoundedDockerCommands::default()
+    };
+
+    let (result, events) = cancel_with_bounded_runner(&mut runner);
+    assert!(matches!(
+        result,
+        Err(ExecutionError::DockerExecute(detail)) if detail.contains("cancel cleanup")
+    ));
+    assert_eq!(runner.timeouts, vec![Duration::from_secs(20)]);
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -459,7 +610,7 @@ fn run_plan(kind: ExecutionBackendKind, cancel: bool) -> super::backend::Executi
     session.prepare(&plan, &mut world).unwrap();
     session.start(&mut world).unwrap();
     if cancel {
-        session.cancel(&mut world).unwrap();
+        session.cancel(&plan, &mut world).unwrap();
     } else {
         session.execute(&plan, &mut world).unwrap();
     }

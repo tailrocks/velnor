@@ -6758,7 +6758,7 @@ mod tests {
     #[test]
     fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
         use std::io::{Read, Write};
-        use std::net::{Shutdown, TcpListener, TcpStream};
+        use std::net::{TcpListener, TcpStream};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let probe_addr = listener.local_addr().unwrap();
@@ -6852,7 +6852,7 @@ mod tests {
         .unwrap_err();
         let mut probe = TcpStream::connect(probe_addr).unwrap();
         probe.write_all(b"PROBE").unwrap();
-        probe.shutdown(Shutdown::Both).unwrap();
+        drop(probe);
         assert!(
             error
                 .chain()

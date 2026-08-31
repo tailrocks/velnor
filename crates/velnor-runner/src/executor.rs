@@ -20,6 +20,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
@@ -28,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex, OnceLock,
     },
     thread,
@@ -44,6 +46,10 @@ const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STEP_TIMEOUT_
 /// dockerd finishes. Job teardown must not inherit the 6h step timeout or the
 /// job container (and every guest sibling) stays Up for hours.
 const TEARDOWN_RM_TIMEOUT: Duration = Duration::from_secs(20);
+/// Docker Engine calls during job startup must not inherit the 6h step
+/// timeout. Readiness polling has its own aggregate budget below.
+const STARTUP_DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
+const SERVICE_READINESS_BUDGET: Duration = Duration::from_secs(30);
 const SETUP_QEMU_BINFMT_IMAGE: &str =
     "docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0";
 const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
@@ -234,6 +240,22 @@ pub trait CommandRunner {
         self.run_timeout(program, args, timeout)
     }
 
+    /// Run a timed command with a job cancellation signal.
+    ///
+    /// Runners that do not own a cancellable process retain their existing
+    /// behavior. The production process runner overrides this hook.
+    fn run_timeout_with_env_and_cancellation(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<CommandResult> {
+        let _ = cancellation;
+        self.run_timeout_with_env(program, args, env, timeout)
+    }
+
     fn run_streaming_timeout(
         &mut self,
         program: &str,
@@ -257,6 +279,24 @@ pub trait CommandRunner {
             bail!("command runner does not support streaming process environment forwarding");
         }
         self.run_streaming_timeout(program, args, timeout, on_output)
+    }
+
+    /// Run a streaming command with a job cancellation signal.
+    ///
+    /// Implementations that do not own a cancellable process retain their
+    /// existing behavior. The production process runner overrides this hook
+    /// so cancellation uses the same watchdog that enforces step timeouts.
+    fn run_streaming_timeout_with_env_and_cancellation(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        cancellation: Arc<AtomicBool>,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        let _ = cancellation;
+        self.run_streaming_timeout_with_env(program, args, env, timeout, on_output)
     }
 
     fn run_streaming(
@@ -301,6 +341,23 @@ pub trait CommandRunner {
             bail!("command runner does not support stdin process environment forwarding");
         }
         self.run_with_stdin_timeout(program, args, stdin, timeout)
+    }
+
+    /// Run a timed stdin command with a job cancellation signal.
+    ///
+    /// Runners that do not own a cancellable process retain their existing
+    /// behavior. The production process runner overrides this hook.
+    fn run_with_stdin_timeout_with_env_and_cancellation(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<CommandResult> {
+        let _ = cancellation;
+        self.run_with_stdin_timeout_with_env(program, args, env, stdin, timeout)
     }
 
     fn run_with_stdin(
@@ -351,8 +408,236 @@ fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn put_command_in_private_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    command.process_group(0);
+}
+
+fn kill_command_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{pid}");
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &process_group])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+}
+
 #[derive(Default)]
 pub struct ProcessCommandRunner;
+
+impl ProcessCommandRunner {
+    fn run_timeout_with_env_inner(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Result<CommandResult> {
+        // Called from spawn_blocking context — synchronous blocking is fine here.
+        let timeout = if program == "docker" {
+            crate::docker_lease::docker_cli_timeout(args, timeout)
+        } else {
+            timeout
+        };
+        let rm_claim = if program == "docker" {
+            crate::docker_lease::claim_docker_container_rm(args)
+        } else {
+            None
+        };
+        if let Some(claim) = rm_claim.as_ref()
+            && claim.ids.is_empty()
+        {
+            return Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        let claimed_args = rm_claim
+            .as_ref()
+            .map(|claim| crate::docker_lease::container_rm_args_with_claimed_ids(args, &claim.ids));
+        let args = claimed_args.as_deref().unwrap_or(args);
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        put_command_in_private_process_group(&mut command);
+        let child = command
+            .spawn()
+            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let cancellation_signal = cancellation.clone();
+        let (timed_out, canceled, watchdog_cancel, watchdog) =
+            spawn_docker_timeout_watchdog(child.id(), timeout, cancellation);
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
+        let _ = watchdog_cancel.send(());
+        if let Some(watchdog) = watchdog {
+            let _ = watchdog.join();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if canceled.load(Ordering::SeqCst)
+            || cancellation_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::SeqCst))
+        {
+            return Ok(canceled_command_result(stdout, stderr));
+        }
+        if timed_out.load(Ordering::SeqCst) {
+            return Ok(timeout_command_result(stdout, stderr));
+        }
+
+        Ok(CommandResult {
+            code: exit_code(output.status)?,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn run_with_stdin_timeout_with_env_inner(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Result<CommandResult> {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        put_command_in_private_process_group(&mut command);
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let cancellation_signal = cancellation.clone();
+        let (timed_out, canceled, watchdog_cancel, watchdog) =
+            spawn_docker_timeout_watchdog(child.id(), timeout, cancellation);
+        let stdin_error = child
+            .stdin
+            .take()
+            .and_then(|mut child_stdin| child_stdin.write_all(stdin.as_bytes()).err());
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
+        let _ = watchdog_cancel.send(());
+        if let Some(watchdog) = watchdog {
+            let _ = watchdog.join();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if canceled.load(Ordering::SeqCst)
+            || cancellation_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::SeqCst))
+        {
+            return Ok(canceled_command_result(stdout, stderr));
+        }
+        if timed_out.load(Ordering::SeqCst) {
+            return Ok(timeout_command_result(stdout, stderr));
+        }
+        if let Some(error) = stdin_error {
+            return Err(error)
+                .with_context(|| format!("write stdin for {program} {}", args.join(" ")));
+        }
+
+        Ok(CommandResult {
+            code: exit_code(output.status)?,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn run_streaming_timeout_with_env_inner(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        cancellation: Option<Arc<AtomicBool>>,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        put_command_in_private_process_group(&mut command);
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing stdout pipe for {program}"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing stderr pipe for {program}"))?;
+        let (sender, receiver) = mpsc::channel();
+        let stdout_sender = sender.clone();
+        thread::spawn(move || stream_reader(stdout, CommandStream::Stdout, stdout_sender));
+        thread::spawn(move || stream_reader(stderr, CommandStream::Stderr, sender));
+        let cancellation_signal = cancellation.clone();
+        let (timed_out, canceled, watchdog_cancel, watchdog) =
+            spawn_docker_timeout_watchdog(child.id(), timeout, cancellation);
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        for (stream, line) in receiver {
+            match stream {
+                CommandStream::Stdout => {
+                    stdout.push_str(&line);
+                    stdout.push('\n');
+                }
+                CommandStream::Stderr => {
+                    stderr.push_str(&line);
+                    stderr.push('\n');
+                }
+            }
+            on_output(stream, &line);
+        }
+
+        let status = child
+            .wait()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
+        let _ = watchdog_cancel.send(());
+        if let Some(watchdog) = watchdog {
+            let _ = watchdog.join();
+        }
+        if canceled.load(Ordering::SeqCst)
+            || cancellation_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::SeqCst))
+        {
+            return Ok(canceled_command_result(stdout, stderr));
+        }
+        if timed_out.load(Ordering::SeqCst) {
+            return Ok(timeout_command_result(stdout, stderr));
+        }
+        Ok(CommandResult {
+            code: exit_code(status)?,
+            stdout,
+            stderr,
+        })
+    }
+}
 
 impl CommandRunner for ProcessCommandRunner {
     fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
@@ -415,59 +700,18 @@ impl CommandRunner for ProcessCommandRunner {
         env: &[(String, String)],
         timeout: Duration,
     ) -> Result<CommandResult> {
-        // Called from spawn_blocking context — synchronous blocking is fine here.
-        let timeout = if program == "docker" {
-            crate::docker_lease::docker_cli_timeout(args, timeout)
-        } else {
-            timeout
-        };
-        let rm_claim = if program == "docker" {
-            crate::docker_lease::claim_docker_container_rm(args)
-        } else {
-            None
-        };
-        if let Some(claim) = rm_claim.as_ref()
-            && claim.ids.is_empty()
-        {
-            return Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            });
-        }
-        let claimed_args = rm_claim
-            .as_ref()
-            .map(|claim| crate::docker_lease::container_rm_args_with_claimed_ids(args, &claim.ids));
-        let args = claimed_args.as_deref().unwrap_or(args);
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = command
-            .spawn()
-            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
-        let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
-        let output = child
-            .wait_with_output()
-            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
-        let _ = watchdog_cancel.send(());
-        if let Some(watchdog) = watchdog {
-            let _ = watchdog.join();
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(timeout_command_result(stdout, stderr));
-        }
+        self.run_timeout_with_env_inner(program, args, env, timeout, None)
+    }
 
-        Ok(CommandResult {
-            code: exit_code(output.status)?,
-            stdout,
-            stderr,
-        })
+    fn run_timeout_with_env_and_cancellation(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<CommandResult> {
+        self.run_timeout_with_env_inner(program, args, env, timeout, Some(cancellation))
     }
 
     fn run_streaming(
@@ -497,61 +741,26 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
         on_output: &mut dyn FnMut(CommandStream, &str),
     ) -> Result<CommandResult> {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("run {program} {}", args.join(" ")))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("missing stdout pipe for {program}"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("missing stderr pipe for {program}"))?;
-        let (sender, receiver) = mpsc::channel();
-        let stdout_sender = sender.clone();
-        thread::spawn(move || stream_reader(stdout, CommandStream::Stdout, stdout_sender));
-        thread::spawn(move || stream_reader(stderr, CommandStream::Stderr, sender));
-        let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
+        self.run_streaming_timeout_with_env_inner(program, args, env, timeout, None, on_output)
+    }
 
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        for (stream, line) in receiver {
-            match stream {
-                CommandStream::Stdout => {
-                    stdout.push_str(&line);
-                    stdout.push('\n');
-                }
-                CommandStream::Stderr => {
-                    stderr.push_str(&line);
-                    stderr.push('\n');
-                }
-            }
-            on_output(stream, &line);
-        }
-
-        let status = child
-            .wait()
-            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
-        let _ = watchdog_cancel.send(());
-        if let Some(watchdog) = watchdog {
-            let _ = watchdog.join();
-        }
-        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(timeout_command_result(stdout, stderr));
-        }
-        Ok(CommandResult {
-            code: exit_code(status)?,
-            stdout,
-            stderr,
-        })
+    fn run_streaming_timeout_with_env_and_cancellation(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        cancellation: Arc<AtomicBool>,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        self.run_streaming_timeout_with_env_inner(
+            program,
+            args,
+            env,
+            timeout,
+            Some(cancellation),
+            on_output,
+        )
     }
 
     fn run_with_env(
@@ -603,41 +812,26 @@ impl CommandRunner for ProcessCommandRunner {
         stdin: &str,
         timeout: Duration,
     ) -> Result<CommandResult> {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
-        let (timed_out, watchdog_cancel, watchdog) =
-            spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
-        if let Some(mut child_stdin) = child.stdin.take() {
-            child_stdin
-                .write_all(stdin.as_bytes())
-                .with_context(|| format!("write stdin for {program} {}", args.join(" ")))?;
-        }
-        let output = child
-            .wait_with_output()
-            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
-        let _ = watchdog_cancel.send(());
-        if let Some(watchdog) = watchdog {
-            let _ = watchdog.join();
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(timeout_command_result(stdout, stderr));
-        }
+        self.run_with_stdin_timeout_with_env_inner(program, args, env, stdin, timeout, None)
+    }
 
-        Ok(CommandResult {
-            code: exit_code(output.status)?,
-            stdout,
-            stderr,
-        })
+    fn run_with_stdin_timeout_with_env_and_cancellation(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<CommandResult> {
+        self.run_with_stdin_timeout_with_env_inner(
+            program,
+            args,
+            env,
+            stdin,
+            timeout,
+            Some(cancellation),
+        )
     }
 }
 
@@ -1209,6 +1403,7 @@ pub(crate) struct DockerJobEngine<R> {
     /// just `run:` steps).
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
+    cancellation: Option<Arc<AtomicBool>>,
     docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
     /// Armed when the job network is created, defused once terminal cleanup
     /// removed it. Drop then removes the network, so no executor exit path can
@@ -1242,6 +1437,7 @@ where
             trust_scope: "trusted".to_string(),
             live_step: None,
             job_environment_started: false,
+            cancellation: None,
             docker_lease: None,
             job_network_guard: None,
             lifecycle_telemetry: None,
@@ -1293,6 +1489,11 @@ where
         self
     }
 
+    pub(crate) fn with_cancellation(mut self, cancellation: Arc<AtomicBool>) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
     pub(crate) fn with_tool_prep_telemetry(
         mut self,
         sink: Arc<crate::ops::OpsSink>,
@@ -1312,8 +1513,24 @@ where
         self
     }
 
+    /// Adopt the pre-created job network guard. It must remain owned by the
+    /// executor or its durable teardown handle until exact cleanup succeeds.
+    pub(crate) fn with_job_network_guard(
+        mut self,
+        guard: crate::docker_lease::JobNetworkGuard,
+    ) -> Self {
+        self.job_network_guard = Some(guard);
+        self
+    }
+
     pub(crate) fn take_docker_lease(&mut self) -> Option<crate::docker_lease::DockerLeaseGuard> {
         self.docker_lease.take()
+    }
+
+    pub(crate) fn take_job_network_guard(
+        &mut self,
+    ) -> Option<crate::docker_lease::JobNetworkGuard> {
+        self.job_network_guard.take()
     }
 
     pub fn into_runner(self) -> R {
@@ -1322,6 +1539,10 @@ where
 
     pub fn runner(&self) -> &R {
         &self.runner
+    }
+
+    pub fn runner_mut(&mut self) -> &mut R {
+        &mut self.runner
     }
 
     fn emit_step_started(
@@ -1359,6 +1580,75 @@ where
         results
             .pop()
             .ok_or_else(|| anyhow::anyhow!("script step did not produce a result"))
+    }
+
+    fn run_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        match self.cancellation.clone() {
+            Some(cancellation) => self.runner.run_timeout_with_env_and_cancellation(
+                program,
+                args,
+                env,
+                timeout,
+                cancellation,
+            ),
+            None => self
+                .runner
+                .run_timeout_with_env(program, args, env, timeout),
+        }
+    }
+
+    fn run_with_stdin_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        match self.cancellation.clone() {
+            Some(cancellation) => self
+                .runner
+                .run_with_stdin_timeout_with_env_and_cancellation(
+                    program,
+                    args,
+                    env,
+                    stdin,
+                    timeout,
+                    cancellation,
+                ),
+            None => self
+                .runner
+                .run_with_stdin_timeout_with_env(program, args, env, stdin, timeout),
+        }
+    }
+
+    fn run_streaming_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        match self.cancellation.clone() {
+            Some(cancellation) => self.runner.run_streaming_timeout_with_env_and_cancellation(
+                program,
+                args,
+                env,
+                timeout,
+                cancellation,
+                on_output,
+            ),
+            None => self
+                .runner
+                .run_streaming_timeout_with_env(program, args, env, timeout, on_output),
+        }
     }
 
     pub fn execute_steps(
@@ -1511,11 +1801,13 @@ where
         let mut services = serde_json::Map::new();
         for service in &container.services {
             let id = self
-                .run_docker(&service.id_args())?
+                .run_docker_timeout(&service.id_args(), STARTUP_DOCKER_TIMEOUT)?
                 .stdout
                 .trim()
                 .to_string();
-            let ports_output = self.run_docker(&service.mapped_ports_args())?.stdout;
+            let ports_output = self
+                .run_docker_timeout(&service.mapped_ports_args(), STARTUP_DOCKER_TIMEOUT)?
+                .stdout;
             let mut ports = serde_json::Map::new();
             for line in ports_output.lines() {
                 let Some((container_port, address)) = line.split_once(" -> ") else {
@@ -1906,7 +2198,7 @@ where
                         (Some(_), Some(_)) => Some(Instant::now()),
                         _ => None,
                     };
-                    let step_result = self.runner.run_streaming_timeout_with_env(
+                    let step_result = self.run_streaming_timeout_with_env(
                         "docker",
                         exec_args.args(),
                         exec_args.process_env(),
@@ -2371,7 +2663,7 @@ where
             &node_image,
             entrypoint_container_path,
         )?;
-        let step_result = self.runner.run_timeout_with_env(
+        let step_result = self.run_timeout_with_env(
             "docker",
             exec_args.args(),
             exec_args.process_env(),
@@ -2456,12 +2748,13 @@ where
                     )
                 },
             )?;
-            self.run_docker_with_env(
+            self.run_docker_with_env_timeout(
                 &container.build_docker_action_args(&action.image, dockerfile_host, context_host),
                 &[(
                     "DOCKER_CONFIG".to_string(),
                     docker_config.display().to_string(),
                 )],
+                timeout,
             )?;
         }
         let command_files = ScriptStepPlan::prepare(
@@ -2503,7 +2796,7 @@ where
             entrypoint.as_deref(),
             &args,
         )?;
-        let step_result = self.runner.run_timeout_with_env(
+        let step_result = self.run_timeout_with_env(
             "docker",
             exec_args.args(),
             exec_args.process_env(),
@@ -3065,7 +3358,7 @@ where
                 &secret_masks,
                 &["sh".to_string(), "-c".to_string(), cmd],
             )?;
-            return self.runner.run_with_stdin_timeout_with_env(
+            return self.run_with_stdin_timeout_with_env(
                 "docker",
                 exec_args.args(),
                 exec_args.process_env(),
@@ -3076,16 +3369,12 @@ where
         self.native_shell(container, state, &cmd, timeout)
     }
 
-    fn run_docker_args(&mut self, args: &[String]) -> Result<CommandResult> {
-        self.runner.run("docker", args)
-    }
-
     fn run_docker_args_timeout(
         &mut self,
         args: &[String],
         timeout: Duration,
     ) -> Result<CommandResult> {
-        self.runner.run_timeout("docker", args, timeout)
+        self.run_timeout_with_env("docker", args, &[], timeout)
     }
 
     fn native_shell(
@@ -3148,7 +3437,7 @@ where
                 );
             }
         };
-        self.runner.run_streaming_timeout_with_env(
+        self.run_streaming_timeout_with_env(
             "docker",
             args.args(),
             args.process_env(),
@@ -3194,8 +3483,7 @@ where
             &[],
         )?;
         Ok(native_command_result(
-            self.runner
-                .run_timeout_with_env("docker", args.args(), args.process_env(), timeout)?,
+            self.run_timeout_with_env("docker", args.args(), args.process_env(), timeout)?,
             StepCommandState::default(),
         ))
     }
@@ -3613,6 +3901,7 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard()?;
+        self.abort_docker_lease();
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
         // and `docker network rm` fails while an endpoint is still attached.
@@ -3620,12 +3909,9 @@ where
         // service job and orphaned the network once the services went away —
         // the `velnor-net-*` address-pool exhaustion leak.
         let service_result = self.cleanup_services_unlocked(container);
-        let container_result = self.run_docker_remove_container(&container.remove_container_args());
-        // Job container is gone; abort in-flight Engine HTTP (BuildKit start)
-        // before reclaim. `docker rm` of Created BuildKit waits forever on
-        // that lock if the lease still holds `POST /containers/{id}/start`.
-        self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
+        let container_result =
+            self.remove_owned_container(&container.name, &container.daemon_id, &container.name);
+        let owned_result = self.reclaim_job_owned_docker(&container.name, &container.daemon_id);
         let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
 
         let result = (|| {
@@ -3653,15 +3939,13 @@ where
     }
 
     fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
+        self.abort_docker_lease();
         // Services first: their endpoints block the network removal inside
         // reclaim (see `cleanup`).
         let service_result = self.cleanup_services_unlocked(container);
-        let container_result = self.run_docker_remove_container(&container.remove_container_args());
-        // Abort in-flight Engine HTTP before the deferred BuildKit worker
-        // runs. Dropping the lease at the end used to leave ContainerStart
-        // held, so the worker's `docker rm` of Created BuildKit hung.
-        self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
+        let container_result =
+            self.remove_owned_container(&container.name, &container.daemon_id, &container.name);
+        let owned_result = self.reclaim_job_owned_docker(&container.name, &container.daemon_id);
 
         let result = (|| {
             container_result?;
@@ -3676,6 +3960,7 @@ where
 
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard()?;
+        self.abort_docker_lease();
         self.cleanup_services_unlocked(container)
     }
 
@@ -3684,7 +3969,9 @@ where
             .services
             .iter()
             .rev()
-            .map(|service| self.run_docker_remove_container(&service.remove_args()))
+            .map(|service| {
+                self.remove_owned_container(&container.name, &container.daemon_id, &service.name)
+            })
             .collect::<Vec<_>>();
         for service_result in service_results {
             service_result?;
@@ -3693,10 +3980,12 @@ where
     }
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let _lifecycle = docker_lifecycle_guard()?;
         self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let buildkit_result = self.cleanup_job_buildkit(container);
+        let container_result =
+            self.remove_owned_container(&container.name, &container.daemon_id, &container.name);
+        let owned_result = self.reclaim_job_owned_docker(&container.name, &container.daemon_id);
+        let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
         let result = (|| {
             container_result?;
             owned_result?;
@@ -3720,9 +4009,10 @@ where
         &mut self,
         container: &JobContainerSpec,
     ) -> Result<()> {
-        let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
-        let owned_result = self.reclaim_job_owned_docker(&container.name);
+        let container_result =
+            self.remove_owned_container(&container.name, &container.daemon_id, &container.name);
+        let owned_result = self.reclaim_job_owned_docker(&container.name, &container.daemon_id);
         let result = (|| {
             container_result?;
             owned_result
@@ -3733,10 +4023,51 @@ where
         result
     }
 
-    fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
-        crate::docker_lease::reclaim_job_owned(job_id, |args| {
+    fn reclaim_job_owned_docker(&mut self, job_id: &str, daemon_id: &str) -> Result<()> {
+        crate::docker_lease::reclaim_job_owned(job_id, daemon_id, |args| {
             self.run_docker_cleanup(args).map(|result| result.stdout)
         })
+    }
+
+    fn remove_owned_container(&mut self, job_id: &str, daemon_id: &str, name: &str) -> Result<()> {
+        let list_args =
+            crate::docker_lease::list_daemon_owned_containers_state_args(job_id, daemon_id);
+        let listed = self.run_docker_cleanup(&list_args)?;
+        let ids = crate::docker_lease::owned_container_ids_for_name(
+            &listed.stdout,
+            job_id,
+            daemon_id,
+            name,
+        );
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let remove_args = crate::docker_lease::force_remove_container_args(&ids);
+        match self.run_docker_remove_container(&remove_args) {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error.to_string().contains("removal of container")
+                    && error.to_string().contains("is already in progress") =>
+            {
+                let revalidated = self.run_docker_cleanup(&list_args)?;
+                let revalidated_ids = crate::docker_lease::owned_container_ids_for_name(
+                    &revalidated.stdout,
+                    job_id,
+                    daemon_id,
+                    name,
+                );
+                let remaining = ids
+                    .iter()
+                    .filter(|id| revalidated_ids.binary_search(id).is_ok())
+                    .count();
+                if remaining == 0 {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Remove every BuildKit daemon whose buildx builder belongs to this job.
@@ -3749,45 +4080,75 @@ where
     /// daemon together with its anonymous/named state volume.
     pub(crate) fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard()?;
+        self.abort_docker_lease();
         self.cleanup_job_buildkit_unlocked(container)
     }
 
     fn cleanup_job_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
         let scope = job_scope_from_temp(Some(&container.temp_host));
-        let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
-        let ids =
-            crate::docker_lease::job_buildkit_ids_for_job(&listed.stdout, &container.name, &scope);
+        let list_args = crate::docker_lease::list_exact_job_buildkit_format_args(
+            &container.name,
+            &container.daemon_id,
+        );
+        let listed = self.run_docker_cleanup(&list_args)?;
+        let initial_ids = crate::docker_lease::job_buildkit_ids_for_job(
+            &listed.stdout,
+            &container.name,
+            &container.daemon_id,
+            &scope,
+        );
+        let ids = if initial_ids.is_empty() {
+            Vec::new()
+        } else {
+            let revalidated = self.run_docker_cleanup(&list_args)?;
+            let revalidated = crate::docker_lease::job_buildkit_ids_for_job(
+                &revalidated.stdout,
+                &container.name,
+                &container.daemon_id,
+                &scope,
+            );
+            initial_ids
+                .into_iter()
+                .filter(|id| revalidated.binary_search(id).is_ok())
+                .collect::<Vec<_>>()
+        };
         if !ids.is_empty() {
-            crate::docker_lease::force_remove_containers_serially(&ids, |args| {
-                self.run_docker_remove_container(args).map(|_| ())
+            crate::docker_lease::remove_containers_serially(&ids, |args| {
+                self.run_docker_cleanup(args).map(|_| ())
             })?;
         }
 
         // Buildx creates a named `<container>_state` volume. Docker's
         // `rm --volumes` deliberately removes only anonymous volumes, so the
         // state volume requires a separate prefix query and removal.
-        let volume_filter = format!(
-            "name={}{scope}",
-            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
+        let volume_list_args = crate::docker_lease::list_exact_job_buildkit_volume_format_args(
+            &container.name,
+            &container.daemon_id,
         );
-        let listed_volumes = self.run_docker(&[
-            "volume".into(),
-            "ls".into(),
-            "--quiet".into(),
-            "--filter".into(),
-            volume_filter,
-        ])?;
-        let volumes = listed_volumes
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+        let listed_volumes = self.run_docker_cleanup(&volume_list_args)?;
+        let initial_volumes = crate::docker_lease::job_buildkit_volume_names_for_job(
+            &listed_volumes.stdout,
+            &container.name,
+            &container.daemon_id,
+            &scope,
+        );
+        let volumes = if initial_volumes.is_empty() {
+            Vec::new()
+        } else {
+            let revalidated = self.run_docker_cleanup(&volume_list_args)?;
+            let revalidated = crate::docker_lease::job_buildkit_volume_names_for_job(
+                &revalidated.stdout,
+                &container.name,
+                &container.daemon_id,
+                &scope,
+            );
+            initial_volumes
+                .into_iter()
+                .filter(|name| revalidated.binary_search(name).is_ok())
+                .collect::<Vec<_>>()
+        };
         if !volumes.is_empty() {
-            let mut args = vec!["volume".into(), "rm".into(), "--force".into()];
-            args.extend(volumes);
-            self.run_docker(&args)?;
+            self.run_docker_cleanup(&crate::docker_lease::remove_volume_args(&volumes))?;
         }
         Ok(())
     }
@@ -3882,7 +4243,7 @@ where
             drop(previous);
         }
         self.with_docker_lifecycle(|executor| {
-            executor.run_docker(&container.create_network_args())
+            executor.run_docker_timeout(&container.create_network_args(), STARTUP_DOCKER_TIMEOUT)
         })?;
         // Own the network from creation to terminal cleanup. Dropping the
         // executor on any error path now removes it instead of leaking it.
@@ -3891,12 +4252,21 @@ where
         // live job.
         self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
             container.network.clone(),
+            container.name.clone(),
+            container.daemon_id.clone(),
         ));
         for service in &container.services {
-            self.with_docker_lifecycle(|executor| executor.run_docker(&service.start_args()))?;
+            self.with_docker_lifecycle(|executor| {
+                executor.run_docker_timeout(
+                    &service.start_args(&container.name, &container.daemon_id),
+                    STARTUP_DOCKER_TIMEOUT,
+                )
+            })?;
             self.wait_for_service(service)?;
         }
-        self.with_docker_lifecycle(|executor| executor.run_docker(&container.start_args()))?;
+        self.with_docker_lifecycle(|executor| {
+            executor.run_docker_timeout(&container.start_args(), STARTUP_DOCKER_TIMEOUT)
+        })?;
         // Docker accepts repeated network-shaped create options with behavior
         // that depends on option placement. Reconcile the runner-owned
         // topology explicitly after every container exists, before any step
@@ -3904,11 +4274,23 @@ where
         // embedded-DNS alias on the per-job network.
         if !container.services.is_empty() {
             self.with_docker_lifecycle(|executor| {
-                executor.run_docker(&container.disconnect_network_args())?;
-                executor.run_docker(&container.connect_network_args())?;
+                executor.run_docker_timeout(
+                    &container.disconnect_network_args(),
+                    STARTUP_DOCKER_TIMEOUT,
+                )?;
+                executor.run_docker_timeout(
+                    &container.connect_network_args(),
+                    STARTUP_DOCKER_TIMEOUT,
+                )?;
                 for service in &container.services {
-                    executor.run_docker(&service.disconnect_network_args())?;
-                    executor.run_docker(&service.connect_network_args())?;
+                    executor.run_docker_timeout(
+                        &service.disconnect_network_args(),
+                        STARTUP_DOCKER_TIMEOUT,
+                    )?;
+                    executor.run_docker_timeout(
+                        &service.connect_network_args(),
+                        STARTUP_DOCKER_TIMEOUT,
+                    )?;
                 }
                 Ok(())
             })?;
@@ -3921,28 +4303,25 @@ where
     }
 
     fn verify_service_dns(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let deadline = Instant::now() + SERVICE_READINESS_BUDGET;
         for service in &container.services {
-            let lookup = self.runner.run(
-                "docker",
+            let lookup = self.run_bounded_probe(
                 &container.service_dns_args(&service.network_alias),
+                deadline,
             )?;
             if lookup.code == 0 {
                 continue;
             }
-            let network = self
-                .runner
-                .run("docker", &container.inspect_network_args())?;
-            let resolver = self
-                .runner
-                .run("docker", &container.resolver_state_args())?;
+            let network = self.probe_diagnostic(&container.inspect_network_args(), deadline);
+            let resolver = self.probe_diagnostic(&container.resolver_state_args(), deadline);
             bail!(
                 "service DNS preflight failed for alias '{}' in job '{}': getent code={}, stderr={}; network={}; resolv.conf={}",
                 service.network_alias,
                 container.name,
                 lookup.code,
                 lookup.stderr.trim(),
-                network.stdout.trim(),
-                resolver.stdout.trim()
+                network,
+                resolver
             );
         }
         Ok(())
@@ -3954,16 +4333,22 @@ where
     /// a valid shim` class); seeding makes the store a superset of the image.
     fn seed_mise_store(&mut self, container: &JobContainerSpec) -> Result<()> {
         let store = crate::container::mise_store_host(&container.temp_host);
-        let inspect = self.runner.run(
-            "docker",
-            &[
-                "image".to_string(),
-                "inspect".to_string(),
-                "-f".to_string(),
-                "{{.Id}}".to_string(),
-                container.image.clone(),
-            ],
-        )?;
+        let inspect_args = [
+            "image".to_string(),
+            "inspect".to_string(),
+            "-f".to_string(),
+            "{{.Id}}".to_string(),
+            container.image.clone(),
+        ];
+        let inspect =
+            self.run_timeout_with_env("docker", &inspect_args, &[], STARTUP_DOCKER_TIMEOUT)?;
+        if matches!(inspect.code, 124 | 130) {
+            bail!(
+                "docker image inspect for {} did not complete: {}",
+                container.image,
+                inspect.stderr.trim()
+            );
+        }
         if inspect.code != 0 {
             // Image not present yet — container start will surface the real
             // error; a missing seed must not mask it.
@@ -3986,7 +4371,7 @@ where
         {
             return Ok(());
         }
-        self.run_docker(&container.seed_mise_store_args())?;
+        self.run_docker_timeout(&container.seed_mise_store_args(), STARTUP_DOCKER_TIMEOUT)?;
         fs::create_dir_all(&store).ok();
         fs::write(&marker, &image_id)
             .with_context(|| format!("write mise store seed marker {}", marker.display()))?;
@@ -4008,7 +4393,12 @@ where
                 format!("test -f /__t/{DOCKER_MOUNT_CHECK_FILE}"),
             ],
         )?;
-        let result = self.runner.run("docker", args.args())?;
+        let result = self.run_timeout_with_env(
+            "docker",
+            args.args(),
+            args.process_env(),
+            STARTUP_DOCKER_TIMEOUT,
+        )?;
         fs::remove_file(&marker).ok();
         if result.code != 0 {
             bail!(
@@ -4033,31 +4423,32 @@ where
         // container that is still live or whose state is unknown.
         self.abort_docker_lease();
         for service in container.services.iter().rev() {
-            self.run_docker_cleanup(&crate::docker_lease::remove_one_container_args(
+            let Ok(listed) = self.run_docker_cleanup(
+                &crate::docker_lease::list_daemon_owned_containers_state_args(
+                    &container.name,
+                    &container.daemon_id,
+                ),
+            ) else {
+                continue;
+            };
+            let ids = crate::docker_lease::stale_owned_container_ids_for_name(
+                &listed.stdout,
+                &container.name,
+                &container.daemon_id,
                 &service.name,
-            ))
-            .ok();
-        }
-        if self.reclaim_stale_job_owned_docker(&container.name).is_ok() {
-            // The stale reclaim can legitimately skip the network (its
-            // liveness gate only guards containers). Remove it explicitly:
-            // the job container is absent or stopped here, so no endpoint can
-            // block the removal. A "not found" is success — already gone.
-            let removed =
-                match self.run_docker_cleanup(&crate::docker_lease::force_remove_network_args(
-                    std::slice::from_ref(&container.network),
-                )) {
-                    Ok(_) => true,
-                    Err(error) => error.to_string().contains("not found"),
-                };
-            if removed {
-                self.defuse_job_network_guard();
+            );
+            if !ids.is_empty() {
+                crate::docker_lease::remove_containers_serially(&ids, |args| {
+                    self.run_docker_cleanup(args).map(|_| ())
+                })
+                .ok();
             }
         }
+        let _ = self.reclaim_stale_job_owned_docker(&container.name, &container.daemon_id);
     }
 
-    fn reclaim_stale_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
-        crate::docker_lease::reclaim_stale_job_owned(job_id, |args| {
+    fn reclaim_stale_job_owned_docker(&mut self, job_id: &str, daemon_id: &str) -> Result<()> {
+        crate::docker_lease::reclaim_stale_job_owned(job_id, daemon_id, |args| {
             self.run_docker_cleanup(args).map(|result| result.stdout)
         })
     }
@@ -4066,17 +4457,28 @@ where
         self.docker_lease.take();
     }
 
-    fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
-        let result = self.runner.run("docker", args)?;
-        if result.code != 0 {
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+    fn run_docker_timeout(&mut self, args: &[String], timeout: Duration) -> Result<CommandResult> {
+        self.run_docker_with_env_timeout(args, &[], timeout)
+    }
+
+    fn run_bounded_probe(&mut self, args: &[String], deadline: Instant) -> Result<CommandResult> {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        if timeout.is_zero() {
+            bail!("Docker service probe exceeded its 30-second budget");
         }
-        Ok(result)
+        self.run_timeout_with_env("docker", args, &[], timeout)
+    }
+
+    fn probe_diagnostic(&mut self, args: &[String], deadline: Instant) -> String {
+        match self.run_bounded_probe(args, deadline) {
+            Ok(result) => format!(
+                "code={}, stdout={}, stderr={}",
+                result.code,
+                result.stdout.trim(),
+                result.stderr.trim()
+            ),
+            Err(error) => format!("unavailable: {error:#}"),
+        }
     }
 
     fn with_docker_lifecycle<T>(
@@ -4088,19 +4490,29 @@ where
     }
 
     fn run_docker_cleanup(&mut self, args: &[String]) -> Result<CommandResult> {
-        if args.first().is_some_and(|arg| arg == "rm") {
-            self.run_docker_remove_container(args)
-        } else {
-            self.run_docker(args)
+        let result = self
+            .runner
+            .run_timeout("docker", args, TEARDOWN_RM_TIMEOUT)?;
+        if result.code != 0 {
+            bail!(
+                "docker {} failed with code {}: {}",
+                args.join(" "),
+                result.code,
+                result.stderr
+            );
         }
+        Ok(result)
     }
 
-    fn run_docker_with_env(
+    fn run_docker_with_env_timeout(
         &mut self,
         args: &[String],
         env: &[(String, String)],
+        timeout: Duration,
     ) -> Result<CommandResult> {
-        let result = self.runner.run_with_env("docker", args, env)?;
+        let result = self
+            .run_timeout_with_env("docker", args, env, timeout)
+            .context("run timed Docker command")?;
         if result.code != 0 {
             bail!(
                 "docker {} failed with code {}: {}",
@@ -4120,15 +4532,13 @@ where
             // Docker reports this when another rm request is already in flight for
             // the same container (e.g. the container exited on its own and Docker
             // started its own GC pass concurrently with our `docker rm --force`).
-            // The container IS being removed — treat it as success so a clean
-            // container removal does not cause the slot to cycle unnecessarily.
-            // A bounded timeout (Created/removing BuildKit) is the same class:
-            // job teardown proceeds; doctor/boot retry until the object is gone.
-            if result.code == 124
-                || (result.stderr.contains("removal of container")
-                    && result.stderr.contains("is already in progress"))
+            if result.stderr.contains("removal of container")
+                && result.stderr.contains("is already in progress")
             {
-                return Ok(result);
+                bail!(
+                    "docker {} removal is already in progress; cleanup must revalidate",
+                    args.join(" ")
+                );
             }
             bail!(
                 "docker {} failed with code {}: {}",
@@ -4145,10 +4555,13 @@ where
         // services report running/healthy within the first second, so a fixed
         // 1s poll added up to ~1s of dead time per service on the hot path.
         let mut delay = Duration::from_millis(100);
-        let mut waited = Duration::ZERO;
-        let budget = Duration::from_secs(30);
+        let deadline = Instant::now() + SERVICE_READINESS_BUDGET;
         loop {
-            let result = self.run_docker(&service.health_status_args())?;
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            if timeout.is_zero() {
+                break;
+            }
+            let result = self.run_docker_timeout(&service.health_status_args(), timeout)?;
             match result.stdout.trim() {
                 "healthy" | "running" | "" => return Ok(()),
                 "exited" | "dead" => {
@@ -4158,11 +4571,11 @@ where
                     )
                 }
                 _ => {
-                    if waited >= budget {
+                    let sleep_for = delay.min(deadline.saturating_duration_since(Instant::now()));
+                    if sleep_for.is_zero() {
                         break;
                     }
-                    thread::sleep(delay);
-                    waited += delay;
+                    thread::sleep(sleep_for);
                     delay = (delay * 2).min(Duration::from_millis(1600));
                 }
             }
@@ -12231,75 +12644,66 @@ fn timeout_command_result(stdout: String, mut stderr: String) -> CommandResult {
     }
 }
 
+fn canceled_command_result(stdout: String, mut stderr: String) -> CommandResult {
+    if !stderr.is_empty() {
+        stderr.push('\n');
+    }
+    stderr.push_str("##[error]The operation was canceled.\n");
+    CommandResult {
+        code: 130,
+        stdout,
+        stderr,
+    }
+}
+
 fn spawn_docker_timeout_watchdog(
-    program: &str,
-    args: &[String],
     child_pid: u32,
     timeout: Duration,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     mpsc::Sender<()>,
     Option<thread::JoinHandle<()>>,
 ) {
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (watchdog_cancel, watchdog_cancelled) = mpsc::channel();
-    let container_name = docker_timeout_container_name(program, args);
     let timed_out_thread = std::sync::Arc::clone(&timed_out);
+    let canceled_thread = std::sync::Arc::clone(&canceled);
     let watchdog = Some(thread::spawn(move || {
-        if watchdog_cancelled.recv_timeout(timeout).is_err() {
-            timed_out_thread.store(true, std::sync::atomic::Ordering::SeqCst);
-            if let Some(container_name) = container_name {
-                let _ = Command::new("docker")
-                    .arg("kill")
-                    .arg(container_name)
-                    .status();
+        let started = Instant::now();
+        loop {
+            if cancellation
+                .as_ref()
+                .is_some_and(|signal| signal.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                canceled_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+                kill_command_process_group(child_pid);
+                break;
             }
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", &child_pid.to_string()])
-                .status();
+
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                if cancellation
+                    .as_ref()
+                    .is_some_and(|signal| signal.load(std::sync::atomic::Ordering::SeqCst))
+                {
+                    canceled_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    timed_out_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                kill_command_process_group(child_pid);
+                break;
+            }
+
+            match watchdog_cancelled.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
         }
     }));
-    (timed_out, watchdog_cancel, watchdog)
-}
-
-fn docker_timeout_container_name(program: &str, args: &[String]) -> Option<String> {
-    if program != "docker" {
-        return None;
-    }
-    match args.first().map(String::as_str) {
-        Some("exec") => docker_exec_container_name(&args[1..]),
-        Some("run") => docker_run_container_name(&args[1..]),
-        _ => None,
-    }
-}
-
-fn docker_exec_container_name(args: &[String]) -> Option<String> {
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "-i" | "-t" | "--interactive" | "--tty" | "--privileged" => index += 1,
-            "-w" | "--workdir" | "-e" | "--env" | "--env-file" | "-u" | "--user" => index += 2,
-            value if value.starts_with('-') => return None,
-            _ => return Some(args[index].clone()),
-        }
-    }
-    None
-}
-
-fn docker_run_container_name(args: &[String]) -> Option<String> {
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--name" => return args.get(index + 1).cloned(),
-            "-v" | "--volume" | "--workdir" | "-w" | "-e" | "--env" | "--env-file"
-            | "--network" | "--entrypoint" | "--user" | "-u" => index += 2,
-            value if value.starts_with("--name=") => {
-                return value.strip_prefix("--name=").map(ToString::to_string);
-            }
-            _ => index += 1,
-        }
-    }
-    None
+    (timed_out, canceled, watchdog_cancel, watchdog)
 }
 
 #[cfg(test)]
@@ -12747,7 +13151,7 @@ mod tests {
         fs,
         path::PathBuf,
         sync::{
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc,
         },
         time::{SystemTime, UNIX_EPOCH},
@@ -12768,6 +13172,140 @@ mod tests {
             start.elapsed()
         );
         assert_eq!(result.code, 124);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_command_runner_timeout_kills_process_group_descendant() {
+        let start = std::time::Instant::now();
+        let result = ProcessCommandRunner
+            .run_timeout(
+                "sh",
+                &["-c".into(), "sleep 30".into()],
+                Duration::from_millis(250),
+            )
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "timeout watchdog must kill the shell's process group, elapsed={:?}",
+            start.elapsed()
+        );
+        assert_eq!(result.code, 124);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_command_runner_cancellation_kills_blocked_streaming_child() {
+        let canceled = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&canceled);
+        let signal = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        let mut runner = ProcessCommandRunner;
+        let result = runner
+            .run_streaming_timeout_with_env_and_cancellation(
+                "sleep",
+                &["30".into()],
+                &[],
+                Duration::from_secs(30),
+                canceled,
+                &mut |_, _| {},
+            )
+            .unwrap();
+        signal.join().unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancellation watchdog must kill sleep, elapsed={:?}",
+            start.elapsed()
+        );
+        assert_eq!(result.code, 130);
+        assert!(result.stderr.contains("The operation was canceled"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_command_runner_cancellation_kills_blocked_timed_child() {
+        let canceled = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&canceled);
+        let signal = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        let mut runner = ProcessCommandRunner;
+        let result = runner
+            .run_timeout_with_env_and_cancellation(
+                "sleep",
+                &["30".into()],
+                &[],
+                Duration::from_secs(30),
+                canceled,
+            )
+            .unwrap();
+        signal.join().unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancellation watchdog must kill sleep, elapsed={:?}",
+            start.elapsed()
+        );
+        assert_eq!(result.code, 130);
+        assert!(result.stderr.contains("The operation was canceled"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_command_runner_cancellation_kills_blocked_stdin_child() {
+        let canceled = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&canceled);
+        let signal = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        let mut runner = ProcessCommandRunner;
+        let result = runner
+            .run_with_stdin_timeout_with_env_and_cancellation(
+                "sh",
+                &["-c".into(), "sleep 30".into()],
+                &[],
+                "payload\n",
+                Duration::from_secs(30),
+                canceled,
+            )
+            .unwrap();
+        signal.join().unwrap();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancellation watchdog must kill sleep, elapsed={:?}",
+            start.elapsed()
+        );
+        assert_eq!(result.code, 130);
+        assert!(result.stderr.contains("The operation was canceled"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_command_runner_cancellation_never_reports_stream_eof_as_success() {
+        let canceled = Arc::new(AtomicBool::new(true));
+        let mut runner = ProcessCommandRunner;
+        let result = runner
+            .run_streaming_timeout_with_env_and_cancellation(
+                "sh",
+                &["-c".into(), "exit 0".into()],
+                &[],
+                Duration::from_secs(5),
+                canceled,
+                &mut |_, _| {},
+            )
+            .unwrap();
+
+        assert_eq!(result.code, 130);
+        assert!(result.stderr.contains("The operation was canceled"));
     }
 
     #[test]
@@ -12794,41 +13332,6 @@ mod tests {
         assert_eq!(result.stdout, "stdout\n");
         assert!(result.stderr.contains("timeout-minutes"));
         assert!(result.stderr.contains("The operation was canceled"));
-    }
-
-    #[test]
-    fn docker_timeout_container_name_finds_exec_and_run_targets() {
-        let args = vec![
-            "exec".to_string(),
-            "-i".to_string(),
-            "--workdir".to_string(),
-            "/__w".to_string(),
-            "--env-file".to_string(),
-            "/tmp/env".to_string(),
-            "-e".to_string(),
-            "NAME=value".to_string(),
-            "velnor-job-1".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            "sleep 60".to_string(),
-        ];
-
-        assert_eq!(
-            docker_timeout_container_name("docker", &args).as_deref(),
-            Some("velnor-job-1")
-        );
-        let run_args = vec![
-            "run".to_string(),
-            "--rm".to_string(),
-            "--name".to_string(),
-            "velnor-node-action-velnor-job-1".to_string(),
-            "node:24-bookworm".to_string(),
-        ];
-        assert_eq!(
-            docker_timeout_container_name("docker", &run_args).as_deref(),
-            Some("velnor-node-action-velnor-job-1")
-        );
-        assert_eq!(docker_timeout_container_name("git", &args), None);
     }
 
     #[derive(Default)]
@@ -12914,6 +13417,51 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct TimeoutRecordingRunner {
+        inner: RecordingRunner,
+        timeouts: Vec<Duration>,
+        cancellation_calls: usize,
+    }
+
+    impl CommandRunner for TimeoutRecordingRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.inner.run(program, args)
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            self.inner.run_with_env(program, args, env)
+        }
+
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.timeouts.push(timeout);
+            self.inner.run_with_env(program, args, env)
+        }
+
+        fn run_timeout_with_env_and_cancellation(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            timeout: Duration,
+            _cancellation: Arc<AtomicBool>,
+        ) -> Result<CommandResult> {
+            self.cancellation_calls += 1;
+            self.run_timeout_with_env(program, args, env, timeout)
+        }
+    }
+
+    #[derive(Default)]
     struct BuildkitCleanupRunner {
         calls: Vec<Vec<String>>,
     }
@@ -12923,11 +13471,11 @@ mod tests {
             self.calls.push(args.to_vec());
             let stdout = match args.first().map(String::as_str) {
                 Some("ps") => {
-                    "bk1\tbuildx_buildkit_velnor-builder-job-scope0\tjob\t\tcreated\n\
-                     bk2\tbuildx_buildkit_velnor-builder-job-scope0\t\t\tremoving\n"
+                    "bk1\tbuildx_buildkit_velnor-builder-job-scope0\tjob\ttest-daemon\texited\n\
+                     bk2\tbuildx_buildkit_velnor-builder-job-scope0\tjob\ttest-daemon\tdead\n"
                 }
                 Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                    "buildx_buildkit_velnor-builder-job-scope0_state\n"
+                    "buildx_buildkit_velnor-builder-job-scope0_state\tjob\ttest-daemon\n"
                 }
                 _ => "",
             };
@@ -13752,34 +14300,31 @@ esac
         }
     }
 
-    fn assert_cleanup_reclaims_job_docker(
-        calls: &[(String, Vec<String>)],
-        rm_index: usize,
-        temp: &Path,
-    ) {
-        assert_eq!(calls[rm_index].1[0], "rm");
+    fn assert_cleanup_reclaims_job_docker(calls: &[(String, Vec<String>)], cleanup_index: usize) {
         assert_eq!(
-            calls[rm_index + 1].1,
-            crate::docker_lease::list_owned_containers_args("job")
+            calls[cleanup_index].1,
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
-            calls[rm_index + 2].1,
-            crate::docker_lease::list_owned_networks_args("job")
+            calls[cleanup_index + 1].1,
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
-            calls[rm_index + 3].1,
-            crate::docker_lease::list_owned_volumes_args("job")
+            calls[cleanup_index + 2].1,
+            crate::docker_lease::list_daemon_owned_networks_args("job", "test-daemon")
         );
         assert_eq!(
-            calls[rm_index + 4].1,
-            crate::docker_lease::list_job_buildkit_format_args()
+            calls[cleanup_index + 3].1,
+            crate::docker_lease::list_daemon_owned_volumes_args("job", "test-daemon")
         );
-        let scope = sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap());
-        assert_eq!(calls[rm_index + 5].1[0], "volume");
-        assert!(calls[rm_index + 5].1.contains(&format!(
-            "name={}{scope}",
-            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
-        )));
+        assert_eq!(
+            calls[cleanup_index + 4].1,
+            crate::docker_lease::list_exact_job_buildkit_format_args("job", "test-daemon")
+        );
+        assert_eq!(
+            calls[cleanup_index + 5].1,
+            crate::docker_lease::list_exact_job_buildkit_volume_format_args("job", "test-daemon")
+        );
     }
 
     fn expected_network_create_args() -> Vec<String> {
@@ -13835,12 +14380,31 @@ esac
 
         executor.cleanup(&spec).unwrap();
         let calls = &executor.runner().calls;
-        assert!(calls
+        assert!(calls.iter().any(|(_, args)| {
+            args == &crate::docker_lease::list_daemon_owned_containers_state_args(
+                &spec.name,
+                &spec.daemon_id,
+            )
+        }));
+        assert!(!calls
             .iter()
-            .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
-        assert!(calls
+            .any(|(_, args)| args == &spec.remove_container_args()));
+        assert!(calls.iter().any(|(_, args)| {
+            args == &crate::docker_lease::list_exact_job_buildkit_format_args(
+                &spec.name,
+                &spec.daemon_id,
+            )
+        }));
+        let cleanup_index = calls
             .iter()
-            .any(|(_, args)| args == &crate::docker_lease::list_job_buildkit_format_args()));
+            .position(|(_, args)| {
+                args == &crate::docker_lease::list_daemon_owned_containers_state_args(
+                    &spec.name,
+                    &spec.daemon_id,
+                )
+            })
+            .expect("deferred cleanup lists the job container by ownership");
+        assert_cleanup_reclaims_job_docker(calls, cleanup_index);
         assert!(!calls
             .iter()
             .any(|(_, args)| args == &spec.remove_network_args()));
@@ -13855,11 +14419,19 @@ esac
         impl CommandRunner for ReclaimRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 self.calls.push(args.to_vec());
-                let stdout = if args == crate::docker_lease::list_owned_containers_args("job") {
-                    "guest-id\tguest-postgres\nbk-id\tbuildx_buildkit_velnor-builder-job0\n".into()
-                } else if args == crate::docker_lease::list_owned_networks_args("job") {
+                let stdout = if args
+                    == crate::docker_lease::list_daemon_owned_containers_state_args(
+                        "job",
+                        "test-daemon",
+                    ) {
+                    "guest-id\tguest-postgres\tjob\ttest-daemon\texited\n".to_string()
+                } else if args
+                    == crate::docker_lease::list_daemon_owned_networks_args("job", "test-daemon")
+                {
                     "guest-net\n".into()
-                } else if args == crate::docker_lease::list_owned_volumes_args("job") {
+                } else if args
+                    == crate::docker_lease::list_daemon_owned_volumes_args("job", "test-daemon")
+                {
                     "guest-vol\n".into()
                 } else {
                     String::new()
@@ -13878,9 +14450,12 @@ esac
         let mut executor = DockerJobEngine::new(ReclaimRunner { calls: Vec::new() });
         executor.cleanup(&spec).unwrap();
         let calls = &executor.runner().calls;
-        assert!(calls
-            .iter()
-            .any(|args| args == &crate::docker_lease::list_owned_containers_args("job")));
+        assert!(calls.iter().any(|args| {
+            args == &crate::docker_lease::list_daemon_owned_containers_state_args(
+                "job",
+                "test-daemon",
+            )
+        }));
         assert!(calls
             .iter()
             .any(|args| args
@@ -13909,8 +14484,8 @@ esac
         let mut executor = DockerJobEngine::new(BuildkitCleanupRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
-        // Created + removing of this job's builder must both be force-removed,
-        // one docker rm per id. Batching those ids deadlocks Engine 29 DELETE.
+        // Terminal builders are removed one at a time after exact relisting.
+        // Batching those ids deadlocks Engine 29 DELETE.
 
         for call in &executor.runner().calls {
             if call.first().map(String::as_str) != Some("rm") {
@@ -13930,28 +14505,21 @@ esac
         assert_eq!(
             executor.runner().calls,
             vec![
-                crate::docker_lease::list_job_buildkit_format_args(),
-                crate::docker_lease::force_remove_one_container_args("bk1"),
-                crate::docker_lease::force_remove_one_container_args("bk2"),
-                vec![
-                    "volume",
-                    "ls",
-                    "--quiet",
-                    "--filter",
-                    "name=buildx_buildkit_velnor-builder-job-scope",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>(),
-                vec![
-                    "volume",
-                    "rm",
-                    "--force",
-                    "buildx_buildkit_velnor-builder-job-scope0_state",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>(),
+                crate::docker_lease::list_exact_job_buildkit_format_args("job", "test-daemon"),
+                crate::docker_lease::list_exact_job_buildkit_format_args("job", "test-daemon"),
+                crate::docker_lease::remove_one_container_args("bk1"),
+                crate::docker_lease::remove_one_container_args("bk2"),
+                crate::docker_lease::list_exact_job_buildkit_volume_format_args(
+                    "job",
+                    "test-daemon",
+                ),
+                crate::docker_lease::list_exact_job_buildkit_volume_format_args(
+                    "job",
+                    "test-daemon",
+                ),
+                crate::docker_lease::remove_volume_args(&[
+                    "buildx_buildkit_velnor-builder-job-scope0_state".into(),
+                ]),
             ]
         );
         fs::remove_dir_all(root).unwrap();
@@ -13965,29 +14533,66 @@ esac
         struct LeaseOrderRunner {
             lease_path: PathBuf,
             job_rm_saw_lease: bool,
-            buildkit_saw_dead_lease: bool,
+            job_list_count: usize,
+            buildkit_list_args: Vec<String>,
+            buildkit_list_output: String,
+            volume_list_args: Vec<String>,
+            volume_list_output: String,
+            calls: Vec<Vec<String>>,
         }
 
         impl CommandRunner for LeaseOrderRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 let lease_live = self.lease_path.exists();
-                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                let job_list_args = crate::docker_lease::list_daemon_owned_containers_state_args(
+                    "job",
+                    "test-daemon",
+                );
+                if args == job_list_args.as_slice() {
                     assert!(
-                        lease_live,
-                        "lease must stay mounted until the job container is removed"
+                        !lease_live,
+                        "lease must be aborted before cleanup discovery or removal"
+                    );
+                    self.job_list_count += 1;
+                } else if args
+                    == crate::docker_lease::force_remove_container_args(&["job-id".into()])
+                        .as_slice()
+                {
+                    assert!(
+                        !lease_live,
+                        "lease must be aborted before cleanup discovery or removal"
                     );
                     self.job_rm_saw_lease = true;
                 }
-                if args == crate::docker_lease::list_job_buildkit_format_args() {
+                let stdout = if args == job_list_args.as_slice() && self.job_list_count == 1 {
+                    "job-id\tjob\tjob\ttest-daemon\trunning\n".to_string()
+                } else if args == self.buildkit_list_args.as_slice() {
                     assert!(
                         !lease_live,
                         "in-flight Engine Start must be aborted before BuildKit reclaim"
                     );
-                    self.buildkit_saw_dead_lease = true;
-                }
+                    self.buildkit_list_output.clone()
+                } else if args == self.volume_list_args.as_slice() {
+                    assert!(
+                        !lease_live,
+                        "BuildKit volume reclaim must follow lease abort"
+                    );
+                    self.volume_list_output.clone()
+                } else if args.first().map(String::as_str) == Some("volume")
+                    && args.get(1).map(String::as_str) == Some("rm")
+                {
+                    assert!(
+                        !args.iter().any(|arg| arg == "--force"),
+                        "BuildKit volume cleanup must be non-force"
+                    );
+                    String::new()
+                } else {
+                    String::new()
+                };
+                self.calls.push(args.to_vec());
                 Ok(CommandResult {
                     code: 0,
-                    stdout: String::new(),
+                    stdout,
                     stderr: String::new(),
                 })
             }
@@ -14017,10 +14622,24 @@ esac
             "lease socket must exist before cleanup"
         );
         let spec = container(&temp);
+        let scope = sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap());
+        let builder = format!(
+            "{}{scope}0",
+            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
+        );
+        let buildkit_list_args =
+            crate::docker_lease::list_exact_job_buildkit_format_args("job", "test-daemon");
+        let volume_list_args =
+            crate::docker_lease::list_exact_job_buildkit_volume_format_args("job", "test-daemon");
         let mut executor = DockerJobEngine::new(LeaseOrderRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
-            buildkit_saw_dead_lease: false,
+            job_list_count: 0,
+            buildkit_list_args: buildkit_list_args.clone(),
+            buildkit_list_output: format!("buildkit-id\t{builder}\tjob\ttest-daemon\texited\n"),
+            volume_list_args: volume_list_args.clone(),
+            volume_list_output: format!("{builder}_state\tjob\ttest-daemon\n"),
+            calls: Vec::new(),
         })
         .with_docker_lease(lease);
         executor.cleanup(&spec).unwrap();
@@ -14029,9 +14648,22 @@ esac
             runner.job_rm_saw_lease,
             "cleanup must remove the job container"
         );
-        assert!(
-            runner.buildkit_saw_dead_lease,
-            "cleanup must reclaim BuildKit after aborting the lease"
+        assert_eq!(
+            runner.calls,
+            vec![
+                crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon",),
+                crate::docker_lease::force_remove_container_args(&["job-id".into()]),
+                crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon",),
+                crate::docker_lease::list_daemon_owned_networks_args("job", "test-daemon"),
+                crate::docker_lease::list_daemon_owned_volumes_args("job", "test-daemon"),
+                buildkit_list_args.clone(),
+                buildkit_list_args,
+                crate::docker_lease::remove_one_container_args("buildkit-id"),
+                volume_list_args.clone(),
+                volume_list_args,
+                crate::docker_lease::remove_volume_args(&[format!("{builder}_state")]),
+            ],
+            "cleanup must abort the lease before exact, revalidated BuildKit cleanup"
         );
         assert!(!lease_path.exists(), "cleanup must drop the lease socket");
         fs::remove_dir_all(temp).ok();
@@ -14046,23 +14678,42 @@ esac
         struct SkipBuildkitRunner {
             lease_path: PathBuf,
             job_rm_saw_lease: bool,
+            job_list_count: usize,
             calls: Vec<Vec<String>>,
         }
 
         impl CommandRunner for SkipBuildkitRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 let lease_live = self.lease_path.exists();
-                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                let job_list_args = crate::docker_lease::list_daemon_owned_containers_state_args(
+                    "job",
+                    "test-daemon",
+                );
+                if args == job_list_args.as_slice() {
                     assert!(
-                        lease_live,
-                        "lease must stay mounted until the job container is removed"
+                        !lease_live,
+                        "lease must be aborted before cleanup discovery or removal"
+                    );
+                    self.job_list_count += 1;
+                } else if args
+                    == crate::docker_lease::force_remove_container_args(&["job-id".into()])
+                        .as_slice()
+                {
+                    assert!(
+                        !lease_live,
+                        "lease must be aborted before cleanup discovery or removal"
                     );
                     self.job_rm_saw_lease = true;
                 }
+                let stdout = if args == job_list_args.as_slice() && self.job_list_count == 1 {
+                    "job-id\tjob\tjob\ttest-daemon\trunning\n".to_string()
+                } else {
+                    String::new()
+                };
                 self.calls.push(args.to_vec());
                 Ok(CommandResult {
                     code: 0,
-                    stdout: String::new(),
+                    stdout,
                     stderr: String::new(),
                 })
             }
@@ -14091,6 +14742,7 @@ esac
         let mut executor = DockerJobEngine::new(SkipBuildkitRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
+            job_list_count: 0,
             calls: Vec::new(),
         })
         .with_docker_lease(lease);
@@ -14098,10 +14750,12 @@ esac
         let runner = executor.into_runner();
         assert!(runner.job_rm_saw_lease);
         assert!(
-            runner
-                .calls
-                .iter()
-                .all(|args| args != &crate::docker_lease::list_job_buildkit_format_args()),
+            runner.calls.iter().all(|args| {
+                args != &crate::docker_lease::list_exact_job_buildkit_format_args(
+                    &spec.name,
+                    &spec.daemon_id,
+                )
+            }),
             "slot path must not wait on BuildKit rm: {:?}",
             runner.calls
         );
@@ -14216,7 +14870,7 @@ esac
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/step1_output".into()));
-        assert_cleanup_reclaims_job_docker(calls, 3, &temp);
+        assert_cleanup_reclaims_job_docker(calls, 3);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -14417,7 +15071,7 @@ esac
             .unwrap();
 
         assert_eq!(result.exit_code, 7);
-        assert_cleanup_reclaims_job_docker(&executor.runner().calls, 3, &temp);
+        assert_cleanup_reclaims_job_docker(&executor.runner().calls, 3);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -14463,7 +15117,7 @@ esac
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "exec");
-        assert_cleanup_reclaims_job_docker(calls, 4, &temp);
+        assert_cleanup_reclaims_job_docker(calls, 4);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -17723,7 +18377,62 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
+    fn service_startup_uses_bounded_cancellation_aware_docker_calls() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut container = container(&temp);
+        container.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        let mut executor = DockerJobEngine::new(TimeoutRecordingRunner::default())
+            .with_cancellation(Arc::new(AtomicBool::new(false)));
+
+        executor.start_job_environment_once(&container).unwrap();
+
+        let runner = executor.runner();
+        assert_eq!(runner.cancellation_calls, runner.timeouts.len());
+        assert_eq!(runner.timeouts.len(), runner.inner.calls.len());
+        assert!(runner
+            .timeouts
+            .iter()
+            .all(|timeout| !timeout.is_zero() && *timeout <= STARTUP_DOCKER_TIMEOUT));
+        executor.defuse_job_network_guard();
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn service_cleanup_is_separate_from_deferred_job_teardown() {
+        #[derive(Default)]
+        struct ServiceCleanupRunner {
+            calls: Vec<Vec<String>>,
+        }
+
+        impl CommandRunner for ServiceCleanupRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                self.calls.push(args.to_vec());
+                let stdout = if args
+                    == crate::docker_lease::list_daemon_owned_containers_state_args(
+                        "job",
+                        "test-daemon",
+                    ) {
+                    "owned-service-id\tsvc\tjob\ttest-daemon\texited\n".to_string()
+                } else {
+                    String::new()
+                };
+                Ok(CommandResult {
+                    code: 0,
+                    stdout,
+                    stderr: String::new(),
+                })
+            }
+        }
+
         let temp = temp_dir();
         let mut spec = container(&temp);
         spec.services.push(ServiceContainerSpec {
@@ -17735,18 +18444,30 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ports: Vec::new(),
             options: Vec::new(),
         });
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(ServiceCleanupRunner::default());
 
         executor.cleanup_services(&spec).unwrap();
 
-        assert_eq!(executor.runner().calls.len(), 1);
-        assert_eq!(executor.runner().calls[0].1, vec!["rm", "--force", "svc"]);
+        assert_eq!(
+            executor.runner().calls,
+            vec![
+                crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon",),
+                crate::docker_lease::force_remove_container_args(&["owned-service-id".into()]),
+            ]
+        );
     }
 
     struct ContainerRemovalRaceRunner;
 
     impl CommandRunner for ContainerRemovalRaceRunner {
-        fn run(&mut self, _program: &str, _args: &[String]) -> Result<CommandResult> {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            if args.first().map(String::as_str) == Some("ps") {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: "service-id\tsvc\tjob\ttest-daemon\texited\n".into(),
+                    stderr: String::new(),
+                });
+            }
             Ok(CommandResult {
                 code: 1,
                 stdout: String::new(),
@@ -17758,7 +18479,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
-    fn service_cleanup_treats_in_progress_removal_as_success() {
+    fn service_cleanup_rejects_in_progress_removal_without_disappearance() {
         let temp = temp_dir();
         let mut spec = container(&temp);
         spec.services.push(ServiceContainerSpec {
@@ -17771,29 +18492,91 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             options: Vec::new(),
         });
 
-        DockerJobEngine::new(ContainerRemovalRaceRunner)
+        let error = DockerJobEngine::new(ContainerRemovalRaceRunner)
             .cleanup_services(&spec)
-            .unwrap();
+            .unwrap_err();
+        assert!(error.to_string().contains("cleanup must revalidate"));
+    }
+
+    #[test]
+    fn cleanup_rejects_in_progress_removal_without_postcondition() {
+        let args = vec!["rm".into(), "--force".into(), "service-id".into()];
+        let error = DockerJobEngine::new(ContainerRemovalRaceRunner)
+            .run_docker_cleanup(&args)
+            .unwrap_err();
+        assert!(error.to_string().contains("already in progress"));
+    }
+
+    struct CleanupTimeoutRunner {
+        timeouts: Vec<Duration>,
+    }
+
+    impl CommandRunner for CleanupTimeoutRunner {
+        fn run(&mut self, _program: &str, _args: &[String]) -> Result<CommandResult> {
+            panic!("cleanup Docker commands must use the bounded runner")
+        }
+
+        fn run_timeout(
+            &mut self,
+            _program: &str,
+            _args: &[String],
+            timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.timeouts.push(timeout);
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn cleanup_callback_bounds_every_docker_command() {
+        let mut executor = DockerJobEngine::new(CleanupTimeoutRunner {
+            timeouts: Vec::new(),
+        });
+        for args in [
+            vec!["ps".into(), "--all".into()],
+            vec!["network".into(), "ls".into()],
+            vec!["volume".into(), "ls".into()],
+            vec!["rm".into(), "--force".into(), "container-id".into()],
+            vec!["network".into(), "rm".into(), "network-id".into()],
+            vec!["volume".into(), "rm".into(), "volume-id".into()],
+        ] {
+            executor.run_docker_cleanup(&args).unwrap();
+        }
+        assert_eq!(executor.runner().timeouts, vec![TEARDOWN_RM_TIMEOUT; 6]);
     }
 
     #[derive(Default)]
     struct StaleServiceCleanupRunner {
         calls: Vec<Vec<String>>,
+        container_list_count: usize,
     }
 
     impl CommandRunner for StaleServiceCleanupRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push(args.to_vec());
-            let running_service_refusal =
-                args.len() == 2 && args[0] == "rm" && args[1] == "running-service";
+            let list_args =
+                crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon");
+            if args == list_args.as_slice() {
+                self.container_list_count += 1;
+                let stdout = match self.container_list_count {
+                    1 => "running-id\trunning-service\tjob\ttest-daemon\trunning\n",
+                    2 => "stopped-id\tstopped-service\tjob\ttest-daemon\texited\n",
+                    _ => "",
+                };
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: stdout.into(),
+                    stderr: String::new(),
+                });
+            }
             Ok(CommandResult {
-                code: i32::from(running_service_refusal),
+                code: 0,
                 stdout: String::new(),
-                stderr: if running_service_refusal {
-                    "cannot remove a running container".into()
-                } else {
-                    String::new()
-                },
+                stderr: String::new(),
             })
         }
     }
@@ -17825,30 +18608,40 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         executor.cleanup_stale(&spec);
 
         let calls = &executor.runner().calls;
-        assert_eq!(calls[0], vec!["rm", "running-service"]);
-        assert_eq!(calls[1], vec!["rm", "stopped-service"]);
-        assert!(calls[..2]
-            .iter()
-            .all(|args| !args.iter().any(|arg| arg == "--force")));
+        assert_eq!(
+            calls[0],
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
+        );
+        assert_eq!(
+            calls[1],
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
+        );
         assert_eq!(
             calls[2],
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::remove_one_container_args("stopped-id")
         );
         assert_eq!(
             calls[3],
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
             calls[4],
-            crate::docker_lease::list_owned_networks_args("job")
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
-            calls
-                .iter()
-                .filter(|args| args.first().is_some_and(|arg| arg == "rm"))
-                .count(),
-            2
+            calls[5],
+            crate::docker_lease::list_daemon_owned_networks_args("job", "test-daemon")
         );
+        assert_eq!(
+            calls[6],
+            crate::docker_lease::list_daemon_owned_volumes_args("job", "test-daemon")
+        );
+        assert!(!calls.iter().any(|args| {
+            args == &crate::docker_lease::force_remove_network_args(&["net".into()])
+        }));
+        assert!(!calls
+            .iter()
+            .any(|args| args == &vec!["rm", "running-service"]));
         fs::remove_dir_all(temp).ok();
     }
 
@@ -17883,26 +18676,21 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(
             calls[1].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
             calls[2].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
             calls[3].1,
-            crate::docker_lease::list_owned_networks_args("job")
+            crate::docker_lease::list_daemon_owned_networks_args("job", "test-daemon")
         );
         assert_eq!(
             calls[4].1,
-            crate::docker_lease::list_owned_volumes_args("job")
+            crate::docker_lease::list_daemon_owned_volumes_args("job", "test-daemon")
         );
-        // Retry cleanup removes the job network before the retry recreates it.
-        assert_eq!(
-            calls[5].1,
-            crate::docker_lease::force_remove_network_args(&["net".to_string()])
-        );
-        assert_eq!(calls[6].1, expected_network_create_args());
+        assert_eq!(calls[5].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -17914,58 +18702,52 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let error = executor
             .start_job_environment(&container(&temp))
             .unwrap_err();
 
-        assert!(error.to_string().contains("docker run"));
+        assert!(error.to_string().contains("docker network create"));
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(
             calls[1].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
             calls[2].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
             calls[3].1,
-            crate::docker_lease::list_owned_networks_args("job")
+            crate::docker_lease::list_daemon_owned_networks_args("job", "test-daemon")
         );
         assert_eq!(
             calls[4].1,
-            crate::docker_lease::list_owned_volumes_args("job")
+            crate::docker_lease::list_daemon_owned_volumes_args("job", "test-daemon")
+        );
+        assert_eq!(calls[5].1, expected_network_create_args());
+        assert_eq!(
+            calls[6].1,
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
         assert_eq!(
-            calls[5].1,
-            crate::docker_lease::force_remove_network_args(&["net".to_string()])
+            calls[7].1,
+            crate::docker_lease::list_daemon_owned_containers_state_args("job", "test-daemon")
         );
-        assert_eq!(calls[6].1, expected_network_create_args());
-        assert_eq!(calls[7].1[0], "run");
         assert_eq!(
             calls[8].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::list_daemon_owned_networks_args("job", "test-daemon")
         );
         assert_eq!(
             calls[9].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            crate::docker_lease::list_daemon_owned_volumes_args("job", "test-daemon")
         );
-        assert_eq!(
-            calls[10].1,
-            crate::docker_lease::list_owned_networks_args("job")
-        );
-        assert_eq!(
-            calls[11].1,
-            crate::docker_lease::list_owned_volumes_args("job")
-        );
-        assert_eq!(
-            calls[12].1,
-            crate::docker_lease::force_remove_network_args(&["net".to_string()])
-        );
+        assert!(!calls.iter().any(|(_, args)| {
+            args == &crate::docker_lease::force_remove_network_args(&["net".to_string()])
+        }));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -20997,19 +21779,32 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::new(TimeoutRecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
-        let calls = &executor.runner().calls;
-        assert_eq!(calls[2].1[0], "build");
-        assert!(calls[2]
-            .1
-            .contains(&"velnor-action-acme-docker-v1-root".into()));
+        let expected_timeout = effective_step_timeout(None, None);
+        let timeouts = &executor.runner().timeouts;
+        assert!(timeouts.len() >= 2, "Docker action build and run timeouts");
         assert_eq!(
-            executor.runner().env[2],
+            &timeouts[timeouts.len() - 2..],
+            &[expected_timeout, expected_timeout],
+            "Docker action build and run must share the bounded step timeout"
+        );
+        let calls = &executor.runner().inner.calls;
+        let (build_index, (_, build_args)) = calls
+            .iter()
+            .enumerate()
+            .find(|(_, (_, args))| {
+                args.first().is_some_and(|arg| arg == "build")
+                    && args.contains(&"velnor-action-acme-docker-v1-root".into())
+            })
+            .expect("Docker action build call");
+        assert!(build_args.contains(&"velnor-action-acme-docker-v1-root".into()));
+        assert_eq!(
+            executor.runner().inner.env[build_index],
             vec![(
                 "DOCKER_CONFIG".into(),
                 temp.join("_velnor/docker-client").display().to_string()
@@ -21023,10 +21818,15 @@ fi"#
                 & 0o777,
             0o700
         );
-        assert_eq!(calls[3].1[0], "run");
-        assert!(calls[3]
-            .1
-            .contains(&"velnor-action-acme-docker-v1-root".into()));
+        let (_, (_, action_run_args)) = calls
+            .iter()
+            .enumerate()
+            .find(|(_, (_, args))| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"velnor-action-acme-docker-v1-root".into())
+            })
+            .expect("Docker action run call");
+        assert!(action_run_args.contains(&"velnor-action-acme-docker-v1-root".into()));
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -21101,7 +21901,7 @@ fi"#
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "run");
         assert_eq!(calls[4].1[0], "exec");
-        assert_cleanup_reclaims_job_docker(calls, 5, &temp);
+        assert_cleanup_reclaims_job_docker(calls, 5);
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
         assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
@@ -25394,6 +26194,38 @@ bitcoin-processor-app.push=true")
         assert!(!calls[0]
             .1
             .contains(&"evil.example/binfmt:latest".to_string()));
+    }
+
+    #[test]
+    fn setup_qemu_uses_cancellation_aware_timeout_and_preserves_step_failure() {
+        let timeout = Duration::from_secs(17);
+        let mut executor = DockerJobEngine::new(TimeoutRecordingRunner {
+            inner: RecordingRunner {
+                codes: vec![23],
+                ..RecordingRunner::default()
+            },
+            ..TimeoutRecordingRunner::default()
+        })
+        .with_cancellation(Arc::new(AtomicBool::new(false)));
+
+        let result = executor
+            .native_setup_qemu(
+                &NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::SetupQemu,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                &JobExecutionState::default(),
+                timeout,
+            )
+            .unwrap();
+
+        assert_eq!(result.exit_code, 23);
+        assert_eq!(executor.runner().timeouts, vec![timeout]);
+        assert_eq!(executor.runner().cancellation_calls, 1);
     }
 
     #[test]

@@ -1,3 +1,7 @@
 [[profile.default.overrides]]
 filter = "test(crash_recovery_reopen_fuzz_has_no_torn_records)"
 slow-timeout = "5m"
+
+[[profile.default.overrides]]
+filter = "package(velnor-runner) + test(idle_resource_scaling_from_one_to_sixteen_slots_is_bounded)"
+threads-required = "num-test-threads"
