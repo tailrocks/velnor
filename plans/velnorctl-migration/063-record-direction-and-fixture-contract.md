@@ -30,7 +30,7 @@ Historical snapshot refreshed 2026-08-24 at Velnor `aed09eb`; the original
 planning-time gaps in steps 1–2 were closed during that historical campaign.
 Current execution follows the operator-assigned branch/focused-PR topology
 recorded in external `../COORDINATION.md`, anchored to 2026-08-31 at main SHA
-`d413b1ef445ec9e6156dbdc1d92b491b5436f77a`; the citations below are live
+`c6e4ed8c290b0029d859d1c749c52e6ab856827a`; the citations below are live
 anchors:
 
 - `docs/vision.md:92-105` records the authoritative direction: performance,
