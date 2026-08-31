@@ -228,6 +228,10 @@ green local test, a shared commit, or partial workflow success.
 
 ## P1 — Prove cache reuse and performance
 
+This documentation-only ledger correction changes no production runtime or
+workflow behavior. Its pull-request validation still consumes normal CI
+capacity; that cost is not production performance evidence.
+
 For each representative workflow in each repository:
 
 - [ ] Run cold, unchanged warm, and unchanged rerun on Velnor.
