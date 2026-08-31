@@ -250,6 +250,10 @@ fn debian_package_ships_boot_persistent_transaction_lock_path() {
         postinst.contains("systemd-tmpfiles --create /usr/lib/tmpfiles.d/velnor-runner.conf"),
         "postinst must recreate the lock path immediately, not only at boot"
     );
+    assert!(
+        assets.contains("systemd-tmpfiles | systemd"),
+        "postinst calls systemd-tmpfiles unconditionally, so a provider must be declared"
+    );
 }
 
 #[test]

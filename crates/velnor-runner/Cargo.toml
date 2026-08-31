@@ -48,7 +48,7 @@ priority = "optional"
 # info for a cross-built (arm64) binary on an amd64 host. OpenSSL is vendored,
 # so the runtime surface is just glibc + libgcc (>= 2.34 covers every "latest
 # Debian/Ubuntu" this package targets).
-depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, util-linux (>= 2.37.2)"
+depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, util-linux (>= 2.37.2), systemd-tmpfiles | systemd"
 recommends = "docker.io | docker-ce"
 conf-files = ["/etc/velnor/velnor.env", "/etc/velnor/execution.toml"]
 maintainer-scripts = "debian/"
