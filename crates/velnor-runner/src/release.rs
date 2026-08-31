@@ -28,10 +28,11 @@
 //! fixtures so the normal (feature-off) test path proves the whole model.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -53,6 +54,13 @@ pub const DEPLOYED_IDENTITY_SCHEMA: &str = "velnor.deployed-identity/v1";
 /// Canonical source repository the release chain is anchored to.
 pub const SOURCE_REPOSITORY: &str = "tailrocks/velnor";
 pub const SOURCE_URL: &str = "https://github.com/tailrocks/velnor";
+const CANONICAL_OCI_IMAGE: &str = "ghcr.io/tailrocks/velnor-job-ubuntu";
+const MAX_RELEASE_METADATA_BYTES: usize = 64 * 1024;
+const MAX_RELEASE_CHECKSUM_BYTES: usize = 4096;
+const RECORD_FILE_NAME: &str = "record.json";
+const DEPLOYED_FILE_NAME: &str = "deployed.json";
+const RELEASE_STATE_LOCK_FILE_NAME: &str = ".state.lock";
+const RELEASE_TRANSITION_FILE_NAME: &str = ".transition.json";
 
 /// Every release ships exactly these architectures; a record missing or
 /// duplicating one is incoherent (per-arch completeness).
@@ -462,6 +470,8 @@ pub enum CoherenceError {
     EmptyField(&'static str),
     #[error("release tag does not equal v<crate version>")]
     TagVersion,
+    #[error("release tag is not a safe path component")]
+    TagPath,
     #[error("debian version does not equal the crate version")]
     DebianVersion,
     #[error("compiled-manifest version is not the expected schema version")]
@@ -573,6 +583,9 @@ impl ReleaseRecord {
         if build.tag != format!("v{}", build.crate_version) {
             return Err(CoherenceError::TagVersion);
         }
+        if !is_safe_path_component(&build.tag) {
+            return Err(CoherenceError::TagPath);
+        }
         if build.debian_version != build.crate_version {
             return Err(CoherenceError::DebianVersion);
         }
@@ -599,7 +612,7 @@ impl ReleaseRecord {
             return Err(CoherenceError::ArchitectureSet);
         }
 
-        if !self.oci_image_ref.contains(self.oci_index_digest.as_str()) {
+        if self.oci_image_ref != format!("{CANONICAL_OCI_IMAGE}@{}", self.oci_index_digest) {
             return Err(CoherenceError::OciRef);
         }
         if self.oci_labels.version != build.crate_version {
@@ -633,6 +646,9 @@ pub fn verify_record_bytes(
     bytes: &[u8],
     expected: &Sha256Hex,
 ) -> std::result::Result<ReleaseRecord, CoherenceError> {
+    if bytes.len() > MAX_RELEASE_METADATA_BYTES {
+        return Err(CoherenceError::Malformed);
+    }
     if &Sha256Hex::of_bytes(bytes) != expected {
         return Err(CoherenceError::RecordChecksum);
     }
@@ -1082,6 +1098,39 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn read_bounded(reader: &mut impl Read, limit: usize, label: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(limit.min(8192));
+    reader
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {label}"))?;
+    if bytes.len() > limit {
+        bail!("{label} exceeds {limit} bytes");
+    }
+    Ok(bytes)
+}
+
+fn read_file_bounded(file: &mut fs::File, limit: usize, label: &str) -> Result<Vec<u8>> {
+    let size = file
+        .metadata()
+        .with_context(|| format!("inspect {label}"))?
+        .len();
+    if size > limit as u64 {
+        bail!("{label} exceeds {limit} bytes");
+    }
+    read_bounded(file, limit, label)
+}
+
+fn read_path_bounded(path: &Path, limit: usize, label: &str) -> Result<Vec<u8>> {
+    let mut file = fs::File::open(path).with_context(|| format!("read {label}"))?;
+    read_file_bounded(&mut file, limit, label)
+}
+
+fn read_path_text_bounded(path: &Path, limit: usize, label: &str) -> Result<String> {
+    String::from_utf8(read_path_bounded(path, limit, label)?)
+        .with_context(|| format!("{label} is not UTF-8"))
+}
+
 /// Compute a file's SHA-256 without slurping it whole.
 pub fn sha256_file(path: &Path) -> Result<Sha256Hex> {
     let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -1105,76 +1154,96 @@ pub struct ReleaseStore {
     root: PathBuf,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct ReleaseTransition {
+    from_active: Option<String>,
+    from_previous: Option<String>,
+    to_active: Option<String>,
+    to_previous: Option<String>,
+}
+
+impl ReleaseTransition {
+    fn validate(&self) -> Result<()> {
+        for tag in [
+            self.from_active.as_deref(),
+            self.from_previous.as_deref(),
+            self.to_active.as_deref(),
+            self.to_previous.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_release_tag_component(tag)?;
+        }
+        if self.from_active.is_none() && self.from_previous.is_some() {
+            bail!("release transition has previous without active");
+        }
+        if self.from_active == self.from_previous && self.from_active.is_some() {
+            bail!("release transition source pointers must differ");
+        }
+        if self.to_active.is_none() {
+            bail!("release transition must have an active target");
+        }
+        if self.to_active == self.to_previous && self.to_active.is_some() {
+            bail!("release transition target pointers must differ");
+        }
+        Ok(())
+    }
+}
+
 impl ReleaseStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    pub fn record_path(&self, tag: &str) -> PathBuf {
-        self.root.join("records").join(tag).join("record.json")
+    #[cfg(test)]
+    pub fn record_path(&self, tag: &str) -> Result<PathBuf> {
+        validate_release_tag_component(tag)?;
+        Ok(self.root.join("records").join(tag).join("record.json"))
     }
-    pub fn deployed_path(&self, tag: &str) -> PathBuf {
-        self.root.join("records").join(tag).join("deployed.json")
+    #[cfg(test)]
+    pub fn deployed_path(&self, tag: &str) -> Result<PathBuf> {
+        validate_release_tag_component(tag)?;
+        Ok(self.root.join("records").join(tag).join("deployed.json"))
     }
-    pub fn read_record(&self, tag: &str) -> Result<ReleaseRecord> {
-        let path = self.record_path(tag);
-        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let record: ReleaseRecord =
-            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-        record.verify().map_err(anyhow::Error::from)?;
-        if record.build.tag != tag {
-            bail!("stored release record tag disagrees with its directory");
-        }
-        Ok(record)
-    }
-    fn active_path(&self) -> PathBuf {
-        self.root.join("active")
-    }
-    fn previous_path(&self) -> PathBuf {
-        self.root.join("previous")
-    }
-
     /// Persist an immutable record + sidecar checksum. Refuses to overwrite an
     /// existing record whose bytes differ (no clobber); an exact re-write is a
     /// no-op success.
     pub fn store_record(&self, record: &ReleaseRecord) -> Result<Sha256Hex> {
-        let bytes = record.to_canonical_json();
-        let digest = Sha256Hex::of_bytes(bytes.as_bytes());
-        let path = self.record_path(&record.build.tag);
-        fs::create_dir_all(path.parent().unwrap())?;
-        if path.exists() {
-            let existing = fs::read(&path)?;
-            if existing != bytes.as_bytes() {
-                bail!(
-                    "record for {} already exists with different bytes — refusing to clobber",
-                    record.build.tag
-                );
-            }
-        } else {
-            write_atomic(&path, bytes.as_bytes())?;
-        }
-        let checksum = format!("{digest}  {}.json\n", record.build.tag);
-        write_atomic(
-            &self
-                .root
-                .join("records")
-                .join(format!("{}.json.sha256", record.build.tag)),
-            checksum.as_bytes(),
-        )?;
-        Ok(digest)
+        validate_release_tag_component(&record.build.tag)?;
+        record.verify().map_err(anyhow::Error::from)?;
+        let root = self.open_root(true)?;
+        let _lock = lock_release_state_at(&root, rustix::fs::FlockOperation::LockExclusive)?;
+        self.recover_pending_transition_at(&root)?;
+        let records = open_release_directory_at(&root, "records", true)?;
+        let tag_dir = open_release_directory_at(&records, &record.build.tag, true)?;
+        self.store_record_at(&records, &tag_dir, record)
     }
 
+    #[cfg(test)]
     pub fn active_tag(&self) -> Result<Option<String>> {
-        read_optional_link_tag(&self.active_path())
+        let Some(root) = self.open_root_if_exists()? else {
+            return Ok(None);
+        };
+        let _lock = lock_release_state_at(&root, rustix::fs::FlockOperation::LockExclusive)?;
+        self.recover_pending_transition_at(&root)?;
+        Ok(self.read_validated_state_at(&root)?.0)
     }
+    #[cfg(test)]
     pub fn previous_tag(&self) -> Result<Option<String>> {
-        read_optional_link_tag(&self.previous_path())
+        let Some(root) = self.open_root_if_exists()? else {
+            return Ok(None);
+        };
+        let _lock = lock_release_state_at(&root, rustix::fs::FlockOperation::LockExclusive)?;
+        self.recover_pending_transition_at(&root)?;
+        Ok(self.read_validated_state_at(&root)?.1)
     }
 
     /// Atomically make `tag` active, demoting the current active tag to
     /// `previous`. The record for `tag` must already be stored.
     pub fn activate(&self, record: &ReleaseRecord, deployed: &DeployedIdentity) -> Result<()> {
         let tag = &record.build.tag;
+        validate_release_tag_component(tag)?;
         verify_installed(
             deployed,
             record,
@@ -1182,66 +1251,536 @@ impl ReleaseStore {
             &deployed.binary_sha256,
         )
         .map_err(anyhow::Error::from)?;
-        self.store_record(record)?;
+        let root = self.open_root(true)?;
+        let _lock = lock_release_state_at(&root, rustix::fs::FlockOperation::LockExclusive)?;
+        self.recover_pending_transition_at(&root)?;
+        let (current, previous) = self.read_validated_state_at(&root)?;
+        let records = open_release_directory_at(&root, "records", true)?;
+        let tag_dir = open_release_directory_at(&records, tag, true)?;
+        self.store_record_at(&records, &tag_dir, record)?;
         let deployed_bytes = serde_json::to_vec_pretty(deployed)?;
-        let deployed_path = self.deployed_path(tag);
-        if deployed_path.exists() {
-            if fs::read(&deployed_path)? != deployed_bytes {
+        if let Some(existing) = open_release_file_at(&tag_dir, DEPLOYED_FILE_NAME)? {
+            let mut existing = existing;
+            if read_file_bounded(
+                &mut existing,
+                MAX_RELEASE_METADATA_BYTES,
+                "existing deployed identity",
+            )? != deployed_bytes
+            {
                 bail!("deployed identity for {tag} already exists with different bytes");
             }
         } else {
-            write_atomic(&deployed_path, &deployed_bytes)?;
+            write_atomic_file_at(
+                &tag_dir,
+                DEPLOYED_FILE_NAME,
+                &deployed_bytes,
+                "deployed identity",
+            )?;
         }
-        if let Some(current) = self.active_tag()?
-            && current != *tag
-        {
-            write_atomic_symlink(&self.previous_path(), &current)?;
+        self.read_coherent_tuple_at(&records, tag)?;
+        if current.as_deref() == Some(tag.as_str()) {
+            return Ok(());
         }
-        write_atomic_symlink(&self.active_path(), tag)?;
+        let transition = ReleaseTransition {
+            from_active: current.clone(),
+            from_previous: previous,
+            to_active: Some(tag.clone()),
+            to_previous: current,
+        };
+        self.commit_transition_at(&root, &records, transition)?;
         Ok(())
     }
 
     /// Restore the previous coherent tag as active. Requires a recorded previous
     /// tuple whose record is still present.
+    #[cfg(test)]
     pub fn rollback(&self) -> Result<String> {
-        let previous = self
-            .previous_tag()?
-            .context("no previous tag recorded — cannot roll back")?;
-        if !self.record_path(&previous).exists() || !self.deployed_path(&previous).exists() {
-            bail!("cannot roll back to {previous}: its record is missing");
+        self.rollback_with_verification(|_| Ok(()))
+    }
+
+    fn rollback_with_verification<F>(&self, verify_image: F) -> Result<String>
+    where
+        F: FnOnce(&ReleaseRecord) -> Result<()>,
+    {
+        let root = self.open_root(false)?;
+        let _lock = lock_release_state_at(&root, rustix::fs::FlockOperation::LockExclusive)?;
+        self.recover_pending_transition_at(&root)?;
+        let (current, previous) = self.read_validated_state_at(&root)?;
+        let previous = previous.context("no previous tag recorded — cannot roll back")?;
+        let current = current.context("no active tag recorded — cannot roll back")?;
+        if current == previous {
+            bail!("active and previous release tags must differ");
         }
-        if let Some(current) = self.active_tag()? {
-            write_atomic_symlink(&self.previous_path(), &current)?;
-        }
-        write_atomic_symlink(&self.active_path(), &previous)?;
+        let records = open_release_directory_at(&root, "records", false)?;
+        let (previous_record, _) = self.read_coherent_tuple_at(&records, &previous)?;
+        verify_image(&previous_record)?;
+        let transition = ReleaseTransition {
+            from_active: Some(current.clone()),
+            from_previous: Some(previous.clone()),
+            to_active: Some(previous.clone()),
+            to_previous: Some(current),
+        };
+        self.commit_transition_at(&root, &records, transition)?;
         Ok(previous)
     }
-}
 
-fn read_optional_link_tag(path: &Path) -> Result<Option<String>> {
-    match fs::read_link(path) {
-        Ok(target) => Ok(target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err.into()),
+    fn commit_transition_at(
+        &self,
+        root: &fs::File,
+        records: &fs::File,
+        transition: ReleaseTransition,
+    ) -> Result<()> {
+        transition.validate()?;
+        self.validate_transition_target_at(records, &transition)?;
+        let bytes = serde_json::to_vec(&transition)?;
+        write_atomic_file_at(
+            root,
+            RELEASE_TRANSITION_FILE_NAME,
+            &bytes,
+            "release transition",
+        )?;
+        publish_transition_pointers_at(root, &transition)?;
+        remove_release_file_at(root, RELEASE_TRANSITION_FILE_NAME, "release transition")?;
+        Ok(())
+    }
+
+    fn recover_pending_transition_at(&self, root: &fs::File) -> Result<()> {
+        let Some(bytes) = open_release_file_at(root, RELEASE_TRANSITION_FILE_NAME)? else {
+            return Ok(());
+        };
+        let mut bytes = bytes;
+        let bytes =
+            read_file_bounded(&mut bytes, MAX_RELEASE_METADATA_BYTES, "release transition")?;
+        let transition: ReleaseTransition =
+            serde_json::from_slice(&bytes).context("parse release transition")?;
+        transition.validate()?;
+        let current = (
+            read_optional_link_tag_at(root, "active")?,
+            read_optional_link_tag_at(root, "previous")?,
+        );
+        let source = (
+            transition.from_active.clone(),
+            transition.from_previous.clone(),
+        );
+        let partial = (
+            transition.from_active.clone(),
+            transition.to_previous.clone(),
+        );
+        let target = (transition.to_active.clone(), transition.to_previous.clone());
+        if current == target {
+            remove_release_file_at(root, RELEASE_TRANSITION_FILE_NAME, "release transition")?;
+            return Ok(());
+        }
+        if current != source && current != partial {
+            bail!("release transition found unexpected active/previous pointers");
+        }
+        let records = open_release_directory_at(root, "records", false)?;
+        self.validate_transition_target_at(&records, &transition)?;
+        publish_transition_pointers_at(root, &transition)?;
+        remove_release_file_at(root, RELEASE_TRANSITION_FILE_NAME, "release transition")?;
+        Ok(())
+    }
+
+    fn validate_transition_target_at(
+        &self,
+        records: &fs::File,
+        transition: &ReleaseTransition,
+    ) -> Result<()> {
+        if let Some(tag) = &transition.to_active {
+            self.read_coherent_tuple_at(records, tag)?;
+        }
+        if let Some(tag) = &transition.to_previous {
+            self.read_coherent_tuple_at(records, tag)?;
+        }
+        Ok(())
+    }
+
+    fn open_root(&self, create: bool) -> Result<fs::File> {
+        open_release_directory_path(&self.root, create)
+            .with_context(|| format!("open release root {}", self.root.display()))
+    }
+
+    #[cfg(test)]
+    fn open_root_if_exists(&self) -> Result<Option<fs::File>> {
+        match open_release_directory_path(&self.root, false) {
+            Ok(root) => Ok(Some(root)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => {
+                Err(error).with_context(|| format!("open release root {}", self.root.display()))
+            }
+        }
+    }
+
+    fn store_record_at(
+        &self,
+        records: &fs::File,
+        tag_dir: &fs::File,
+        record: &ReleaseRecord,
+    ) -> Result<Sha256Hex> {
+        let bytes = record.to_canonical_json();
+        let digest = Sha256Hex::of_bytes(bytes.as_bytes());
+        if let Some(existing) = open_release_file_at(tag_dir, RECORD_FILE_NAME)? {
+            let mut existing = existing;
+            if read_file_bounded(
+                &mut existing,
+                MAX_RELEASE_METADATA_BYTES,
+                "existing release record",
+            )? != bytes.as_bytes()
+            {
+                bail!(
+                    "record for {} already exists with different bytes — refusing to clobber",
+                    record.build.tag
+                );
+            }
+        } else {
+            write_atomic_file_at(
+                tag_dir,
+                RECORD_FILE_NAME,
+                bytes.as_bytes(),
+                "release record",
+            )?;
+        }
+        let checksum = format!("{digest}  {}.json\n", record.build.tag);
+        let checksum_name = format!("{}.json.sha256", record.build.tag);
+        write_atomic_file_at(
+            records,
+            &checksum_name,
+            checksum.as_bytes(),
+            "record checksum",
+        )?;
+        Ok(digest)
+    }
+
+    fn read_record_at(
+        &self,
+        records: &fs::File,
+        tag_dir: &fs::File,
+        tag: &str,
+    ) -> Result<ReleaseRecord> {
+        let bytes = read_release_file_at(
+            tag_dir,
+            RECORD_FILE_NAME,
+            MAX_RELEASE_METADATA_BYTES,
+            "release record",
+        )?;
+        let checksum_name = format!("{}.json.sha256", tag);
+        let checksum = String::from_utf8(read_release_file_at(
+            records,
+            &checksum_name,
+            MAX_RELEASE_CHECKSUM_BYTES,
+            "record checksum",
+        )?)
+        .context("record checksum is not UTF-8")?;
+        let expected = parse_checksum(&checksum)?;
+        let record = verify_record_bytes(&bytes, &expected).map_err(anyhow::Error::from)?;
+        if record.build.tag != tag {
+            bail!("stored release record tag disagrees with its directory");
+        }
+        Ok(record)
+    }
+
+    fn read_coherent_tuple_at(
+        &self,
+        records: &fs::File,
+        tag: &str,
+    ) -> Result<(ReleaseRecord, DeployedIdentity)> {
+        validate_release_tag_component(tag)?;
+        let tag_dir = open_release_directory_at(records, tag, false)?;
+        let record = self.read_record_at(records, &tag_dir, tag)?;
+        let deployed_bytes = read_release_file_at(
+            &tag_dir,
+            DEPLOYED_FILE_NAME,
+            MAX_RELEASE_METADATA_BYTES,
+            "deployed identity",
+        )?;
+        let deployed: DeployedIdentity =
+            serde_json::from_slice(&deployed_bytes).context("parse deployed identity")?;
+        let host = Arch::host().context("unsupported host architecture")?;
+        verify_installed(&deployed, &record, host, &deployed.binary_sha256)
+            .map_err(anyhow::Error::from)?;
+        Ok((record, deployed))
+    }
+
+    fn read_validated_state_at(&self, root: &fs::File) -> Result<(Option<String>, Option<String>)> {
+        let active = read_optional_link_tag_at(root, "active")?;
+        let previous = read_optional_link_tag_at(root, "previous")?;
+        if active.is_none() && previous.is_some() {
+            bail!("previous release pointer exists without an active pointer");
+        }
+        if active.is_some() && active == previous {
+            bail!("active and previous release pointers must differ");
+        }
+        if active.is_none() {
+            return Ok((None, None));
+        }
+        let records = open_release_directory_at(root, "records", false)?;
+        if let Some(tag) = &active {
+            self.read_coherent_tuple_at(&records, tag)?;
+        }
+        if let Some(tag) = &previous {
+            self.read_coherent_tuple_at(&records, tag)?;
+        }
+        Ok((active, previous))
     }
 }
 
-fn write_atomic_symlink(path: &Path, tag: &str) -> Result<()> {
-    use std::os::unix::fs::symlink;
-    let parent = path.parent().context("release pointer has no parent")?;
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{}.tmp",
-        path.file_name().unwrap().to_string_lossy()
-    ));
-    let _ = fs::remove_file(&tmp);
-    symlink(Path::new("records").join(tag), &tmp)?;
-    fs::rename(&tmp, path)?;
-    if let Ok(handle) = fs::File::open(parent) {
-        let _ = handle.sync_all();
+fn open_release_directory_path(path: &Path, create: bool) -> std::io::Result<fs::File> {
+    let path = normalize_release_root_path(path)?;
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::CLOEXEC;
+    let start = if path.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut current: fs::File =
+        rustix::fs::openat(rustix::fs::CWD, start, flags, rustix::fs::Mode::empty())
+            .map(Into::into)
+            .map_err(std::io::Error::from)?;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::RootDir | Component::CurDir) {
+                continue;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "release root path is not normalized",
+            ));
+        };
+        let next = match rustix::fs::openat(&current, name, flags, rustix::fs::Mode::empty()) {
+            Ok(next) => next,
+            Err(rustix::io::Errno::NOENT) if create => {
+                match rustix::fs::mkdirat(&current, name, rustix::fs::Mode::from_raw_mode(0o700)) {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(std::io::Error::from(error)),
+                }
+                rustix::fs::openat(&current, name, flags, rustix::fs::Mode::empty())?
+            }
+            Err(error) => return Err(std::io::Error::from(error)),
+        };
+        current = next.into();
+    }
+    Ok(current)
+}
+
+fn normalize_release_root_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "release root path is empty",
+        ));
+    }
+    if cfg!(target_os = "macos") {
+        for (alias, canonical) in [("/var", "/private/var"), ("/tmp", "/private/tmp")] {
+            if path == Path::new(alias) {
+                return Ok(PathBuf::from(canonical));
+            }
+            if let Ok(suffix) = path.strip_prefix(alias) {
+                return Ok(Path::new(canonical).join(suffix));
+            }
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn open_release_directory_at(parent: &fs::File, name: &str, create: bool) -> Result<fs::File> {
+    if create {
+        match rustix::fs::mkdirat(parent, name, rustix::fs::Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+    }
+    rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(Into::into)
+    .map_err(std::io::Error::from)
+    .map_err(Into::into)
+}
+
+fn open_release_file_at(parent: &fs::File, name: &str) -> Result<Option<fs::File>> {
+    let file = match rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(file) => file,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    let file: fs::File = file.into();
+    if !file.metadata()?.is_file() {
+        bail!("release file {name} is not a regular file");
+    }
+    Ok(Some(file))
+}
+
+fn read_release_file_at(
+    parent: &fs::File,
+    name: &str,
+    limit: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let mut file =
+        open_release_file_at(parent, name)?.with_context(|| format!("missing {label}"))?;
+    read_file_bounded(&mut file, limit, label)
+}
+
+fn lock_release_state_at(
+    root: &fs::File,
+    operation: rustix::fs::FlockOperation,
+) -> Result<fs::File> {
+    let file: fs::File = rustix::fs::openat(
+        root,
+        RELEASE_STATE_LOCK_FILE_NAME,
+        rustix::fs::OFlags::RDWR
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .map(Into::into)
+    .map_err(std::io::Error::from)
+    .context("open release state lock")?;
+    rustix::fs::flock(&file, operation).context("lock release state")?;
+    Ok(file)
+}
+
+fn validate_regular_destination_at(parent: &fs::File, name: &str, label: &str) -> Result<()> {
+    match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat)
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile =>
+        {
+            Ok(())
+        }
+        Ok(_) => bail!("{label} is not a regular file"),
+        Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(error) => Err(std::io::Error::from(error).into()),
+    }
+}
+
+fn write_atomic_file_at(parent: &fs::File, name: &str, bytes: &[u8], label: &str) -> Result<()> {
+    validate_regular_destination_at(parent, name, label)?;
+    let temporary = format!(".{name}.{}.tmp", uuid::Uuid::new_v4());
+    let result = (|| {
+        let mut file: fs::File = rustix::fs::openat(
+            parent,
+            &temporary,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .map(Into::into)
+        .map_err(std::io::Error::from)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        rustix::fs::renameat(parent, &temporary, parent, name).map_err(std::io::Error::from)?;
+        parent.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = rustix::fs::unlinkat(parent, &temporary, rustix::fs::AtFlags::empty());
+    }
+    result
+}
+
+fn remove_release_file_at(parent: &fs::File, name: &str, label: &str) -> Result<()> {
+    match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat)
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile => {}
+        Ok(_) => bail!("{label} is not a regular file"),
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    }
+    rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty())
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("remove {label}"))?;
+    parent.sync_all()?;
+    Ok(())
+}
+
+fn remove_release_pointer_at(parent: &fs::File, name: &str, label: &str) -> Result<()> {
+    match rustix::fs::readlinkat(parent, name, Vec::<u8>::new()) {
+        Ok(_) => {}
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(rustix::io::Errno::INVAL) => bail!("{label} is not a symbolic link"),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    }
+    rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty())
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("remove {label}"))?;
+    parent.sync_all()?;
+    Ok(())
+}
+
+fn read_optional_link_tag_at(parent: &fs::File, name: &str) -> Result<Option<String>> {
+    let target = match rustix::fs::readlinkat(parent, name, Vec::<u8>::new()) {
+        Ok(target) => String::from_utf8(target.into_bytes())
+            .context("release pointer target is not valid UTF-8")?,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    let mut components = Path::new(&target).components();
+    match components.next() {
+        Some(Component::Normal(component)) if component == OsStr::new("records") => {}
+        _ => bail!("release pointer target is not records/<tag>"),
+    }
+    let tag = match components.next() {
+        Some(Component::Normal(component)) => component
+            .to_str()
+            .context("release pointer target tag is not valid UTF-8")?,
+        _ => bail!("release pointer target has no release tag"),
+    };
+    if components.next().is_some() {
+        bail!("release pointer target contains extra path components");
+    }
+    validate_release_tag_component(tag)?;
+    Ok(Some(tag.to_owned()))
+}
+
+fn write_atomic_symlink_at(parent: &fs::File, name: &str, tag: &str) -> Result<()> {
+    validate_release_tag_component(tag)?;
+    let temporary = format!(".{name}.{}.tmp", uuid::Uuid::new_v4());
+    let result = (|| {
+        rustix::fs::symlinkat(Path::new("records").join(tag), parent, &temporary)
+            .map_err(std::io::Error::from)?;
+        rustix::fs::renameat(parent, &temporary, parent, name).map_err(std::io::Error::from)?;
+        parent.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = rustix::fs::unlinkat(parent, &temporary, rustix::fs::AtFlags::empty());
+    }
+    result
+}
+
+fn publish_transition_pointers_at(root: &fs::File, transition: &ReleaseTransition) -> Result<()> {
+    if let Some(tag) = &transition.to_previous {
+        write_atomic_symlink_at(root, "previous", tag)?;
+    } else {
+        remove_release_pointer_at(root, "previous", "previous release pointer")?;
+    }
+    if let Some(tag) = &transition.to_active {
+        write_atomic_symlink_at(root, "active", tag)?;
+    } else {
+        remove_release_pointer_at(root, "active", "active release pointer")?;
     }
     Ok(())
 }
@@ -1263,7 +1802,11 @@ pub fn run(args: ReleaseArgs) -> Result<()> {
 }
 
 fn read_record_file(path: &Path) -> Result<(Vec<u8>, ReleaseRecord)> {
-    let bytes = fs::read(path).with_context(|| format!("read record {}", path.display()))?;
+    let bytes = read_path_bounded(
+        path,
+        MAX_RELEASE_METADATA_BYTES,
+        &format!("record {}", path.display()),
+    )?;
     let record: ReleaseRecord = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse record {}", path.display()))?;
     Ok((bytes, record))
@@ -1287,16 +1830,26 @@ fn parse_artifact_checksum(text: &str) -> Result<Sha256Hex> {
 }
 
 fn validate_artifact_version_component(version: &str) -> Result<()> {
-    if version.is_empty()
-        || version == "."
-        || version == ".."
-        || version
-            .bytes()
-            .any(|byte| byte == b'/' || byte == b'\\' || byte.is_ascii_control())
-    {
+    if !is_safe_path_component(version) {
         bail!("release version is not a safe artifact path component");
     }
     Ok(())
+}
+
+fn validate_release_tag_component(tag: &str) -> Result<()> {
+    if !is_safe_path_component(tag) {
+        bail!("release tag is not a safe path component");
+    }
+    Ok(())
+}
+
+fn is_safe_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value
+            .bytes()
+            .any(|byte| byte == b'/' || byte == b'\\' || byte.is_ascii_control())
 }
 
 fn emit_command(args: ReleaseEmitArgs) -> Result<()> {
@@ -1320,10 +1873,11 @@ fn assemble_command(args: ReleaseAssembleArgs) -> Result<()> {
             .architecture(arch)
             .with_context(|| format!("record has no {} architecture", arch.as_str()))?;
         let binary = dir.join(format!("velnor-runner-{}.bin.sha256", arch.as_str()));
-        let expected_binary = parse_artifact_checksum(
-            &fs::read_to_string(&binary)
-                .with_context(|| format!("read binary checksum {}", binary.display()))?,
-        )?;
+        let expected_binary = parse_artifact_checksum(&read_path_text_bounded(
+            &binary,
+            MAX_RELEASE_CHECKSUM_BYTES,
+            &format!("binary checksum {}", binary.display()),
+        )?)?;
         if expected_binary != record_arch.binary_sha256 {
             bail!(
                 "assembled binary digest for {} disagrees with the record",
@@ -1336,10 +1890,11 @@ fn assemble_command(args: ReleaseAssembleArgs) -> Result<()> {
             candidate.build.debian_version,
             arch.as_str()
         ));
-        let expected_deb = parse_artifact_checksum(
-            &fs::read_to_string(&deb)
-                .with_context(|| format!("read deb checksum {}", deb.display()))?,
-        )?;
+        let expected_deb = parse_artifact_checksum(&read_path_text_bounded(
+            &deb,
+            MAX_RELEASE_CHECKSUM_BYTES,
+            &format!("deb checksum {}", deb.display()),
+        )?)?;
         let deb_payload = dir.join(format!(
             "velnor-runner-{}-{}.deb",
             candidate.build.debian_version,
@@ -1409,27 +1964,42 @@ fn read_distinct_apt_metadata_sources(
         bail!("APT metadata source identity checks require a Unix platform");
     }
 
-    let mut expected_bytes = Vec::new();
-    let mut served_bytes = Vec::new();
-    expected_file.read_to_end(&mut expected_bytes)?;
-    served_file.read_to_end(&mut served_bytes)?;
+    let expected_bytes = read_file_bounded(
+        &mut expected_file,
+        MAX_RELEASE_METADATA_BYTES,
+        "expected APT metadata",
+    )?;
+    let served_bytes = read_file_bounded(
+        &mut served_file,
+        MAX_RELEASE_METADATA_BYTES,
+        "served APT metadata",
+    )?;
     Ok((expected_bytes, served_bytes))
 }
 
 fn verify_record_command(args: ReleaseVerifyRecordArgs) -> Result<()> {
-    let bytes =
-        fs::read(&args.record).with_context(|| format!("read {}", args.record.display()))?;
+    let bytes = read_path_bounded(
+        &args.record,
+        MAX_RELEASE_METADATA_BYTES,
+        &format!("record {}", args.record.display()),
+    )?;
     let expected = match (&args.checksum, &args.sha256) {
-        (Some(path), _) => parse_checksum(&fs::read_to_string(path)?)?,
+        (Some(path), _) => parse_checksum(&read_path_text_bounded(
+            path,
+            MAX_RELEASE_CHECKSUM_BYTES,
+            &format!("checksum {}", path.display()),
+        )?)?,
         (None, Some(hex)) => Sha256Hex::parse(hex)?,
         (None, None) => bail!("provide --checksum <file> or --sha256 <hex>"),
     };
     let record = verify_record_bytes(&bytes, &expected).map_err(anyhow::Error::from)?;
     let publication = if let Some(path) = &args.publication {
         Some(
-            serde_json::from_slice::<PublicationRecord>(
-                &fs::read(path).with_context(|| format!("read publication {}", path.display()))?,
-            )
+            serde_json::from_slice::<PublicationRecord>(&read_path_bounded(
+                path,
+                MAX_RELEASE_METADATA_BYTES,
+                &format!("publication {}", path.display()),
+            )?)
             .with_context(|| format!("parse publication {}", path.display()))?,
         )
     } else {
@@ -1483,8 +2053,11 @@ fn verify_record_command(args: ReleaseVerifyRecordArgs) -> Result<()> {
 
 fn verify_installed_command(args: ReleaseVerifyInstalledArgs) -> Result<()> {
     let (_, record) = read_record_file(&args.record)?;
-    let deployed_bytes = fs::read(&args.deployed)
-        .with_context(|| format!("read deployed identity {}", args.deployed.display()))?;
+    let deployed_bytes = read_path_bounded(
+        &args.deployed,
+        MAX_RELEASE_METADATA_BYTES,
+        &format!("deployed identity {}", args.deployed.display()),
+    )?;
     let deployed: DeployedIdentity = serde_json::from_slice(&deployed_bytes)
         .with_context(|| format!("parse deployed identity {}", args.deployed.display()))?;
     let host = match args.arch {
@@ -1600,15 +2173,11 @@ fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
 
 fn rollback_command(args: ReleaseRollbackArgs) -> Result<()> {
     let store = ReleaseStore::new(&args.dir);
-    let previous = store
-        .previous_tag()?
-        .context("no previous release is available")?;
-    let record = store.read_record(&previous)?;
     // A rollback changes both halves of the runtime tuple while the fleet is
-    // drained: first make the exact prior image locally runnable, then switch
-    // the filesystem pointer. Any verification failure leaves active unchanged.
-    verify_and_tag_release_image(&record)?;
-    let restored = store.rollback()?;
+    // drained: verify the exact prior image while the store lock is held, then
+    // switch the filesystem pointer. Any verification failure leaves active
+    // unchanged and cannot race a concurrent activation.
+    let restored = store.rollback_with_verification(verify_and_tag_release_image)?;
     println!("rolled back to {restored}");
     Ok(())
 }
@@ -1616,7 +2185,11 @@ fn rollback_command(args: ReleaseRollbackArgs) -> Result<()> {
 fn export_command(args: ReleaseExportArgs) -> Result<()> {
     let identity = embedded();
     if let Some(path) = &args.deployed {
-        let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let bytes = read_path_bounded(
+            path,
+            MAX_RELEASE_METADATA_BYTES,
+            &format!("deployed identity {}", path.display()),
+        )?;
         let deployed: DeployedIdentity =
             serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
         println!("{}", serde_json::to_string_pretty(&deployed)?);

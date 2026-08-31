@@ -453,6 +453,286 @@ fn valid_record_verifies() {
 }
 
 #[test]
+fn record_verify_requires_exact_canonical_oci_identity() {
+    let record = valid_record();
+    let digest = record.oci_index_digest.as_str();
+    let invalid_refs = [
+        format!("ghcr.io/other/velnor-job-ubuntu@{digest}"),
+        "ghcr.io/tailrocks/velnor-job-ubuntu:latest".to_string(),
+        format!("ghcr.io/tailrocks/velnor-job-ubuntu@{digest}-suffix"),
+        format!("ghcr.io/tailrocks/velnor-job-ubuntu@prefix-{digest}"),
+    ];
+
+    for oci_image_ref in invalid_refs {
+        let mut candidate = record.clone();
+        candidate.oci_image_ref = oci_image_ref;
+        assert_eq!(candidate.verify(), Err(CoherenceError::OciRef));
+    }
+}
+
+#[test]
+fn release_store_rejects_unsafe_tags_before_any_write() {
+    let dir = TempDir::new("unsafe-tag");
+    let store = ReleaseStore::new(dir.path());
+    let outside = dir.path().parent().unwrap().join(format!(
+        "{}-outside",
+        dir.path().file_name().unwrap().to_string_lossy()
+    ));
+
+    for tag in ["", ".", "..", "v0/1", r"v0\1", "v0\0"] {
+        assert!(store.record_path(tag).is_err());
+        assert!(store.deployed_path(tag).is_err());
+    }
+
+    let mut record = valid_record();
+    record.build.tag = "../../outside".into();
+    let error = store.store_record(&record).unwrap_err();
+    assert!(error.to_string().contains("safe path component"));
+    assert!(!outside.exists());
+    assert!(!dir.path().join("records").exists());
+}
+
+#[test]
+fn release_store_rejects_unsafe_symlink_derived_tags() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("unsafe-pointer");
+    symlink("records/../escape", dir.path().join("active")).unwrap();
+    let error = ReleaseStore::new(dir.path()).active_tag().unwrap_err();
+    assert!(error.to_string().contains("release pointer target"));
+}
+
+#[test]
+fn release_store_rejects_symlinked_records_and_tag_directories() {
+    use std::os::unix::fs::symlink;
+
+    let records_root = TempDir::new("symlink-records");
+    let outside = records_root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    symlink("outside", records_root.path().join("records")).unwrap();
+    let store = ReleaseStore::new(records_root.path());
+    assert!(store.store_record(&valid_record()).is_err());
+    assert!(!outside.join("v0.1.121").exists());
+
+    let tag_root = TempDir::new("symlink-tag");
+    let outside = tag_root.path().join("outside");
+    std::fs::create_dir_all(tag_root.path().join("records")).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    symlink("../outside", tag_root.path().join("records/v0.1.121")).unwrap();
+    let store = ReleaseStore::new(tag_root.path());
+    assert!(store.store_record(&valid_record()).is_err());
+    assert!(!outside.join("record.json").exists());
+}
+
+#[test]
+fn release_store_rejects_dangling_active_before_demoting_it() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("dangling-active");
+    std::fs::create_dir(dir.path().join("records")).unwrap();
+    symlink("records/v0.1.121", dir.path().join("active")).unwrap();
+    let store = ReleaseStore::new(dir.path());
+    let next = valid_record();
+    let next_deployed = deployed_for(&next, Arch::host().unwrap());
+    assert!(store.activate(&next, &next_deployed).is_err());
+    assert_eq!(
+        std::fs::read_link(dir.path().join("active")).unwrap(),
+        Path::new("records/v0.1.121")
+    );
+    assert!(!dir.path().join("previous").exists());
+}
+
+#[test]
+fn release_store_rejects_mismatched_active_tuple_without_pointer_mutation() {
+    let dir = TempDir::new("mismatched-active");
+    let store = ReleaseStore::new(dir.path());
+    let first = valid_record();
+    let host = Arch::host().unwrap();
+    store.activate(&first, &deployed_for(&first, host)).unwrap();
+    let deployed_path = store.deployed_path(first.build.tag.as_str()).unwrap();
+    let mut tampered = deployed_for(&first, host);
+    tampered.record_sha256 = digest_of("wrong-record");
+    std::fs::write(
+        &deployed_path,
+        serde_json::to_vec_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
+
+    let next = {
+        let mut record = valid_record();
+        record.build.tag = "v0.1.122".into();
+        record.build.crate_version = "0.1.122".into();
+        record.build.debian_version = "0.1.122".into();
+        record.oci_labels.version = "0.1.122".into();
+        record
+    };
+    assert!(store.activate(&next, &deployed_for(&next, host)).is_err());
+    assert!(store.active_tag().is_err());
+    assert!(!dir.path().join("previous").exists());
+}
+
+#[test]
+fn release_store_rejects_symlinked_tuple_files() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("symlink-tuple-files");
+    let store = ReleaseStore::new(dir.path());
+    let record = valid_record();
+    let host = Arch::host().unwrap();
+    store
+        .activate(&record, &deployed_for(&record, host))
+        .unwrap();
+
+    let outside = dir.path().join("outside");
+    std::fs::write(&outside, b"outside").unwrap();
+    let record_path = store.record_path(record.build.tag.as_str()).unwrap();
+    std::fs::remove_file(&record_path).unwrap();
+    symlink("../../outside", &record_path).unwrap();
+    assert!(store.active_tag().is_err());
+    std::fs::remove_file(&record_path).unwrap();
+    std::fs::write(&record_path, record.to_canonical_json()).unwrap();
+
+    let deployed_path = store.deployed_path(record.build.tag.as_str()).unwrap();
+    std::fs::remove_file(&deployed_path).unwrap();
+    symlink("../../outside", &deployed_path).unwrap();
+    assert!(store.active_tag().is_err());
+    std::fs::remove_file(&deployed_path).unwrap();
+    std::fs::write(
+        &deployed_path,
+        serde_json::to_vec_pretty(&deployed_for(&record, host)).unwrap(),
+    )
+    .unwrap();
+
+    let checksum_path = dir
+        .path()
+        .join("records")
+        .join(format!("{}.json.sha256", record.build.tag));
+    std::fs::remove_file(&checksum_path).unwrap();
+    symlink("../../outside", &checksum_path).unwrap();
+    assert!(store.active_tag().is_err());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+}
+
+#[test]
+fn release_store_rejects_symlinked_root() {
+    use std::os::unix::fs::symlink;
+
+    let actual = TempDir::new("root-target");
+    let link = actual.path().parent().unwrap().join(format!(
+        "{}-link",
+        actual.path().file_name().unwrap().to_string_lossy()
+    ));
+    symlink(actual.path(), &link).unwrap();
+    let store = ReleaseStore::new(&link);
+    assert!(store.store_record(&valid_record()).is_err());
+    assert!(!actual.path().join("records").exists());
+}
+
+#[test]
+fn release_store_rejects_symlinked_root_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let outside = TempDir::new("ancestor-target");
+    let parent = TempDir::new("ancestor-parent");
+    let parent_link = parent.path().join("link");
+    symlink(outside.path(), &parent_link).unwrap();
+    let store = ReleaseStore::new(parent_link.join("release"));
+    assert!(store.store_record(&valid_record()).is_err());
+    assert!(!outside.path().join("release").exists());
+}
+
+#[test]
+fn release_store_recovers_a_partially_published_transition() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("transition-recovery");
+    let store = ReleaseStore::new(dir.path());
+    let host = Arch::host().unwrap();
+    let first = valid_record();
+    store.activate(&first, &deployed_for(&first, host)).unwrap();
+
+    let second = {
+        let mut record = valid_record();
+        record.build.tag = "v0.1.122".into();
+        record.build.crate_version = "0.1.122".into();
+        record.build.debian_version = "0.1.122".into();
+        record.oci_labels.version = "0.1.122".into();
+        record
+    };
+    store.store_record(&second).unwrap();
+    std::fs::write(
+        store.deployed_path(second.build.tag.as_str()).unwrap(),
+        serde_json::to_vec_pretty(&deployed_for(&second, host)).unwrap(),
+    )
+    .unwrap();
+
+    let transition = ReleaseTransition {
+        from_active: Some(first.build.tag.clone()),
+        from_previous: None,
+        to_active: Some(second.build.tag.clone()),
+        to_previous: Some(first.build.tag.clone()),
+    };
+    write_atomic(
+        &dir.path().join(RELEASE_TRANSITION_FILE_NAME),
+        &serde_json::to_vec(&transition).unwrap(),
+    )
+    .unwrap();
+    symlink(
+        format!("records/{}", first.build.tag),
+        dir.path().join("previous"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some(second.build.tag.as_str())
+    );
+    assert_eq!(
+        store.previous_tag().unwrap().as_deref(),
+        Some(first.build.tag.as_str())
+    );
+    assert!(!dir.path().join(RELEASE_TRANSITION_FILE_NAME).exists());
+}
+
+#[test]
+fn release_store_rejects_incoherent_previous_on_rollback() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("incoherent-previous");
+    let store = ReleaseStore::new(dir.path());
+    let first = valid_record();
+    let host = Arch::host().unwrap();
+    store.activate(&first, &deployed_for(&first, host)).unwrap();
+    let second = {
+        let mut record = valid_record();
+        record.build.tag = "v0.1.122".into();
+        record.build.crate_version = "0.1.122".into();
+        record.build.debian_version = "0.1.122".into();
+        record.oci_labels.version = "0.1.122".into();
+        record
+    };
+    store
+        .activate(&second, &deployed_for(&second, host))
+        .unwrap();
+    std::fs::remove_file(store.deployed_path(first.build.tag.as_str()).unwrap()).unwrap();
+    let active_before = std::fs::read_link(dir.path().join("active")).unwrap();
+    let previous_before = std::fs::read_link(dir.path().join("previous")).unwrap();
+    assert!(store.rollback().is_err());
+    assert_eq!(
+        std::fs::read_link(dir.path().join("active")).unwrap(),
+        active_before
+    );
+    assert_eq!(
+        std::fs::read_link(dir.path().join("previous")).unwrap(),
+        previous_before
+    );
+
+    std::fs::remove_file(dir.path().join("previous")).unwrap();
+    symlink("records/v0.1.122", dir.path().join("previous")).unwrap();
+    assert!(store.rollback().is_err());
+}
+
+#[test]
 fn verify_record_bytes_happy_path() {
     let record = valid_record();
     let bytes = record.to_canonical_json();
@@ -731,6 +1011,45 @@ fn assemble_command_rejects_missing_deb_sidecar() {
     })
     .unwrap_err();
     assert!(error.to_string().contains("read deb checksum"));
+}
+
+#[test]
+fn assemble_command_rejects_oversized_checksum_sidecar() {
+    let root = TempDir::new("assemble-oversized-checksum");
+    let (record, artifacts) = write_assemble_fixture(root.path());
+    std::fs::write(
+        artifacts.join("velnor-runner-amd64.bin.sha256"),
+        vec![b'0'; MAX_RELEASE_CHECKSUM_BYTES + 1],
+    )
+    .unwrap();
+    let error = assemble_command(ReleaseAssembleArgs {
+        record,
+        artifacts,
+        out: None,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("exceeds 4096 bytes"));
+}
+
+#[test]
+fn verify_record_command_rejects_oversized_checksum_sidecar() {
+    let dir = TempDir::new("verify-record-oversized-checksum");
+    let record = valid_record();
+    let record_path = dir.path().join("record.json");
+    let checksum_path = dir.path().join("record.json.sha256");
+    std::fs::write(&record_path, record.to_canonical_json()).unwrap();
+    std::fs::write(&checksum_path, vec![b'0'; MAX_RELEASE_CHECKSUM_BYTES + 1]).unwrap();
+
+    let error = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: None,
+        expected_apt_metadata: None,
+        served_apt_metadata: None,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("exceeds 4096 bytes"));
 }
 
 #[test]
