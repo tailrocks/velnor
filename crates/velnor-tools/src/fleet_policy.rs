@@ -1392,7 +1392,7 @@ fn open_policy_directory_components(
 }
 
 #[cfg(unix)]
-unsafe fn clear_errno() {
+fn clear_errno() {
     #[cfg(any(
         target_os = "macos",
         target_os = "ios",
@@ -1403,7 +1403,11 @@ unsafe fn clear_errno() {
         target_os = "netbsd"
     ))]
     {
-        *libc::__error() = 0;
+        // SAFETY: libc returns the current thread's valid errno slot, which
+        // this assignment updates without exposing the raw pointer.
+        unsafe {
+            *libc::__error() = 0;
+        }
     }
     #[cfg(not(any(
         target_os = "macos",
@@ -1415,7 +1419,11 @@ unsafe fn clear_errno() {
         target_os = "netbsd"
     )))]
     {
-        *libc::__errno_location() = 0;
+        // SAFETY: libc returns the current thread's valid errno slot, which
+        // this assignment updates without exposing the raw pointer.
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
     }
 }
 
@@ -1583,7 +1591,7 @@ fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<St
     }
     let mut names = Vec::new();
     loop {
-        unsafe { clear_errno() };
+        clear_errno();
         let entry = unsafe { libc::readdir(directory_stream) };
         if entry.is_null() {
             let error = io::Error::last_os_error();
