@@ -364,7 +364,9 @@ jobs:
           if test -z "$(git status --porcelain --untracked-files=all)"; then echo NO_CHANGE_VERIFIED; exit 0; fi
           git add --all
           git commit --signoff -m "chore(package): update verified release"
-          git push --force-with-lease origin "$BRANCH"
+          # Ordinary push is intentional: a concurrent updater must fail closed
+          # instead of rewriting the verified branch history.
+          git push origin "HEAD:refs/heads/$BRANCH"
           OPEN_PR_COUNT="$(gh pr list --state open --head "$BRANCH" --base main --json number --jq 'length')"
           test "$OPEN_PR_COUNT" -le 1
           if test "$OPEN_PR_COUNT" -eq 0; then
