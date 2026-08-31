@@ -348,7 +348,7 @@ fn read_bounded(
     path: &Path,
 ) -> anyhow::Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(size as usize);
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(MAX_COMPLETION_PAYLOAD_BYTES as u64 + 1)
         .read_to_end(&mut payload)?;
     if payload.len() > MAX_COMPLETION_PAYLOAD_BYTES {
