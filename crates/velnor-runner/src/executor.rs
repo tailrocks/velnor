@@ -12425,6 +12425,13 @@ mod tests {
         );
     }
 
+    #[test]
+    fn over_budget_expression_is_not_evaluated() {
+        let state = JobExecutionState::default();
+        let expression = format!("${{{{ {} }}}}", "github.sha ".repeat(7000));
+        assert_eq!(state.resolve_expressions(&expression), expression);
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_runner_forwards_multiline_env_on_all_timed_paths() {

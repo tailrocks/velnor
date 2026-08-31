@@ -1870,6 +1870,23 @@ runs:
     }
 
     #[test]
+    fn metadata_parser_ignores_quoted_and_block_scalar_delimiters() {
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "{ this is shell text }"
+        echo '[ still shell text ]'
+"#,
+        )
+        .unwrap();
+        assert_eq!(metadata.runs.steps.len(), 1);
+    }
+
+    #[test]
     fn parses_composite_action_metadata() {
         let metadata = parse_action_metadata(
             r#"

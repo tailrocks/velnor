@@ -11462,6 +11462,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workflow_source_context_requires_exact_workflow_sha() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "event": {"workflow": ".github/workflows/ci.yml"}
+            }),
+        )];
+        assert!(workflow_source_context(&context).is_none());
+
+        let mut context_with_workflow_sha = context;
+        context_with_workflow_sha[0].1["workflow_sha"] =
+            serde_json::json!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(
+            workflow_source_context(&context_with_workflow_sha)
+                .expect("exact workflow SHA should admit source lookup")
+                .sha,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        );
+    }
+
+    #[test]
     fn empty_network_sweep_removes_only_owned_containerless_networks() {
         // id → (daemon-id label, container count) or Err to simulate inspect
         // failure; records `network rm` calls.
