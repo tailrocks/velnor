@@ -32,6 +32,7 @@ const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
 const OUTPUT_ROOT_DIGEST: &str = "output_root";
 const RESULT_DIGEST: &str = "compiler_cache_result";
+const ACCOUNTING_DIGEST: &str = "compiler_cache_physical_byte_accounting";
 
 /// One mutually exclusive compiler-cache implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +165,30 @@ pub type CompilerActionKey = ActionKey;
 
 /// Public result alias retained for the compiler-specific service contract.
 pub type CompilerResult = ActionResult;
+
+pub use velnor_cas::PhysicalByteAccounting;
+
+/// A validated compiler-cache result paired with durable physical-byte
+/// evidence for its result-envelope CAS object publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerCacheEntry {
+    result: CompilerResult,
+    publication_accounting: PhysicalByteAccounting,
+}
+
+impl CompilerCacheEntry {
+    /// The immutable compiler result.
+    #[must_use]
+    pub fn result(&self) -> &CompilerResult {
+        &self.result
+    }
+
+    /// Physical-byte evidence for the result-envelope CAS object publication.
+    #[must_use]
+    pub const fn publication_accounting(&self) -> PhysicalByteAccounting {
+        self.publication_accounting
+    }
+}
 
 /// Backend-neutral compiler-cache contract.
 pub trait CompilerCache: Send + Sync {
@@ -309,6 +334,17 @@ pub struct CompilerCacheService<C: Clock> {
     metadata: Mutex<Connection>,
     journal: Mutex<LeaseManager<C>>,
     telemetry: Mutex<CompilerCacheTelemetry>,
+    #[cfg(test)]
+    failure_boundary: Mutex<Option<FailureBoundary>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureBoundary {
+    ResultCas,
+    AccountingCas,
+    JournalComplete,
+    MetadataFinalization,
 }
 
 impl<C: Clock> CompilerCacheService<C> {
@@ -327,9 +363,9 @@ impl<C: Clock> CompilerCacheService<C> {
             .join(backend.namespace());
         fs::create_dir_all(&storage_root)?;
         let cas = CasStore::new(storage_root.join("cas"))?;
-        let metadata = Connection::open(storage_root.join("metadata.sqlite"))?;
+        let mut metadata = Connection::open(storage_root.join("metadata.sqlite"))?;
         metadata.busy_timeout(std::time::Duration::from_secs(5))?;
-        initialize_metadata(&metadata)?;
+        initialize_metadata(&mut metadata)?;
         let journal = LeaseManager::open(storage_root.join("journal.sqlite"), clock)?;
         Ok(Self {
             backend,
@@ -342,6 +378,8 @@ impl<C: Clock> CompilerCacheService<C> {
             metadata: Mutex::new(metadata),
             journal: Mutex::new(journal),
             telemetry: Mutex::new(CompilerCacheTelemetry::default()),
+            #[cfg(test)]
+            failure_boundary: Mutex::new(None),
         })
     }
 
@@ -361,6 +399,172 @@ impl<C: Clock> CompilerCacheService<C> {
     #[must_use]
     pub fn telemetry(&self) -> CompilerCacheTelemetry {
         *self.lock_telemetry()
+    }
+
+    /// Look up a result and retain its durable publication physical-byte
+    /// evidence. This does not attribute publication allocation to the lookup
+    /// operation itself.
+    pub async fn lookup_with_publication_accounting(
+        &self,
+        key: &CompilerActionKey,
+    ) -> Result<Option<CompilerCacheEntry>, CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            self.record_passthrough();
+            return Ok(None);
+        }
+        self.ensure_trust_scope(key)?;
+        let expected_key_json = canonical_key_json(key)?;
+        let record = {
+            let journal = self.lock_journal()?;
+            let Some(record) = journal.latest_action(key)? else {
+                self.record_miss();
+                return Ok(None);
+            };
+            if record.state != ActionState::Complete {
+                self.record_miss();
+                return Ok(None);
+            }
+            if record.trust_class != key.execution_policy.trust_class {
+                return Err(CacheError::TrustMismatch);
+            }
+            record
+        };
+        let key_digest = key.digest()?.to_string();
+        let Some(result_digest) = record.output_digests.get(RESULT_DIGEST) else {
+            self.record_miss();
+            return Ok(None);
+        };
+        let result_digest = result_digest.clone();
+        let output_digest = record_output_digest(&record)?;
+        let metadata_entry = {
+            let metadata = self.lock_metadata()?;
+            read_metadata(&metadata, &key_digest)?
+        };
+        let bytes = self.cas.get(&result_digest).map_err(CacheError::from)?;
+        let result: CompilerResult = serde_json::from_slice(&bytes)
+            .map_err(|error| CacheError::CorruptEntry(error.to_string()))?;
+        if result.action_key != *key
+            || result.action_key.execution_policy.trust_class != key.execution_policy.trust_class
+            || result.output_root != *output_digest
+        {
+            return Err(CacheError::CorruptEntry(
+                "published compiler result does not match its journal record".into(),
+            ));
+        }
+        let accounting = match record_accounting(&self.cas, &record)? {
+            Some(accounting) => accounting,
+            None => metadata_entry
+                .as_ref()
+                .and_then(|entry| entry.accounting)
+                .unwrap_or_else(PhysicalByteAccounting::unknown),
+        };
+        let entry = match metadata_entry {
+            Some(entry) => entry,
+            None => {
+                let mut metadata = self.lock_metadata()?;
+                finalize_metadata(&mut metadata, key, &record, &result_digest, &accounting)?;
+                read_metadata(&metadata, &key_digest)?.ok_or_else(|| {
+                    CacheError::InvalidMetadata(
+                        "metadata finalization committed no cache entry".into(),
+                    )
+                })?
+            }
+        };
+        verify_metadata(
+            &entry,
+            key,
+            &expected_key_json,
+            &record,
+            &result_digest,
+            &accounting,
+        )?;
+        if result.exit_code != 0 {
+            return Err(CacheError::CorruptEntry(
+                "failed compiler result cannot be a cache hit".into(),
+            ));
+        }
+        if result.action_key != *key
+            || result.action_key.execution_policy.trust_class != key.execution_policy.trust_class
+            || result.output_root.to_string() != entry.output_digest
+        {
+            return Err(CacheError::CorruptEntry(
+                "published compiler result does not match its metadata".into(),
+            ));
+        }
+        self.record_hit();
+        Ok(Some(CompilerCacheEntry {
+            result,
+            publication_accounting: accounting,
+        }))
+    }
+
+    /// Publish a result and return physical-byte evidence for its durable
+    /// result-envelope CAS object publication. The separate accounting sidecar
+    /// is durable and recoverable but is not folded into these components.
+    pub async fn publish_with_accounting(
+        &self,
+        lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<PhysicalByteAccounting, CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        if lease.action != result.action_key {
+            return Err(CacheError::LeaseKeyMismatch);
+        }
+        if result.action_key.execution_policy.trust_class
+            != lease.action.execution_policy.trust_class
+        {
+            return Err(CacheError::TrustMismatch);
+        }
+        if result.exit_code != 0 {
+            return Err(CacheError::FailedResult {
+                exit_code: result.exit_code,
+            });
+        }
+        let result_bytes = serde_json::to_vec(&result)?;
+        let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
+        #[cfg(test)]
+        self.fail_if_injected(FailureBoundary::ResultCas)?;
+        let accounting_digest = self.cas.put(&serde_json::to_vec(&accounting)?)?;
+        #[cfg(test)]
+        self.fail_if_injected(FailureBoundary::AccountingCas)?;
+        let complete = ActionRecord {
+            action_key: lease.action.clone(),
+            state: ActionState::Complete,
+            producer_lease_ref: Some(lease_reference(&lease)),
+            consumer_run_ids: BTreeSet::new(),
+            output_digests: BTreeMap::from([
+                (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
+                (RESULT_DIGEST.into(), result_digest.clone()),
+                (ACCOUNTING_DIGEST.into(), accounting_digest),
+            ]),
+            timing: result.timing,
+            worker_id: Some(lease.owner.clone()),
+            trust_class: lease.action.execution_policy.trust_class,
+        };
+
+        // Journal completion remains the fencing point. The accounting digest
+        // is part of that durable record, so recovery never needs to infer
+        // whether the primary result object was new or deduplicated.
+        let mut journal = self.lock_journal()?;
+        journal.append_action_and_release(&lease, &complete)?;
+        drop(journal);
+        #[cfg(test)]
+        self.fail_if_injected(FailureBoundary::JournalComplete)?;
+
+        #[cfg(test)]
+        self.fail_if_injected(FailureBoundary::MetadataFinalization)?;
+        let mut metadata = self.lock_metadata()?;
+        finalize_metadata(
+            &mut metadata,
+            &lease.action,
+            &complete,
+            &result_digest,
+            &accounting,
+        )?;
+        Ok(accounting)
     }
 
     /// Return daemon-owned wrapper variables for one job.
@@ -429,77 +633,10 @@ impl CompilerCacheService<velnor_action_journal::TokioClock> {
 
 impl<C: Clock> CompilerCache for CompilerCacheService<C> {
     async fn lookup(&self, key: &CompilerActionKey) -> Result<Option<CompilerResult>, CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            self.record_passthrough();
-            return Ok(None);
-        }
-        self.ensure_trust_scope(key)?;
-        let expected_key_json = canonical_key_json(key)?;
-        let record = {
-            let journal = self.lock_journal()?;
-            let Some(record) = journal.latest_action(key)? else {
-                self.record_miss();
-                return Ok(None);
-            };
-            if record.state != ActionState::Complete {
-                self.record_miss();
-                return Ok(None);
-            }
-            if record.trust_class != key.execution_policy.trust_class {
-                return Err(CacheError::TrustMismatch);
-            }
-            record
-        };
-        let key_digest = key.digest()?.to_string();
-        let Some(result_digest) = record.output_digests.get(RESULT_DIGEST) else {
-            self.record_miss();
-            return Ok(None);
-        };
-        let result_digest = result_digest.clone();
-        let output_digest = record_output_digest(&record)?;
-        let metadata_entry = {
-            let metadata = self.lock_metadata()?;
-            read_metadata(&metadata, &key_digest)?
-        };
-        let bytes = self.cas.get(&result_digest).map_err(CacheError::from)?;
-        let result: CompilerResult = serde_json::from_slice(&bytes)
-            .map_err(|error| CacheError::CorruptEntry(error.to_string()))?;
-        if result.action_key != *key
-            || result.action_key.execution_policy.trust_class != key.execution_policy.trust_class
-            || result.output_root != *output_digest
-        {
-            return Err(CacheError::CorruptEntry(
-                "published compiler result does not match its journal record".into(),
-            ));
-        }
-        let entry = match metadata_entry {
-            Some(entry) => entry,
-            None => {
-                let mut metadata = self.lock_metadata()?;
-                finalize_metadata(&mut metadata, key, &record, &result_digest)?;
-                read_metadata(&metadata, &key_digest)?.ok_or_else(|| {
-                    CacheError::InvalidMetadata(
-                        "metadata finalization committed no cache entry".into(),
-                    )
-                })?
-            }
-        };
-        verify_metadata(&entry, key, &expected_key_json, &record, &result_digest)?;
-        if result.exit_code != 0 {
-            return Err(CacheError::CorruptEntry(
-                "failed compiler result cannot be a cache hit".into(),
-            ));
-        }
-        if result.action_key != *key
-            || result.action_key.execution_policy.trust_class != key.execution_policy.trust_class
-            || result.output_root.to_string() != entry.output_digest
-        {
-            return Err(CacheError::CorruptEntry(
-                "published compiler result does not match its metadata".into(),
-            ));
-        }
-        self.record_hit();
-        Ok(Some(result))
+        Ok(self
+            .lookup_with_publication_accounting(key)
+            .await?
+            .map(|entry| entry.result))
     }
 
     async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
@@ -556,48 +693,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<(), CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(&lease.action)?;
-        if lease.action != result.action_key {
-            return Err(CacheError::LeaseKeyMismatch);
-        }
-        if result.action_key.execution_policy.trust_class
-            != lease.action.execution_policy.trust_class
-        {
-            return Err(CacheError::TrustMismatch);
-        }
-        if result.exit_code != 0 {
-            return Err(CacheError::FailedResult {
-                exit_code: result.exit_code,
-            });
-        }
-        let result_bytes = serde_json::to_vec(&result)?;
-        let result_digest = self.cas.put(&result_bytes)?;
-        let complete = ActionRecord {
-            action_key: lease.action.clone(),
-            state: ActionState::Complete,
-            producer_lease_ref: Some(lease_reference(&lease)),
-            consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::from([
-                (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
-                (RESULT_DIGEST.into(), result_digest.clone()),
-            ]),
-            timing: result.timing,
-            worker_id: Some(lease.owner.clone()),
-            trust_class: lease.action.execution_policy.trust_class,
-        };
-
-        // This journal transition is the fencing point. Metadata follows it;
-        // the durable result digest above lets lookup finish this step after a
-        // crash, without allowing a stale producer to write first.
-        let mut journal = self.lock_journal()?;
-        journal.append_action_and_release(&lease, &complete)?;
-        drop(journal);
-
-        let mut metadata = self.lock_metadata()?;
-        finalize_metadata(&mut metadata, &lease.action, &complete, &result_digest)?;
+        self.publish_with_accounting(lease, result).await?;
         Ok(())
     }
 }
@@ -638,6 +734,9 @@ pub enum CacheError {
     InvalidConfig(String),
     #[error("compiler-cache mutex is poisoned")]
     LockPoisoned,
+    #[cfg(test)]
+    #[error("injected compiler-cache failure")]
+    InjectedFailure,
 }
 
 #[derive(Debug)]
@@ -648,22 +747,46 @@ struct MetadataEntry {
     trust_class: String,
     schema_version: u32,
     lease_generation: u64,
+    accounting_json: Option<String>,
+    accounting: Option<PhysicalByteAccounting>,
 }
 
-fn initialize_metadata(connection: &Connection) -> Result<(), CacheError> {
+fn initialize_metadata(connection: &mut Connection) -> Result<(), CacheError> {
     connection.execute_batch(
         "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = FULL;
-         CREATE TABLE IF NOT EXISTS compiler_cache_entries (
+         PRAGMA synchronous = FULL;",
+    )?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "CREATE TABLE IF NOT EXISTS compiler_cache_entries (
              action_key_digest TEXT PRIMARY KEY NOT NULL,
              action_key_json TEXT NOT NULL,
              result_digest TEXT NOT NULL,
              output_digest TEXT NOT NULL,
              trust_class TEXT NOT NULL,
              schema_version INTEGER NOT NULL,
-             lease_generation INTEGER NOT NULL
-         );",
+             lease_generation INTEGER NOT NULL,
+             physical_byte_accounting_json TEXT
+         )",
+        [],
     )?;
+    let has_accounting_column = transaction
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('compiler_cache_entries')
+             WHERE name = 'physical_byte_accounting_json'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some();
+    if !has_accounting_column {
+        transaction.execute(
+            "ALTER TABLE compiler_cache_entries
+             ADD COLUMN physical_byte_accounting_json TEXT",
+            [],
+        )?;
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -704,14 +827,27 @@ fn record_lease_generation(record: &ActionRecord) -> Result<u64, CacheError> {
     })
 }
 
+fn record_accounting(
+    cas: &CasStore,
+    record: &ActionRecord,
+) -> Result<Option<PhysicalByteAccounting>, CacheError> {
+    let Some(accounting_digest) = record.output_digests.get(ACCOUNTING_DIGEST) else {
+        return Ok(None);
+    };
+    let bytes = cas.get(accounting_digest)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| CacheError::CorruptEntry(error.to_string()))
+}
+
 fn read_metadata(
     connection: &Connection,
     action_key_digest: &str,
 ) -> Result<Option<MetadataEntry>, CacheError> {
-    connection
+    let entry = connection
         .query_row(
             "SELECT action_key_json, result_digest, output_digest, trust_class,
-                    schema_version, lease_generation
+                    schema_version, lease_generation, physical_byte_accounting_json
              FROM compiler_cache_entries WHERE action_key_digest = ?1",
             [action_key_digest],
             |row| {
@@ -727,11 +863,32 @@ fn read_metadata(
                     lease_generation: u64::try_from(lease_generation).map_err(|_| {
                         rusqlite::Error::IntegralValueOutOfRange(5, lease_generation)
                     })?,
+                    accounting_json: row.get(6)?,
+                    accounting: None,
                 })
             },
         )
         .optional()
-        .map_err(CacheError::from)
+        .map_err(CacheError::from)?;
+    entry
+        .map(|entry| {
+            let accounting = entry
+                .accounting_json
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|error| CacheError::CorruptEntry(error.to_string()))?;
+            Ok(MetadataEntry {
+                key_json: entry.key_json,
+                result_digest: entry.result_digest,
+                output_digest: entry.output_digest,
+                trust_class: entry.trust_class,
+                schema_version: entry.schema_version,
+                lease_generation: entry.lease_generation,
+                accounting_json: None,
+                accounting,
+            })
+        })
+        .transpose()
 }
 
 fn finalize_metadata(
@@ -739,6 +896,7 @@ fn finalize_metadata(
     key: &ActionKey,
     record: &ActionRecord,
     result_digest: &Digest,
+    accounting: &PhysicalByteAccounting,
 ) -> Result<(), CacheError> {
     if record.action_key != *key || record.state != ActionState::Complete {
         return Err(CacheError::InvalidMetadata(
@@ -755,12 +913,13 @@ fn finalize_metadata(
     let trust_json = serde_json::to_string(&key.execution_policy.trust_class)?;
     let output_digest = record_output_digest(record)?.to_string();
     let lease_generation = record_lease_generation(record)?;
+    let accounting_json = serde_json::to_string(accounting)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "INSERT INTO compiler_cache_entries(
              action_key_digest, action_key_json, result_digest, output_digest,
-             trust_class, schema_version, lease_generation
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             trust_class, schema_version, lease_generation, physical_byte_accounting_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(action_key_digest) DO NOTHING",
         params![
             key_digest,
@@ -771,6 +930,7 @@ fn finalize_metadata(
             i64::from(COMPILER_CACHE_SCHEMA_VERSION),
             i64::try_from(lease_generation)
                 .map_err(|_| CacheError::InvalidMetadata("lease generation overflow".into()))?,
+            accounting_json,
         ],
     )?;
     transaction.commit()?;
@@ -783,11 +943,17 @@ fn verify_metadata(
     expected_key_json: &str,
     record: &ActionRecord,
     result_digest: &Digest,
+    accounting: &PhysicalByteAccounting,
 ) -> Result<(), CacheError> {
     verify_metadata_fields(entry, key, expected_key_json, record)?;
     if entry.result_digest != result_digest.to_string() {
         return Err(CacheError::CorruptEntry(
             "metadata result digest does not match journal record".into(),
+        ));
+    }
+    if entry.accounting.is_some_and(|value| value != *accounting) {
+        return Err(CacheError::CorruptEntry(
+            "metadata physical-byte accounting does not match durable result".into(),
         ));
     }
     Ok(())
@@ -879,6 +1045,21 @@ impl<C: Clock> CompilerCacheService<C> {
         let mut telemetry = self.lock_telemetry();
         telemetry.passthroughs = telemetry.passthroughs.saturating_add(1);
     }
+
+    #[cfg(test)]
+    fn inject_failure(&self, boundary: FailureBoundary) {
+        *self.failure_boundary.lock().expect("failure boundary lock") = Some(boundary);
+    }
+
+    #[cfg(test)]
+    fn fail_if_injected(&self, boundary: FailureBoundary) -> Result<(), CacheError> {
+        let mut injected = self.failure_boundary.lock().expect("failure boundary lock");
+        if *injected == Some(boundary) {
+            *injected = None;
+            return Err(CacheError::InjectedFailure);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -888,7 +1069,7 @@ mod tests {
         collections::BTreeMap,
         future::Future,
         pin::Pin,
-        sync::{Arc, Mutex},
+        sync::{Arc, Barrier, Mutex},
     };
     use tempfile::TempDir;
     use velnor_action_journal::TokioClock;
@@ -972,6 +1153,81 @@ mod tests {
         CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service")
     }
 
+    #[test]
+    fn concurrent_opens_serialize_legacy_metadata_migration() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let storage_root = directory.path().join("untrusted/compiler/kache");
+        fs::create_dir_all(&storage_root).expect("storage root");
+        let metadata_path = storage_root.join("metadata.sqlite");
+        let legacy_metadata = Connection::open(&metadata_path).expect("legacy metadata");
+        legacy_metadata
+            .execute_batch(
+                "CREATE TABLE compiler_cache_entries (
+                     action_key_digest TEXT PRIMARY KEY NOT NULL,
+                     action_key_json TEXT NOT NULL,
+                     result_digest TEXT NOT NULL,
+                     output_digest TEXT NOT NULL,
+                     trust_class TEXT NOT NULL,
+                     schema_version INTEGER NOT NULL,
+                     lease_generation INTEGER NOT NULL
+                 );
+                 INSERT INTO compiler_cache_entries(
+                     action_key_digest, action_key_json, result_digest,
+                     output_digest, trust_class, schema_version, lease_generation
+                 ) VALUES ('legacy-key', '{}', 'legacy-result', 'legacy-output',
+                           'untrusted', 1, 1);",
+            )
+            .expect("legacy metadata schema");
+        drop(legacy_metadata);
+
+        let barrier = Arc::new(Barrier::new(8));
+        std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|index| {
+                    let barrier = Arc::clone(&barrier);
+                    let root = directory.path().to_path_buf();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let config = CompilerCacheConfig::new(root, format!("worker-{index}"));
+                        CompilerCacheService::open(
+                            config,
+                            WrapperDeclaration::default(),
+                            TokioClock::new(),
+                        )
+                        .map(|cache| cache.backend())
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                assert_eq!(
+                    handle
+                        .join()
+                        .expect("concurrent open thread")
+                        .expect("concurrent open"),
+                    CompilerCacheBackend::Kache
+                );
+            }
+        });
+
+        let metadata = Connection::open(metadata_path).expect("verify metadata");
+        let column_count: i64 = metadata
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('compiler_cache_entries')
+                 WHERE name = 'physical_byte_accounting_json'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("accounting column");
+        assert_eq!(column_count, 1);
+        let legacy_count: i64 = metadata
+            .query_row("SELECT COUNT(*) FROM compiler_cache_entries", [], |row| {
+                row.get(0)
+            })
+            .expect("legacy record");
+        assert_eq!(legacy_count, 1);
+    }
+
     #[tokio::test]
     async fn lookup_is_a_clean_miss_before_publication() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -1019,6 +1275,192 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn physical_accounting_survives_publish_reopen_and_recovery() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let action_key = key(19);
+        let expected = result(action_key.clone());
+        let accounting = {
+            let cache = service(
+                &directory,
+                CompilerCachePolicy::Kache,
+                WrapperDeclaration::default(),
+            );
+            let lease = cache.begin(&action_key).await.expect("lease");
+            cache
+                .publish_with_accounting(lease, expected.clone())
+                .await
+                .expect("publish")
+        };
+
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let reopened = cache
+            .lookup_with_publication_accounting(&action_key)
+            .await
+            .expect("reopened lookup")
+            .expect("reopened hit");
+        assert_eq!(reopened.result(), &expected);
+        assert_eq!(reopened.publication_accounting(), accounting);
+
+        let key_digest = action_key.digest().expect("key digest").to_string();
+        {
+            let metadata = cache.lock_metadata().expect("metadata lock");
+            metadata
+                .execute(
+                    "DELETE FROM compiler_cache_entries WHERE action_key_digest = ?1",
+                    [&key_digest],
+                )
+                .expect("delete metadata");
+        }
+        let recovered = cache
+            .lookup_with_publication_accounting(&action_key)
+            .await
+            .expect("recovery lookup")
+            .expect("recovery hit");
+        assert_eq!(recovered.publication_accounting(), accounting);
+        let metadata = cache.lock_metadata().expect("metadata lock");
+        let recovered_entry = read_metadata(&metadata, &key_digest)
+            .expect("read recovered metadata")
+            .expect("recovered metadata");
+        assert_eq!(recovered_entry.accounting, Some(accounting));
+    }
+
+    #[tokio::test]
+    async fn publication_failure_boundaries_recover_without_false_accounting() {
+        for (seed, boundary) in [
+            (21, FailureBoundary::ResultCas),
+            (22, FailureBoundary::AccountingCas),
+            (23, FailureBoundary::JournalComplete),
+            (24, FailureBoundary::MetadataFinalization),
+        ] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let action_key = key(seed);
+            let expected = result(action_key.clone());
+            let cache = service(
+                &directory,
+                CompilerCachePolicy::Kache,
+                WrapperDeclaration::default(),
+            );
+            let lease = cache.begin(&action_key).await.expect("lease");
+            cache.inject_failure(boundary);
+            assert!(matches!(
+                cache.publish_with_accounting(lease, expected.clone()).await,
+                Err(CacheError::InjectedFailure)
+            ));
+            drop(cache);
+
+            let cache = service(
+                &directory,
+                CompilerCachePolicy::Kache,
+                WrapperDeclaration::default(),
+            );
+            let key_digest = action_key.digest().expect("key digest").to_string();
+            let latest = {
+                let journal = cache.lock_journal().expect("journal lock");
+                journal
+                    .latest_action(&action_key)
+                    .expect("latest action")
+                    .expect("action record")
+            };
+            match boundary {
+                FailureBoundary::ResultCas | FailureBoundary::AccountingCas => {
+                    assert_eq!(latest.state, ActionState::Leased);
+                    assert!(cache
+                        .lookup_with_publication_accounting(&action_key)
+                        .await
+                        .expect("partial publication lookup")
+                        .is_none());
+                    let metadata = cache.lock_metadata().expect("metadata lock");
+                    assert!(read_metadata(&metadata, &key_digest)
+                        .expect("partial metadata read")
+                        .is_none());
+                }
+                FailureBoundary::JournalComplete | FailureBoundary::MetadataFinalization => {
+                    assert_eq!(latest.state, ActionState::Complete);
+                    let recovered = cache
+                        .lookup_with_publication_accounting(&action_key)
+                        .await
+                        .expect("recovery lookup")
+                        .expect("recovered hit");
+                    let accounting_digest = latest
+                        .output_digests
+                        .get(ACCOUNTING_DIGEST)
+                        .expect("accounting digest");
+                    let durable_accounting: PhysicalByteAccounting = serde_json::from_slice(
+                        &cache.cas.get(accounting_digest).expect("accounting object"),
+                    )
+                    .expect("durable accounting");
+                    assert_eq!(recovered.result(), &expected);
+                    assert_eq!(recovered.publication_accounting(), durable_accounting);
+                    let metadata = cache.lock_metadata().expect("metadata lock");
+                    assert_eq!(
+                        read_metadata(&metadata, &key_digest)
+                            .expect("recovered metadata read")
+                            .expect("recovered metadata")
+                            .accounting,
+                        Some(durable_accounting)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_record_without_accounting_stays_unknown() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(20);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        cache
+            .publish_with_accounting(lease, result(action_key.clone()))
+            .await
+            .expect("publish");
+
+        let mut legacy = {
+            let journal = cache.lock_journal().expect("journal lock");
+            journal
+                .latest_action(&action_key)
+                .expect("read journal")
+                .expect("complete record")
+        };
+        legacy.output_digests.remove(ACCOUNTING_DIGEST);
+        {
+            let mut journal = cache.lock_journal().expect("journal lock");
+            journal
+                .append_action(&legacy)
+                .expect("append legacy record");
+        }
+        let key_digest = action_key.digest().expect("key digest").to_string();
+        {
+            let metadata = cache.lock_metadata().expect("metadata lock");
+            metadata
+                .execute(
+                    "UPDATE compiler_cache_entries
+                     SET physical_byte_accounting_json = NULL
+                     WHERE action_key_digest = ?1",
+                    [&key_digest],
+                )
+                .expect("remove legacy accounting");
+        }
+
+        let entry = cache
+            .lookup_with_publication_accounting(&action_key)
+            .await
+            .expect("lookup")
+            .expect("legacy hit");
+        assert!(!entry.publication_accounting().is_known());
+        assert_eq!(entry.publication_accounting().shared_bytes(), None);
+        assert_eq!(entry.publication_accounting().newly_allocated_bytes(), None);
     }
 
     #[tokio::test]
@@ -1175,8 +1617,14 @@ mod tests {
             .insert(RESULT_DIGEST.into(), alternate_digest.clone());
         {
             let mut metadata = cache.lock_metadata().expect("metadata lock");
-            finalize_metadata(&mut metadata, &action_key, &alternate, &alternate_digest)
-                .expect("idempotent metadata finalization");
+            finalize_metadata(
+                &mut metadata,
+                &action_key,
+                &alternate,
+                &alternate_digest,
+                &PhysicalByteAccounting::unknown(),
+            )
+            .expect("idempotent metadata finalization");
             let preserved = read_metadata(&metadata, &key_digest)
                 .expect("read preserved metadata")
                 .expect("preserved entry");

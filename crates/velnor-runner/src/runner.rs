@@ -606,17 +606,10 @@ fn emit_plan_summary_telemetry(
 /// Instance slug naming this daemon in the shared operational store:
 /// hostname when resolvable, sanitized to the store's slug charset.
 fn instance_slug_for_store() -> String {
-    let mut buffer = [0u8; 256];
-    let host = unsafe {
-        // POSIX gethostname: writes at most `buffer.len()` bytes, always
-        // NUL-terminated on glibc/musl/Darwin for this buffer size.
-        if libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len()) == 0 {
-            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
-            String::from_utf8_lossy(&buffer[..end]).into_owned()
-        } else {
-            String::new()
-        }
-    };
+    #[cfg(unix)]
+    let host = String::from_utf8_lossy(rustix::system::uname().nodename().to_bytes()).into_owned();
+    #[cfg(not(unix))]
+    let host = String::new();
     crate::ops::sanitize_slug_for_instance(&host)
 }
 
@@ -3662,7 +3655,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
+                DOCKER_NETWORK_INSPECT_FORMAT,
                 id,
             ])
             .filter(|output| output.status.success())
@@ -3693,6 +3686,9 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
     crate::docker_lease::daemon_owns_label(owner, daemon_id)
 }
+
+const DOCKER_NETWORK_INSPECT_FORMAT: &str =
+    r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#;
 
 /// True when a `velnor-net-*` network is safe to remove at startup. Networks
 /// carrying THIS daemon's ownership label are stale by definition (a daemon
@@ -3776,7 +3772,7 @@ fn prune_empty_velnor_networks_with(
                 "network",
                 "inspect",
                 "--format",
-                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
+                DOCKER_NETWORK_INSPECT_FORMAT,
                 id,
             ]);
             let mut fields = state.trim().splitn(2, '\t');
@@ -12708,6 +12704,14 @@ jobs:
     }
 
     #[test]
+    fn docker_network_inspect_format_uses_go_template_tab_escape() {
+        assert_eq!(
+            DOCKER_NETWORK_INSPECT_FORMAT,
+            r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#
+        );
+    }
+
+    #[test]
     fn stale_network_prunable_removes_owned_and_unlabeled_endpointless() {
         // This daemon's own label (or a direct slot child) is stale at startup.
         assert!(stale_network_prunable("/daemon/work", 3, "/daemon/work"));
@@ -17331,8 +17335,7 @@ runs:
     }
 
     #[cfg(unix)]
-    #[test]
-    fn abandoned_precreated_environment_cleanup_takes_lease() {
+    fn abandoned_precreated_environment_cleanup_takes_lease_impl() {
         // An unclaimed pre-created environment is cleaned up by Drop; the
         // pre-create thread's guard must be handed to that cleanup so the
         // proxy outlives the container removal (and is gone afterwards).
@@ -17342,11 +17345,6 @@ runs:
         // `docker rm --force` hangs for DEFAULT_STEP_TIMEOUT (6h). Point
         // docker CLI at a missing socket so cleanup fails fast as the
         // comment below assumed.
-        // SAFETY: this test owns the process environment value for the external
-        // docker probe and does not expose it to Rust library code.
-        unsafe {
-            std::env::set_var("DOCKER_HOST", "unix:///tmp/velnor-test-no-docker.sock");
-        }
         let root = std::env::temp_dir().join(format!("velnor-lease-drop-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let (socket_dir, listen) = short_lease_socket("drop");
@@ -17375,6 +17373,30 @@ runs:
         );
         fs::remove_dir_all(&socket_dir).ok();
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_precreated_environment_cleanup_takes_lease() {
+        let test_binary = std::env::current_exe().expect("test binary path");
+        let status = Command::new(test_binary)
+            .args([
+                "--exact",
+                "runner::tests::abandoned_precreated_environment_cleanup_takes_lease_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("DOCKER_HOST", "unix:///tmp/velnor-test-no-docker.sock")
+            .status()
+            .expect("spawn isolated cleanup test");
+        assert!(status.success(), "isolated cleanup test failed: {status}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "launched by abandoned_precreated_environment_cleanup_takes_lease"]
+    fn abandoned_precreated_environment_cleanup_takes_lease_child() {
+        abandoned_precreated_environment_cleanup_takes_lease_impl();
     }
 
     #[test]
