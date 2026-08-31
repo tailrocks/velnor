@@ -913,7 +913,7 @@ jobs:
           done
           jq -S -n \
             --arg source_repository "$GITHUB_REPOSITORY" \
-            --arg source_ref "$COMMIT" \
+            --arg source_ref "refs/tags/v$VERSION" \
             --arg source_commit "$COMMIT" \
             --arg version "$VERSION" \
             --slurpfile assets assets.jsonl \
