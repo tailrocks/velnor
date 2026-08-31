@@ -388,19 +388,20 @@ mod tests {
             } else {
                 self.codes.remove(0)
             };
-            if code == 0 && args.contains(&"/__t/velnor-preflight.sh".to_string()) {
-                if let Some(temp_mount) = args.windows(2).find_map(|items| {
+            if code == 0
+                && args.contains(&"/__t/velnor-preflight.sh".to_string())
+                && let Some(temp_mount) = args.windows(2).find_map(|items| {
                     if items[0] == "-v" {
                         items[1].strip_suffix(":/__t")
                     } else {
                         None
                     }
-                }) {
-                    fs::write(
-                        Path::new(temp_mount).join("velnor-preflight-output"),
-                        "velnor-script-ok\n",
-                    )?;
-                }
+                })
+            {
+                fs::write(
+                    Path::new(temp_mount).join("velnor-preflight-output"),
+                    "velnor-script-ok\n",
+                )?;
             }
             Ok(CommandResult {
                 code,
@@ -686,7 +687,9 @@ mod tests {
     #[test]
     fn missing_socket_error_explains_remote_docker_host_target_limit() {
         let previous = std::env::var_os("DOCKER_HOST");
-        std::env::set_var("DOCKER_HOST", "tcp://docker.example:2376");
+        // SAFETY: this test owns the process environment value for the duration
+        // of the synchronous probe and restores it before returning.
+        unsafe { std::env::set_var("DOCKER_HOST", "tcp://docker.example:2376") };
 
         let error = missing_docker_socket_error();
 
@@ -695,9 +698,11 @@ mod tests {
         assert!(error.contains("VELNOR_REQUIRE_DOCKER_SOCKET=false only for fixture checks"));
 
         if let Some(previous) = previous {
-            std::env::set_var("DOCKER_HOST", previous);
+            // SAFETY: restore the value owned by this synchronous test.
+            unsafe { std::env::set_var("DOCKER_HOST", previous) };
         } else {
-            std::env::remove_var("DOCKER_HOST");
+            // SAFETY: restore the value owned by this synchronous test.
+            unsafe { std::env::remove_var("DOCKER_HOST") };
         }
     }
 }

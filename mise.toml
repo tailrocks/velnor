@@ -51,6 +51,21 @@ if cargo check -p velnor-runner --release --locked --features test-support; then
 fi
 """
 
+[tasks."release:check"]
+description = "Validate the tagged release unit and signed velnor-apt train"
+run = """
+set -eu
+workflow=.github/workflows/release.yml
+docs=docs/debian-apt-repo.md
+test -f "$workflow"
+test -f "$docs"
+grep -q "^  push:" "$workflow"
+grep -q "      - 'v\\[0-9\\]\\*'" "$workflow"
+grep -q -- "--features release-build" "$workflow"
+grep -q "tailrocks/velnor-actions/.github/workflows/package-signer.yml@" "$workflow"
+grep -q "tailrocks/velnor-apt" "$docs"
+"""
+
 [tasks.actionlint]
 run = "actionlint"
 
