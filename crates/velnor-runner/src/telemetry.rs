@@ -54,15 +54,14 @@ impl RotatingFile {
         let mut rotated = self.path.file_name().unwrap_or_default().to_os_string();
         rotated.push(".1");
         let rotated = self.path.with_file_name(rotated);
-        if std::fs::rename(&self.path, rotated).is_ok() {
-            if let Ok(fresh) = std::fs::OpenOptions::new()
+        if std::fs::rename(&self.path, rotated).is_ok()
+            && let Ok(fresh) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.path)
-            {
-                self.file = BufWriter::new(fresh);
-                self.written = 0;
-            }
+        {
+            self.file = BufWriter::new(fresh);
+            self.written = 0;
         }
     }
 }

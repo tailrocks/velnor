@@ -11,7 +11,7 @@ coverage/
 .velnor-config/
 .velnor-job-dumps/
 .velnor-live-evidence/
-.velnor-compare/*.html
+.velnor-compare/
 target-job-payloads/
 
 # opencode local runtime state

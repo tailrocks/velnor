@@ -37,7 +37,8 @@ struct NativeTransportGuard {
 async fn native_transport_guard() -> NativeTransportGuard {
     let lock = GITHUB_HTTP_TRANSPORT_ENV_LOCK.lock().await;
     let previous = std::env::var_os(GITHUB_HTTP_TRANSPORT_ENV);
-    std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "native");
+    // SAFETY: the process-wide environment lock is held for this guard.
+    unsafe { std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "native") };
     NativeTransportGuard {
         previous,
         _lock: lock,
@@ -47,8 +48,14 @@ async fn native_transport_guard() -> NativeTransportGuard {
 impl Drop for NativeTransportGuard {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, value),
-            None => std::env::remove_var(GITHUB_HTTP_TRANSPORT_ENV),
+            Some(value) => unsafe {
+                // SAFETY: the process-wide environment lock is held for this guard.
+                std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, value)
+            },
+            None => unsafe {
+                // SAFETY: the process-wide environment lock is held for this guard.
+                std::env::remove_var(GITHUB_HTTP_TRANSPORT_ENV)
+            },
         }
     }
 }

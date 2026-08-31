@@ -239,12 +239,11 @@ where
                 if entry.file_name() != ".git" {
                     pending.push(path);
                 }
-            } else if file_type.is_file() {
-                if let Ok(file) = std::fs::File::options().append(true).open(&path) {
-                    if file.set_modified(commit_time).is_ok() {
-                        touched += 1;
-                    }
-                }
+            } else if file_type.is_file()
+                && let Ok(file) = std::fs::File::options().append(true).open(&path)
+                && file.set_modified(commit_time).is_ok()
+            {
+                touched += 1;
             }
         }
         // Directories too: cargo's `rerun-if-changed=<dir>` fingerprints the
@@ -253,10 +252,10 @@ where
         // blockchain-explorer rebuilding 28s of clippy per warm run because
         // its build.rs tracks the proto include directories. Setting file
         // times does not touch the parent dir, so order is irrelevant.
-        if let Ok(handle) = std::fs::File::open(&dir) {
-            if handle.set_modified(commit_time).is_ok() {
-                touched += 1;
-            }
+        if let Ok(handle) = std::fs::File::open(&dir)
+            && handle.set_modified(commit_time).is_ok()
+        {
+            touched += 1;
         }
     }
     if touched > 0 {
@@ -454,10 +453,8 @@ where
     // LFS blobs — it authenticates via the persisted http.<host>.extraheader, so
     // set credentials up BEFORE checkout. For lfs:false (default) we instead skip
     // the smudge entirely (no LFS fetch, no creds needed) via lfs_skip_smudge_args.
-    if lfs {
-        if let Some(token) = token {
-            persist_git_credentials(runner, destination, clone_url, token, log)?;
-        }
+    if lfs && let Some(token) = token {
+        persist_git_credentials(runner, destination, clone_url, token, log)?;
     }
 
     let mut checkout = vec!["-C".to_string(), path_arg(destination)];
@@ -497,10 +494,8 @@ where
         )?;
     }
 
-    if persist_credentials {
-        if let Some(token) = token {
-            persist_git_credentials(runner, destination, clone_url, token, log)?;
-        }
+    if persist_credentials && let Some(token) = token {
+        persist_git_credentials(runner, destination, clone_url, token, log)?;
     }
 
     Ok(())
