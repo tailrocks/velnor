@@ -3,7 +3,7 @@
 //! This module resolves one deterministic precedence chain. It never reads
 //! process environment or `/proc`; callers provide captured layers explicitly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,10 @@ impl ConfigResolver {
         for layer in &self.layers {
             match &layer.endpoint {
                 Setting::Unset => {}
-                Setting::Value(value) => endpoint = (Some(value.clone()), layer.source),
+                Setting::Value(value) => {
+                    validate_endpoint(value)?;
+                    endpoint = (Some(value.clone()), layer.source);
+                }
                 Setting::ExplicitEmpty => endpoint = (None, layer.source),
             }
             apply_setting(&mut name, &layer.name, layer.source, Some(String::new()))?;
@@ -163,12 +166,14 @@ impl ContextJournal {
     }
 
     /// Record a sanitized context change, retaining only the latest rows.
-    pub fn record(&mut self, change: ContextChange) {
+    pub fn record(&mut self, change: ContextChange) -> Result<(), ConfigError> {
+        validate_context_change(&change)?;
         self.entries.push(change);
         if self.entries.len() > self.capacity {
             let excess = self.entries.len() - self.capacity;
             self.entries.drain(..excess);
         }
+        Ok(())
     }
 
     /// Current bounded entries in chronological order.
@@ -201,11 +206,11 @@ pub trait ContextStore: Send + Sync {
 
 /// File-backed context store with atomic `0600` writes.
 pub struct FileContextStore {
-    path: std::path::PathBuf,
-    resolved_path: std::sync::OnceLock<std::path::PathBuf>,
+    resolved_path: std::sync::OnceLock<Result<std::path::PathBuf, ConfigError>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContextFile {
     contexts: Vec<ContextConfig>,
     current: Option<String>,
@@ -215,21 +220,19 @@ impl FileContextStore {
     /// Open a store at an explicit path.
     #[must_use]
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            resolved_path: std::sync::OnceLock::new(),
-        }
+        let path = path.into();
+        let resolved_path = std::sync::OnceLock::new();
+        let _ = resolved_path
+            .set(std::path::absolute(&path).map_err(|error| ConfigError::Io(error.to_string())));
+        Self { resolved_path }
     }
 
     /// Save or replace one context.
     pub fn set(&self, mut context: ContextConfig) -> Result<(), ConfigError> {
-        validate_context_name(&context.name)?;
-        if context.endpoint.as_str().is_empty() {
-            return Err(ConfigError::Empty("endpoint"));
-        }
+        validate_context_config(&context)?;
         let path = self.absolute_path()?;
-        let _lock = SidecarLock::acquire(&path)?;
-        let mut file = read_file(&path)?;
+        let mut lock = SidecarLock::acquire(&path)?;
+        let mut file = read_file_at(lock.context_file.as_mut())?;
         let is_current =
             file.current.as_deref() == Some(context.name.as_str()) || file.current.is_none();
         if is_current {
@@ -245,15 +248,15 @@ impl FileContextStore {
         } else {
             file.contexts.push(context);
         }
-        write_file(&path, &file)
+        write_file_at(&lock.path, &file)
     }
 
     /// Select one existing context and persist that selection.
     pub fn use_context(&self, name: &str) -> Result<ContextConfig, ConfigError> {
         validate_context_name(name)?;
         let path = self.absolute_path()?;
-        let _lock = SidecarLock::acquire(&path)?;
-        let mut file = read_file(&path)?;
+        let mut lock = SidecarLock::acquire(&path)?;
+        let mut file = read_file_at(lock.context_file.as_mut())?;
         if !file.contexts.iter().any(|context| context.name == name) {
             return Err(ConfigError::ContextNotFound);
         }
@@ -261,18 +264,22 @@ impl FileContextStore {
         for context in &mut file.contexts {
             context.current = context.name == name;
         }
-        write_file(&path, &file)?;
-        file.contexts
+        write_file_at(&lock.path, &file)?;
+        let context = file
+            .contexts
             .into_iter()
             .find(|context| context.name == name)
-            .ok_or(ConfigError::ContextNotFound)
+            .ok_or(ConfigError::ContextNotFound)?;
+        validate_context_config(&context)?;
+        Ok(context)
     }
 
     /// Delete a non-current context.
     pub fn delete(&self, name: &str) -> Result<(), ConfigError> {
+        validate_context_name(name)?;
         let path = self.absolute_path()?;
-        let _lock = SidecarLock::acquire(&path)?;
-        let mut file = read_file(&path)?;
+        let mut lock = SidecarLock::acquire(&path)?;
+        let mut file = read_file_at(lock.context_file.as_mut())?;
         if file.current.as_deref() == Some(name) {
             return Err(ConfigError::ContextCurrent);
         }
@@ -281,22 +288,30 @@ impl FileContextStore {
         if before == file.contexts.len() {
             return Err(ConfigError::ContextNotFound);
         }
-        write_file(&path, &file)
+        write_file_at(&lock.path, &file)
     }
 
     fn absolute_path(&self) -> Result<std::path::PathBuf, ConfigError> {
-        if let Some(path) = self.resolved_path.get() {
-            return Ok(path.clone());
-        }
-        let path =
-            std::path::absolute(&self.path).map_err(|error| ConfigError::Io(error.to_string()))?;
-        let _ = self.resolved_path.set(path.clone());
-        Ok(self.resolved_path.get().cloned().unwrap_or(path))
+        self.resolved_path.get().cloned().ok_or_else(|| {
+            ConfigError::Io("context path was not resolved at construction".to_owned())
+        })?
     }
 }
 
 struct SidecarLock {
-    _file: std::fs::File,
+    _file: Option<std::fs::File>,
+    path: AnchoredPath,
+    context_file: Option<std::fs::File>,
+}
+
+struct OpenedLock {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+struct AnchoredPath {
+    parent: std::fs::File,
+    name: std::ffi::OsString,
 }
 
 #[cfg(unix)]
@@ -321,9 +336,15 @@ fn validate_file_metadata(
             "refusing to use {description} not owned by the current user"
         )));
     }
-    if metadata.permissions().mode() & 0o022 != 0 {
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode & 0o022 != 0 {
         return Err(ConfigError::Io(format!(
             "refusing to use {description} writable by group or other"
+        )));
+    }
+    if mode != 0o600 {
+        return Err(ConfigError::Io(format!(
+            "refusing to use {description} without exact mode 0600"
         )));
     }
     Ok(())
@@ -370,134 +391,107 @@ fn validate_directory_metadata(
 
 impl SidecarLock {
     fn acquire(config_path: &std::path::Path) -> Result<Self, ConfigError> {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let parent = ensure_parent(config_path)?;
-        inspect_final_file(config_path)?;
-        let name = context_file_name(config_path)?;
-        let path = parent.join(format!(".{name}.lock"));
-        inspect_lock_path(&path)?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        validate_file_metadata(&metadata, "context lock")?;
-        if !metadata.is_file() {
-            return Err(ConfigError::Io(
-                "refusing to use a non-regular context lock".to_owned(),
-            ));
-        }
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
+        let path = open_anchored_parent(config_path, true)?.ok_or_else(|| {
+            ConfigError::Io("context parent disappeared while opening it".to_owned())
+        })?;
+        let context_exists = inspect_regular_entry(&path.parent, &path.name, "context file")?;
+        let lock_name = lock_file_name(&path.name);
+        let opened =
+            open_lock(&path.parent, &lock_name, !context_exists, true)?.ok_or_else(|| {
+                if context_exists {
+                    ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+                } else {
+                    ConfigError::Io("context lock disappeared while opening it".to_owned())
+                }
+            })?;
+        let file = opened.file;
         file.lock()
             .map_err(|error| ConfigError::Io(error.to_string()))?;
-        Ok(Self { _file: file })
+        let context_file = open_verified_file(&path.parent, &path.name, "context file")?;
+        Ok(Self {
+            _file: Some(file),
+            path,
+            context_file,
+        })
     }
 
     fn acquire_existing_shared(config_path: &std::path::Path) -> Result<Option<Self>, ConfigError> {
-        let Some(parent) = inspect_read_parent(config_path)? else {
+        let Some(path) = open_anchored_parent(config_path, false)? else {
             return Ok(None);
         };
-        inspect_final_file(config_path)?;
-        let name = context_file_name(config_path)?;
-        let path = parent.join(format!(".{name}.lock"));
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+        let lock_name = lock_file_name(&path.name);
+        let Some(opened) = open_lock(&path.parent, &lock_name, false, false)? else {
+            if inspect_regular_entry(&path.parent, &path.name, "context file")? {
                 return Err(ConfigError::Io(
-                    "refusing to use a symbolic-link context lock".to_owned(),
+                    "refusing to use context file without sidecar lock".to_owned(),
                 ));
             }
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(ConfigError::Io(
-                    "refusing to use a non-regular context lock".to_owned(),
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ConfigError::Io(error.to_string())),
-        }
-
-        let file = match std::fs::OpenOptions::new().read(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ConfigError::Io(error.to_string())),
+            return Ok(None);
         };
-        let metadata = file
-            .metadata()
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        validate_file_metadata(&metadata, "context lock")?;
-        if !metadata.is_file() {
-            return Err(ConfigError::Io(
-                "refusing to use a non-regular context lock".to_owned(),
-            ));
-        }
+        let file = opened.file;
         file.lock_shared()
             .map_err(|error| ConfigError::Io(error.to_string()))?;
-        Ok(Some(Self { _file: file }))
+        let context_file = open_verified_file(&path.parent, &path.name, "context file")?;
+        Ok(Some(Self {
+            _file: Some(file),
+            path,
+            context_file,
+        }))
     }
 }
 
-fn read_file(path: &std::path::Path) -> Result<ContextFile, ConfigError> {
-    inspect_read_path(path)?;
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            toml::from_str(&contents).map_err(|error| ConfigError::Decode(error.to_string()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ContextFile {
-            contexts: Vec::new(),
-            current: None,
-        }),
-        Err(error) => Err(ConfigError::Io(error.to_string())),
-    }
-}
-
-fn write_file(path: &std::path::Path, file: &ContextFile) -> Result<(), ConfigError> {
-    let parent = ensure_parent(path)?;
-    inspect_final_file(path)?;
-    let name = context_file_name(path)?;
-    let temp = parent.join(format!(".{name}.tmp-{}", uuid::Uuid::new_v4().simple()));
-    write_file_with_temp_path(path, parent, file, &temp)
-}
-
+#[cfg(test)]
 fn write_file_with_temp_path(
     path: &std::path::Path,
-    parent: &std::path::Path,
+    _parent: &std::path::Path,
     file: &ContextFile,
     temp: &std::path::Path,
 ) -> Result<(), ConfigError> {
+    let path = open_anchored_parent(path, true)?
+        .ok_or_else(|| ConfigError::Io("context parent disappeared while opening it".to_owned()))?;
+    let temp_name = temp
+        .file_name()
+        .ok_or_else(|| ConfigError::Io("context temporary path has no file name".to_owned()))?
+        .to_owned();
+    write_file_at_with_temp_name(&path, file, &temp_name)
+}
+
+fn write_file_at(path: &AnchoredPath, file: &ContextFile) -> Result<(), ConfigError> {
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(&path.name);
+    temp_name.push(format!(".tmp-{}", uuid::Uuid::new_v4().simple()));
+    write_file_at_with_temp_name(path, file, &temp_name)
+}
+
+fn write_file_at_with_temp_name(
+    path: &AnchoredPath,
+    file: &ContextFile,
+    temp_name: &std::ffi::OsStr,
+) -> Result<(), ConfigError> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let mut owns_temp = false;
     let result = (|| {
-        let mut handle = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(temp)
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
+        validate_context_file(file)?;
+        validate_existing_file(&path.parent, &path.name, "context file")?;
+        let descriptor = rustix::fs::openat(
+            &path.parent,
+            temp_name,
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .map_err(|error| ConfigError::Io(std::io::Error::from(error).to_string()))?;
+        let mut handle: std::fs::File = descriptor.into();
         owns_temp = true;
-        let metadata = handle
-            .metadata()
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        validate_file_metadata(&metadata, "context temporary file")?;
-        if !metadata.is_file() {
-            return Err(ConfigError::Io(
-                "refusing to use a non-regular context temporary file".to_owned(),
-            ));
-        }
-        handle
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| ConfigError::Io(error.to_string()))?;
-        let contents =
-            toml::to_string_pretty(file).map_err(|error| ConfigError::Decode(error.to_string()))?;
+        rustix::fs::fchmod(&handle, rustix::fs::Mode::from_raw_mode(0o600))
+            .map_err(|error| ConfigError::Io(std::io::Error::from(error).to_string()))?;
+        validate_file_handle(&handle, "context temporary file")?;
+        let contents = toml::to_string_pretty(file)
+            .map_err(|_| ConfigError::Decode("context document failed serialization".to_owned()))?;
         handle
             .write_all(contents.as_bytes())
             .map_err(|error| ConfigError::Io(error.to_string()))?;
@@ -505,80 +499,38 @@ fn write_file_with_temp_path(
             .sync_all()
             .map_err(|error| ConfigError::Io(error.to_string()))?;
         drop(handle);
-        std::fs::rename(temp, path).map_err(|error| ConfigError::Io(error.to_string()))?;
+        rustix::fs::renameat(&path.parent, temp_name, &path.parent, &path.name)
+            .map_err(|error| ConfigError::Io(std::io::Error::from(error).to_string()))?;
         owns_temp = false;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
+        path.parent
+            .sync_all()
             .map_err(|error| ConfigError::Io(error.to_string()))
     })();
     if owns_temp && result.is_err() {
-        let _ = std::fs::remove_file(temp);
+        let _ = rustix::fs::unlinkat(&path.parent, temp_name, rustix::fs::AtFlags::empty());
     }
     result
 }
 
-fn ensure_parent(path: &std::path::Path) -> Result<&std::path::Path, ConfigError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ConfigError::Io("context path has no parent".to_owned()))?;
-    inspect_directory_chain(parent, true)?;
-    std::fs::create_dir_all(parent).map_err(|error| ConfigError::Io(error.to_string()))?;
-    inspect_directory_chain(parent, false)?;
-    Ok(parent)
-}
-
-fn inspect_read_path(path: &std::path::Path) -> Result<(), ConfigError> {
-    let _ = inspect_read_parent(path)?;
-    inspect_final_file(path)
-}
-
-fn inspect_read_parent(path: &std::path::Path) -> Result<Option<&std::path::Path>, ConfigError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ConfigError::Io("context path has no parent".to_owned()))?;
-    inspect_directory_chain(parent, true)?;
-    if parent.exists() {
-        Ok(Some(parent))
-    } else {
-        Ok(None)
-    }
-}
-
-fn inspect_final_file(path: &std::path::Path) -> Result<(), ConfigError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(ConfigError::Io(
-            "refusing to use a symbolic-link context file".to_owned(),
-        )),
-        Ok(metadata) if !metadata.is_file() => Err(ConfigError::Io(
-            "refusing to use a non-regular context file".to_owned(),
-        )),
-        Ok(metadata) => validate_file_metadata(&metadata, "context file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ConfigError::Io(error.to_string())),
-    }
-}
-
-fn inspect_lock_path(path: &std::path::Path) -> Result<(), ConfigError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(ConfigError::Io(
-            "refusing to use a symbolic-link context lock".to_owned(),
-        )),
-        Ok(metadata) if !metadata.is_file() => Err(ConfigError::Io(
-            "refusing to use a non-regular context lock".to_owned(),
-        )),
-        Ok(metadata) => validate_file_metadata(&metadata, "context lock"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ConfigError::Io(error.to_string())),
-    }
-}
-
-fn context_file_name(path: &std::path::Path) -> Result<&str, ConfigError> {
+fn context_file_name(path: &std::path::Path) -> Result<&std::ffi::OsStr, ConfigError> {
     path.file_name()
-        .and_then(|name| name.to_str())
+        .filter(|name| *name != std::ffi::OsStr::new(".") && *name != std::ffi::OsStr::new(".."))
         .ok_or_else(|| ConfigError::Io("context path has no valid file name".to_owned()))
 }
 
-fn inspect_directory_chain(path: &std::path::Path, allow_missing: bool) -> Result<(), ConfigError> {
+fn open_anchored_parent(
+    path: &std::path::Path,
+    create: bool,
+) -> Result<Option<AnchoredPath>, ConfigError> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::absolute(path).map_err(|error| ConfigError::Io(error.to_string()))?
+    };
+    let parent_path = path
+        .parent()
+        .ok_or_else(|| ConfigError::Io("context path has no parent".to_owned()))?;
+    let name = context_file_name(&path)?.to_owned();
     for component in path.components() {
         if !matches!(
             component,
@@ -590,47 +542,312 @@ fn inspect_directory_chain(path: &std::path::Path, allow_missing: bool) -> Resul
         }
     }
 
-    let mut current = std::path::PathBuf::from("/");
-    for component in path.components() {
+    let mut parent = open_root_directory()?;
+    for component in parent_path.components() {
         if component == std::path::Component::RootDir {
             continue;
         }
         let std::path::Component::Normal(name) = component else {
             unreachable!("directory components were validated above");
         };
-        current.push(name);
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(())
-            }
-            Err(error) => return Err(ConfigError::Io(error.to_string())),
+        let Some(child) = open_directory_child(&parent, name, create)? else {
+            return Ok(None);
         };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        parent = child;
+    }
+    validate_directory_handle(&parent, "context directory")?;
+    Ok(Some(AnchoredPath { parent, name }))
+}
+
+fn open_root_directory() -> Result<std::fs::File, ConfigError> {
+    let descriptor = rustix::fs::open(
+        std::path::Path::new("/"),
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| ConfigError::Io(std::io::Error::from(error).to_string()))?;
+    let directory: std::fs::File = descriptor.into();
+    validate_directory_handle(&directory, "context directory")?;
+    Ok(directory)
+}
+
+fn open_directory_child(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    create: bool,
+) -> Result<Option<std::fs::File>, ConfigError> {
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK;
+    let open = || rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty());
+    let descriptor = match open() {
+        Ok(descriptor) => descriptor,
+        Err(error) if error == rustix::io::Errno::NOENT && !create => return Ok(None),
+        Err(error) if error == rustix::io::Errno::NOENT => {
+            match rustix::fs::mkdirat(parent, name, rustix::fs::Mode::from_raw_mode(0o700)) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => return Err(ConfigError::Io(std::io::Error::from(error).to_string())),
+            }
+            open().map_err(|error| {
+                if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::NOTDIR {
+                    ConfigError::Io(
+                        "context directory contains a symlink or non-directory".to_owned(),
+                    )
+                } else {
+                    ConfigError::Io(std::io::Error::from(error).to_string())
+                }
+            })?
+        }
+        Err(error) if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::NOTDIR => {
             return Err(ConfigError::Io(
                 "context directory contains a symlink or non-directory".to_owned(),
-            ));
+            ))
         }
-        validate_directory_metadata(&metadata, "context directory")?;
+        Err(error) => {
+            return Err(ConfigError::Io(std::io::Error::from(error).to_string()));
+        }
+    };
+    let directory: std::fs::File = descriptor.into();
+    validate_directory_handle(&directory, "context directory")?;
+    Ok(Some(directory))
+}
+
+fn open_lock(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    create: bool,
+    writable: bool,
+) -> Result<Option<OpenedLock>, ConfigError> {
+    if !create && !inspect_regular_entry(parent, name, "context lock")? {
+        return Ok(None);
+    }
+    let access = if writable {
+        rustix::fs::OFlags::RDWR
+    } else {
+        rustix::fs::OFlags::RDONLY
+    };
+    let flags = access
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::NOCTTY;
+    let descriptor = if create {
+        match rustix::fs::openat(
+            parent,
+            name,
+            flags | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        ) {
+            Ok(descriptor) => Ok((descriptor, true)),
+            Err(error) if error == rustix::io::Errno::EXIST => {
+                let _ = inspect_regular_entry(parent, name, "context lock")?;
+                rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty())
+                    .map(|descriptor| (descriptor, false))
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty())
+            .map(|descriptor| (descriptor, false))
+    };
+    let (descriptor, created) = match descriptor {
+        Ok(descriptor) => descriptor,
+        Err(error) if error == rustix::io::Errno::NOENT && !create => return Ok(None),
+        Err(error) if error == rustix::io::Errno::LOOP => {
+            return Err(ConfigError::Io(
+                "refusing to use a symbolic-link context lock".to_owned(),
+            ))
+        }
+        Err(error) if error == rustix::io::Errno::ISDIR => {
+            return Err(ConfigError::Io(
+                "refusing to use a non-regular context lock".to_owned(),
+            ))
+        }
+        Err(error) => return Err(ConfigError::Io(std::io::Error::from(error).to_string())),
+    };
+    let file: std::fs::File = descriptor.into();
+    if created && let Err(error) = rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(0o600))
+    {
+        return Err(ConfigError::Io(std::io::Error::from(error).to_string()));
+    }
+    validate_file_handle(&file, "context lock")?;
+    Ok(Some(OpenedLock { file }))
+}
+
+fn lock_file_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    let mut lock_name = std::ffi::OsString::from(".");
+    lock_name.push(name);
+    lock_name.push(".lock");
+    lock_name
+}
+
+fn read_file_at(context_file: Option<&mut std::fs::File>) -> Result<ContextFile, ConfigError> {
+    let Some(file) = context_file else {
+        return Ok(ContextFile {
+            contexts: Vec::new(),
+            current: None,
+        });
+    };
+    let mut contents = String::new();
+    std::io::Read::read_to_string(file, &mut contents)
+        .map_err(|error| ConfigError::Io(error.to_string()))?;
+    let file = toml::from_str::<ContextFile>(&contents)
+        .map_err(|_| ConfigError::Decode("context document failed typed decoding".to_owned()))?;
+    validate_context_file(&file)?;
+    Ok(file)
+}
+
+fn validate_existing_file(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    description: &str,
+) -> Result<(), ConfigError> {
+    let _ = open_verified_file(parent, name, description)?;
+    Ok(())
+}
+
+fn open_verified_file(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    description: &str,
+) -> Result<Option<std::fs::File>, ConfigError> {
+    if !inspect_regular_entry(parent, name, description)? {
+        return Ok(None);
+    }
+    let descriptor = match rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::NOCTTY,
+        rustix::fs::Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+        Err(error) if error == rustix::io::Errno::LOOP => {
+            let message = if description == "context file" {
+                "refusing to use a symbolic-link context file"
+            } else {
+                "refusing to use a symbolic-link context lock"
+            };
+            return Err(ConfigError::Io(message.to_owned()));
+        }
+        Err(error) => return Err(ConfigError::Io(std::io::Error::from(error).to_string())),
+    };
+    let file: std::fs::File = descriptor.into();
+    validate_file_handle(&file, description)?;
+    Ok(Some(file))
+}
+
+fn inspect_regular_entry(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    description: &str,
+) -> Result<bool, ConfigError> {
+    let stat = match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(false),
+        Err(error) => return Err(ConfigError::Io(std::io::Error::from(error).to_string())),
+    };
+    match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+        rustix::fs::FileType::Symlink => {
+            let message = if description == "context file" {
+                "refusing to use a symbolic-link context file"
+            } else {
+                "refusing to use a symbolic-link context lock"
+            };
+            Err(ConfigError::Io(message.to_owned()))
+        }
+        rustix::fs::FileType::RegularFile => {
+            validate_file_stat(&stat, description)?;
+            Ok(true)
+        }
+        _ => Err(ConfigError::Io(format!(
+            "refusing to use a non-regular {description}"
+        ))),
+    }
+}
+
+fn validate_file_stat(stat: &rustix::fs::Stat, description: &str) -> Result<(), ConfigError> {
+    if stat.st_uid != current_effective_uid() {
+        return Err(ConfigError::Io(format!(
+            "refusing to use {description} not owned by the current user"
+        )));
+    }
+    let mode = stat.st_mode & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(ConfigError::Io(format!(
+            "refusing to use {description} writable by group or other"
+        )));
+    }
+    if mode != 0o600 {
+        return Err(ConfigError::Io(format!(
+            "refusing to use {description} without exact mode 0600"
+        )));
     }
     Ok(())
+}
+
+fn validate_file_handle(file: &std::fs::File, description: &str) -> Result<(), ConfigError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| ConfigError::Io(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(ConfigError::Io(format!(
+            "refusing to use a non-regular {description}"
+        )));
+    }
+    validate_file_metadata(&metadata, description)
+}
+
+fn validate_directory_handle(
+    directory: &std::fs::File,
+    description: &str,
+) -> Result<(), ConfigError> {
+    let metadata = directory
+        .metadata()
+        .map_err(|error| ConfigError::Io(error.to_string()))?;
+    if !metadata.is_dir() {
+        return Err(ConfigError::Io(format!(
+            "refusing to use a non-directory {description}"
+        )));
+    }
+    validate_directory_metadata(&metadata, description)
 }
 
 impl ContextStore for FileContextStore {
     fn list(&self) -> Result<Vec<ContextConfig>, ConfigError> {
         let path = self.absolute_path()?;
-        let _lock = SidecarLock::acquire_existing_shared(&path)?;
-        Ok(read_file(&path)?.contexts)
+        let Some(lock) = SidecarLock::acquire_existing_shared(&path)? else {
+            return Ok(Vec::new());
+        };
+        let mut lock = lock;
+        let file = read_file_at(lock.context_file.as_mut())?;
+        Ok(file.contexts)
     }
 
     fn select(&self, name: &str) -> Result<ContextConfig, ConfigError> {
         let path = self.absolute_path()?;
-        let _lock = SidecarLock::acquire_existing_shared(&path)?;
-        read_file(&path)?
+        let Some(lock) = SidecarLock::acquire_existing_shared(&path)? else {
+            return Err(ConfigError::ContextNotFound);
+        };
+        let mut lock = lock;
+        let file = read_file_at(lock.context_file.as_mut())?;
+        let context = file
             .contexts
             .into_iter()
             .find(|context| context.name == name)
-            .ok_or(ConfigError::ContextNotFound)
+            .ok_or(ConfigError::ContextNotFound)?;
+        validate_context_config(&context)?;
+        Ok(context)
     }
 }
 
@@ -736,6 +953,70 @@ fn validate_context_name(name: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn validate_context_config(context: &ContextConfig) -> Result<(), ConfigError> {
+    validate_context_name(&context.name)?;
+    validate_endpoint(&context.endpoint)?;
+    if let Some(reference) = &context.credential {
+        validate_reference(reference)?;
+    }
+    Ok(())
+}
+
+fn validate_context_change(change: &ContextChange) -> Result<(), ConfigError> {
+    if !matches!(change.actor.as_str(), "cli" | "daemon" | "api") {
+        return Err(ConfigError::Decode(
+            "context journal change has an invalid actor".to_owned(),
+        ));
+    }
+    validate_context_name(&change.new_context).map_err(|_| {
+        ConfigError::Decode("context journal change has an invalid context".to_owned())
+    })?;
+    if let Some(old_context) = &change.old_context {
+        validate_context_name(old_context).map_err(|_| {
+            ConfigError::Decode("context journal change has an invalid context".to_owned())
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_endpoint(endpoint: &velnor_model::SanitizedUrl) -> Result<(), ConfigError> {
+    if endpoint.as_str().is_empty() {
+        return Err(ConfigError::Empty("endpoint"));
+    }
+    Ok(())
+}
+
+fn validate_context_file(file: &ContextFile) -> Result<(), ConfigError> {
+    let mut names = BTreeSet::new();
+    for context in &file.contexts {
+        validate_context_config(context)?;
+        if !names.insert(context.name.as_str()) {
+            return Err(ConfigError::Decode(
+                "context store contains a duplicate context".to_owned(),
+            ));
+        }
+    }
+
+    let current_flags = file
+        .contexts
+        .iter()
+        .filter(|context| context.current)
+        .map(|context| context.name.as_str())
+        .collect::<Vec<_>>();
+    match file.current.as_deref() {
+        Some(current) if current_flags.as_slice() != [current] => Err(ConfigError::Decode(
+            "context store has an invalid current context marker".to_owned(),
+        )),
+        Some(current) if !names.contains(current) => Err(ConfigError::Decode(
+            "context store has an invalid current context marker".to_owned(),
+        )),
+        None if !current_flags.is_empty() => Err(ConfigError::Decode(
+            "context store has an invalid current context marker".to_owned(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,6 +1085,29 @@ mod tests {
         }
     }
 
+    fn write_secure_file(path: &std::path::Path, contents: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .expect("create secure test file");
+        file.write_all(contents.as_bytes())
+            .expect("write secure test file");
+    }
+
+    fn write_secure_lock(path: &std::path::Path) {
+        let parent = path.parent().expect("context parent");
+        let name = path.file_name().expect("context file name");
+        let mut lock_name = std::ffi::OsString::from(".");
+        lock_name.push(name);
+        lock_name.push(".lock");
+        write_secure_file(&parent.join(lock_name), "");
+    }
+
     #[test]
     fn precedence_is_total_and_provenance_is_retained() {
         let resolver = ConfigResolver::new(vec![
@@ -825,6 +1129,39 @@ mod tests {
     }
 
     #[test]
+    fn context_journal_rejects_untrusted_values() {
+        let mut journal = ContextJournal::new(1).expect("journal capacity");
+        let valid = ContextChange {
+            actor: "cli".to_owned(),
+            old_context: None,
+            new_context: "primary".to_owned(),
+            occurred_at: Timestamp::now(),
+        };
+        journal.record(valid.clone()).expect("record valid change");
+        assert_eq!(journal.entries(), std::slice::from_ref(&valid));
+
+        let invalid_actor = ContextChange {
+            actor: "/tmp/secret-token".to_owned(),
+            ..valid.clone()
+        };
+        assert!(matches!(
+            journal.record(invalid_actor),
+            Err(ConfigError::Decode(message))
+                if message == "context journal change has an invalid actor"
+        ));
+
+        let invalid_context = ContextChange {
+            new_context: "../secret".to_owned(),
+            ..valid.clone()
+        };
+        assert!(matches!(
+            journal.record(invalid_context),
+            Err(ConfigError::Decode(message))
+                if message == "context journal change has an invalid context"
+        ));
+    }
+
+    #[test]
     fn invalid_credential_reference_fails_before_serialization() {
         let resolver = ConfigResolver::new(vec![ConfigLayer {
             source: ConfigSource::Command,
@@ -839,6 +1176,21 @@ mod tests {
     }
 
     #[test]
+    fn empty_programmatic_endpoint_is_rejected_before_resolution() {
+        let resolver = ConfigResolver::new(vec![ConfigLayer {
+            source: ConfigSource::Command,
+            endpoint: Setting::Value(velnor_model::SanitizedUrl::project("")),
+            ..ConfigLayer::default()
+        }])
+        .expect("unique source");
+
+        assert_eq!(
+            resolver.resolve().expect_err("reject empty endpoint"),
+            ConfigError::Empty("endpoint")
+        );
+    }
+
+    #[test]
     fn relative_context_store_round_trips() {
         let temp = RelativeTempDir::new("round-trip");
         let path = temp.path.join("nested").join("config.toml");
@@ -848,6 +1200,64 @@ mod tests {
         store.set(context.clone()).expect("write context");
 
         assert_eq!(store.select("primary").expect("read context"), context);
+    }
+
+    #[test]
+    fn valid_credential_reference_round_trips_through_context_store() {
+        let temp = RelativeTempDir::new("valid-credential");
+        let path = temp.path.join("nested").join("config.toml");
+        let store = FileContextStore::new(path);
+        let mut context = test_context();
+        context.credential = Some(SecretRef::named("GITHUB_TOKEN"));
+
+        store.set(context.clone()).expect("write context");
+
+        assert_eq!(store.list().expect("list context"), vec![context.clone()]);
+        assert_eq!(store.select("primary").expect("select context"), context);
+    }
+
+    #[test]
+    fn invalid_credential_reference_is_rejected_for_set_and_persisted_context() {
+        let temp = RelativeTempDir::new("invalid-credential");
+        let path = temp.path.join("nested").join("config.toml");
+        let mut invalid_context = test_context();
+        invalid_context.credential = Some(SecretRef::named("token=value"));
+        let store = FileContextStore::new(path.clone());
+
+        assert_eq!(
+            store
+                .set(invalid_context.clone())
+                .expect_err("reject invalid set"),
+            ConfigError::InvalidCredentialReference
+        );
+        assert!(!path.exists(), "invalid set must not persist a context");
+
+        std::fs::create_dir_all(path.parent().expect("context parent"))
+            .expect("create context parent");
+        let contents = toml::to_string(&ContextFile {
+            contexts: vec![invalid_context],
+            current: Some("primary".to_owned()),
+        })
+        .expect("serialize invalid context");
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(contents.as_bytes())
+            })
+            .expect("persist invalid context");
+        write_secure_lock(&path);
+
+        assert_eq!(
+            FileContextStore::new(path)
+                .list()
+                .expect_err("reject invalid persisted context"),
+            ConfigError::InvalidCredentialReference
+        );
     }
 
     #[test]
@@ -960,6 +1370,195 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn context_store_rejects_non_private_config_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = RelativeTempDir::new("non-private-mode");
+        let path = temp.path.join("nested").join("config.toml");
+        let store = FileContextStore::new(path.clone());
+        store.set(test_context()).expect("write context");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make config world-readable");
+
+        assert_eq!(
+            store.list().expect_err("reject non-private config mode"),
+            ConfigError::Io("refusing to use context file without exact mode 0600".to_owned())
+        );
+    }
+
+    #[test]
+    fn context_store_rejects_duplicate_context_names() {
+        let temp = RelativeTempDir::new("duplicate-context");
+        let path = temp.path.join("config.toml");
+        let contents = toml::to_string(&ContextFile {
+            contexts: vec![test_context(), test_context()],
+            current: Some("primary".to_owned()),
+        })
+        .expect("serialize duplicate contexts");
+        write_secure_file(&path, &contents);
+        write_secure_lock(&path);
+
+        assert!(matches!(
+            FileContextStore::new(path).list(),
+            Err(ConfigError::Decode(message))
+                if message == "context store contains a duplicate context"
+        ));
+    }
+
+    #[test]
+    fn context_store_rejects_inconsistent_current_marker() {
+        let temp = RelativeTempDir::new("invalid-current");
+        let path = temp.path.join("config.toml");
+        let mut context = test_context();
+        context.current = false;
+        let contents = toml::to_string(&ContextFile {
+            contexts: vec![context],
+            current: Some("primary".to_owned()),
+        })
+        .expect("serialize invalid current marker");
+        write_secure_file(&path, &contents);
+        write_secure_lock(&path);
+
+        assert!(matches!(
+            FileContextStore::new(path).list(),
+            Err(ConfigError::Decode(message))
+                if message == "context store has an invalid current context marker"
+        ));
+    }
+
+    #[test]
+    fn context_store_rejects_unknown_document_fields() {
+        let temp = RelativeTempDir::new("unknown-field");
+        let path = temp.path.join("config.toml");
+        write_secure_file(
+            &path,
+            "contexts = []\ncurrent = \"primary\"\nunexpected = true\n",
+        );
+        write_secure_lock(&path);
+
+        assert!(matches!(
+            FileContextStore::new(path).list(),
+            Err(ConfigError::Decode(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_store_rejects_non_private_lock_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = RelativeTempDir::new("non-private-lock-mode");
+        let path = temp.path.join("config.toml");
+        let store = FileContextStore::new(path.clone());
+        store.set(test_context()).expect("write context");
+        let lock = path
+            .parent()
+            .expect("context parent")
+            .join(".config.toml.lock");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o400))
+            .expect("make lock owner-readable only");
+
+        assert_eq!(
+            store.list().expect_err("reject non-private lock mode"),
+            ConfigError::Io("refusing to use context lock without exact mode 0600".to_owned())
+        );
+    }
+
+    #[test]
+    fn context_store_rejects_existing_file_without_sidecar_lock() {
+        let temp = RelativeTempDir::new("absent-lock");
+        let path = temp.path.join("config.toml");
+        let store = FileContextStore::new(path.clone());
+        store.set(test_context()).expect("write context");
+        std::fs::remove_file(
+            path.parent()
+                .expect("context parent")
+                .join(".config.toml.lock"),
+        )
+        .expect("remove sidecar lock");
+
+        assert_eq!(
+            store
+                .list()
+                .expect_err("reject context without sidecar lock"),
+            ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert_eq!(
+            store
+                .set(named_context("secondary"))
+                .expect_err("mutator must reject context without sidecar lock"),
+            ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert_eq!(
+            store
+                .use_context("primary")
+                .expect_err("selection must reject context without sidecar lock"),
+            ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert_eq!(
+            store
+                .delete("primary")
+                .expect_err("deletion must reject context without sidecar lock"),
+            ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert!(
+            !path
+                .parent()
+                .expect("context parent")
+                .join(".config.toml.lock")
+                .exists(),
+            "mutators must not recreate a missing lock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_store_rejects_fifo_config_before_opening_it() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = RelativeTempDir::new("fifo-config");
+        let parent = temp.path.join("nested");
+        std::fs::create_dir(&parent).expect("context parent");
+        let path = parent.join("config.toml");
+        let path_bytes = path.as_os_str().as_bytes();
+        let path_c = std::ffi::CString::new(path_bytes).expect("config fifo path");
+        // SAFETY: The path is a valid, nul-free temporary test path.
+        assert_eq!(unsafe { libc::mkfifo(path_c.as_ptr(), 0o600) }, 0);
+
+        assert_eq!(
+            FileContextStore::new(path)
+                .list()
+                .expect_err("reject config fifo"),
+            ConfigError::Io("refusing to use a non-regular context file".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_store_rejects_fifo_lock_before_opening_it() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = RelativeTempDir::new("fifo-lock");
+        let path = temp.path.join("config.toml");
+        let store = FileContextStore::new(path.clone());
+        store.set(test_context()).expect("write context");
+        let parent = path.parent().expect("context parent");
+        let lock_name = std::ffi::OsString::from(".config.toml.lock");
+        std::fs::remove_file(parent.join(&lock_name)).expect("remove regular lock");
+        let lock_path = parent.join(&lock_name);
+        let path_bytes = lock_path.as_os_str().as_bytes();
+        let path_c = std::ffi::CString::new(path_bytes).expect("lock fifo path");
+        // SAFETY: The path is a valid, nul-free temporary test path.
+        assert_eq!(unsafe { libc::mkfifo(path_c.as_ptr(), 0o600) }, 0);
+
+        assert_eq!(
+            store.list().expect_err("reject lock fifo"),
+            ConfigError::Io("refusing to use a non-regular context lock".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn context_store_rejects_group_or_other_writable_config() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1014,6 +1613,24 @@ mod tests {
         let selected = store.select("primary").expect("read context");
 
         assert_eq!(selected, test_context());
+    }
+
+    #[test]
+    fn relative_context_store_anchors_path_before_first_use() {
+        let temp = RelativeTempDir::new("first-use-cwd");
+        let cwd = CurrentDirectoryGuard::new();
+        let original = cwd.original.clone();
+        let alternate = original.join(&temp.path).join("alternate");
+        std::fs::create_dir_all(&alternate).expect("alternate directory");
+        let path = temp.path.join("nested").join("config.toml");
+        let expected = original.join(&path);
+        let store = FileContextStore::new(path);
+
+        cwd.change_to(&alternate);
+        store.set(test_context()).expect("write context");
+
+        assert!(expected.is_file());
+        assert!(!alternate.join("nested/config.toml").exists());
     }
 
     #[test]
@@ -1085,6 +1702,19 @@ mod tests {
             store.list().expect("list remaining context"),
             vec![selected]
         );
+    }
+
+    #[test]
+    fn delete_rejects_invalid_context_names_before_touching_filesystem() {
+        let temp = RelativeTempDir::new("invalid-delete");
+        let path = temp.path.join("nested").join("config.toml");
+        let store = FileContextStore::new(path);
+
+        assert_eq!(
+            store.delete("../secret").expect_err("reject invalid name"),
+            ConfigError::Empty("context name")
+        );
+        assert!(!temp.path.join("nested").exists());
     }
 
     #[test]
