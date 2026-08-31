@@ -1467,9 +1467,7 @@ fn open_source_file_nonblocking_no_follow_at(
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use std::{
-        io::Read, sync::mpsc, thread, time::Duration,
-    };
+    use std::{io::Read, sync::mpsc, thread, time::Duration};
 
     use super::*;
 
