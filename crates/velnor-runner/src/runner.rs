@@ -16062,7 +16062,7 @@ runs:
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
             assert!(request.contains(
-                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeef"
+                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
             ));
             let body =
                 "name: local\nruns:\n  using: composite\n  steps:\n    - uses: acme/unknown@v1\n";
@@ -16094,7 +16094,10 @@ runs:
         .unwrap();
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({ "repository": "acme/repo", "workflow_sha": "deadbeef" }),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }),
         )];
         let source =
             crate::admission::ContentsApiMetadataSource::new_for_test("token", api).unwrap();
