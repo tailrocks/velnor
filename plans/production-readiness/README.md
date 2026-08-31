@@ -303,9 +303,10 @@ evidence and requires a fresh baseline.
 - Plan 066 is `IN PROGRESS`; root campaign remains 4/94 done; Plan 039 remains
   in progress; Plan 079 and the final signed-release gates remain incomplete.
 - Current external snapshot: at capture, open peer PRs were #498, #499, #500,
-  and #503; this ledger correction is now PR #504 from `velnor1`. PR #500's
-  release-owner run `33347662040` was active at capture. No runner-registration
-  cleanup or Sentry mutation was performed. Public `velnor-apt` serves signed
+  and #503; PR #504 was not yet open and was created later from `velnor1`.
+  PR #500's release-owner run `33347662040` was active at capture. No
+  runner-registration cleanup or Sentry mutation was performed. Public
+  `velnor-apt` serves signed
   `Release`, `InRelease`, and
   `Release.gpg` metadata dated `2026-08-29T17:48:19Z`, but only versions
   `0.1.242` and `0.1.244`; no current-main package is published.
