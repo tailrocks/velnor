@@ -34,6 +34,11 @@ transaction. Maintainer scripts require that `FLOCK WRITE` owner to be an
 apt-wrapper ancestor. Direct marker-only, shared-lock, `apt-get install`,
 `apt upgrade`, or `dpkg` invocation is refused.
 First install uses the same wrapper.
+`/run` is tmpfs, so the package ships `usr/lib/tmpfiles.d/velnor-runner.conf`
+to recreate `/run/velnor` and the (stateless) lock file on every boot, and
+`postinst` runs `systemd-tmpfiles --create` so an install/upgrade works
+immediately; the `install -d` + lock file in the snippets above remains the
+explicit operator-equivalent for hosts where systemd-tmpfiles is unavailable.
 
 Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 
