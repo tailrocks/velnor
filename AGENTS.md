@@ -8,3 +8,4 @@
   - Stop only when the required change is proven impossible with the available tools or model. When uncertain, inspect, test, and measure first.
   - Before fixing a bug, identify why the architecture permitted it and whether the same structure permits related bugs.
   - Prefer fixes that remove the enabling condition. Use a symptom-layer patch only when the root fix is proven infeasible or belongs in a separate change, and name the deferred root cause.
+
