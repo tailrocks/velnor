@@ -126,8 +126,9 @@ Use the durable leaf-goal controller in
 dependency, verification, review, evidence, and status transition mandatory
 across Codex `/goal` and Claude Code execution.
 
-1. Plan 063 records direction and extends fixture with success, failure, hold,
-   queue, cancellation, logs, artifacts, and controlled state scenarios.
+1. Plan 063 is marked `DONE`: it recorded direction and extended the fixture
+   with success, failure, hold, queue, cancellation, logs, artifacts, and
+   controlled state scenarios. Its historical procedure is not executable.
 2. Plans 064–067 establish crates, resource/output contracts, durable history,
    and local API.
 3. Plans 068, 074, and 075 establish config/GitHub/storage authority; then 069–
@@ -151,9 +152,12 @@ across Codex `/goal` and Claude Code execution.
 - Never weaken `tailrocks/velnor-actions-fixture`; extend it when coverage lacks
   a required observable state.
 - Run Rust tests only with `rtk cargo nextest run`, normally via repository mise.
-- Before fixture dispatch: cancel old pending/in-progress runs, delete only stale
-  validation-owned registrations, prove clean, capture new run ID, and monitor
-  only it. Check within 60 seconds; diagnose stasis before two minutes.
+- Before fixture dispatch: cancel only older pending/in-progress validation runs
+  owned by the current iteration; never cancel protected `Release`, `Package
+  update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs,
+  or unrelated runs. Delete only stale validation-owned registrations, prove
+  both run and registration state are clear, capture the new run ID, and
+  monitor only it. Check within 60 seconds; diagnose stasis before two minutes.
 - Preserve sanitized `.json`, `.jsonl`, `.log`, `.md`, and archives only. Never
   save rendered GitHub HTML.
 - Destructive commands are dry-run/plan-first where specified, explicit,
