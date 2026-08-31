@@ -60,8 +60,10 @@ repository through the authorized host/Sentry release path. Install the exact
 version through the configured HTTPS APT source using the current exclusive
 `flock` transaction lock, never `dpkg -i`. Verify the installed package/source
 identity, service health, signed rollback predecessor, and rollback ability;
-record all evidence. Cancel stale
-validation state as required, prove it is clear, then retry `velnor`,
+record all evidence. Before any retry, cancel only older pending/in-progress
+validation runs owned by this iteration; never cancel protected
+release/package/publish-APT workflows or unrelated runs. Remove only
+validation-owned stale registrations, prove it is clear, then retry `velnor`,
 `github`, and `both`. This exception is not raw binary/source/checkout copy,
 local-path installation, an unpinned package, or silent GitHub fallback.
 Merge the same assigned branch through its focused PR when that PR becomes

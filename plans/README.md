@@ -31,8 +31,9 @@ explicitly authorized while the PR is unmergeable, release the exact branch
 SHA through the signed `velnor-apt` path and install only that signed version over
 `ssh sentry`; never copy binaries or install local packages. Verify exact
 identity, health, rollback, and `velnor`, `github`, and `both` lanes. Before
-every retry, cancel only older validation runs owned by this iteration; never
-cancel protected release/package/publish-APT workflows or unrelated runs.
+every retry, cancel only older pending/in-progress validation runs owned by this
+iteration; never cancel protected release/package/publish-APT workflows or
+unrelated runs.
 Remove only validation-owned stale registrations and prove both are clear.
 Fresh security, performance, goal/acceptance, verifier, and reviewer
 subagents audit every pushed iteration.

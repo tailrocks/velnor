@@ -184,8 +184,9 @@ fleet-generate` regenerates the per-org policy JSONs under `fleet/policies/`,
    velnor-trusted`, run `velnor-runner doctor`, and collect the pending runner-
    state, full guard-state, routing/denial, and warm-run acceptance evidence.
 5. Before smoke, cancel only validation-owned pending/in-progress runs; never
-   cancel protected release/package workflows or unrelated runs, and prove each
-   cancellation is terminal. Dispatch one `lanes=both` run, monitor only its
+   cancel protected release/package/publish-APT workflows, workflow-dispatch
+   release runs, or unrelated runs, and prove each cancellation is terminal.
+   Dispatch one `lanes=both` run, monitor only its
    returned id, and require a non-empty runner
    and group assignment within two minutes. Never declare migration complete
    from group readback or daemon health alone.
