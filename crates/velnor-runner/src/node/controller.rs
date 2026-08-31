@@ -434,7 +434,7 @@ async fn reconcile_once(
 ) -> anyhow::Result<LocalCycle> {
     let remote_deadline = tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET;
     let total = args.desired_ready;
-    let mut effects = Vec::new();
+    let mut reservation_events = Vec::new();
     reap(slots);
     // Ingest a surviving slot's heartbeat before deciding whether its permit
     // needs repair. On controller restart the child handle is gone, so the
@@ -467,26 +467,28 @@ async fn reconcile_once(
         {
             continue;
         }
-        effects.extend(
-            journal
-                .apply(Event::PermitReserved {
-                    slot_id: id,
-                    generation,
-                })?
-                .commands,
-        );
+        reservation_events.push(Event::PermitReserved {
+            slot_id: id,
+            generation,
+        });
     }
-    for command in effects {
-        execute_effect(
-            args,
-            journal,
-            slots,
-            jobs,
-            &mut *pacing,
-            remote_deadline,
-            command,
-        )
-        .await?;
+    if !reservation_events.is_empty() {
+        let effects = journal
+            .apply_many(reservation_events)?
+            .into_iter()
+            .flat_map(|outcome| outcome.commands);
+        for command in effects {
+            execute_effect(
+                args,
+                journal,
+                slots,
+                jobs,
+                &mut *pacing,
+                remote_deadline,
+                command,
+            )
+            .await?;
+        }
     }
 
     observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
@@ -505,7 +507,7 @@ async fn reconcile_once(
         }
     }
 
-    let mut proof_effects = Vec::new();
+    let mut proof_events = Vec::new();
     let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
     let executor = prove::observe_executor(&args.state_dir, execution.backend());
     let snapshot = journal.materialized_state()?;
@@ -519,14 +521,10 @@ async fn reconcile_once(
             .map(|slot| slot.generation)
             .unwrap_or(Generation::INITIAL);
         if executor {
-            proof_effects.extend(
-                journal
-                    .apply(Event::ExecutorProven {
-                        slot_id: id.clone(),
-                        generation,
-                    })?
-                    .commands,
-            );
+            proof_events.push(Event::ExecutorProven {
+                slot_id: id.clone(),
+                generation,
+            });
         }
         let journal_pid = snapshot
             .slots
@@ -540,30 +538,43 @@ async fn reconcile_once(
             &id,
             generation,
         ) {
-            proof_effects.extend(
-                journal
-                    .apply(Event::SessionLive {
-                        slot_id: id.clone(),
-                        generation,
-                    })?
-                    .commands,
-            );
+            proof_events.push(Event::SessionLive {
+                slot_id: id,
+                generation,
+            });
         }
-        let state = journal.materialized_state()?;
+    }
+    let mut proof_effects = journal
+        .apply_many(proof_events)?
+        .into_iter()
+        .flat_map(|outcome| outcome.commands)
+        .collect::<Vec<_>>();
+    let state = journal.materialized_state()?;
+    let mut registration_events = Vec::new();
+    for index in 1..=total {
+        let id = slot_id(&args.scope, index as usize);
+        let generation = snapshot
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == id)
+            .map(|slot| slot.generation)
+            .unwrap_or(Generation::INITIAL);
         if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) {
             if slot.ready_proof().is_ok() && !slot.registered && pacing.registration_due(&id.0, now)
             {
-                proof_effects.extend(
-                    journal
-                        .apply(Event::RegistrationIntended {
-                            slot_id: id,
-                            generation,
-                        })?
-                        .commands,
-                );
+                registration_events.push(Event::RegistrationIntended {
+                    slot_id: id,
+                    generation,
+                });
             }
         }
     }
+    proof_effects.extend(
+        journal
+            .apply_many(registration_events)?
+            .into_iter()
+            .flat_map(|outcome| outcome.commands),
+    );
     let mut registrations = Vec::new();
     for command in proof_effects {
         match command {
