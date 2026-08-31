@@ -2303,6 +2303,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -2531,6 +2532,7 @@ mod tests {
         reconciliation.map(|()| slot)
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn missing_runner_config_allows_registration_recovery() {
         let slot = reconcile_with_runner_config_fixture(|_| {}).await.unwrap();
@@ -2541,6 +2543,7 @@ mod tests {
         assert_eq!(slot.phase, ActorPhase::Provisioning);
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn corrupt_runner_config_does_not_clear_local_claim() {
         let error = reconcile_with_runner_config_fixture(|dir| {
@@ -2555,6 +2558,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn unreadable_runner_config_does_not_clear_local_claim() {
         let error = reconcile_with_runner_config_fixture(|dir| {
@@ -2569,6 +2573,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn broken_runner_config_symlink_does_not_allow_recovery() {
         let error = reconcile_with_runner_config_fixture(|dir| {
@@ -2706,6 +2711,7 @@ mod tests {
         pacing
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn reconciliation_quota_errors_hold_fleet_until_absolute_deadline() {
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
@@ -2725,6 +2731,7 @@ mod tests {
         assert!(!pacing.registration_due("unregistered", tokio::time::Instant::now()));
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn reconciliation_permission_error_does_not_hold_fleet() {
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
@@ -2744,6 +2751,7 @@ mod tests {
         assert!(CONTROLLER_REMOTE_BUDGET < Duration::from_secs(30));
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn org_url_probe_bootstraps_policy_from_generated_allowlist() {
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -3047,6 +3055,7 @@ mod tests {
     /// with `x-ratelimit-remaining: 0` must park the fleet (visible degraded
     /// health) and issue at most ONE probe per rate-limit window instead of
     /// one per 2s reconcile tick.
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn rate_limited_probe_parks_instead_of_retrying_per_tick() {
         let transport_guard = crate::test_support::github_http_transport_env().await;
