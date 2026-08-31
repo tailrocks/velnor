@@ -1055,6 +1055,11 @@ impl Journal {
     where
         I: IntoIterator<Item = Event>,
     {
+        let mut events = events.into_iter();
+        let Some(first_event) = events.next() else {
+            return Ok(Vec::new());
+        };
+
         // Lock before reading materialized state. Controller, job, guardian,
         // and completion processes can overlap; a snapshot taken before the
         // write lock could otherwise clobber a concurrent committed event.
@@ -1073,7 +1078,7 @@ impl Journal {
         }
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
-        for mut event in events {
+        for mut event in std::iter::once(first_event).chain(events) {
             stamp_event(&mut event);
             let outcome = reduce(state.clone(), event.clone());
             if !outcome.rejected {
@@ -1917,6 +1922,21 @@ mod tests {
                 .and_then(|slot| slot.pid),
             Some(456)
         );
+    }
+
+    #[test]
+    fn apply_many_empty_does_not_start_an_immediate_transaction() {
+        let (dir, mut journal) = open_tmp("batch-empty");
+        journal.conn.busy_timeout(Duration::ZERO).unwrap();
+        let mut blocker = Connection::open(dir.join("journal.db")).unwrap();
+        blocker.busy_timeout(Duration::ZERO).unwrap();
+        let _blocking_transaction = blocker
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+
+        let outcomes = journal.apply_many(std::iter::empty()).unwrap();
+
+        assert!(outcomes.is_empty());
     }
 
     #[test]
