@@ -26,7 +26,8 @@ pub use migrations::LATEST_SCHEMA_VERSION;
 pub use records::{
     EventRow, EventWindow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow,
     LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
-    SlotIdentity, SlotRow, SlotTransition, StoredEvent, Transition,
+    SlotIdentity, SlotRow, SlotTransition, SlotTransitionRequest, SlotTransitionRequestKey,
+    StoredEvent, Transition, SLOT_TRANSITION_REQUEST_CAP,
 };
 pub use retention::{
     PhysicalBudgetStatus, PrunePhase, PruneReport, RetentionBudget, RetentionLease,
@@ -109,17 +110,19 @@ impl Store {
     /// classes (`UNAVAILABLE`, `OPERATION`, `TIMEOUT`).
     pub fn open_with(path: impl AsRef<Path>, options: OpenOptions) -> StoreResult<Self> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.is_dir() {
-                return Err(
-                    StoreError::new(ExitClass::Unavailable, "store.parent.missing")
-                        .with_remediation(format!(
-                            "create directory {} before starting the daemon that owns {}",
-                            parent.display(),
-                            path.display()
-                        )),
-                );
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.is_dir()
+        {
+            return Err(
+                StoreError::new(ExitClass::Unavailable, "store.parent.missing").with_remediation(
+                    format!(
+                        "create directory {} before starting the daemon that owns {}",
+                        parent.display(),
+                        path.display()
+                    ),
+                ),
+            );
         }
         let mut conn = {
             let mut attempt = 0;
