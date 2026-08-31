@@ -259,17 +259,19 @@ fn packaged_units_have_no_controller_partof_to_workers() {
     let jobs_slice = include_str!("../debian/velnor-jobs.slice");
     assert!(jobs_slice.contains("job-worker slice"));
     assert!(!jobs_slice.contains("transitional Docker"));
-    for directive in [
-        "CPUQuota=1900%",
-        "MemoryHigh=90%",
-        "MemoryMax=95%",
-        "MemorySwapMax=0",
-    ] {
+    for directive in ["MemoryHigh=90%", "MemoryMax=95%", "MemorySwapMax=0"] {
         assert!(
             jobs_slice.lines().any(|line| line == directive),
             "velnor-jobs.slice must pin aggregate host budget: {directive}"
         );
     }
+    // CPUQuota is host-specific: postinst derives it from the detected online
+    // logical CPUs and writes the required drop-in atomically, so the package
+    // slice must never pin a fixed default or run uncapped.
+    assert!(!jobs_slice.lines().any(|line| line.starts_with("CPUQuota=")));
+    assert!(jobs_slice.contains(
+        "AssertPathExists=/etc/systemd/system/velnor-jobs.slice.d/10-host-cpu.conf"
+    ));
     let control_slice = include_str!("../debian/velnor-control.slice");
     assert!(
         !control_slice
@@ -1089,9 +1091,43 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
     velnor_runner::node::prove::write_routing_document(&dir, fields.clone(), fields).unwrap();
     velnor_runner::node::prove::write_executor_ok(&dir).unwrap();
 
-    let second = run_runner(
-        &dir,
-        &[
+    // Registration reconciliation is fail-closed: without a daemon execution
+    // config and PAT the controller publishes NotReady and skips the cycle,
+    // so this proof run must present both. The unreachable loopback URL keeps
+    // every remote call a fast local refusal; no slot is registered yet, so
+    // reconciliation itself makes no remote calls.
+    std::fs::write(
+        dir.join("daemon-exec.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "url": "http://127.0.0.1:1/tailrocks/velnor",
+            "name": "proof",
+            "labels": ["velnor"],
+            "target_mvp_labels": false,
+            "target_mvp_arm_label": false,
+            "replace": false,
+            "dry_run_registration": false,
+            "slots": 1,
+            "once": false,
+            "complete_noop": false,
+            "execute_scripts": false,
+            "dry_run_jobs": false,
+            "docker_image": "img",
+            "job_cpus": "",
+            "job_memory": "",
+            "trust_scope": "trusted",
+            "emergency_reserve_bytes": 0,
+            "job_peak_bytes": 0,
+            "node_action_image": "img",
+            "skip_preflight": false,
+            "require_docker_socket": false
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let stdout = std::fs::File::create(dir.join("cmd.out")).unwrap();
+    let stderr = std::fs::File::create(dir.join("cmd.err")).unwrap();
+    let second = Command::new(runner())
+        .args([
             "controller",
             "--state-dir",
             dir.to_str().unwrap(),
@@ -1102,8 +1138,13 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
             "--once",
             "--spawn-slots",
             "false",
-        ],
-    );
+        ])
+        .env("GITHUB_TOKEN", "proof-pat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .status()
+        .unwrap();
     assert!(second.success(), "{}", cmd_err(&dir));
     let state = Journal::open(dir.join("journal.db"))
         .unwrap()
@@ -1119,7 +1160,7 @@ fn controller_observes_live_session_and_executor_before_ready_proof() {
     assert!(slot_state.ready_proof().is_ok(), "{slot_state:?}");
     assert!(
         !slot_state.registered,
-        "JIT must not register without exec config: {slot_state:?}"
+        "JIT registration against the unreachable loopback URL must fail and back off: {slot_state:?}"
     );
     slot.kill().ok();
     let _ = slot.wait();
