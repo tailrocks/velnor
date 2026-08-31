@@ -6,11 +6,3 @@ Documentation=https://github.com/tailrocks/velnor
 CPUWeight=100
 IOWeight=100
 TasksMax=4096
-# Aggregate host budget: all job units together may use at most 95% of host
-# CPUs (19/20 on sentry) and 95% of host RAM. MemoryHigh throttles reclaim
-# pressure first; MemoryMax is the hard OOM-kill cap. This bounds a
-# misconfigured pool env from oversubscribing the host; the control plane
-# (velnor-control.slice) is intentionally outside this cap.
-CPUQuota=1900%
-MemoryHigh=90%
-MemoryMax=95%
