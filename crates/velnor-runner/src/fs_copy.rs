@@ -1549,13 +1549,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let fifo = root.join("source.fifo");
-        if let Err(error) = rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::Mode::from_raw_mode(0o600),
-        ) {
-            panic!("create FIFO: {}", std::io::Error::from(error));
-        }
+        let status = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo must be available on Unix");
+        assert!(status.success(), "create FIFO: {status}");
 
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
