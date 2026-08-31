@@ -8893,8 +8893,9 @@ fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
 fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
     action
         .inputs
-        .get(name)
-        .or_else(|| action.inputs.get(&name.to_ascii_lowercase()))
+        .iter()
+        .find(|(input_name, _)| input_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value)
         .map(|value| state.resolve_expressions(value))
         .unwrap_or_default()
 }
@@ -12305,6 +12306,24 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_input_lookup_is_case_insensitive() {
+        let action = NativeActionInvocation {
+            git_ref: "cache-action".to_owned(),
+            adapter: NativeActionAdapter::Cache,
+            cache_kind: Some(CacheActionKind::Root),
+            source_path: None,
+            inputs: [("Lookup-Only".to_owned(), "true".to_owned())]
+                .into_iter()
+                .collect(),
+            env: Vec::new(),
+        };
+        assert_eq!(
+            native_input(&action, &JobExecutionState::default(), "lookup-only"),
+            "true"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
