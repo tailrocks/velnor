@@ -261,7 +261,7 @@ pub fn build_guest_image_cli(
     output_dir: &Path,
     arch: GuestArch,
     kernel_tarball: &[u8],
-    guest_agent: Option<&[u8]>,
+    guest_agent: &[u8],
 ) -> Result<(PathBuf, PathBuf), MicroVmPreflightFailure> {
     let mut runner = crate::executor::ProcessCommandRunner;
     build_guest_image(
@@ -286,7 +286,8 @@ pub struct GuestImageRequest<'a> {
     pub kernel_tarball: &'a [u8],
     pub isolation_fragment: &'a str,
     pub guest_toml: &'a str,
-    pub guest_agent: Option<&'a [u8]>,
+    /// Exact bytes embedded at `/usr/bin/velnor-guest-agent`.
+    pub guest_agent: &'a [u8],
 }
 
 /// Linux-only kernel+rootfs build from the pinned tarball and spec.
@@ -429,7 +430,7 @@ fn build_rootfs(
     work_dir: &Path,
     output: &Path,
     arch: GuestArch,
-    guest_agent: Option<&[u8]>,
+    guest_agent: &[u8],
 ) -> Result<(), MicroVmPreflightFailure> {
     let tree = work_dir.join("rootfs-tree");
     let includes = ROOTFS_PACKAGES
@@ -494,17 +495,7 @@ fn build_rootfs(
             "rootfs contains sshd; production guest has no SSH server",
         ));
     }
-    if let Some(bytes) = guest_agent {
-        let dest = tree.join("usr/bin/velnor-guest-agent");
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                MicroVmPreflightFailure::new("guest.agent", format!("create bin: {error}"))
-            })?;
-        }
-        std::fs::write(&dest, bytes).map_err(|error| {
-            MicroVmPreflightFailure::new("guest.agent", format!("write guest-agent: {error}"))
-        })?;
-    }
+    install_guest_agent(&tree, guest_agent)?;
     for relative in [
         "var/cache/apt/archives",
         "var/lib/apt/lists",
@@ -643,6 +634,28 @@ fn build_rootfs(
     Ok(())
 }
 
+fn install_guest_agent(tree: &Path, bytes: &[u8]) -> Result<(), MicroVmPreflightFailure> {
+    let dest = tree.join("usr/bin/velnor-guest-agent");
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            MicroVmPreflightFailure::new("guest.agent", format!("create bin: {error}"))
+        })?;
+    }
+    std::fs::write(&dest, bytes).map_err(|error| {
+        MicroVmPreflightFailure::new("guest.agent", format!("write guest-agent: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).map_err(
+            |error| {
+                MicroVmPreflightFailure::new("guest.agent", format!("chmod guest-agent: {error}"))
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Prefix args that run mmdebstrap as real root when the invoking user has
 /// passwordless sudo. Empty when already root (no prefix needed) or when sudo
 /// is unavailable (fall back to mmdebstrap's automatic mode selection).
@@ -662,8 +675,7 @@ fn root_mmdebstrap_prefix(runner: &mut dyn CommandRunner) -> (Vec<String>, bool)
 
 #[cfg(unix)]
 fn unix_euid() -> u32 {
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    unsafe { libc::geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 #[cfg(not(unix))]
@@ -673,8 +685,7 @@ fn unix_euid() -> u32 {
 
 #[cfg(unix)]
 fn unix_uid() -> u32 {
-    // SAFETY: getuid takes no arguments and cannot fail.
-    unsafe { libc::getuid() }
+    rustix::process::getuid().as_raw()
 }
 
 #[cfg(not(unix))]
@@ -684,8 +695,7 @@ fn unix_uid() -> u32 {
 
 #[cfg(unix)]
 fn unix_gid() -> u32 {
-    // SAFETY: getgid takes no arguments and cannot fail.
-    unsafe { libc::getgid() }
+    rustix::process::getgid().as_raw()
 }
 
 #[cfg(not(unix))]
@@ -753,6 +763,25 @@ mod tests {
         assert!(script.contains("velnor.isolation_generation=*)"));
         assert!(script.contains("export VELNOR_ISOLATION_ID VELNOR_ISOLATION_GENERATION"));
         assert!(script.contains("exec /usr/bin/velnor-guest-agent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_agent_is_embedded_with_exact_bytes_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tree =
+            std::env::temp_dir().join(format!("velnor-guest-agent-test-{}", uuid::Uuid::new_v4()));
+        let bytes = b"guest-agent\0exact-bytes";
+        install_guest_agent(&tree, bytes).unwrap();
+
+        let path = tree.join("usr/bin/velnor-guest-agent");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        std::fs::remove_dir_all(tree).unwrap();
     }
 
     #[test]
@@ -847,7 +876,7 @@ mod tests {
                 kernel_tarball: b"tarball",
                 isolation_fragment: include_str!("../../../../microvm/kernel.config"),
                 guest_toml: include_str!("../../../../microvm/guest.toml"),
-                guest_agent: None,
+                guest_agent: b"guest-agent",
             },
         )
         .unwrap_err();

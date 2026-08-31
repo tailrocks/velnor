@@ -7,6 +7,8 @@
 //! error stream, payloads always to the body stream. This crate depends
 //! only on the shared model types and never on Clap or Axum.
 
+#![forbid(unsafe_code)]
+
 use std::io::Write;
 
 use velnor_model::{
