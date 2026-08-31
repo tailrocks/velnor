@@ -183,13 +183,13 @@ pub struct ReapReport {
 }
 
 enum TerminationClaim {
-    Claimed,
+    Claimed { reason: KillReason },
     AlreadyClaimed,
     BlockedByConsumers(u64),
 }
 
 enum RetentionClaim {
-    Claimed,
+    Claimed { reason: KillReason },
     AlreadyClaimed,
     LiveConsumers(u64),
     Missing,
@@ -510,14 +510,17 @@ impl<C: Clock> SupersessionCoordinator<C> {
         };
         for raw_digest in rows {
             let digest = Digest::parse(raw_digest)?;
+            let incomplete_claim = self.incomplete_termination_reason(&digest)?;
             let Some(action) = self.action_for_digest(&digest)? else {
                 self.delete_retention(&digest)?;
                 continue;
             };
-            if matches!(
-                action_state(&self.manager, &action)?,
-                Some(ActionState::Failed | ActionState::Abandoned)
-            ) {
+            if incomplete_claim.is_none()
+                && matches!(
+                    action_state(&self.manager, &action)?,
+                    Some(ActionState::Failed | ActionState::Abandoned)
+                )
+            {
                 self.delete_retention(&digest)?;
                 self.emit_telemetry(SupersessionTelemetryEvent {
                     action_key_digest: digest,
@@ -543,18 +546,12 @@ impl<C: Clock> SupersessionCoordinator<C> {
                         retained_until: None,
                     });
                 }
-                RetentionClaim::Claimed => {
-                    if let Err(error) = self.execute_claimed_termination(
+                RetentionClaim::Claimed { reason } => {
+                    self.execute_claimed_termination(
                         &action,
-                        KillReason::RetentionExpired,
+                        reason,
                         terminator,
-                    ) {
-                        // The durable claim remains incomplete. Restore a
-                        // short, bounded retry deadline so a transient hook
-                        // failure cannot strand physical work forever.
-                        self.restore_retention(&digest, now.saturating_add(TERMINATION_RETRY_MS))?;
-                        return Err(error);
-                    }
+                    )?;
                     report.reaped += 1;
                     self.emit_telemetry(SupersessionTelemetryEvent {
                         action_key_digest: digest,
@@ -562,7 +559,7 @@ impl<C: Clock> SupersessionCoordinator<C> {
                         at: now,
                         kind: SupersessionEventKind::RetainedThenReaped,
                         live_consumers: 0,
-                        reason: Some(KillReason::RetentionExpired.to_string()),
+                        reason: Some(reason.to_string()),
                         retained_until: None,
                     });
                 }
@@ -731,6 +728,16 @@ impl<C: Clock> SupersessionCoordinator<C> {
         Ok(())
     }
 
+    fn restore_termination_retry(&mut self, digest: &Digest) -> Result<(), SupersessionError> {
+        self.restore_retention(
+            digest,
+            self.manager
+                .clock()
+                .now()
+                .saturating_add(TERMINATION_RETRY_MS),
+        )
+    }
+
     fn action_for_digest(&self, digest: &Digest) -> Result<Option<ActionKey>, SupersessionError> {
         Ok(self
             .manager
@@ -753,6 +760,29 @@ impl<C: Clock> SupersessionCoordinator<C> {
             .optional()?)
     }
 
+    fn incomplete_termination_reason(
+        &self,
+        digest: &Digest,
+    ) -> Result<Option<KillReason>, SupersessionError> {
+        let claim: Option<(String, i64)> = self
+            .manager
+            .journal
+            .connection
+            .query_row(
+                "SELECT reason, completed FROM action_termination_claims
+                 WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match claim {
+            Some((reason, completed)) if completed == 0 => {
+                Ok(Some(parse_kill_reason(&reason)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn terminate<T: PhysicalActionTerminator>(
         &mut self,
         action: &ActionKey,
@@ -761,13 +791,18 @@ impl<C: Clock> SupersessionCoordinator<C> {
     ) -> Result<bool, SupersessionError> {
         let digest = action.digest()?;
         let now = self.manager.clock().now();
-        match self.claim_termination(&digest, reason, reason == KillReason::TrustRevoked, now)? {
+        let claimed_reason = match self.claim_termination(
+            &digest,
+            reason,
+            reason == KillReason::TrustRevoked,
+            now,
+        )? {
             TerminationClaim::BlockedByConsumers(_) | TerminationClaim::AlreadyClaimed => {
                 return Ok(false)
             }
-            TerminationClaim::Claimed => {}
-        }
-        self.execute_claimed_termination(action, reason, terminator)?;
+            TerminationClaim::Claimed { reason } => reason,
+        };
+        self.execute_claimed_termination(action, claimed_reason, terminator)?;
         Ok(true)
     }
 
@@ -783,6 +818,24 @@ impl<C: Clock> SupersessionCoordinator<C> {
             .journal
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let incomplete_claim: Option<i64> = transaction
+            .query_row(
+                "SELECT completed FROM action_termination_claims
+                 WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if incomplete_claim == Some(0) {
+            let claim = claim_termination_row(
+                &transaction,
+                digest,
+                reason,
+                sqlite_integer(now.as_millis())?,
+            )?;
+            transaction.commit()?;
+            return Ok(claim);
+        }
         if !bypass_consumer_check {
             let live: i64 = transaction.query_row(
                 "SELECT COUNT(*) FROM action_consumers WHERE action_key_digest = ?1",
@@ -818,6 +871,18 @@ impl<C: Clock> SupersessionCoordinator<C> {
             .journal
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing_claim: Option<(String, i64)> = transaction
+            .query_row(
+                "SELECT reason, completed FROM action_termination_claims
+                 WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let incomplete_reason = match existing_claim {
+            Some((reason, completed)) if completed == 0 => Some(parse_kill_reason(&reason)?),
+            _ => None,
+        };
         let Some(retained_until) = transaction
             .query_row(
                 "SELECT retained_until_ms FROM action_retention WHERE action_key_digest = ?1",
@@ -832,6 +897,19 @@ impl<C: Clock> SupersessionCoordinator<C> {
         if retained_until > now_ms {
             transaction.commit()?;
             return Ok(RetentionClaim::Missing);
+        }
+        if let Some(reason) = incomplete_reason {
+            transaction.execute(
+                "UPDATE action_termination_claims SET claimed_at_ms = ?1
+                 WHERE action_key_digest = ?2 AND completed = 0",
+                params![now_ms, digest.to_string()],
+            )?;
+            transaction.execute(
+                "DELETE FROM action_retention WHERE action_key_digest = ?1",
+                [digest.to_string()],
+            )?;
+            transaction.commit()?;
+            return Ok(RetentionClaim::Claimed { reason });
         }
         let live: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM action_consumers WHERE action_key_digest = ?1",
@@ -852,7 +930,7 @@ impl<C: Clock> SupersessionCoordinator<C> {
             claim_termination_row(&transaction, digest, KillReason::RetentionExpired, now_ms)?;
         if matches!(
             claim,
-            TerminationClaim::Claimed | TerminationClaim::AlreadyClaimed
+            TerminationClaim::Claimed { .. } | TerminationClaim::AlreadyClaimed
         ) {
             transaction.execute(
                 "DELETE FROM action_retention WHERE action_key_digest = ?1",
@@ -861,7 +939,7 @@ impl<C: Clock> SupersessionCoordinator<C> {
         }
         transaction.commit()?;
         Ok(match claim {
-            TerminationClaim::Claimed => RetentionClaim::Claimed,
+            TerminationClaim::Claimed { reason } => RetentionClaim::Claimed { reason },
             TerminationClaim::AlreadyClaimed => RetentionClaim::AlreadyClaimed,
             TerminationClaim::BlockedByConsumers(count) => RetentionClaim::LiveConsumers(count),
         })
@@ -874,13 +952,27 @@ impl<C: Clock> SupersessionCoordinator<C> {
         terminator: &mut T,
     ) -> Result<(), SupersessionError> {
         let digest = action.digest()?;
-        terminator
-            .terminate(action, reason)
-            .map_err(SupersessionError::Terminator)?;
-        self.manager.journal.connection.execute(
+        if let Err(error) = terminator.terminate(action, reason) {
+            self.restore_termination_retry(&digest)?;
+            return Err(SupersessionError::Terminator(error));
+        }
+        let changed = match self.manager.journal.connection.execute(
             "UPDATE action_termination_claims SET completed = 1 WHERE action_key_digest = ?1",
             [digest.to_string()],
-        )?;
+        ) {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.restore_termination_retry(&digest)?;
+                return Err(error.into());
+            }
+        };
+        if changed != 1 {
+            let error = SupersessionError::Journal(JournalError::InvalidState(
+                "termination completion claim was not persisted".to_owned(),
+            ));
+            self.restore_termination_retry(&digest)?;
+            return Err(error);
+        }
         self.delete_retention(&digest)?;
         if let Some(mut record) = self.manager.latest_action(action)? {
             if record.state != ActionState::Abandoned {
@@ -917,36 +1009,52 @@ fn claim_termination_row(
     digest: &Digest,
     reason: KillReason,
     now_ms: i64,
-) -> Result<TerminationClaim, rusqlite::Error> {
-    let existing: Option<i64> = transaction
+) -> Result<TerminationClaim, SupersessionError> {
+    let existing: Option<(String, i64)> = transaction
         .query_row(
-            "SELECT completed FROM action_termination_claims WHERE action_key_digest = ?1",
+            "SELECT reason, completed FROM action_termination_claims
+             WHERE action_key_digest = ?1",
             [digest.to_string()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     match existing {
-        Some(completed) if completed != 0 => Ok(TerminationClaim::AlreadyClaimed),
-        Some(_) => {
+        Some((_, completed)) if completed != 0 => Ok(TerminationClaim::AlreadyClaimed),
+        Some((persisted_reason, _)) => {
             // A failed hook leaves an incomplete intent. Retrying is safe
             // because executor termination is idempotent for an action key.
             transaction.execute(
-                "UPDATE action_termination_claims
-                 SET reason = ?1, claimed_at_ms = ?2
-                 WHERE action_key_digest = ?3 AND completed = 0",
-                params![reason.to_string(), now_ms, digest.to_string()],
+                 "UPDATE action_termination_claims
+                 SET claimed_at_ms = ?1
+                 WHERE action_key_digest = ?2 AND completed = 0",
+                params![now_ms, digest.to_string()],
             )?;
-            Ok(TerminationClaim::Claimed)
+            Ok(TerminationClaim::Claimed {
+                reason: parse_kill_reason(&persisted_reason)?,
+            })
         }
         None => {
             transaction.execute(
                 "INSERT INTO action_termination_claims(
                      action_key_digest, reason, claimed_at_ms, completed
-                 ) VALUES (?1, ?2, ?3, 0)",
+                ) VALUES (?1, ?2, ?3, 0)",
                 params![digest.to_string(), reason.to_string(), now_ms],
             )?;
-            Ok(TerminationClaim::Claimed)
+            Ok(TerminationClaim::Claimed { reason })
         }
+    }
+}
+
+fn parse_kill_reason(value: &str) -> Result<KillReason, SupersessionError> {
+    match value {
+        "no_consumers" => Ok(KillReason::NoConsumers),
+        "retention_expired" => Ok(KillReason::RetentionExpired),
+        "non_adoptable" => Ok(KillReason::NonAdoptable),
+        "failed_action" => Ok(KillReason::FailedAction),
+        "trust_revoked" => Ok(KillReason::TrustRevoked),
+        _ => Err(SupersessionError::InvalidConfig(format!(
+            "unknown termination claim reason: {value}"
+        ))),
     }
 }
 
@@ -1228,7 +1336,7 @@ mod tests {
         let clock = TestClock::default();
         let mut coordinator = SupersessionCoordinator::open(
             ":memory:",
-            clock,
+            clock.clone(),
             SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
         )
         .unwrap();
@@ -1249,9 +1357,9 @@ mod tests {
             coordinator.detach(&action, "run-a", &mut spy),
             Err(SupersessionError::Terminator(_))
         ));
-        coordinator
-            .revoke_trust(&action, "retry termination", &mut spy)
-            .unwrap();
+        assert!(coordinator.next_retention().unwrap().is_some());
+        clock.advance(TERMINATION_RETRY_MS);
+        coordinator.reap_due(&mut spy).unwrap();
         assert_eq!(spy.calls, 2);
     }
 
