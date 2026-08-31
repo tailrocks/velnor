@@ -386,6 +386,7 @@ pub fn admit_job(
             .unwrap_or_else(|| format!("step-{index}"));
 
         if is_local_reference(reference.name.as_deref(), reference.path.as_deref()) {
+            let inputs = resolve_step_inputs(step, context_data);
             let (workflow_repo, workflow_sha) = workflow.as_ref().ok_or_else(|| {
                 AdmissionError::new(
                     &root.child(format!("step '{step_label}'")),
@@ -408,6 +409,7 @@ pub fn admit_job(
                 workflow_repo,
                 workflow_sha,
                 &subpath,
+                &inputs,
                 1,
             )?;
             continue;
@@ -600,6 +602,7 @@ fn admit_remote(
 }
 
 /// Admit a local action read from the workflow repository at the workflow SHA.
+#[allow(clippy::too_many_arguments)]
 fn admit_local(
     walk: &mut Walk,
     ancestry: &Ancestry,
@@ -607,6 +610,7 @@ fn admit_local(
     repository: &str,
     sha: &str,
     subpath: &str,
+    provided_inputs: &BTreeMap<String, String>,
     depth: usize,
 ) -> Result<(), AdmissionError> {
     if subpath.starts_with('/') || subpath.split('/').any(|segment| segment == "..") {
@@ -645,7 +649,7 @@ fn admit_local(
         index,
         repository,
         sha,
-        &BTreeMap::new(),
+        provided_inputs,
         &metadata,
         depth,
     )
@@ -707,6 +711,7 @@ fn recurse_composite(
                 repo_ctx,
                 ref_ctx,
                 nested_subpath,
+                &child_inputs,
                 depth + 1,
             )?;
             continue;
@@ -1025,16 +1030,16 @@ mod tests {
             "./.github/actions/outer",
             "",
             Some("./.github/actions/outer"),
-            serde_json::json!({})
+            serde_json::json!({"lookup_only": "true"})
         )]));
         let source = FakeMetadataSource::new(&[
             (
                 "acme/repo/.github/actions/outer@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n",
+                "inputs:\n  lookup_only:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n      with:\n        lookup_only: ${{ inputs.lookup_only }}\n",
             ),
             (
                 "acme/repo/.github/actions/inner@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                &format!("runs:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        path: target\n        key: k\n"),
+                &format!("inputs:\n  lookup_only:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        path: target\n        key: k\n        lookup-only: ${{{{ inputs.lookup_only }}}}\n"),
             ),
         ]);
         let graph = admit_job(&job, &context, &source).unwrap();
@@ -1043,6 +1048,34 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.kind == AdmissionNodeKind::LocalAction));
+    }
+
+    #[test]
+    fn invalid_nested_capability_input_uses_caller_value() {
+        let context = workflow_context();
+        let job = job(serde_json::json!([repo_step(
+            "./.github/actions/outer",
+            "",
+            Some("./.github/actions/outer"),
+            serde_json::json!({"lookup_only": "invalid"})
+        )]));
+        let source = FakeMetadataSource::new(&[
+            (
+                "acme/repo/.github/actions/outer@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "inputs:\n  lookup_only:\n    default: true\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n      with:\n        lookup_only: ${{ inputs.lookup_only }}\n",
+            ),
+            (
+                "acme/repo/.github/actions/inner@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                &format!("inputs:\n  lookup_only:\n    default: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        path: target\n        key: k\n        lookup-only: ${{{{ inputs.lookup_only }}}}\n"),
+            ),
+        ]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 2);
+        assert_eq!(error.field, "with.lookup-only");
+        assert_eq!(
+            error.accepted,
+            vec!["true".to_string(), "false".to_string()]
+        );
     }
 
     #[test]
