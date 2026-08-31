@@ -1260,7 +1260,7 @@ fn policy_symlink_identity(directory: RawFd, name: &CString) -> io::Result<(u64,
     if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
-    Ok((stat.st_dev as u64, stat.st_ino, stat.st_mode as u64))
+    Ok((stat.st_dev as _, stat.st_ino, stat.st_mode as u64))
 }
 
 #[cfg(unix)]
