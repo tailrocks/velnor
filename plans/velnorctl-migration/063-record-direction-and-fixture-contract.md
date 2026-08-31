@@ -28,8 +28,9 @@ plane inspection. Every later task needs one stable integration corpus.
 ## Current state
 
 Refreshed 2026-08-24 at Velnor `aed09eb`; the original planning-time gaps in
-steps 1–2 are already closed on the campaign branch, and the citations below
-are live anchors:
+steps 1–2 were closed during the historical campaign; current execution follows
+the operator-assigned branch/focused-PR topology recorded in external
+`../COORDINATION.md`, and the citations below are live anchors:
 
 - `docs/vision.md:70-83` records the authoritative direction: performance,
   native adapters, and UX stay active, and the velnorctl migration names the
