@@ -508,7 +508,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         }
         self.ensure_trust_scope(key)?;
         let mut journal = self.lock_journal()?;
-        let lease = journal.acquire(
+        let lease = journal.acquire_or_takeover(
             key,
             self.owner.clone(),
             self.lease_duration_ms,
