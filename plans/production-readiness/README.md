@@ -290,11 +290,11 @@ evidence and requires a fresh baseline.
 - Repository: baseline captured from assigned branch `velnor1` at source HEAD
   `f2f03637df1c173d014344f47dae8fd5fdb4f3b2`; `origin/main`
   `2a6853ae395fd6c2401b48d989b6077c77d534d0`; `origin/velnor1` was the same
-  HEAD. The worktree was clean and its tree equaled `origin/main`; the
-  docs-only ledger commit is `5facff7c183f56960cb5a78d6e147c16a5c756df`.
-  Branch-only history records the rejected Ajv pin, its safe revert, and the
-  normal main reconciliation merge. No source, fixture, workflow, package,
-  APT, or Sentry mutation is present on this branch.
+  HEAD. The worktree was clean and its tree equaled `origin/main`. Branch-only
+  history records the rejected Ajv pin, its safe revert, the normal main
+  reconciliation merge, and this docs-only ledger correction. No source,
+  fixture, workflow, package, APT, or Sentry mutation is present on this
+  branch.
 - Historical/unverified, not current proof: tag `v0.1.247` peels to
   `738f18f68472c15e30645d81a7d2d664f29e5cab` and is unsigned; release runs
   `33344114108` and `33344405790` were cancelled. PR #502 was closed unmerged
