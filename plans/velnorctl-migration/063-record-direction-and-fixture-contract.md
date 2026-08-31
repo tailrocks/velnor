@@ -52,10 +52,10 @@ anchors:
 - `crates/velnor-tools/src/main.rs:20-21` defaults fixture tooling to
   `tailrocks/velnor-actions-fixture`.
 - Fixture `tailrocks/velnor-actions-fixture` is pinned here for reproducibility:
-  main commit `9ab34d754fd6e079d71d4da17a972cc30a1bb81c` and
-  `.github/workflows/compat.yml` blob `37ab0a30ddce460febe8fc6a51598814e49c86ea`;
+  main commit `3a01651d12f1285f92a7cdd4ec9087433bdea10c` and
+  `.github/workflows/compat.yml` blob `13f7aa6227c36f39498800e392cdb75508f11e0f`;
   `.github/workflows/control-plane.yml` blob
-  `125cc81874a7f7f46c79e4ea5985c604159ad7dd` (verified 2026-08-31). It covers
+  `be95f5e4895579f4c5baa1238590a7f9440ea67d` (verified 2026-08-31). It covers
   real execution semantics but lacks deterministic
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
   validation. Its current manual input is `lanes`, matching the canonical
