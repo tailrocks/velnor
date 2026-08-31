@@ -1,12 +1,11 @@
 # Plan 063: Record the velnorctl direction and fixture control contract
 
-> **Executor instructions**: Complete this plan before product implementation.
-> Update both repositories through normal reviewed changes. Do not weaken any
-> existing fixture. If the fixture baseline cannot pass unchanged, diagnose and
-> fix Velnor first; do not hide the failure in the new workflow.
+> **Historical record notice (Plan status: DONE):** This plan records completed
+> historical work only. It is historical and non-authoritative; do not execute
+> its procedure or derive current selector requirements from it. Current
+> execution follows the active repository contract and current coordination
+> instructions.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- AGENTS.md .github/AGENTS.md README.md docs/vision.md docs/roadmap.md docs/prompt.md plans/README.md crates/velnor-tools/src/main.rs scripts`
-> Compare live text with the evidence below before editing.
 > Reconciled 2026-08-24 at Velnor b57b036; generator ce23409 emits sole `lane`; fixture pin dc4204c green (compat run 32675488430).
 
 ## Status
@@ -58,9 +57,12 @@ anchors:
   plural selector contract; callable workflows derive singular `lane` from
   `inputs.lanes`.
 
-## Drift reconciliation 2026-08-24
+## Historical drift reconciliation 2026-08-24
 
 Reconciled at Velnor b57b036 against live repository state:
+
+> This dated reconciliation is historical and non-authoritative for current
+> execution or selector requirements.
 
 - The canonical fixture-class generator (`tailrocks/velnor-actions`) at
   committed state ce23409 already emits the sole `lane` input in all five class
@@ -107,7 +109,7 @@ they disagree:
   stopped per step 3 until both external gaps close; live dispatch evidence
   for step 4 remains gated behind it.
 
-### Execution closeout 2026-08-24 (at Velnor 82b15f5)
+### Historical execution closeout 2026-08-24 (at Velnor 82b15f5)
 
 **LANED**: docs direction verified at aed09eb; generator sole-lane fix landed in
 `tailrocks/velnor-actions` branch `campaign/sole-lane-package-update` commit
@@ -136,7 +138,7 @@ literally (expression-parity observation).
 **Status**: DONE (2026-08-24). The queue-isolation gap is closed by validation
 run r2 on dedicated runner `cp-queue-validation-154447` (registration 5540):
 all eight control scenarios report `CP_VERDICT=match`. Full mapping in
-[Evidence (2026-08-24)](#evidence-2026-08-24) below.
+[Historical evidence (2026-08-24)](#historical-evidence-2026-08-24) below.
 
 ### Supersession 2026-08-24 (operator ruling): plural lanes restored
 
@@ -170,7 +172,7 @@ Consequences for the evidence above:
 restoration merged to fixture main as PR #93 squash `1661158`, and the
 isolated queue proof landed in `.velnor-compare/plan063-r2-queue-validation/`
 (8/8 `CP_VERDICT=match`). Full mapping in
-[Evidence (2026-08-24)](#evidence-2026-08-24) below.
+[Historical evidence (2026-08-24)](#historical-evidence-2026-08-24) below.
 
 ## Scope
 
@@ -276,7 +278,7 @@ markers report expected reuse. Record run URLs and sanitized JSON only.
 failure fails at its named step with logs, and hold cancellation terminates with
 no orphaned runner registration.
 
-## Test plan
+## Historical test plan
 
 - Unit tests for corrected default fixture slug and dispatch input validation.
 - Fixture static tests for every scenario and lane.
@@ -309,7 +311,10 @@ Later tasks may extend control scenarios, but must preserve success, failure,
 hold, and cancellation semantics. Workflow dispatch cleanup rules remain
 mandatory for every migration task.
 
-## Evidence (2026-08-24)
+## Historical evidence (2026-08-24)
+
+> **Historical evidence notice:** The dated evidence below is historical and is
+> not current execution authority.
 
 Mapping of each done criterion to concrete, machine-verifiable pointers.
 All selector statements below reflect the canonical plural `lanes` choice
