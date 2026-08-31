@@ -84,7 +84,11 @@ jobs:
     outputs:
       lane: ${{ needs.lane-admission.outputs.lanes }}
       version: ${{ steps.gate.outputs.version }}
-      commit: ${{ steps.gate.outputs.commit }}
+      # Downstream provenance is bound to the exact default-branch snapshot
+      # accepted below, not to an independently re-resolved tag ref.
+      commit: ${{ steps.gate.outputs.default_branch_commit }}
+      default_branch_commit: ${{ steps.gate.outputs.default_branch_commit }}
+      tag_commit: ${{ steps.gate.outputs.tag_commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -99,31 +103,46 @@ jobs:
         id: gate
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
 
           # Peel annotated OR lightweight tags to exactly one commit object.
-          commit="$(git rev-list -n 1 "$TAG")"
-          case "$commit" in
+          tag_commit="$(git rev-list -n 1 "$TAG")"
+          case "$tag_commit" in
             *[!0-9a-f]*|'') echo "::error::tag $TAG did not peel to lowercase hex" >&2; exit 1 ;;
           esac
-          [ "${#commit}" -eq 40 ] || { echo "::error::tag $TAG did not peel to a 40-hex commit" >&2; exit 1; }
+          [ "${#tag_commit}" -eq 40 ] || { echo "::error::tag $TAG did not peel to a 40-hex commit" >&2; exit 1; }
 
           # Older native checkout adapters fetch the requested tag but may leave
           # workflow_dispatch on the caller SHA. Move to the already-resolved
           # immutable commit before validating the checkout identity.
-          git checkout --detach "$commit"
+          git checkout --detach "$tag_commit"
 
           # The checkout must sit exactly on that commit (non-HEAD checkout is a
           # coherence failure).
           head="$(git rev-parse HEAD)"
-          [ "$head" = "$commit" ] || { echo "::error::HEAD $head != tag commit $commit" >&2; exit 1; }
+          [ "$head" = "$tag_commit" ] || { echo "::error::HEAD $head != tag commit $tag_commit" >&2; exit 1; }
+
+          # A release tag is valid only when it names the current default-branch
+          # tip. This closes the human tag/version race before any build,
+          # artifact upload, image push, or publication job can start.
+          remote_default_branch="$(git ls-remote --exit-code --heads origin "refs/heads/$DEFAULT_BRANCH")"
+          default_branch_commit="$(printf '%s\n' "$remote_default_branch" | awk 'NF == 2 { print $1 }')"
+          case "$default_branch_commit" in
+            *[!0-9a-f]*|'') echo "::error::could not resolve current default branch $DEFAULT_BRANCH to one lowercase-hex commit" >&2; exit 1 ;;
+          esac
+          [ "${#default_branch_commit}" -eq 40 ] || { echo "::error::default branch $DEFAULT_BRANCH did not resolve to a 40-hex commit" >&2; exit 1; }
+          [ "$default_branch_commit" = "$tag_commit" ] || {
+            echo "::error::tag $TAG resolves to $tag_commit, but default branch $DEFAULT_BRANCH is $default_branch_commit; release tags must point at the current default-branch tip" >&2
+            exit 1
+          }
 
           # Exactly one v* tag may point at this commit (reused/ambiguous lineage
           # fails closed).
-          tags_here="$(git tag --points-at "$commit" | grep -c '^v' || true)"
-          [ "$tags_here" = "1" ] || { echo "::error::expected exactly one v* tag at $commit, found $tags_here" >&2; exit 1; }
+          tags_here="$(git tag --points-at "$tag_commit" | grep -c '^v' || true)"
+          [ "$tags_here" = "1" ] || { echo "::error::expected exactly one v* tag at $tag_commit, found $tags_here" >&2; exit 1; }
 
           # Clean tree.
           [ -z "$(git status --porcelain)" ] || { echo "::error::dirty tree" >&2; exit 1; }
@@ -135,11 +154,58 @@ jobs:
 
           {
             echo "version=$version"
-            echo "commit=$commit"
+            echo "tag_commit=$tag_commit"
+            echo "default_branch_commit=$default_branch_commit"
           } >> "$GITHUB_OUTPUT"
 
-  metadata:
+  # This is the final pre-publication default-branch read. All downstream jobs
+  # consume its immutable output; later default-branch movement cannot change
+  # the already-bound source snapshot or provenance.
+  release_gate:
     needs: identity
+    name: Final pre-publication default-branch gate
+    timeout-minutes: 10
+    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    outputs:
+      default_branch_commit: ${{ steps.gate.outputs.default_branch_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Re-read default branch and fail closed on movement
+        id: gate
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_DEFAULT_BRANCH_COMMIT: ${{ needs.identity.outputs.default_branch_commit }}
+          EXPECTED_RELEASE_COMMIT: ${{ needs.identity.outputs.commit }}
+          EXPECTED_TAG_COMMIT: ${{ needs.identity.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          remote_default_branch="$(git ls-remote --exit-code --heads origin "refs/heads/$DEFAULT_BRANCH")"
+          default_branch_commit="$(printf '%s\n' "$remote_default_branch" | awk 'NF == 2 { print $1 }')"
+          case "$default_branch_commit" in
+            *[!0-9a-f]*|'') echo "::error::could not resolve current default branch $DEFAULT_BRANCH to one lowercase-hex commit" >&2; exit 1 ;;
+          esac
+          [ "${#default_branch_commit}" -eq 40 ] || { echo "::error::default branch $DEFAULT_BRANCH did not resolve to a 40-hex commit" >&2; exit 1; }
+          [ "$default_branch_commit" = "$EXPECTED_DEFAULT_BRANCH_COMMIT" ] || {
+            echo "::error::default branch $DEFAULT_BRANCH moved from $EXPECTED_DEFAULT_BRANCH_COMMIT to $default_branch_commit after identity; refusing release work" >&2
+            exit 1
+          }
+          [ "$default_branch_commit" = "$EXPECTED_RELEASE_COMMIT" ] || {
+            echo "::error::release provenance commit $EXPECTED_RELEASE_COMMIT is not the default-branch snapshot $default_branch_commit" >&2
+            exit 1
+          }
+          [ "$default_branch_commit" = "$EXPECTED_TAG_COMMIT" ] || {
+            echo "::error::tag commit $EXPECTED_TAG_COMMIT is not the default-branch snapshot $default_branch_commit" >&2
+            exit 1
+          }
+          echo "default_branch_commit=$default_branch_commit" >> "$GITHUB_OUTPUT"
+
+  metadata:
+    needs: [identity, release_gate]
     name: Compile release metadata once
     timeout-minutes: 30
     runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
@@ -155,14 +221,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.identity.outputs.commit }}
+          ref: ${{ needs.release_gate.outputs.default_branch_commit }}
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
 
       - name: Normalize immutable release checkout
         env:
-          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+          SOURCE_COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
         run: |
           set -euo pipefail
           case "$SOURCE_COMMIT" in
@@ -224,7 +290,7 @@ jobs:
             velnor-release-tool
 
   image:
-    needs: [identity, metadata]
+    needs: [identity, release_gate, metadata]
     name: Build + push one multi-platform GHCR image
     timeout-minutes: 60
     runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
@@ -237,18 +303,18 @@ jobs:
     env:
       CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       VERSION: ${{ needs.identity.outputs.version }}
-      COMMIT: ${{ needs.identity.outputs.commit }}
+      COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.identity.outputs.commit }}
+          ref: ${{ needs.release_gate.outputs.default_branch_commit }}
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
 
       - name: Normalize immutable release checkout
         env:
-          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+          SOURCE_COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
         run: |
           set -euo pipefail
           case "$SOURCE_COMMIT" in
@@ -299,7 +365,7 @@ jobs:
           tags: ${{ env.GHCR_IMAGE }}:${{ needs.identity.outputs.version }}
           labels: |
             org.opencontainers.image.version=${{ needs.identity.outputs.version }}
-            org.opencontainers.image.revision=${{ needs.identity.outputs.commit }}
+            org.opencontainers.image.revision=${{ needs.release_gate.outputs.default_branch_commit }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.velnor.manifest-sha256=${{ needs.metadata.outputs.manifest_sha256 }}
 
@@ -322,7 +388,7 @@ jobs:
             manifest.json
 
   guest-image:
-    needs: identity
+    needs: [identity, release_gate]
     name: Guest kernel/rootfs ${{ matrix.arch }}
     timeout-minutes: 180
     strategy:
@@ -345,14 +411,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.identity.outputs.commit }}
+          ref: ${{ needs.release_gate.outputs.default_branch_commit }}
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
 
       - name: Normalize immutable release checkout
         env:
-          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+          SOURCE_COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
         run: |
           set -euo pipefail
           git cat-file -e "${SOURCE_COMMIT}^{commit}"
@@ -413,6 +479,17 @@ jobs:
             --guest-agent target/release/velnor-guest-agent
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
+          test -s target/release/velnor-guest-agent
+          test -x target/release/velnor-guest-agent
+          # shellcheck disable=SC2209
+          stat_output="$(DEBUGFS_PAGER=cat debugfs -R 'stat /usr/bin/velnor-guest-agent' dist/microvm/rootfs.ext4 2>&1)"
+          printf '%s\n' "$stat_output" | grep -Eq 'Type: regular[[:space:]]+Mode:[[:space:]]+0755([[:space:]]|$)' \
+            || { echo "::error::rootfs guest agent must be a regular file with mode 0755" >&2; exit 1; }
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" dist/microvm/rootfs.ext4 >/dev/null
+          cmp -- "$agent_dump" target/release/velnor-guest-agent
           sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -424,7 +501,7 @@ jobs:
             dist/microvm/rootfs.sha256
 
   build:
-    needs: [identity, metadata, guest-image]
+    needs: [identity, release_gate, metadata, guest-image]
     name: Build ${{ matrix.arch }} binary + deb (release-build)
     timeout-minutes: 60
     strategy:
@@ -446,14 +523,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.identity.outputs.commit }}
+          ref: ${{ needs.release_gate.outputs.default_branch_commit }}
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
 
       - name: Normalize immutable release checkout
         env:
-          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+          SOURCE_COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
         run: |
           set -euo pipefail
           case "$SOURCE_COMMIT" in
@@ -667,7 +744,7 @@ jobs:
             velnor-runner-*.bin.sha256
 
   release:
-    needs: [identity, metadata, image, build]
+    needs: [identity, release_gate, metadata, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
     runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
@@ -675,20 +752,20 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.identity.outputs.version }}
-      COMMIT: ${{ needs.identity.outputs.commit }}
+      COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
       INDEX_DIGEST: ${{ needs.image.outputs.index_digest }}
       MANIFEST_SHA256: ${{ needs.image.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.identity.outputs.commit }}
+          ref: ${{ needs.release_gate.outputs.default_branch_commit }}
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
 
       - name: Normalize immutable release checkout
         env:
-          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+          SOURCE_COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
         run: |
           set -euo pipefail
           case "$SOURCE_COMMIT" in
@@ -778,7 +855,7 @@ jobs:
           done
           jq -S -n \
             --arg source_repository "$GITHUB_REPOSITORY" \
-            --arg source_ref "refs/tags/v${VERSION}" \
+            --arg source_ref "$COMMIT" \
             --arg source_commit "$COMMIT" \
             --arg version "$VERSION" \
             --slurpfile assets assets.jsonl \
@@ -882,7 +959,7 @@ jobs:
           if-no-files-found: error
 
   sign-amd64-tar:
-    needs: [identity, release]
+    needs: [identity, release_gate, release]
     permissions:
       attestations: write
       contents: read
@@ -891,10 +968,10 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.tar.gz
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   sign-arm64-tar:
-    needs: [identity, release]
+    needs: [identity, release_gate, release]
     permissions:
       attestations: write
       contents: read
@@ -903,10 +980,10 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.tar.gz
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   sign-amd64-deb:
-    needs: [identity, release]
+    needs: [identity, release_gate, release]
     permissions:
       attestations: write
       contents: read
@@ -915,10 +992,10 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.deb
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   sign-arm64-deb:
-    needs: [identity, release]
+    needs: [identity, release_gate, release]
     permissions:
       attestations: write
       contents: read
@@ -927,7 +1004,7 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
   # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).
