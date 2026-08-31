@@ -183,6 +183,23 @@ pub fn list_job_buildkit_volume_args() -> Vec<String> {
     ]
 }
 
+/// List BuildKit volumes with the ownership labels injected by the lease
+/// proxy. Daemon-scoped startup reclaim must prove both daemon and job
+/// ownership before deleting a volume; names alone are not an ownership
+/// boundary when daemons share a Docker engine.
+pub fn list_daemon_owned_job_buildkit_volume_format_args() -> Vec<String> {
+    vec![
+        "volume".into(),
+        "ls".into(),
+        "--filter".into(),
+        format!("name={BUILDKIT_CONTAINER_NAME_PREFIX}"),
+        "--filter".into(),
+        format!("label={DAEMON_ID_LABEL}"),
+        "--format".into(),
+        "{{.Name}}\t{{.Label \"velnor.job-id\"}}\t{{.Label \"velnor.daemon-id\"}}".into(),
+    ]
+}
+
 /// Created `velnor-preflight-*` leftovers from prior job-image tags. After a
 /// release retags `velnor/job-ubuntu:26.04`, `ancestor=` no longer matches
 /// those older image IDs, so name prefix is the remaining ownership key.
@@ -648,9 +665,11 @@ pub fn orphan_job_buildkit_ids(
         {
             continue;
         }
+        // Startup reclaim is daemon-scoped. An absent ownership label is
+        // not proof that this daemon owns the builder; fail closed so a
+        // co-located daemon cannot reclaim an unlabeled live resource.
         if let Some(daemon_id) = daemon_id
-            && !owner.is_empty()
-            && !daemon_owns_label(owner, daemon_id)
+            && (owner.is_empty() || !daemon_owns_label(owner, daemon_id))
         {
             continue;
         }
@@ -732,29 +751,82 @@ fn reclaim_orphan_job_buildkit_with_live(
     if !ids.is_empty() {
         remove_containers_serially(&ids, |args| docker(args).map(|_| ()))?;
     }
-    let volumes = docker(&list_job_buildkit_volume_args())?;
-    let volume_ids: Vec<String> = volumes
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty() && name.contains(BUILDKIT_CONTAINER_NAME_PREFIX))
-        .filter(|name| {
-            let scope = name
-                .strip_prefix(BUILDKIT_CONTAINER_NAME_PREFIX)
-                .unwrap_or(name);
-            let scope = scope.strip_suffix("_state").unwrap_or(scope);
-            let scope = scope.strip_suffix('0').unwrap_or(scope);
-            let job = format!("velnor-job-{scope}");
-            !protected_jobs.contains(&job)
-                && !protected_jobs
-                    .iter()
-                    .any(|live| name.contains(live.trim_start_matches("velnor-job-")))
-        })
-        .map(ToOwned::to_owned)
-        .collect();
+    // Re-list jobs immediately before volume deletion. A job can become live
+    // after the container revalidation above, and a not-yet-attached BuildKit
+    // volume is otherwise removable even though the job now owns it.
+    let volume_protected_jobs = match daemon_id {
+        Some(_) => docker(&list_daemon_owned_job_format_args())?,
+        None => docker(&list_owned_job_format_args())?,
+    };
+    let volume_protected_jobs = match daemon_id {
+        Some(daemon_id) => live_daemon_job_ids(&volume_protected_jobs, daemon_id),
+        None => live_job_ids(&volume_protected_jobs),
+    };
+    let volume_ids = match daemon_id {
+        Some(daemon_id) => {
+            let volumes = docker(&list_daemon_owned_job_buildkit_volume_format_args())?;
+            daemon_owned_buildkit_volume_names(&volumes, daemon_id, &volume_protected_jobs)
+        }
+        None => {
+            let volumes = docker(&list_job_buildkit_volume_args())?;
+            volumes
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && name.contains(BUILDKIT_CONTAINER_NAME_PREFIX))
+                .filter(|name| {
+                    let scope = name
+                        .strip_prefix(BUILDKIT_CONTAINER_NAME_PREFIX)
+                        .unwrap_or(name);
+                    let scope = scope.strip_suffix("_state").unwrap_or(scope);
+                    let scope = scope.strip_suffix('0').unwrap_or(scope);
+                    let job = format!("velnor-job-{scope}");
+                    !volume_protected_jobs.contains(&job)
+                        && !volume_protected_jobs
+                            .iter()
+                            .any(|live| name.contains(live.trim_start_matches("velnor-job-")))
+                })
+                .map(ToOwned::to_owned)
+                .collect()
+        }
+    };
     if !volume_ids.is_empty() {
         docker(&remove_volume_args(&volume_ids)).map(|_| ())?;
     }
     Ok(())
+}
+
+fn daemon_owned_buildkit_volume_names(
+    formatted: &str,
+    daemon_id: &str,
+    protected_jobs: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut names = formatted
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() != 3 {
+                return None;
+            }
+            let name = fields[0].trim();
+            let job_id = fields[1].trim();
+            let owner = fields[2].trim();
+            if name.is_empty()
+                || job_id.is_empty()
+                || !name.contains(BUILDKIT_CONTAINER_NAME_PREFIX)
+                || !daemon_owns_label(owner, daemon_id)
+                || protected_jobs.contains(job_id)
+                || protected_jobs
+                    .iter()
+                    .any(|live| name.contains(live.trim_start_matches("velnor-job-")))
+            {
+                return None;
+            }
+            Some(name.to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// IDs of testcontainers that were created before the lease proxy (no job label).
@@ -1918,6 +1990,7 @@ velnor-job-dead\tvelnor-job-dead\texited
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
         ];
         reclaim_orphan_jobs(|args| {
             calls.push(args.to_vec());
@@ -2015,6 +2088,20 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
     }
 
     #[test]
+    fn daemon_scoped_buildkit_reclaim_requires_daemon_ownership() {
+        let daemon = "/var/lib/velnor-fleet/work";
+        let formatted = "\
+owned\tbuildx_buildkit_velnor-builder-owned0\tvelnor-job-old\t/var/lib/velnor-fleet/work/slot-1\tcreated
+foreign\tbuildx_buildkit_velnor-builder-foreign0\tvelnor-job-foreign\t/var/lib/velnor-other/work\tcreated
+unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcreated
+";
+        assert_eq!(
+            orphan_job_buildkit_ids(formatted, &BTreeSet::new(), Some(daemon)),
+            vec!["owned".to_string()]
+        );
+    }
+
+    #[test]
     fn reclaim_orphan_job_buildkit_removes_created_removing_of_ended_jobs_without_force() {
         let mut calls = Vec::new();
         let mut outputs = vec![
@@ -2036,6 +2123,8 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
                 .to_string(),
             String::new(),
             String::new(),
+            "velnor-job-live\tvelnor-job-live\trunning\nvelnor-job-dead\tvelnor-job-dead\texited\n"
+                .to_string(),
             "buildx_buildkit_velnor-builder-dead0_state\nbuildx_buildkit_velnor-builder-live0_state\n"
                 .to_string(),
             String::new(),
@@ -2084,6 +2173,7 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
             buildkit.to_string(),
             "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
             buildkit.to_string(),
+            "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
             "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
         ];
         reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
@@ -2095,7 +2185,8 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
         assert_eq!(calls[0], list_job_buildkit_format_args());
         assert_eq!(calls[1], list_owned_job_format_args());
         assert_eq!(calls[2], list_job_buildkit_format_args());
-        assert_eq!(calls[3], list_job_buildkit_volume_args());
+        assert_eq!(calls[3], list_owned_job_format_args());
+        assert_eq!(calls[4], list_job_buildkit_volume_args());
         assert!(!calls
             .iter()
             .any(|call| call.first().is_some_and(|a| a == "rm")));
@@ -2114,6 +2205,7 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
             String::new(),
             buildkit.to_string(),
             String::new(),
+            String::new(),
             "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
         ];
         let result = reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
@@ -2127,7 +2219,7 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
         assert!(result.is_err());
         assert_eq!(calls[3], remove_one_container_args("id-race"));
         assert_eq!(
-            calls[5],
+            calls[6],
             remove_volume_args(&["buildx_buildkit_velnor-builder-race0_state".into()])
         );
         assert!(calls
@@ -2140,13 +2232,9 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
         let mut calls = Vec::new();
         let mut outputs = vec![
             String::new(),
-            "velnor-job-unknown\tvelnor-job-unknown\tfuture-state\n\
-             velnor-job-malformed\tvelnor-job-malformed\n"
-                .to_string(),
-            "buildx_buildkit_velnor-builder-unknown0_state\n\
-             buildx_buildkit_velnor-builder-malformed0_state\n"
-                .to_string(),
             String::new(),
+            "velnor-job-race\tvelnor-job-race\trunning\n".to_string(),
+            "buildx_buildkit_velnor-builder-race0_state\n".to_string(),
         ];
         reclaim_orphan_job_buildkit_with_live(&BTreeSet::new(), None, &mut |args| {
             calls.push(args.to_vec());
@@ -2156,7 +2244,8 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
 
         assert_eq!(calls[0], list_job_buildkit_format_args());
         assert_eq!(calls[1], list_owned_job_format_args());
-        assert_eq!(calls[2], list_job_buildkit_volume_args());
+        assert_eq!(calls[2], list_owned_job_format_args());
+        assert_eq!(calls[3], list_job_buildkit_volume_args());
         assert!(!calls
             .iter()
             .any(|call| { call.starts_with(&["volume".into(), "rm".into(), "--force".into()]) }));
@@ -2263,6 +2352,22 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
     }
 
     #[test]
+    fn daemon_scoped_buildkit_volume_reclaim_requires_labeled_owner() {
+        let daemon = "/var/lib/velnor-fleet/work";
+        let protected = BTreeSet::from(["velnor-job-live".to_string()]);
+        let formatted = "\
+buildx_buildkit_velnor-builder-dead0_state\tvelnor-job-dead\t/var/lib/velnor-fleet/work/slot-1
+buildx_buildkit_velnor-builder-live0_state\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1
+buildx_buildkit_velnor-builder-foreign0_state\tvelnor-job-foreign\t/var/lib/velnor-other/work
+buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
+";
+        assert_eq!(
+            daemon_owned_buildkit_volume_names(formatted, daemon, &protected),
+            vec!["buildx_buildkit_velnor-builder-dead0_state".to_string()]
+        );
+    }
+
+    #[test]
     fn reclaim_daemon_orphan_jobs_reclaims_only_this_daemons_orphans() {
         let daemon = "/var/lib/velnor-fleet/work";
         let mut calls = Vec::new();
@@ -2294,6 +2399,9 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
         );
         assert_eq!(calls[3], remove_one_container_args("guest-old"));
         assert!(!calls[3].iter().any(|arg| arg == "--force"));
+        assert!(calls
+            .iter()
+            .any(|call| call == &list_daemon_owned_job_buildkit_volume_format_args()));
         // The other daemon's exited job is never looked up or reclaimed.
         assert!(
             calls

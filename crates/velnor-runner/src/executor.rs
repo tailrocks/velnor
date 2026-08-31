@@ -16910,6 +16910,7 @@ type=sha,format=long,prefix=,enable=true"
         assert_eq!(outputs["base_path"], "/example");
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn configure_pages_fetches_site_and_exports_environment() {
         use std::net::TcpListener;
@@ -16966,6 +16967,7 @@ type=sha,format=long,prefix=,enable=true"
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn deploy_pages_runs_artifact_oidc_create_and_status_loop() {
         use std::net::TcpListener;
