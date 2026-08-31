@@ -224,6 +224,7 @@ rtk cargo run -p velnor-tools --locked -- fleet-policy apply \
   --plan-digest <REVIEWED_PLAN_DIGEST>
 rtk cargo run -p velnor-tools --locked -- fleet-policy audit \
   --policy fleet/policies/tailrocks-desired-policy.json \
+  --ledger fleet/release-refs.toml \
   --organization tailrocks
 ```
 
@@ -239,6 +240,7 @@ acceptance evidence:
 ```sh
 rtk cargo run -p velnor-tools --locked -- fleet-policy audit \
   --policy fleet/policies/tailrocks-desired-policy.json \
+  --ledger fleet/release-refs.toml \
   --organization tailrocks
 ```
 
