@@ -61,10 +61,10 @@ stale working files were removed; Git history preserves delivery evidence. Plan
 | [`velnorctl-migration`](velnorctl-migration/README.md) | Replace every `velnor-runner` product, binary, package, and command surface with `velnorctl` | Current; Plan 063 DONE; follow the active goal graph |
 
 The migration category contains one shared-plan index plus
-[`commands/README.md`](velnorctl-migration/commands/README.md), with one task
-for each of 74 retained researched leaf commands and the required `velnorctl
-daemon` replacement. Plan 063 is complete: it established the direction and
-fixture control contract. Subsequent product work follows the active goal graph
+[`commands/README.md`](velnorctl-migration/commands/README.md), with 75 command
+tasks: 74 retained researched leaf commands and the required `velnorctl daemon`
+replacement. Plan 063 is complete: it established the direction and fixture
+control contract. Subsequent product work follows the active goal graph
 and `plans/TASKS.md`; this historical plan is not an execution procedure.
 
 ## Plan-library rules
