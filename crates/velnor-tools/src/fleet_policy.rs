@@ -2102,7 +2102,7 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
         .with_context(|| format!("creating {}", args.out_dir.display()))?;
     #[cfg(not(unix))]
     let existing = read_existing_policy_files(&args.out_dir)?;
-    let plan = plan_policy_actions(&policies, &existing)?;
+    let plan = plan_policy_actions(&policies, existing)?;
     let by_org: BTreeMap<&str, &OrgPolicy> = policies
         .iter()
         .map(|policy| (policy.organization.as_str(), policy))
