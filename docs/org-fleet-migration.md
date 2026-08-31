@@ -6,6 +6,31 @@ labels. The reviewed generated fleet policy is the active authority for group,
 repository, workflow, and ref changes. Complete the storage capacity and GC
 gates before migrating production organizations.
 
+## Fleet-policy publication boundary
+
+`fleet-policy generate` mutates policy files only through the provisioned
+Unix publisher boundary documented in [Fleet-policy publication](fleet-policy-publication.md).
+The output path must be absolute, root-owned, and non-writable by group or
+other users, including every ancestor. The publisher must run with effective
+uid 0. Symlinked ancestors, symlink/hardlink/FIFO/non-regular policy entries,
+and writable policy entries are rejected.
+
+Before production publication, run the external acceptance gate on the
+provisioned host with `VELNOR_FLEET_POLICY_OUT_DIR` set:
+`rtk mise run fleet-publisher-acceptance`. It invokes the production binary
+and fails closed unless the root-owned, restrictive, no-follow namespace
+checks succeed; repository CI cannot supply this privileged positive test.
+The protection claim is limited to unprivileged/non-root writers subject to
+Unix DAC. The dedicated root publisher, root or equivalent capabilities, ACL
+exceptions, and the filesystem are trusted and outside this claim.
+
+This boundary is required because #528's pathname identity/content
+revalidation and advisory `flock` cannot bind a validated inode to a later
+`renameat` or `unlinkat` against a same-uid non-cooperating writer. The
+revalidation checks remain detection only. On non-Unix systems, generation
+refuses to mutate. Repository gates use read-only `audit-ci`; they do not run
+the privileged publisher.
+
 ## Target pools
 
 Reconcile restricted runner groups through the reviewed generated fleet policy,
@@ -26,9 +51,12 @@ mount trusted stores or the host Docker socket.
 For each organization, use the reviewed `velnor-tools fleet-policy` boundary
 sequentially:
 
-1. Regenerate and validate the deterministic policy from the approved ledger:
-   `rtk mise run fleet-generate`. Do not edit repository ids or workflow entries
-   by hand.
+1. On the provisioned publisher host, set
+   `VELNOR_FLEET_POLICY_OUT_DIR` to the absolute policy output directory and
+   regenerate/validate the deterministic policy from the approved ledger with
+   `rtk mise run fleet-generate`. Do not edit repository ids or workflow
+   entries by hand. Copy reviewed output into the repository only through the
+   publisher host's approved change workflow.
 2. Produce the read-only desired/observed diff and digest:
 
    ```sh
@@ -162,10 +190,12 @@ executable as well:
    ```
 
 The allowlist is owned by the generated policy, never by this page:
-`fleet/release-refs.toml` is the release-ref ledger, `rtk mise run
-fleet-generate` regenerates the per-org policy JSONs under `fleet/policies/`,
-`rtk mise run fleet-digests` prints their digests, and the audit-ci rule
-`fleet-policy-current` fails when committed policy bytes are stale.
+`fleet/release-refs.toml` is the release-ref ledger. On the provisioned
+publisher host, set `VELNOR_FLEET_POLICY_OUT_DIR` and run `rtk mise run
+fleet-generate`; the approved workflow then copies the reviewed output into
+`fleet/policies/`. `rtk mise run fleet-digests` prints committed-policy
+digests, and the audit-ci rule `fleet-policy-current` fails when committed
+policy bytes are stale.
 
 ### Active Tailrocks procedure
 
@@ -220,7 +250,10 @@ apply, and audit flow for onboarding batches and drift checks. Apply requires
 explicit approval of the unchanged plan digest:
 
 ```sh
+# On the provisioned publisher host:
+export VELNOR_FLEET_POLICY_OUT_DIR=/absolute/path/to/publisher/fleet/policies
 rtk mise run fleet-generate
+# Copy the reviewed output into this checkout through the approved workflow.
 rtk cargo run -p velnor-tools --locked -- fleet-policy plan \
   --policy fleet/policies/tailrocks-desired-policy.json \
   --ledger fleet/release-refs.toml

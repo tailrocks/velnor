@@ -28,6 +28,8 @@ Start here:
 - [Runner usage](runner-usage.md): operator how-to — apt install, systemd
   units (`velnor-daemon`, `velnor-daemon@<name>`, doctor timers), secrets
   layout, and local/dev invocations.
+- [Fleet-policy publication](fleet-policy-publication.md): the Unix publisher
+  trust boundary and the TOCTOU limitation behind generated policy files.
 - [Target live runbook](target-live-runbook.md): operator commands for
   fixture and target validation.
 - [Debian + apt repository](debian-apt-repo.md): the release/delivery chain

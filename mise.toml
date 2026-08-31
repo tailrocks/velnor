@@ -74,12 +74,42 @@ run = "cargo deny check advisories"
 
 # Plan 039 tooling-law closure: policy generation remains fully offline. The
 # committed per-org desired-policy JSONs live in fleet/policies/ and are
-# byte-reproducible via [tasks.fleet-generate]; audit-ci enforces that they
-# stay current with fleet/release-refs.toml. The plan task is a live,
-# read-only GitHub observation and requires the explicit release-ref ledger.
+# byte-reproducible via [tasks.fleet-generate]. Generation is a privileged
+# publisher operation; audit-ci remains the unprivileged, read-only freshness
+# check used by repository gates.
 [tasks.fleet-generate]
-description = "Regenerate fleet/policies/<org>-desired-policy.json from the release-ref ledger (offline, deterministic)"
-run = "cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir fleet/policies"
+description = "Regenerate policies through the provisioned root-owned publisher boundary"
+run = "set -eu; out_dir=\"${VELNOR_FLEET_POLICY_OUT_DIR:-}\"; [ -n \"$out_dir\" ] || { echo 'fleet-generate: set VELNOR_FLEET_POLICY_OUT_DIR to an absolute root-owned publisher directory' >&2; exit 2; }; case \"$out_dir\" in /*) ;; *) echo 'fleet-generate: VELNOR_FLEET_POLICY_OUT_DIR must be absolute' >&2; exit 2 ;; esac; cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir \"$out_dir\""
+
+[tasks.fleet-publisher-acceptance]
+description = "Production acceptance: generate through the trusted root publisher boundary"
+run = """
+set -eu
+out_dir="${VELNOR_FLEET_POLICY_OUT_DIR:-}"
+if [ -z "$out_dir" ]; then
+  echo "fleet-publisher-acceptance: VELNOR_FLEET_POLICY_OUT_DIR is required" >&2
+  exit 2
+fi
+case "$out_dir" in
+  /*) ;;
+  *) echo "fleet-publisher-acceptance: VELNOR_FLEET_POLICY_OUT_DIR must be absolute" >&2; exit 2 ;;
+esac
+if [ "$out_dir" = "/" ]; then
+  echo "fleet-publisher-acceptance: filesystem root is not an output directory" >&2
+  exit 2
+fi
+if [ ! -d "$out_dir" ]; then
+  echo "fleet-publisher-acceptance: provision the existing output directory first: $out_dir" >&2
+  exit 2
+fi
+if [ "$(id -u)" -ne 0 ]; then
+  echo "fleet-publisher-acceptance: must run as the dedicated root publisher" >&2
+  exit 2
+fi
+echo "fleet-publisher-acceptance: checking euid=0, absolute namespace, root-owned/non-group-other-writable ancestors and entries, no-follow traversal, regular single-link policy files"
+cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir "$out_dir"
+echo "fleet-publisher-acceptance: passed production publisher path and publication checks for $out_dir"
+"""
 
 [tasks.audit-ci]
 description = "Enforce the offline estate CI workflow contract"
@@ -107,7 +137,7 @@ for f in fleet/policies/*-desired-policy.json; do
 done
 if [ "$found" -ne 1 ]; then
   echo "fleet plan: no *-desired-policy.json under fleet/policies/" >&2
-  echo "fleet plan: run rtk mise run fleet-generate to produce fleet/policies/<org>-desired-policy.json" >&2
+  echo "fleet plan: run on the provisioned publisher host with VELNOR_FLEET_POLICY_OUT_DIR set: rtk mise run fleet-generate" >&2
   exit 1
 fi
 """
@@ -134,17 +164,17 @@ for f in fleet/policies/*-desired-policy.json; do
 done
 if [ "$found" -ne 1 ]; then
   echo "fleet digests: no *-desired-policy.json under fleet/policies/" >&2
-  echo "fleet digests: run rtk mise run fleet-generate to produce fleet/policies/<org>-desired-policy.json" >&2
+  echo "fleet digests: run on the provisioned publisher host with VELNOR_FLEET_POLICY_OUT_DIR set: rtk mise run fleet-generate" >&2
   exit 1
 fi
 cat "$digest_output"
 """
 
 [tasks.check]
-depends = ["fmt", "actionlint", "audit-ci", "deny", "fleet-generate", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
+depends = ["fmt", "actionlint", "audit-ci", "deny", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
 
 [tasks.ci]
-depends = ["actionlint", "audit-ci", "deny", "fleet-generate"]
+depends = ["actionlint", "audit-ci", "deny"]
 # The generated CI workflow owns separate test, lint, and format gates. Keep
 # this task build-only so those gates are not executed twice on every run.
 run = "cargo check --workspace --all-targets --locked --features velnor-runner/test-support"
