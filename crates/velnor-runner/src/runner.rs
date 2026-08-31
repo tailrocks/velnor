@@ -112,6 +112,11 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
+/// Keep blocking Contents-API admission off Tokio workers and bound the total
+/// time an acquired job can wait in the read-only gate.
+const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
+const ACTION_ADMISSION_BLOCKING_PERMITS: usize = 1;
+static ACTION_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// SQLite admission is a single-writer boundary. Keep the Tokio blocking
 /// queue bounded by acquiring the only admission permit before spawning work.
 const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
@@ -128,6 +133,13 @@ fn operational_admission_permits() -> Arc<Semaphore> {
     Arc::clone(
         OPERATIONAL_ADMISSION_PERMITS
             .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
+    )
+}
+
+fn action_admission_permits() -> Arc<Semaphore> {
+    Arc::clone(
+        ACTION_ADMISSION_PERMITS
+            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_BLOCKING_PERMITS))),
     )
 }
 
@@ -5313,7 +5325,7 @@ async fn handle_job_request(
             return Err(error);
         }
         let admission_graph =
-            match admit_job_closure(&job, &early_context, &broker_cancellation.stored) {
+            match admit_job_closure(&job, &early_context, &broker_cancellation.stored).await {
                 Ok(graph) => graph,
                 Err(error) => {
                     complete_acquired_job_failure(
@@ -8631,7 +8643,28 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 /// repository token and admits every root (local and remote), recursing nested
 /// local and remote closures. Replaces the former flat + local-only preflight
 /// split; planning consumes the returned graph and never re-resolves identity.
-fn admit_job_closure(
+async fn admit_job_closure(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+    stored: &StoredRunnerConfig,
+) -> Result<crate::admission::AdmissionGraph> {
+    let permit = action_admission_permits()
+        .try_acquire_owned()
+        .context("action admission blocking worker is busy")?;
+    let job = job.clone();
+    let context_data = context_data.to_vec();
+    let stored = stored.clone();
+    let admission = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        admit_job_closure_sync(&job, &context_data, &stored)
+    });
+    tokio::time::timeout(ACTION_ADMISSION_TIMEOUT, admission)
+        .await
+        .context("action admission exceeded its deadline")?
+        .context("action admission blocking worker failed")?
+}
+
+fn admit_job_closure_sync(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
