@@ -1,11 +1,14 @@
 [Unit]
 Description=Velnor job-worker slice
 Documentation=https://github.com/tailrocks/velnor
+# postinst writes this host-specific CPUQuota drop-in atomically. Do not let
+# Docker create a supposedly protected parent with the package default absent.
+AssertPathExists=/etc/systemd/system/velnor-jobs.slice.d/10-host-cpu.conf
 
 [Slice]
-# Sentry has 20 logical CPUs. Reserve 5% for the daemon, guardian, and host;
-# the job fleet may consume the remaining 19 CPUs in parallel.
-CPUQuota=1900%
+# postinst derives CPUQuota as 95% of the detected online logical CPUs. The
+# drop-in is required above so this slice never silently falls back to a fixed
+# 20-CPU assumption or an uncapped host.
 CPUWeight=100
 IOWeight=100
 # Keep job memory below 95% of installed RAM while throttling before the hard

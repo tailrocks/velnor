@@ -226,6 +226,14 @@ impl JobContainerSpec {
         self.append_ownership_labels(&mut args);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
+        // Docker creates the actual workload in dockerd's cgroup, not in the
+        // Velnor worker process. Keep the outer job below the package-owned
+        // aggregate cap; the job lease proxy applies the same policy to
+        // containers created from inside the job.
+        args.extend([
+            "--cgroup-parent".into(),
+            crate::docker_lease::JOB_CGROUP_PARENT.into(),
+        ]);
 
         // Docker Engine 29 inherits systemd's 1024-file descriptor default
         // when no container limit is explicit. Large Rust/Zig links open one
@@ -913,6 +921,10 @@ impl ServiceContainerSpec {
             args.extend(["-p".into(), port.clone()]);
         }
         args.extend(self.options.iter().cloned());
+        args.extend([
+            "--cgroup-parent".into(),
+            crate::docker_lease::JOB_CGROUP_PARENT.into(),
+        ]);
         // Runner-owned network policy must win over any network-shaped token
         // present in the expanded service options. Docker uses the final
         // occurrence, so append the per-job network and workflow service key
@@ -1564,6 +1576,9 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
         assert!(args
             .windows(2)
+            .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
+        assert!(args
+            .windows(2)
             .any(|pair| pair == ["--ulimit", "nofile=65536:65536"]));
         assert!(args
             .windows(2)
@@ -2106,6 +2121,8 @@ mod tests {
                 "5432:5432",
                 "--health-cmd",
                 "pg_isready",
+                "--cgroup-parent",
+                "velnor-jobs.slice",
                 "--network",
                 "velnor-net-1",
                 "--network-alias",
@@ -2161,6 +2178,37 @@ mod tests {
             .filter(|pair| pair[0] == "--network")
             .collect::<Vec<_>>();
         assert_eq!(network_pairs.last().unwrap()[1], "velnor-net-1");
+    }
+
+    #[test]
+    fn job_runner_cgroup_parent_overrides_expanded_options() {
+        let mut job = spec();
+        job.options = vec!["--cgroup-parent".into(), "unexpected.slice".into()];
+        let args = job.start_args();
+        let cgroup_pairs = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--cgroup-parent")
+            .collect::<Vec<_>>();
+        assert_eq!(cgroup_pairs.last().unwrap()[1], "velnor-jobs.slice");
+    }
+
+    #[test]
+    fn service_runner_cgroup_parent_overrides_expanded_options() {
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-1".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: vec!["--cgroup-parent".into(), "unexpected.slice".into()],
+        };
+        let args = service.start_args();
+        let cgroup_pairs = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--cgroup-parent")
+            .collect::<Vec<_>>();
+        assert_eq!(cgroup_pairs.last().unwrap()[1], "velnor-jobs.slice");
     }
 
     #[test]

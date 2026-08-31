@@ -20,10 +20,39 @@ SHARE=/usr/share/velnor
 RELEASE_DIR=/var/lib/velnor/release
 ACTIVE_DIR=$RELEASE_DIR/active
 PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
+JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
+JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
 
 fail() {
   echo "velnor-runner postinst: $1" >&2
   exit 1
+}
+
+write_host_scaled_jobs_cpu_quota() {
+  cpu_count=$(/usr/bin/getconf _NPROCESSORS_ONLN 2>/dev/null || true)
+  case "$cpu_count" in
+    ''|*[!0-9]*) fail "could not detect a positive online CPU count for velnor-jobs.slice" ;;
+  esac
+  [ "$cpu_count" -gt 0 ] || fail "online CPU count is zero for velnor-jobs.slice"
+  cpu_quota=$((cpu_count * 95))
+  [ "$cpu_quota" -gt 0 ] || fail "computed CPUQuota is invalid for velnor-jobs.slice"
+
+  # Unit fragments are read from /etc so the generated host-specific value
+  # overrides the immutable package unit. Same-directory rename makes a
+  # package interruption leave the previous valid cap in place.
+  install -d -m 0755 "$JOBS_SLICE_DROPIN_DIR"
+  temporary="$JOBS_SLICE_DROPIN.tmp.$$"
+  rm -f "$temporary"
+  old_umask=$(umask)
+  umask 022
+  printf '%s\n' \
+    "[Slice]" \
+    "# Generated from the host online CPU count during package configuration." \
+    "# CPUQuota is 95% of one CPU per online logical CPU." \
+    "CPUQuota=${cpu_quota}%" > "$temporary"
+  chmod 0644 "$temporary"
+  mv -f "$temporary" "$JOBS_SLICE_DROPIN"
+  umask "$old_umask"
 }
 
 require_package_transaction_lock() {
@@ -109,6 +138,7 @@ case "$1" in
         all_velnor_units_drained || fail "refusing package configuration: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
       fi
     fi
+    write_host_scaled_jobs_cpu_quota
     # /run is tmpfs: recreate the transaction-lock path now (not only at boot)
     # so the documented flock wrapper works immediately after install/upgrade.
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/velnor-runner.conf
@@ -175,7 +205,15 @@ case "$1" in
     fi
 
     if [ -d /run/systemd/system ]; then
-      systemctl daemon-reload || true
+      systemctl daemon-reload \
+        || fail "systemd refused to reload the host-scaled velnor-jobs.slice quota"
+      effective_cpu_quota=$(systemctl show \
+        --property=CPUQuotaPerSecUSec --value velnor-jobs.slice 2>/dev/null || true)
+      case "$effective_cpu_quota" in
+        ''|infinity)
+          fail "velnor-jobs.slice has no effective CPUQuota after daemon-reload"
+          ;;
+      esac
       # Unit enablement, masking, and activation belong to the operator. Package
       # upgrades preserve systemd's existing state by doing nothing here; fresh
       # installs remain disabled. In particular, never revive the obsolete

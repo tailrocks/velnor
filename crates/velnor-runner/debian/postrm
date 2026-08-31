@@ -1,8 +1,17 @@
 #!/bin/sh
 set -e
 
+JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
+JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
+
 case "$1" in
   remove|purge)
+    if [ -d /run/systemd/system ] && systemctl is-active --quiet velnor-jobs.slice; then
+      echo "velnor-runner postrm: refusing to remove the CPU quota while velnor-jobs.slice is active" >&2
+      exit 1
+    fi
+    rm -f "$JOBS_SLICE_DROPIN"
+    rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
     if [ -d /run/systemd/system ]; then
       for unit in $(systemctl list-unit-files --no-legend --plain 'velnor-doctor*.timer' 'velnor-doctor*.service' 2>/dev/null | awk '{print $1}'); do
         systemctl disable "$unit" || true

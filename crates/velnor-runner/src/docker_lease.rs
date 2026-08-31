@@ -26,6 +26,10 @@ use std::time::Duration;
 
 pub const JOB_ID_LABEL: &str = "velnor.job-id";
 pub const DAEMON_ID_LABEL: &str = "velnor.daemon-id";
+/// Every Docker object created for a job must stay below the package-owned
+/// aggregate resource boundary, including containers created through the
+/// per-job API proxy (BuildKit and Testcontainers).
+pub const JOB_CGROUP_PARENT: &str = "velnor-jobs.slice";
 pub const TESTCONTAINERS_LABEL: &str = "org.testcontainers.managed-by=testcontainers";
 pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 /// Host-visible runtime dir. systemd `PrivateTmp=yes` remaps daemon `/tmp`, so
@@ -967,26 +971,45 @@ pub fn rewrite_docker_api_request(
     if !is_docker_object_create(method, target) {
         return Ok(request.to_vec());
     }
-    let labeled = inject_ownership_labels(body, job_id, daemon_id)?;
     let mut headers = Vec::new();
-    let mut skipped_length = false;
+    let mut content_length_seen = false;
     for line in lines {
         if line.is_empty() {
             continue;
         }
-        if line.len() >= 15 && line[..15].eq_ignore_ascii_case("content-length:") {
-            skipped_length = true;
+        let Some((name, value)) = line.split_once(':') else {
+            headers.push(line);
             continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length_seen {
+                bail!("refusing to rewrite Docker create request with duplicate Content-Length");
+            }
+            let declared = value
+                .trim()
+                .parse::<usize>()
+                .context("parse Docker API Content-Length")?;
+            if declared != body.len() {
+                bail!(
+                    "Docker API Content-Length {declared} does not match request body length {}",
+                    body.len()
+                );
+            }
+            content_length_seen = true;
+            continue;
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            bail!("refusing to rewrite Docker create request with Transfer-Encoding");
         }
         headers.push(line);
     }
-    if !skipped_length
-        && headers
-            .iter()
-            .any(|line| line.len() >= 18 && line[..18].eq_ignore_ascii_case("transfer-encoding:"))
-    {
-        bail!("refusing to rewrite chunked Docker create request");
-    }
+    let path = target.split('?').next().unwrap_or(target);
+    let labeled = inject_ownership_labels(body, job_id, daemon_id)?;
+    let labeled = if path.ends_with("/containers/create") {
+        inject_job_cgroup_parent(&labeled)?
+    } else {
+        labeled
+    };
     let mut out = Vec::new();
     out.extend_from_slice(request_line.as_bytes());
     out.extend_from_slice(b"\r\n");
@@ -997,6 +1020,46 @@ pub fn rewrite_docker_api_request(
     out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", labeled.len()).as_bytes());
     out.extend_from_slice(&labeled);
     Ok(out)
+}
+
+/// Force every job-created Docker container into the runner-owned aggregate
+/// cgroup. The lease proxy is the only Docker socket exposed to a job, so this
+/// also covers BuildKit and nested Testcontainers creates. Runner policy wins
+/// over a workflow-supplied `HostConfig.CgroupParent`.
+fn inject_job_cgroup_parent(body: &[u8]) -> Result<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(body)
+        .context("parse Docker container create JSON so cgroup policy can be injected")?;
+    let Some(object) = value.as_object_mut() else {
+        bail!("Docker container create body must be a JSON object");
+    };
+    if let Some(alias) = object
+        .keys()
+        .find(|key| key.as_str() != "HostConfig" && key.eq_ignore_ascii_case("HostConfig"))
+    {
+        bail!("Docker container create contains ambiguous HostConfig key {alias:?}");
+    }
+    let host_config = object
+        .remove("HostConfig")
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let mut host_config = match host_config {
+        Value::Null => Map::new(),
+        Value::Object(map) => map,
+        other => {
+            bail!("Docker container create HostConfig must be an object, got {other}");
+        }
+    };
+    if let Some(alias) = host_config
+        .keys()
+        .find(|key| key.as_str() != "CgroupParent" && key.eq_ignore_ascii_case("CgroupParent"))
+    {
+        bail!("Docker container create contains ambiguous CgroupParent key {alias:?}");
+    }
+    host_config.insert(
+        "CgroupParent".into(),
+        Value::String(JOB_CGROUP_PARENT.to_owned()),
+    );
+    object.insert("HostConfig".into(), Value::Object(host_config));
+    serde_json::to_vec(&value).context("serialize Docker cgroup policy")
 }
 
 /// Docker Engine 29 keeps HTTP/1.1 connections open after a response. This
@@ -1845,6 +1908,84 @@ mod tests {
         let value: Value = serde_json::from_slice(&labeled).unwrap();
         assert_eq!(value["Labels"][JOB_ID_LABEL], "job-a");
         assert_eq!(value["Labels"][DAEMON_ID_LABEL], "daemon-a");
+    }
+
+    #[test]
+    fn rewrite_injects_cgroup_parent_and_overrides_nested_container_policy() {
+        let body = br#"{
+            "Image":"postgres:18-alpine",
+            "HostConfig":{"CgroupParent":"untrusted.slice","Memory":123}
+        }"#;
+        let request = format!(
+            "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let rewritten =
+            rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a").unwrap();
+        let text = String::from_utf8(rewritten).unwrap();
+        let body = text.split("\r\n\r\n").nth(1).unwrap();
+        let value: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value["HostConfig"]["CgroupParent"], JOB_CGROUP_PARENT);
+        assert_eq!(value["HostConfig"]["Memory"], 123);
+    }
+
+    #[test]
+    fn rewrite_rejects_malformed_nested_container_policy() {
+        let body = br#"{"Image":"postgres:18-alpine","HostConfig":[]}"#;
+        let request = format!(
+            "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+            .expect_err("malformed HostConfig must fail closed");
+        assert!(error.to_string().contains("HostConfig must be an object"));
+    }
+
+    #[test]
+    fn rewrite_rejects_case_insensitive_cgroup_policy_aliases() {
+        for body in [
+            br#"{"Image":"postgres:18-alpine","hostconfig":{"CgroupParent":"untrusted.slice"}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"cgroupParent":"untrusted.slice"}}"#
+                .as_slice(),
+        ] {
+            let request = format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            );
+            let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+                .expect_err("case-insensitive Docker policy aliases must fail closed");
+            assert!(error.to_string().contains("ambiguous"));
+        }
+    }
+
+    #[test]
+    fn rewrite_rejects_ambiguous_or_malformed_http_framing() {
+        let body = br#"{"Image":"postgres:18-alpine"}"#;
+        let requests = [
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            ),
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: nope\r\n\r\n{}",
+                std::str::from_utf8(body).unwrap()
+            ),
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nTransfer-Encoding: chunked\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            ),
+        ];
+        for request in requests {
+            rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+                .expect_err("ambiguous Docker request framing must fail closed");
+        }
     }
 
     #[test]
