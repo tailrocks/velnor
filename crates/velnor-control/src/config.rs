@@ -206,7 +206,7 @@ pub trait ContextStore: Send + Sync {
 
 /// File-backed context store with atomic `0600` writes.
 pub struct FileContextStore {
-    resolved_path: std::sync::OnceLock<Result<std::path::PathBuf, ConfigError>>,
+    resolved_path: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,19 +218,17 @@ struct ContextFile {
 
 impl FileContextStore {
     /// Open a store at an explicit path.
-    #[must_use]
-    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Result<Self, ConfigError> {
         let path = path.into();
-        let resolved_path = std::sync::OnceLock::new();
-        let _ = resolved_path
-            .set(std::path::absolute(&path).map_err(|error| ConfigError::Io(error.to_string())));
-        Self { resolved_path }
+        let resolved_path =
+            std::path::absolute(&path).map_err(|error| ConfigError::Io(error.to_string()))?;
+        Ok(Self { resolved_path })
     }
 
     /// Save or replace one context.
     pub fn set(&self, mut context: ContextConfig) -> Result<(), ConfigError> {
         validate_context_config(&context)?;
-        let path = self.absolute_path()?;
+        let path = self.absolute_path();
         let mut lock = SidecarLock::acquire(&path)?;
         let mut file = read_file_at(lock.context_file.as_mut())?;
         let is_current =
@@ -254,7 +252,7 @@ impl FileContextStore {
     /// Select one existing context and persist that selection.
     pub fn use_context(&self, name: &str) -> Result<ContextConfig, ConfigError> {
         validate_context_name(name)?;
-        let path = self.absolute_path()?;
+        let path = self.absolute_path();
         let mut lock = SidecarLock::acquire(&path)?;
         let mut file = read_file_at(lock.context_file.as_mut())?;
         if !file.contexts.iter().any(|context| context.name == name) {
@@ -277,7 +275,7 @@ impl FileContextStore {
     /// Delete a non-current context.
     pub fn delete(&self, name: &str) -> Result<(), ConfigError> {
         validate_context_name(name)?;
-        let path = self.absolute_path()?;
+        let path = self.absolute_path();
         let mut lock = SidecarLock::acquire(&path)?;
         let mut file = read_file_at(lock.context_file.as_mut())?;
         if file.current.as_deref() == Some(name) {
@@ -291,10 +289,8 @@ impl FileContextStore {
         write_file_at(&lock.path, &file)
     }
 
-    fn absolute_path(&self) -> Result<std::path::PathBuf, ConfigError> {
-        self.resolved_path.get().cloned().ok_or_else(|| {
-            ConfigError::Io("context path was not resolved at construction".to_owned())
-        })?
+    fn absolute_path(&self) -> std::path::PathBuf {
+        self.resolved_path.clone()
     }
 }
 
@@ -825,7 +821,7 @@ fn validate_directory_handle(
 
 impl ContextStore for FileContextStore {
     fn list(&self) -> Result<Vec<ContextConfig>, ConfigError> {
-        let path = self.absolute_path()?;
+        let path = self.absolute_path();
         let Some(lock) = SidecarLock::acquire_existing_shared(&path)? else {
             return Ok(Vec::new());
         };
@@ -835,7 +831,7 @@ impl ContextStore for FileContextStore {
     }
 
     fn select(&self, name: &str) -> Result<ContextConfig, ConfigError> {
-        let path = self.absolute_path()?;
+        let path = self.absolute_path();
         let Some(lock) = SidecarLock::acquire_existing_shared(&path)? else {
             return Err(ConfigError::ContextNotFound);
         };
@@ -1190,11 +1186,26 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn context_store_rejects_unresolvable_relative_path_at_construction() {
+        let temp = RelativeTempDir::new("unresolvable-construction");
+        let cwd = CurrentDirectoryGuard::new();
+        let absolute_temp = cwd.original.join(&temp.path);
+        cwd.change_to(&absolute_temp);
+        std::fs::remove_dir(&absolute_temp).expect("remove current directory");
+
+        assert!(matches!(
+            FileContextStore::new("config.toml"),
+            Err(ConfigError::Io(_))
+        ));
+    }
+
     #[test]
     fn relative_context_store_round_trips() {
         let temp = RelativeTempDir::new("round-trip");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
         let context = test_context();
 
         store.set(context.clone()).expect("write context");
@@ -1206,7 +1217,7 @@ mod tests {
     fn valid_credential_reference_round_trips_through_context_store() {
         let temp = RelativeTempDir::new("valid-credential");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
         let mut context = test_context();
         context.credential = Some(SecretRef::named("GITHUB_TOKEN"));
 
@@ -1222,7 +1233,7 @@ mod tests {
         let path = temp.path.join("nested").join("config.toml");
         let mut invalid_context = test_context();
         invalid_context.credential = Some(SecretRef::named("token=value"));
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
 
         assert_eq!(
             store
@@ -1254,6 +1265,7 @@ mod tests {
 
         assert_eq!(
             FileContextStore::new(path)
+                .expect("resolve context store path")
                 .list()
                 .expect_err("reject invalid persisted context"),
             ConfigError::InvalidCredentialReference
@@ -1264,7 +1276,7 @@ mod tests {
     fn missing_context_reads_do_not_create_filesystem_entries() {
         let temp = RelativeTempDir::new("missing-reads");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
         let before: Vec<_> = std::fs::read_dir(&temp.path)
             .expect("read temporary directory")
             .map(|entry| entry.expect("directory entry").file_name())
@@ -1290,7 +1302,7 @@ mod tests {
 
         let temp = RelativeTempDir::new("read-only");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
         store.set(test_context()).expect("write context");
 
         let parent = path.parent().expect("context parent");
@@ -1339,7 +1351,7 @@ mod tests {
 
         let temp = RelativeTempDir::new("permissions");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
 
         store.set(test_context()).expect("write context");
 
@@ -1375,7 +1387,7 @@ mod tests {
 
         let temp = RelativeTempDir::new("non-private-mode");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
         store.set(test_context()).expect("write context");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("make config world-readable");
@@ -1399,7 +1411,9 @@ mod tests {
         write_secure_lock(&path);
 
         assert!(matches!(
-            FileContextStore::new(path).list(),
+            FileContextStore::new(path)
+                .expect("resolve context store path")
+                .list(),
             Err(ConfigError::Decode(message))
                 if message == "context store contains a duplicate context"
         ));
@@ -1420,7 +1434,9 @@ mod tests {
         write_secure_lock(&path);
 
         assert!(matches!(
-            FileContextStore::new(path).list(),
+            FileContextStore::new(path)
+                .expect("resolve context store path")
+                .list(),
             Err(ConfigError::Decode(message))
                 if message == "context store has an invalid current context marker"
         ));
@@ -1437,7 +1453,9 @@ mod tests {
         write_secure_lock(&path);
 
         assert!(matches!(
-            FileContextStore::new(path).list(),
+            FileContextStore::new(path)
+                .expect("resolve context store path")
+                .list(),
             Err(ConfigError::Decode(_))
         ));
     }
@@ -1449,7 +1467,7 @@ mod tests {
 
         let temp = RelativeTempDir::new("non-private-lock-mode");
         let path = temp.path.join("config.toml");
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
         store.set(test_context()).expect("write context");
         let lock = path
             .parent()
@@ -1468,7 +1486,7 @@ mod tests {
     fn context_store_rejects_existing_file_without_sidecar_lock() {
         let temp = RelativeTempDir::new("absent-lock");
         let path = temp.path.join("config.toml");
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
         store.set(test_context()).expect("write context");
         std::fs::remove_file(
             path.parent()
@@ -1527,6 +1545,7 @@ mod tests {
 
         assert_eq!(
             FileContextStore::new(path)
+                .expect("resolve context store path")
                 .list()
                 .expect_err("reject config fifo"),
             ConfigError::Io("refusing to use a non-regular context file".to_owned())
@@ -1540,7 +1559,7 @@ mod tests {
 
         let temp = RelativeTempDir::new("fifo-lock");
         let path = temp.path.join("config.toml");
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
         store.set(test_context()).expect("write context");
         let parent = path.parent().expect("context parent");
         let lock_name = std::ffi::OsString::from(".config.toml.lock");
@@ -1564,7 +1583,7 @@ mod tests {
 
         let temp = RelativeTempDir::new("unsafe-mode");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path.clone());
+        let store = FileContextStore::new(path.clone()).expect("resolve context store path");
         store.set(test_context()).expect("write context");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620))
@@ -1586,7 +1605,8 @@ mod tests {
         std::fs::create_dir(&parent).expect("nested directory");
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777))
             .expect("make ancestor group-writable");
-        let store = FileContextStore::new(parent.join("config.toml"));
+        let store =
+            FileContextStore::new(parent.join("config.toml")).expect("resolve context store path");
 
         assert_eq!(
             store
@@ -1606,7 +1626,7 @@ mod tests {
         let alternate = original.join(&temp.path).join("alternate");
         std::fs::create_dir_all(&alternate).expect("alternate directory");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
 
         store.set(test_context()).expect("write context");
         cwd.change_to(&alternate);
@@ -1624,7 +1644,7 @@ mod tests {
         std::fs::create_dir_all(&alternate).expect("alternate directory");
         let path = temp.path.join("nested").join("config.toml");
         let expected = original.join(&path);
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
 
         cwd.change_to(&alternate);
         store.set(test_context()).expect("write context");
@@ -1637,8 +1657,9 @@ mod tests {
     fn concurrent_distinct_sets_preserve_both_contexts() {
         let temp = RelativeTempDir::new("concurrent");
         let path = temp.path.join("nested").join("config.toml");
-        let first_store = FileContextStore::new(path.clone());
-        let second_store = FileContextStore::new(path);
+        let first_store =
+            FileContextStore::new(path.clone()).expect("resolve first context store path");
+        let second_store = FileContextStore::new(path).expect("resolve second context store path");
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
 
         std::thread::scope(|scope| {
@@ -1680,7 +1701,7 @@ mod tests {
     fn relative_context_store_supports_list_use_and_delete() {
         let temp = RelativeTempDir::new("operations");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
         let primary = test_context();
         let secondary = named_context("secondary");
 
@@ -1708,7 +1729,7 @@ mod tests {
     fn delete_rejects_invalid_context_names_before_touching_filesystem() {
         let temp = RelativeTempDir::new("invalid-delete");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
 
         assert_eq!(
             store.delete("../secret").expect_err("reject invalid name"),
@@ -1721,7 +1742,7 @@ mod tests {
     fn relative_context_store_leaves_no_temporary_files() {
         let temp = RelativeTempDir::new("temporary-files");
         let path = temp.path.join("nested").join("config.toml");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
 
         store.set(test_context()).expect("write context");
 
@@ -1794,7 +1815,7 @@ mod tests {
         let path = temp.path.join("config.toml");
         std::fs::write(&target, "contexts = []\ncurrent = none\n").expect("target file");
         symlink("target.toml", &path).expect("config symlink");
-        let store = FileContextStore::new(path);
+        let store = FileContextStore::new(path).expect("resolve context store path");
 
         assert_eq!(
             store
@@ -1815,7 +1836,8 @@ mod tests {
         let lock_path = nested.join(".config.toml.lock");
         std::fs::write(&target, "not a lock").expect("lock target");
         symlink("../target.lock", &lock_path).expect("lock symlink");
-        let store = FileContextStore::new(nested.join("config.toml"));
+        let store =
+            FileContextStore::new(nested.join("config.toml")).expect("resolve context store path");
 
         assert_eq!(
             store.set(test_context()).expect_err("reject lock symlink"),
@@ -1855,7 +1877,8 @@ mod tests {
         std::fs::create_dir(&target).expect("target directory");
         let link = temp.path.join("link");
         symlink("target", &link).expect("directory symlink");
-        let store = FileContextStore::new(link.join("config.toml"));
+        let store =
+            FileContextStore::new(link.join("config.toml")).expect("resolve context store path");
 
         let error = store
             .set(test_context())
