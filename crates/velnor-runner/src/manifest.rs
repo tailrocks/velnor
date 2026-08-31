@@ -709,6 +709,10 @@ pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
         path: ".github/workflows/package-signer.yml",
         allowed_refs: &[
             allowed(
+                "2d045521be342284cd567b7058a0e635dc74b37c",
+                "fleet 2026.8.33 hosted package signer",
+            ),
+            allowed(
                 "c222e52030fee9ea6eae573a5769770be01d8438",
                 "fleet 2026.8.32 hosted package signer",
             ),
@@ -1914,7 +1918,7 @@ mod tests {
         ];
         let expected = "${{ needs.release_gate.outputs.tag_ref }}";
         let expected_signer =
-            "tailrocks/velnor-actions/.github/workflows/package-signer.yml@77d323dcfdb176b332edc24bfc92cb625b3ab4c8";
+            "tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c";
 
         for job in signer_jobs {
             assert_eq!(
