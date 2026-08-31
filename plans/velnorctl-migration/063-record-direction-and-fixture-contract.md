@@ -27,9 +27,12 @@ plane inspection. Every later task needs one stable integration corpus.
 
 ## Current state
 
-Refreshed 2026-08-24 at Velnor `aed09eb`; the original planning-time gaps in
-steps 1–2 are already closed on the campaign branch, and the citations below
-are live anchors:
+Historical snapshot refreshed 2026-08-24 at Velnor `aed09eb`; the original
+planning-time gaps in steps 1–2 were closed during that historical campaign.
+Current execution follows the operator-assigned branch/focused-PR topology
+recorded in external `../COORDINATION.md`, anchored to 2026-08-31 at main SHA
+`ab9b67faa3bf65af975b3ae4723730075fde7006`; the citations below are live
+anchors:
 
 - `docs/vision.md:70-83` records the authoritative direction: performance,
   native adapters, and UX stay active, and the velnorctl migration names the
@@ -75,7 +78,7 @@ Reconciled at Velnor b57b036 against live repository state:
 - `plans/README.md` now contains the `velnorctl-migration` category row and
   already orders Plan 063 first; no index reconciliation is required here.
 
-### Execution reconciliation 2026-08-24 (at Velnor aed09eb)
+### Historical execution reconciliation 2026-08-24 (at Velnor aed09eb)
 
 Recorded during Plan 063 execution; supersedes the stale spans above where
 they disagree:
