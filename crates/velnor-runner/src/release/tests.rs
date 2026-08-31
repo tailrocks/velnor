@@ -864,7 +864,7 @@ fn publication_and_deployed_round_trip() {
                 sha256: digest_of("packages-arm64"),
             },
         ],
-        signer_fingerprint: "261EDAC957DEB801".to_string(),
+        signer_fingerprint: "7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801".to_string(),
         previous: Some(PreviousPointer::Coherent {
             tag: "v0.1.120".to_string(),
             source_record_sha256: digest_of("prev-record"),
@@ -891,11 +891,17 @@ fn publication_for(record: &ReleaseRecord) -> PublicationRecord {
         tag: record.build.tag.clone(),
         crate_version: record.build.crate_version.clone(),
         inrelease_sha256: digest_of("InRelease"),
-        packages: vec![PackagesIndex {
-            arch: Arch::Amd64,
-            sha256: digest_of("packages-amd64"),
-        }],
-        signer_fingerprint: "261EDAC957DEB801".to_string(),
+        packages: vec![
+            PackagesIndex {
+                arch: Arch::Amd64,
+                sha256: digest_of("packages-amd64"),
+            },
+            PackagesIndex {
+                arch: Arch::Arm64,
+                sha256: digest_of("packages-arm64"),
+            },
+        ],
+        signer_fingerprint: "7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801".to_string(),
         previous: Some(PreviousPointer::Coherent {
             tag: "v0.1.120".to_string(),
             source_record_sha256: digest_of("prev-record"),
@@ -949,6 +955,27 @@ fn verify_publication_binds_catches_each_field() {
         verify_publication_binds(&self_previous, &record),
         Err(CoherenceError::PublicationPrevious)
     );
+
+    let mut missing_arch = publication_for(&record);
+    missing_arch.packages.pop();
+    assert_eq!(
+        verify_publication_binds(&missing_arch, &record),
+        Err(CoherenceError::PublicationPackageArch)
+    );
+
+    let mut empty_inrelease = publication_for(&record);
+    empty_inrelease.inrelease_sha256 = Sha256Hex::parse(&"0".repeat(64)).unwrap();
+    assert_eq!(
+        verify_publication_binds(&empty_inrelease, &record),
+        Err(CoherenceError::PublicationDigestEmpty)
+    );
+
+    let mut empty_index = publication_for(&record);
+    empty_index.packages[0].sha256 = Sha256Hex::parse(&"0".repeat(64)).unwrap();
+    assert_eq!(
+        verify_publication_binds(&empty_index, &record),
+        Err(CoherenceError::PublicationPackageArch)
+    );
 }
 
 #[test]
@@ -975,6 +1002,463 @@ fn publication_accepts_only_the_explicit_legacy_rollback_bridge() {
     publication.crate_version = "0.1.131".into();
     publication.source_record_sha256 = candidate.digest();
     assert_eq!(verify_publication_binds(&publication, &candidate), Ok(()));
+}
+
+fn apt_artifact(seed: &str) -> AptArtifactMetadata {
+    AptArtifactMetadata {
+        sha256: digest_of(seed),
+        size: seed.len() as u64,
+    }
+}
+
+fn apt_metadata_for(
+    publication: &PublicationRecord,
+    record: &ReleaseRecord,
+) -> (ExpectedAptPublicationMetadata, ActualAptPublicationMetadata) {
+    let release = apt_artifact("Release");
+    let inrelease = apt_artifact("InRelease");
+    let release_gpg = apt_artifact("Release.gpg");
+    let signer = publication.signer_fingerprint.clone();
+    let package_indexes = publication
+        .packages
+        .iter()
+        .map(|package| AptPackageIndexMetadata {
+            arch: package.arch,
+            path: apt_packages_path(record, package.arch),
+            artifact: apt_artifact(&format!("packages-{}", package.arch.as_str())),
+        })
+        .collect::<Vec<_>>();
+    let packages = REQUIRED_ARCHES
+        .iter()
+        .map(|&arch| AptPackageMetadata {
+            arch,
+            path: apt_deb_path(record, arch),
+            artifact: AptArtifactMetadata {
+                sha256: record.architecture(arch).unwrap().deb_sha256.clone(),
+                size: 16,
+            },
+        })
+        .collect::<Vec<_>>();
+    let expected = ExpectedAptPublicationMetadata {
+        schema: APT_PUBLICATION_METADATA_SCHEMA.to_string(),
+        release: AptReleaseMetadata {
+            artifact: release.clone(),
+            package_indexes: package_indexes.clone(),
+            self_row: None,
+            self_row_checked: true,
+        },
+        inrelease: AptSignatureMetadata {
+            artifact: inrelease.clone(),
+            signed_release_sha256: release.sha256.clone(),
+            signer_fingerprint: signer.clone(),
+        },
+        release_gpg: AptSignatureMetadata {
+            artifact: release_gpg.clone(),
+            signed_release_sha256: release.sha256,
+            signer_fingerprint: signer.clone(),
+        },
+        packages: packages.clone(),
+    };
+    let actual = ActualAptPublicationMetadata {
+        schema: APT_PUBLICATION_METADATA_SCHEMA.to_string(),
+        release: Some(expected.release.clone()),
+        inrelease: Some(expected.inrelease.clone()),
+        release_gpg: Some(expected.release_gpg.clone()),
+        packages: Some(packages),
+    };
+    (expected, actual)
+}
+
+#[test]
+fn verify_apt_publication_metadata_accepts_preverified_metadata_claims() {
+    let record = valid_record();
+    let publication = publication_for(&record);
+    let (expected, actual) = apt_metadata_for(&publication, &record);
+
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &actual),
+        Ok(())
+    );
+}
+
+#[test]
+fn verify_apt_publication_metadata_fails_closed_for_missing_and_bad_artifacts() {
+    let record = valid_record();
+    let publication = publication_for(&record);
+    let (expected, actual) = apt_metadata_for(&publication, &record);
+
+    let mut missing = actual.clone();
+    missing.release = None;
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &missing),
+        Err(CoherenceError::PublicationMetadataMissing)
+    );
+
+    let mut wrong_hash = actual.clone();
+    wrong_hash.release.as_mut().unwrap().artifact.sha256 = digest_of("tampered");
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &wrong_hash),
+        Err(CoherenceError::PublicationMetadataMismatch)
+    );
+
+    let mut wrong_size = actual.clone();
+    wrong_size.release.as_mut().unwrap().artifact.size += 1;
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &wrong_size),
+        Err(CoherenceError::PublicationMetadataMismatch)
+    );
+
+    let mut empty = actual.clone();
+    empty.release.as_mut().unwrap().artifact.size = 0;
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &empty),
+        Err(CoherenceError::PublicationMetadataEmpty)
+    );
+}
+
+#[test]
+fn verify_apt_publication_metadata_rejects_self_rows_and_bad_signatures() {
+    let record = valid_record();
+    let publication = publication_for(&record);
+    let (expected, actual) = apt_metadata_for(&publication, &record);
+
+    let mut self_row = actual.clone();
+    self_row.release.as_mut().unwrap().self_row = Some(apt_artifact("self"));
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &self_row),
+        Err(CoherenceError::PublicationReleaseSelfRow)
+    );
+
+    let mut uninspected = actual.clone();
+    uninspected.release.as_mut().unwrap().self_row_checked = false;
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &uninspected),
+        Err(CoherenceError::PublicationMetadataMissing)
+    );
+
+    let mut expected_uninspected = expected.clone();
+    expected_uninspected.release.self_row_checked = false;
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected_uninspected, &actual),
+        Err(CoherenceError::PublicationMetadataMissing)
+    );
+
+    let mut bad_signature = actual.clone();
+    bad_signature
+        .inrelease
+        .as_mut()
+        .unwrap()
+        .signed_release_sha256 = digest_of("other-release");
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &bad_signature),
+        Err(CoherenceError::PublicationSignature)
+    );
+
+    let mut short_signer = actual.clone();
+    short_signer.inrelease.as_mut().unwrap().signer_fingerprint = "261EDAC957DEB801".into();
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &short_signer),
+        Err(CoherenceError::PublicationMetadataEmpty)
+    );
+
+    let mut wrong_expected_signer = expected.clone();
+    wrong_expected_signer.inrelease.signer_fingerprint =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &wrong_expected_signer, &actual),
+        Err(CoherenceError::PublicationSignature)
+    );
+
+    let mut bad_binding = publication.clone();
+    bad_binding.inrelease_sha256 = digest_of("other-inrelease");
+    assert_eq!(
+        verify_apt_publication_metadata(&bad_binding, &record, &expected, &actual),
+        Err(CoherenceError::PublicationMetadataBinding)
+    );
+}
+
+#[test]
+fn verify_apt_publication_metadata_rejects_bad_package_hash_size_and_binding() {
+    let record = valid_record();
+    let publication = publication_for(&record);
+    let (expected, actual) = apt_metadata_for(&publication, &record);
+
+    let mut wrong_hash = actual.clone();
+    wrong_hash.packages.as_mut().unwrap()[0].artifact.sha256 = digest_of("tampered-package");
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &wrong_hash),
+        Err(CoherenceError::PublicationPackageMetadata)
+    );
+
+    let mut wrong_expected_hash = expected.clone();
+    wrong_expected_hash.packages[0].artifact.sha256 = digest_of("tampered-package");
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &wrong_expected_hash, &actual),
+        Err(CoherenceError::PublicationPackageMetadata)
+    );
+
+    let mut wrong_both_hashes = expected.clone();
+    wrong_both_hashes.packages[0].artifact.sha256 = digest_of("tampered-package");
+    let mut wrong_both_actual = actual.clone();
+    wrong_both_actual.packages.as_mut().unwrap()[0]
+        .artifact
+        .sha256 = digest_of("tampered-package");
+    assert_eq!(
+        verify_apt_publication_metadata(
+            &publication,
+            &record,
+            &wrong_both_hashes,
+            &wrong_both_actual
+        ),
+        Err(CoherenceError::PublicationPackageMetadata)
+    );
+
+    let mut wrong_size = actual.clone();
+    wrong_size.packages.as_mut().unwrap()[0].artifact.size += 1;
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &wrong_size),
+        Err(CoherenceError::PublicationPackageMetadata)
+    );
+
+    let mut wrong_binding = publication.clone();
+    wrong_binding.packages[0].sha256 = digest_of("other-package");
+    assert_eq!(
+        verify_apt_publication_metadata(&wrong_binding, &record, &expected, &actual),
+        Err(CoherenceError::PublicationPackageMetadata)
+    );
+
+    let mut wrong_path = expected.clone();
+    wrong_path.release.package_indexes[0].path = "dists/other/Packages".into();
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &wrong_path, &actual),
+        Err(CoherenceError::PublicationPackageMetadata)
+    );
+
+    let mut duplicate_arch = expected.clone();
+    duplicate_arch.release.package_indexes[1].arch = Arch::Amd64;
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &duplicate_arch, &actual),
+        Err(CoherenceError::PublicationPackageMetadata)
+    );
+
+    let mut missing = actual.clone();
+    missing.packages = Some(Vec::new());
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &missing),
+        Err(CoherenceError::PublicationMetadataEmpty)
+    );
+}
+
+#[test]
+fn apt_publication_metadata_rejects_wrong_schema_and_unknown_fields() {
+    let record = valid_record();
+    let publication = publication_for(&record);
+    let (expected, mut actual) = apt_metadata_for(&publication, &record);
+
+    actual.schema = "velnor.apt-publication-metadata/v2".into();
+    assert_eq!(
+        verify_apt_publication_metadata(&publication, &record, &expected, &actual),
+        Err(CoherenceError::Schema {
+            want: APT_PUBLICATION_METADATA_SCHEMA,
+        })
+    );
+
+    let mut encoded = serde_json::to_value(&expected).unwrap();
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .insert("unexpected".into(), serde_json::Value::Bool(true));
+    assert!(serde_json::from_value::<ExpectedAptPublicationMetadata>(encoded).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_record_command_rejects_hardlinked_apt_metadata_sources() {
+    let dir = TempDir::new("verify-record-apt-hardlink");
+    let record = valid_record();
+    let record_bytes = record.to_canonical_json();
+    let record_path = dir.path().join("record.json");
+    let checksum_path = dir.path().join("record.json.sha256");
+    let publication_path = dir.path().join("publication.json");
+    let expected_path = dir.path().join("expected-apt.json");
+    let served_path = dir.path().join("served-apt.json");
+    let digest = Sha256Hex::of_bytes(record_bytes.as_bytes());
+    let publication = publication_for(&record);
+
+    std::fs::write(&record_path, record_bytes).unwrap();
+    std::fs::write(&checksum_path, format!("{digest}  record.json\n")).unwrap();
+    std::fs::write(&publication_path, serde_json::to_vec(&publication).unwrap()).unwrap();
+    std::fs::write(&expected_path, b"{}").unwrap();
+    std::fs::hard_link(&expected_path, &served_path).unwrap();
+
+    let error = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: Some(publication_path),
+        expected_apt_metadata: Some(expected_path),
+        served_apt_metadata: Some(served_path),
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "expected and served APT metadata must use different files"
+    );
+}
+
+#[test]
+fn verify_record_command_reaches_apt_metadata_verifier() {
+    let dir = TempDir::new("verify-record-apt");
+    let record = valid_record();
+    let record_path = dir.path().join("record.json");
+    let checksum_path = dir.path().join("record.json.sha256");
+    let publication_path = dir.path().join("publication.json");
+    let expected_path = dir.path().join("expected-apt.json");
+    let served_path = dir.path().join("served-apt.json");
+    let record_bytes = record.to_canonical_json();
+    let record_digest = Sha256Hex::of_bytes(record_bytes.as_bytes());
+    let publication = publication_for(&record);
+    let (expected, served) = apt_metadata_for(&publication, &record);
+
+    std::fs::write(&record_path, record_bytes).unwrap();
+    std::fs::write(&checksum_path, format!("{record_digest}  record.json\n")).unwrap();
+    std::fs::write(&publication_path, serde_json::to_vec(&publication).unwrap()).unwrap();
+    std::fs::write(&expected_path, serde_json::to_vec(&expected).unwrap()).unwrap();
+    std::fs::write(&served_path, serde_json::to_vec(&served).unwrap()).unwrap();
+
+    let result = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: Some(publication_path),
+        expected_apt_metadata: Some(expected_path),
+        served_apt_metadata: Some(served_path),
+    });
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn verify_record_command_rejects_publication_without_apt_metadata() {
+    let dir = TempDir::new("verify-record-apt-required");
+    let record = valid_record();
+    let record_bytes = record.to_canonical_json();
+    let record_path = dir.path().join("record.json");
+    let checksum_path = dir.path().join("record.json.sha256");
+    let publication_path = dir.path().join("publication.json");
+    let digest = Sha256Hex::of_bytes(record_bytes.as_bytes());
+
+    std::fs::write(&record_path, record_bytes).unwrap();
+    std::fs::write(&checksum_path, format!("{digest}  record.json\n")).unwrap();
+    std::fs::write(
+        &publication_path,
+        serde_json::to_vec(&publication_for(&record)).unwrap(),
+    )
+    .unwrap();
+
+    let error = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: Some(publication_path),
+        expected_apt_metadata: None,
+        served_apt_metadata: None,
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "--publication requires preverified APT claims for coherence checking"
+    );
+}
+
+#[test]
+fn verify_record_command_requires_both_apt_metadata_paths() {
+    let dir = TempDir::new("verify-record-apt-missing");
+    let record = valid_record();
+    let record_bytes = record.to_canonical_json();
+    let record_path = dir.path().join("record.json");
+    let checksum_path = dir.path().join("record.json.sha256");
+    let expected_path = dir.path().join("expected-apt.json");
+    let digest = Sha256Hex::of_bytes(record_bytes.as_bytes());
+
+    std::fs::write(&record_path, record_bytes).unwrap();
+    std::fs::write(&checksum_path, format!("{digest}  record.json\n")).unwrap();
+
+    let error = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: None,
+        expected_apt_metadata: Some(expected_path),
+        served_apt_metadata: None,
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "provide both --expected-apt-metadata and --served-apt-metadata"
+    );
+}
+
+#[test]
+fn verify_record_command_rejects_one_file_for_both_apt_metadata_sources() {
+    let dir = TempDir::new("verify-record-apt-same-source");
+    let record = valid_record();
+    let record_bytes = record.to_canonical_json();
+    let record_path = dir.path().join("record.json");
+    let checksum_path = dir.path().join("record.json.sha256");
+    let metadata_path = dir.path().join("apt.json");
+    let publication_path = dir.path().join("publication.json");
+    let digest = Sha256Hex::of_bytes(record_bytes.as_bytes());
+    let publication = publication_for(&record);
+
+    std::fs::write(&record_path, record_bytes).unwrap();
+    std::fs::write(&checksum_path, format!("{digest}  record.json\n")).unwrap();
+    std::fs::write(&metadata_path, b"{}").unwrap();
+    std::fs::write(&publication_path, serde_json::to_vec(&publication).unwrap()).unwrap();
+
+    let error = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: Some(publication_path),
+        expected_apt_metadata: Some(metadata_path.clone()),
+        served_apt_metadata: Some(metadata_path),
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "expected and served APT metadata must use different files"
+    );
+}
+
+#[test]
+fn verify_record_command_requires_publication_for_distinct_apt_metadata() {
+    let dir = TempDir::new("verify-record-apt-publication");
+    let record = valid_record();
+    let record_bytes = record.to_canonical_json();
+    let record_path = dir.path().join("record.json");
+    let checksum_path = dir.path().join("record.json.sha256");
+    let expected_path = dir.path().join("expected-apt.json");
+    let served_path = dir.path().join("served-apt.json");
+    let digest = Sha256Hex::of_bytes(record_bytes.as_bytes());
+
+    std::fs::write(&record_path, record_bytes).unwrap();
+    std::fs::write(&checksum_path, format!("{digest}  record.json\n")).unwrap();
+    std::fs::write(&expected_path, b"{}").unwrap();
+    std::fs::write(&served_path, b"{}").unwrap();
+
+    let error = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: None,
+        expected_apt_metadata: Some(expected_path),
+        served_apt_metadata: Some(served_path),
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "--publication is required with preverified APT claims coherence checking"
+    );
 }
 
 // --- atomic on-disk activation ---------------------------------------------
