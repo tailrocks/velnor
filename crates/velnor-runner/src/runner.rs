@@ -112,6 +112,11 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
+/// Keep blocking Contents-API admission off Tokio workers and bound the total
+/// time an acquired job can wait in the read-only gate.
+const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
+const ACTION_ADMISSION_BLOCKING_PERMITS: usize = 1;
+static ACTION_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// SQLite admission is a single-writer boundary. Keep the Tokio blocking
 /// queue bounded by acquiring the only admission permit before spawning work.
 const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
@@ -128,6 +133,13 @@ fn operational_admission_permits() -> Arc<Semaphore> {
     Arc::clone(
         OPERATIONAL_ADMISSION_PERMITS
             .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
+    )
+}
+
+fn action_admission_permits() -> Arc<Semaphore> {
+    Arc::clone(
+        ACTION_ADMISSION_PERMITS
+            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_BLOCKING_PERMITS))),
     )
 }
 
@@ -5514,7 +5526,7 @@ async fn handle_job_request(
             return Err(error);
         }
         let admission_graph =
-            match admit_job_closure(&job, &early_context, &broker_cancellation.stored) {
+            match admit_job_closure(&job, &early_context, &broker_cancellation.stored).await {
                 Ok(graph) => graph,
                 Err(error) => {
                     complete_acquired_job_failure(
@@ -7317,6 +7329,7 @@ fn microvm_executable_steps(
                     .as_ref()
                     .and_then(|reference| reference.git_ref.clone())
                     .unwrap_or_else(|| repository.to_string());
+                let inputs = crate::action::string_inputs(step)?;
                 let invocation = crate::action::NativeActionInvocation {
                     git_ref,
                     adapter,
@@ -7330,7 +7343,7 @@ fn microvm_executable_steps(
                         .reference
                         .as_ref()
                         .and_then(|reference| reference.path.clone()),
-                    inputs: crate::action::string_inputs(step)?,
+                    inputs: crate::action::canonicalize_input_map(&inputs)?,
                     env: crate::script_step::step_environment(step)?,
                 };
                 ordered.push(crate::executor::ExecutableStep::Native {
@@ -8807,8 +8820,7 @@ struct WorkflowSourceContext {
 fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowSourceContext> {
     let path = context_string(context_data, "job.workflow_file_path")
         .or_else(|| context_string(context_data, "github.event.workflow"))?;
-    let sha = context_string(context_data, "github.workflow_sha")
-        .or_else(|| context_string(context_data, "github.sha"))?;
+    let sha = context_string(context_data, "github.workflow_sha")?;
     let repository = context_string(context_data, "job.workflow_repository")
         .or_else(|| context_string(context_data, "github.repository"))
         .or_else(|| {
@@ -8831,7 +8843,28 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 /// repository token and admits every root (local and remote), recursing nested
 /// local and remote closures. Replaces the former flat + local-only preflight
 /// split; planning consumes the returned graph and never re-resolves identity.
-fn admit_job_closure(
+async fn admit_job_closure(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+    stored: &StoredRunnerConfig,
+) -> Result<crate::admission::AdmissionGraph> {
+    let permit = action_admission_permits()
+        .try_acquire_owned()
+        .context("action admission blocking worker is busy")?;
+    let job = job.clone();
+    let context_data = context_data.to_vec();
+    let stored = stored.clone();
+    let admission = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        admit_job_closure_sync(&job, &context_data, &stored)
+    });
+    tokio::time::timeout(ACTION_ADMISSION_TIMEOUT, admission)
+        .await
+        .context("action admission exceeded its deadline")?
+        .context("action admission blocking worker failed")?
+}
+
+fn admit_job_closure_sync(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
@@ -11637,6 +11670,29 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_source_context_requires_exact_workflow_sha() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "event": {"workflow": ".github/workflows/ci.yml"}
+            }),
+        )];
+        assert!(workflow_source_context(&context).is_none());
+
+        let mut context_with_workflow_sha = context;
+        context_with_workflow_sha[0].1["workflow_sha"] =
+            serde_json::json!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(
+            workflow_source_context(&context_with_workflow_sha)
+                .expect("exact workflow SHA should admit source lookup")
+                .sha,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        );
+    }
 
     #[test]
     fn empty_network_sweep_removes_only_owned_containerless_networks() {
@@ -16253,7 +16309,7 @@ runs:
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
             assert!(request.contains(
-                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeef"
+                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
             ));
             let body =
                 "name: local\nruns:\n  using: composite\n  steps:\n    - uses: acme/unknown@v1\n";
@@ -16285,7 +16341,10 @@ runs:
         .unwrap();
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({ "repository": "acme/repo", "workflow_sha": "deadbeef" }),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }),
         )];
         let source =
             crate::admission::ContentsApiMetadataSource::new_for_test("token", api).unwrap();
