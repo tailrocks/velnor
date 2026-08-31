@@ -4,6 +4,8 @@
 //! model DTOs. It never depends on `velnor-control`, Axum, daemon internals,
 //! runner internals, or Clap.
 
+#![forbid(unsafe_code)]
+
 /// Marker transport seam; later plans own the versioned client implementation.
 pub const TRANSPORT_CONTRACT: &str = "velnor-client/v1";
 
