@@ -2481,7 +2481,7 @@ mod tests {
             seen.insert(policy.organization.clone());
             let generated = format!("{}\n", policy.canonical_json().expect("canonical"));
             let snapshot = repo_root()
-                .join("crates/velnor-tools/tests/fixtures/fleet-policy")
+                .join("fleet/policies")
                 .join(format!("{}-desired-policy.json", policy.organization));
             let committed = fs::read_to_string(&snapshot)
                 .unwrap_or_else(|error| panic!("read {snapshot:?}: {error}"));
