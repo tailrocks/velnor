@@ -14,12 +14,17 @@
 //! admission never performs a mutating side effect. Every rejection carries the
 //! complete [`Ancestry`] and never the received value.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::action::{native_action_adapter, ActionMetadata, NATIVE_ACTION_REF};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
@@ -31,6 +36,36 @@ const MAX_COMPOSITE_DEPTH: usize = 10;
 /// Hard ceiling on admitted nodes so a pathological or adversarial closure
 /// cannot exhaust resources before the depth guard trips.
 const MAX_ADMISSION_NODES: usize = 512;
+/// Hard ceiling on unique graph edges in a pathological action closure.
+const MAX_ADMISSION_EDGES: usize = 4096;
+/// Hard ceiling on steps in one fetched composite metadata document.
+const MAX_COMPOSITE_STEPS: usize = 4096;
+/// Hard ceiling on input-sensitive composite expansions in one job.
+const MAX_ADMISSION_INVOCATIONS: usize = 1024;
+/// Hard ceiling on all composite steps inspected during one admission walk.
+const MAX_ADMISSION_STEP_VISITS: usize = 1_000_000;
+/// Hard ceiling on workflow steps inspected during one admission walk.
+const MAX_ADMISSION_ROOT_STEPS: usize = 4096;
+/// Hard ceiling on one action metadata response before parsing.
+const MAX_ACTION_METADATA_BYTES: usize = 1024 * 1024;
+/// Bound immutable metadata retained by one admission walk.
+const MAX_ADMISSION_METADATA_BYTES: usize = 8 * 1024 * 1024;
+/// Bound copied workflow context used by composite input rendering.
+const MAX_ADMISSION_CONTEXT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ADMISSION_DURATION: Duration = Duration::from_secs(60);
+/// Hard ceiling on one metadata string or map key.
+const MAX_METADATA_STRING_BYTES: usize = 64 * 1024;
+/// Hard ceiling on all metadata strings retained from one document.
+const MAX_METADATA_TOTAL_STRING_BYTES: usize = 512 * 1024;
+/// Hard ceiling on entries in one metadata string map.
+const MAX_METADATA_MAP_ENTRIES: usize = 256;
+/// Hard ceiling on input names in one invocation.
+const MAX_ADMISSION_INPUTS: usize = 256;
+/// Hard ceiling on total input name/value bytes in one invocation.
+const MAX_ADMISSION_INPUT_BYTES: usize = 256 * 1024;
+/// Hard ceiling on one input name or value.
+const MAX_ADMISSION_INPUT_NAME_BYTES: usize = 256;
+const MAX_ADMISSION_INPUT_VALUE_BYTES: usize = 64 * 1024;
 
 /// A fully-resolved action identity: repository, immutable full-SHA ref, and
 /// optional subpath. Local actions carry the workflow repository and workflow
@@ -42,15 +77,50 @@ pub struct ActionIdentity {
     pub subpath: Option<String>,
 }
 
-impl ActionIdentity {
-    fn display(&self) -> String {
-        match &self.subpath {
-            Some(subpath) if !subpath.is_empty() => {
-                format!("{}/{}@{}", self.repository, subpath, self.sha)
-            }
-            _ => format!("{}@{}", self.repository, self.sha),
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ActionKey {
+    local: bool,
+    repository: String,
+    sha: String,
+    subpath: String,
+}
+
+impl ActionKey {
+    fn remote(repository: &str, sha: &str, subpath: Option<&str>) -> Self {
+        Self::new(false, repository, sha, subpath)
+    }
+
+    fn local(repository: &str, sha: &str, subpath: &str) -> Self {
+        Self::new(true, repository, sha, Some(subpath))
+    }
+
+    fn new(local: bool, repository: &str, sha: &str, subpath: Option<&str>) -> Self {
+        Self {
+            local,
+            repository: repository.trim().to_ascii_lowercase(),
+            sha: sha.trim().to_ascii_lowercase(),
+            // GitHub repository names and refs are case-insensitive here, but
+            // action paths address case-sensitive repository files.
+            subpath: normalize_subpath(subpath),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct InvocationKey {
+    node_index: usize,
+    inputs_digest: [u8; 32],
+}
+
+fn input_digest(inputs: &BTreeMap<String, String>) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for (name, value) in inputs {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.finalize().into()
 }
 
 /// The kind of node in the admission graph.
@@ -71,6 +141,7 @@ pub enum AdmissionNodeKind {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AdmissionNode {
     pub identity: ActionIdentity,
     pub kind: AdmissionNodeKind,
@@ -88,6 +159,8 @@ pub struct AdmissionEdge {
 pub struct AdmissionGraph {
     pub nodes: Vec<AdmissionNode>,
     pub edges: Vec<AdmissionEdge>,
+    node_indices: BTreeMap<(String, String, String, u8), usize>,
+    edge_indices: BTreeSet<(usize, usize)>,
 }
 
 impl AdmissionGraph {
@@ -101,30 +174,82 @@ impl AdmissionGraph {
         subpath: Option<&str>,
     ) -> bool {
         let subpath = normalize_subpath(subpath);
-        self.nodes.iter().any(|node| {
-            !matches!(node.kind, AdmissionNodeKind::LocalAction)
-                && node.identity.repository.eq_ignore_ascii_case(repository)
-                && node.identity.sha == sha
-                && normalize_subpath(node.identity.subpath.as_deref()) == subpath
-        })
+        self.node_indices.contains_key(&(
+            repository.trim().to_ascii_lowercase(),
+            sha.trim().to_ascii_lowercase(),
+            subpath,
+            1,
+        ))
     }
 
-    fn intern(&mut self, identity: ActionIdentity, kind: AdmissionNodeKind) -> usize {
-        if let Some(index) = self.nodes.iter().position(|node| node.identity == identity) {
-            return index;
+    fn intern(
+        &mut self,
+        identity: ActionIdentity,
+        kind: AdmissionNodeKind,
+        ancestry: &Ancestry,
+    ) -> Result<usize, AdmissionError> {
+        let key = graph_node_key(&identity, kind);
+        if let Some(index) = self.node_indices.get(&key).copied() {
+            return Ok(index);
+        }
+        if self.nodes.len() >= MAX_ADMISSION_NODES {
+            return Err(AdmissionError::new(
+                ancestry,
+                "nodes",
+                format!("admission closure exceeded {MAX_ADMISSION_NODES} nodes"),
+                Vec::new(),
+            ));
         }
         self.nodes.push(AdmissionNode { identity, kind });
-        self.nodes.len() - 1
+        let index = self.nodes.len() - 1;
+        self.node_indices.insert(key, index);
+        Ok(index)
     }
 
-    fn link(&mut self, from: Option<usize>, to: usize) {
+    fn link(
+        &mut self,
+        from: Option<usize>,
+        to: usize,
+        ancestry: &Ancestry,
+    ) -> Result<(), AdmissionError> {
         if let Some(from) = from {
             let edge = AdmissionEdge { from, to };
-            if !self.edges.contains(&edge) {
-                self.edges.push(edge);
+            let edge_key = (from, to);
+            if self.edge_indices.contains(&edge_key) {
+                return Ok(());
             }
+            if self.edges.len() >= MAX_ADMISSION_EDGES {
+                return Err(AdmissionError::new(
+                    ancestry,
+                    "edges",
+                    format!("admission closure exceeded {MAX_ADMISSION_EDGES} edges"),
+                    Vec::new(),
+                ));
+            }
+            self.edges.push(edge);
+            self.edge_indices.insert(edge_key);
         }
+        Ok(())
     }
+}
+
+fn graph_node_key(
+    identity: &ActionIdentity,
+    kind: AdmissionNodeKind,
+) -> (String, String, String, u8) {
+    let class = match kind {
+        AdmissionNodeKind::LocalAction => 0,
+        AdmissionNodeKind::ReusableWorkflow => 2,
+        AdmissionNodeKind::NativeAction
+        | AdmissionNodeKind::RemoteComposite
+        | AdmissionNodeKind::RemoteAction => 1,
+    };
+    (
+        identity.repository.trim().to_ascii_lowercase(),
+        identity.sha.trim().to_ascii_lowercase(),
+        normalize_subpath(identity.subpath.as_deref()),
+        class,
+    )
 }
 
 fn normalize_subpath(subpath: Option<&str>) -> String {
@@ -263,6 +388,8 @@ impl ContentsApiMetadataSource {
             client: reqwest::blocking::Client::builder()
                 .user_agent("velnor-runner")
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
                 .build()?,
             api_url: api_url.into(),
             token: token.into(),
@@ -320,7 +447,9 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 .send()?;
             last_status = Some(response.status());
             if response.status().is_success() {
-                return crate::action::parse_action_metadata(&response.text()?)
+                let content_length = response.content_length();
+                let contents = read_bounded_metadata_body(response, content_length)?;
+                return crate::action::parse_action_metadata(&contents)
                     .map_err(|error| anyhow::anyhow!("parse {repository}@{git_ref}: {error:#}"));
             }
             if response.status() != reqwest::StatusCode::NOT_FOUND {
@@ -334,12 +463,34 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
     }
 }
 
+fn read_bounded_metadata_body<R: Read>(reader: R, content_length: Option<u64>) -> Result<String> {
+    if content_length.is_some_and(|length| length > MAX_ACTION_METADATA_BYTES as u64) {
+        anyhow::bail!("action metadata response exceeds {MAX_ACTION_METADATA_BYTES} bytes");
+    }
+    let mut body = Vec::with_capacity(
+        content_length
+            .unwrap_or_default()
+            .min(MAX_ACTION_METADATA_BYTES as u64) as usize,
+    );
+    reader
+        .take((MAX_ACTION_METADATA_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut body)?;
+    if body.len() > MAX_ACTION_METADATA_BYTES {
+        anyhow::bail!("action metadata response exceeds {MAX_ACTION_METADATA_BYTES} bytes");
+    }
+    String::from_utf8(body).map_err(Into::into)
+}
+
 /// Recursion state shared across the closure walk.
 struct Walk<'a> {
     graph: AdmissionGraph,
     source: &'a dyn ActionMetadataSource,
-    visited: BTreeSet<String>,
+    metadata_cache: BTreeMap<ActionKey, Arc<ActionMetadata>>,
+    metadata_bytes: usize,
+    expanded: BTreeSet<InvocationKey>,
+    step_visits: usize,
     context_data: &'a [(String, Value)],
+    deadline: Instant,
 }
 
 /// Admit a job's complete action closure. On success returns the typed graph;
@@ -351,11 +502,23 @@ pub fn admit_job(
     context_data: &[(String, Value)],
     source: &dyn ActionMetadataSource,
 ) -> std::result::Result<AdmissionGraph, AdmissionError> {
+    if !context_within_admission_budget(context_data) {
+        return Err(AdmissionError::new(
+            &Ancestry::default(),
+            "context",
+            format!("workflow context exceeds {MAX_ADMISSION_CONTEXT_BYTES} bytes"),
+            Vec::new(),
+        ));
+    }
     let mut walk = Walk {
         graph: AdmissionGraph::default(),
         source,
-        visited: BTreeSet::new(),
+        metadata_cache: BTreeMap::new(),
+        metadata_bytes: 0,
+        expanded: BTreeSet::new(),
+        step_visits: 0,
         context_data,
+        deadline: Instant::now() + MAX_ADMISSION_DURATION,
     };
     let root = Ancestry::default();
 
@@ -365,6 +528,15 @@ pub fn admit_job(
     admit_reusable_workflow(&mut walk, &root)?;
 
     let workflow = workflow_source(context_data);
+    if job.steps.len() > MAX_ADMISSION_ROOT_STEPS {
+        return Err(AdmissionError::new(
+            &root,
+            "steps",
+            format!("workflow step count exceeds {MAX_ADMISSION_ROOT_STEPS}"),
+            Vec::new(),
+        ));
+    }
+    walk.step_visits = job.steps.len();
     for (index, step) in job
         .steps
         .iter()
@@ -408,6 +580,7 @@ pub fn admit_job(
                 workflow_repo,
                 workflow_sha,
                 &subpath,
+                LocalInputSource::Deferred { step, context_data },
                 1,
             )?;
             continue;
@@ -422,8 +595,10 @@ pub fn admit_job(
                 "<missing>"
             },
         );
-        let inputs = resolve_step_inputs(step, context_data);
         let ancestry = root.child(format!("step '{step_label}' ({repository}@{action_ref})"));
+        let inputs = resolve_step_inputs(step, context_data).map_err(|error| {
+            AdmissionError::new(&ancestry, "inputs", error.to_string(), Vec::new())
+        })?;
         admit_remote(
             &mut walk,
             &ancestry,
@@ -526,6 +701,7 @@ fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), Admis
         ));
     }
     let inputs = context_object_strings(walk.context_data, "inputs");
+    let inputs = canonicalize_admission_inputs(&inputs, &ancestry)?;
     manifest::validate_reusable_workflow(
         &ancestry.to_string(),
         &repository,
@@ -541,7 +717,8 @@ fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), Admis
             subpath: Some(path),
         },
         AdmissionNodeKind::ReusableWorkflow,
-    );
+        &ancestry,
+    )?;
     Ok(())
 }
 
@@ -558,8 +735,9 @@ fn admit_remote(
     inputs: &BTreeMap<String, String>,
     step_label: &str,
 ) -> Result<(), AdmissionError> {
-    reject_unresolved_capability_inputs(ancestry, repository, inputs)?;
-    manifest::validate_resolved_action(step_label, repository, action_ref, subpath, inputs)
+    let inputs = canonicalize_admission_inputs(inputs, ancestry)?;
+    reject_unresolved_capability_inputs(ancestry, repository, &inputs)?;
+    manifest::validate_resolved_action(step_label, repository, action_ref, subpath, &inputs)
         .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
 
     let normalized = normalize_subpath(subpath);
@@ -571,35 +749,50 @@ fn admit_remote(
 
     // A native adapter is authoritative: no metadata fetch, no recursion.
     if native_action_adapter(repository).is_some() {
-        let index = walk.graph.intern(identity, AdmissionNodeKind::NativeAction);
-        walk.graph.link(parent, index);
+        let index = walk
+            .graph
+            .intern(identity, AdmissionNodeKind::NativeAction, ancestry)?;
+        walk.graph.link(parent, index, ancestry)?;
         return Ok(());
     }
 
-    let key = identity.display();
+    let action_key = ActionKey::remote(repository, action_ref, subpath);
     let index = walk
         .graph
-        .intern(identity.clone(), AdmissionNodeKind::RemoteAction);
-    walk.graph.link(parent, index);
-    if !walk.visited.insert(key) {
-        return Ok(());
-    }
-    bound_nodes(walk, ancestry)?;
+        .intern(identity.clone(), AdmissionNodeKind::RemoteAction, ancestry)?;
+    walk.graph.link(parent, index, ancestry)?;
 
-    let metadata = walk
-        .source
-        .fetch_action_metadata(repository, action_ref, subpath)
-        .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
+    let metadata = cached_metadata(walk, &action_key, repository, action_ref, subpath, ancestry)?;
     if !is_composite(&metadata) {
         return Ok(());
     }
     walk.graph.nodes[index].kind = AdmissionNodeKind::RemoteComposite;
-    recurse_composite(
-        walk, ancestry, index, repository, action_ref, inputs, &metadata, 1,
+    recurse_composite_invocation(
+        walk, ancestry, index, repository, action_ref, &inputs, &metadata, 1,
     )
 }
 
 /// Admit a local action read from the workflow repository at the workflow SHA.
+enum LocalInputSource<'a> {
+    Deferred {
+        step: &'a crate::job_message::ActionStep,
+        context_data: &'a [(String, Value)],
+    },
+    Resolved(&'a BTreeMap<String, String>),
+}
+
+impl<'a> LocalInputSource<'a> {
+    fn resolve(self) -> Result<Cow<'a, BTreeMap<String, String>>> {
+        match self {
+            Self::Deferred { step, context_data } => {
+                Ok(Cow::Owned(resolve_step_inputs(step, context_data)?))
+            }
+            Self::Resolved(inputs) => Ok(Cow::Borrowed(inputs)),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn admit_local(
     walk: &mut Walk,
     ancestry: &Ancestry,
@@ -607,9 +800,14 @@ fn admit_local(
     repository: &str,
     sha: &str,
     subpath: &str,
+    provided_inputs: LocalInputSource<'_>,
     depth: usize,
 ) -> Result<(), AdmissionError> {
-    if subpath.starts_with('/') || subpath.split('/').any(|segment| segment == "..") {
+    if subpath.starts_with('/')
+        || subpath
+            .split('/')
+            .any(|segment| segment == ".." || segment.is_empty())
+    {
         return Err(AdmissionError::new(
             ancestry,
             "path",
@@ -617,37 +815,118 @@ fn admit_local(
             Vec::new(),
         ));
     }
+    if !is_full_sha(sha) {
+        return Err(AdmissionError::new(
+            ancestry,
+            "ref",
+            "local action workflow ref must be an immutable full-SHA",
+            vec!["a 40-hex commit SHA".to_string()],
+        ));
+    }
     let identity = ActionIdentity {
         repository: repository.to_string(),
         sha: sha.to_string(),
         subpath: Some(subpath.to_string()),
     };
-    let index = walk.graph.intern(identity, AdmissionNodeKind::LocalAction);
-    walk.graph.link(parent, index);
-    let key = format!("local:{repository}@{sha}:{subpath}");
-    if !walk.visited.insert(key) {
-        return Ok(());
-    }
-    bound_nodes(walk, ancestry)?;
+    let action_key = ActionKey::local(repository, sha, subpath);
+    let index = walk
+        .graph
+        .intern(identity, AdmissionNodeKind::LocalAction, ancestry)?;
+    walk.graph.link(parent, index, ancestry)?;
 
-    let metadata = walk
-        .source
-        .fetch_action_metadata(repository, sha, Some(subpath))
-        .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
+    let metadata = cached_metadata(walk, &action_key, repository, sha, Some(subpath), ancestry)?;
     if !is_composite(&metadata) {
         // A local JavaScript/Docker action is trusted workflow-repository code;
         // it is a closure leaf (matches the prior local preflight semantics).
         return Ok(());
     }
-    recurse_composite(
+    let provided_inputs = provided_inputs
+        .resolve()
+        .map_err(|error| AdmissionError::new(ancestry, "inputs", error.to_string(), Vec::new()))?;
+    let provided_inputs = canonicalize_admission_inputs(provided_inputs.as_ref(), ancestry)?;
+    recurse_composite_invocation(
         walk,
         ancestry,
         index,
         repository,
         sha,
-        &BTreeMap::new(),
+        &provided_inputs,
         &metadata,
         depth,
+    )
+}
+
+fn cached_metadata(
+    walk: &mut Walk,
+    key: &ActionKey,
+    repository: &str,
+    action_ref: &str,
+    subpath: Option<&str>,
+    ancestry: &Ancestry,
+) -> Result<Arc<ActionMetadata>, AdmissionError> {
+    if Instant::now() >= walk.deadline {
+        return Err(AdmissionError::new(
+            ancestry,
+            "deadline",
+            "action admission exceeded its read-only deadline",
+            Vec::new(),
+        ));
+    }
+    if let Some(metadata) = walk.metadata_cache.get(key) {
+        return Ok(Arc::clone(metadata));
+    }
+    let metadata = walk
+        .source
+        .fetch_action_metadata(repository, action_ref, subpath)
+        .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
+    validate_metadata_bounds(&metadata).map_err(|error| {
+        AdmissionError::new(ancestry, "metadata", error.to_string(), Vec::new())
+    })?;
+    let retained_bytes = metadata_retained_bytes(&metadata);
+    if walk.metadata_bytes.saturating_add(retained_bytes) > MAX_ADMISSION_METADATA_BYTES {
+        return Err(AdmissionError::new(
+            ancestry,
+            "metadata",
+            format!("admission metadata exceeds {MAX_ADMISSION_METADATA_BYTES} bytes"),
+            Vec::new(),
+        ));
+    }
+    walk.metadata_bytes = walk.metadata_bytes.saturating_add(retained_bytes);
+    let metadata = Arc::new(metadata);
+    walk.metadata_cache
+        .insert(key.clone(), Arc::clone(&metadata));
+    Ok(metadata)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recurse_composite_invocation(
+    walk: &mut Walk,
+    ancestry: &Ancestry,
+    parent: usize,
+    repo_ctx: &str,
+    ref_ctx: &str,
+    inputs: &BTreeMap<String, String>,
+    metadata: &ActionMetadata,
+    depth: usize,
+) -> Result<(), AdmissionError> {
+    let invocation = InvocationKey {
+        node_index: parent,
+        inputs_digest: input_digest(inputs),
+    };
+    if walk.expanded.contains(&invocation) {
+        return Ok(());
+    }
+    if walk.expanded.len() >= MAX_ADMISSION_INVOCATIONS {
+        return Err(AdmissionError::new(
+            ancestry,
+            "invocations",
+            format!("admission closure exceeded {MAX_ADMISSION_INVOCATIONS} composite invocations"),
+            Vec::new(),
+        ));
+    }
+    walk.expanded.insert(invocation.clone());
+    recurse_composite(
+        walk, ancestry, parent, repo_ctx, ref_ctx, inputs, metadata, depth,
     )
 }
 
@@ -671,10 +950,27 @@ fn recurse_composite(
             Vec::new(),
         ));
     }
+    if metadata.runs.steps.len() > MAX_COMPOSITE_STEPS {
+        return Err(AdmissionError::new(
+            ancestry,
+            "steps",
+            format!("composite metadata exceeded {MAX_COMPOSITE_STEPS} steps"),
+            Vec::new(),
+        ));
+    }
+    walk.step_visits = walk.step_visits.saturating_add(metadata.runs.steps.len());
+    if walk.step_visits > MAX_ADMISSION_STEP_VISITS {
+        return Err(AdmissionError::new(
+            ancestry,
+            "steps",
+            format!("admission closure exceeded {MAX_ADMISSION_STEP_VISITS} step visits"),
+            Vec::new(),
+        ));
+    }
     // Resolve this composite's inputs (caller-provided over declared defaults)
     // so nested `${{ inputs.* }}` can be rendered before child validation.
     let composite_inputs = resolve_composite_inputs(metadata, provided_inputs);
-    let inputs_context = inputs_context(&composite_inputs);
+    let inputs_context = inputs_context(&composite_inputs, walk.context_data);
 
     for (child_index, step) in metadata.runs.steps.iter().enumerate() {
         let Some(uses) = step.uses.as_deref() else {
@@ -707,6 +1003,7 @@ fn recurse_composite(
                 repo_ctx,
                 ref_ctx,
                 nested_subpath,
+                LocalInputSource::Resolved(&child_inputs),
                 depth + 1,
             )?;
             continue;
@@ -749,18 +1046,6 @@ fn recurse_composite(
     Ok(())
 }
 
-fn bound_nodes(walk: &Walk, ancestry: &Ancestry) -> Result<(), AdmissionError> {
-    if walk.graph.nodes.len() > MAX_ADMISSION_NODES {
-        return Err(AdmissionError::new(
-            ancestry,
-            "nodes",
-            format!("admission closure exceeded {MAX_ADMISSION_NODES} nodes"),
-            Vec::new(),
-        ));
-    }
-    Ok(())
-}
-
 /// Reject a capability-affecting input whose value still holds an unresolved
 /// `${{ … }}` expression after rendering — it cannot be statically admitted.
 fn reject_unresolved_capability_inputs(
@@ -788,19 +1073,11 @@ fn is_composite(metadata: &ActionMetadata) -> bool {
 fn resolve_step_inputs(
     step: &crate::job_message::ActionStep,
     context_data: &[(String, Value)],
-) -> BTreeMap<String, String> {
-    match crate::action::string_inputs(step) {
-        Ok(inputs) => inputs
-            .into_iter()
-            .map(|(name, value)| {
-                (
-                    name,
-                    crate::executor::render_context_expressions(&value, context_data),
-                )
-            })
-            .collect(),
-        Err(_) => BTreeMap::new(),
-    }
+) -> Result<BTreeMap<String, String>> {
+    Ok(crate::action::string_inputs(step)?
+        .into_iter()
+        .map(|(name, value)| (name, render_admission_expression(&value, context_data)))
+        .collect())
 }
 
 fn resolve_composite_inputs(
@@ -810,7 +1087,7 @@ fn resolve_composite_inputs(
     let mut resolved = BTreeMap::new();
     for (name, input) in &metadata.inputs {
         if let Some(default) = &input.default_value {
-            resolved.insert(name.clone(), default.clone());
+            resolved.insert(name.to_ascii_lowercase(), default.clone());
         }
     }
     for (name, value) in provided {
@@ -819,12 +1096,18 @@ fn resolve_composite_inputs(
     resolved
 }
 
-fn inputs_context(inputs: &BTreeMap<String, String>) -> Vec<(String, Value)> {
+fn inputs_context(
+    inputs: &BTreeMap<String, String>,
+    base_context: &[(String, Value)],
+) -> Vec<(String, Value)> {
+    let mut context = base_context.to_vec();
+    context.retain(|(name, _)| !name.eq_ignore_ascii_case("inputs"));
     let object = inputs
         .iter()
         .map(|(name, value)| (name.clone(), Value::String(value.clone())))
         .collect::<serde_json::Map<_, _>>();
-    vec![("inputs".to_string(), Value::Object(object))]
+    context.push(("inputs".to_string(), Value::Object(object)));
+    context
 }
 
 fn render_inputs(
@@ -835,10 +1118,87 @@ fn render_inputs(
         .map(|(name, value)| {
             (
                 name.clone(),
-                crate::executor::render_context_expressions(value, inputs_context),
+                render_admission_expression(value, inputs_context),
             )
         })
         .collect()
+}
+
+fn render_admission_expression(value: &str, context_data: &[(String, Value)]) -> String {
+    if contains_runtime_context_expression(value) {
+        value.to_string()
+    } else {
+        crate::executor::render_context_expressions_bounded(value, context_data)
+    }
+}
+
+fn contains_runtime_context_expression(value: &str) -> bool {
+    const RUNTIME_ROOTS: &[&str] = &[
+        "steps.",
+        "steps[",
+        "needs.",
+        "needs[",
+        "env.",
+        "env[",
+        "job.",
+        "job[",
+        "matrix.",
+        "matrix[",
+        "strategy.",
+        "strategy[",
+        "secrets.",
+        "secrets[",
+        "vars.",
+        "vars[",
+        "runner.",
+        "runner[",
+        "github.",
+        "github.action",
+        "github[",
+        "github.action_status",
+        "github.event.",
+    ];
+    let mut offset = 0;
+    while let Some(start) = value[offset..].find("${{") {
+        let start = offset + start + 3;
+        let Some(end) = value[start..].find("}}") else {
+            return false;
+        };
+        let expression = &value[start..start + end];
+        let lower_expression = expression.to_ascii_lowercase();
+        if [
+            "hashfiles(",
+            "format(",
+            "success(",
+            "failure(",
+            "cancelled(",
+            "always(",
+        ]
+        .iter()
+        .any(|function| lower_expression.contains(function))
+        {
+            return true;
+        }
+        if RUNTIME_ROOTS.iter().any(|root| {
+            let mut search = 0;
+            while let Some(found) = lower_expression[search..].find(root) {
+                let found = search + found;
+                let boundary = found == 0
+                    || !lower_expression.as_bytes()[found - 1].is_ascii_alphanumeric()
+                        && lower_expression.as_bytes()[found - 1] != b'_'
+                        && lower_expression.as_bytes()[found - 1] != b'-';
+                if boundary {
+                    return true;
+                }
+                search = found + root.len();
+            }
+            false
+        }) {
+            return true;
+        }
+        offset = start + end + 2;
+    }
+    false
 }
 
 fn is_local_reference(name: Option<&str>, path: Option<&str>) -> bool {
@@ -877,8 +1237,7 @@ fn split_workflow_ref(workflow_ref: &str) -> Option<(String, String, String)> {
 }
 
 fn workflow_source(context_data: &[(String, Value)]) -> Option<(String, String)> {
-    let sha = context_string(context_data, "github.workflow_sha")
-        .or_else(|| context_string(context_data, "github.sha"))?;
+    let sha = context_string(context_data, "github.workflow_sha")?;
     let repository = context_string(context_data, "job.workflow_repository")
         .or_else(|| context_string(context_data, "github.repository"))
         .or_else(|| {
@@ -910,6 +1269,182 @@ fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String
     }
 }
 
+fn canonicalize_admission_inputs(
+    inputs: &BTreeMap<String, String>,
+    ancestry: &Ancestry,
+) -> Result<BTreeMap<String, String>, AdmissionError> {
+    if inputs.len() > MAX_ADMISSION_INPUTS {
+        return Err(AdmissionError::new(
+            ancestry,
+            "inputs",
+            format!("action input count exceeds {MAX_ADMISSION_INPUTS}"),
+            Vec::new(),
+        ));
+    }
+    let mut total_bytes = 0usize;
+    let mut canonical = BTreeMap::new();
+    for (name, value) in inputs {
+        if name.len() > MAX_ADMISSION_INPUT_NAME_BYTES {
+            return Err(AdmissionError::new(
+                ancestry,
+                "inputs",
+                format!("action input name exceeds {MAX_ADMISSION_INPUT_NAME_BYTES} bytes"),
+                Vec::new(),
+            ));
+        }
+        if value.len() > MAX_ADMISSION_INPUT_VALUE_BYTES {
+            return Err(AdmissionError::new(
+                ancestry,
+                "inputs",
+                format!("action input value exceeds {MAX_ADMISSION_INPUT_VALUE_BYTES} bytes"),
+                Vec::new(),
+            ));
+        }
+        total_bytes = total_bytes
+            .saturating_add(name.len())
+            .saturating_add(value.len());
+        if total_bytes > MAX_ADMISSION_INPUT_BYTES {
+            return Err(AdmissionError::new(
+                ancestry,
+                "inputs",
+                format!("action inputs exceed {MAX_ADMISSION_INPUT_BYTES} bytes"),
+                Vec::new(),
+            ));
+        }
+        let canonical_name = name.to_ascii_lowercase();
+        if canonical.insert(canonical_name, value.clone()).is_some() {
+            return Err(AdmissionError::new(
+                ancestry,
+                "inputs",
+                "action input names differ only by ASCII case",
+                Vec::new(),
+            ));
+        }
+    }
+    Ok(canonical)
+}
+
+fn validate_metadata_bounds(metadata: &ActionMetadata) -> Result<()> {
+    let mut total_string_bytes = 0usize;
+    validate_metadata_text(metadata.name.as_deref(), "name", &mut total_string_bytes)?;
+    validate_metadata_text(
+        metadata.description.as_deref(),
+        "description",
+        &mut total_string_bytes,
+    )?;
+    if metadata.inputs.len() > MAX_METADATA_MAP_ENTRIES {
+        anyhow::bail!("metadata input count exceeds {MAX_METADATA_MAP_ENTRIES}");
+    }
+    let mut input_names = BTreeSet::new();
+    for (name, input) in &metadata.inputs {
+        validate_metadata_text(Some(name), "inputs.name", &mut total_string_bytes)?;
+        if !input_names.insert(name.to_ascii_lowercase()) {
+            anyhow::bail!("metadata input names differ only by ASCII case");
+        }
+        validate_metadata_text(
+            input.description.as_deref(),
+            "inputs.description",
+            &mut total_string_bytes,
+        )?;
+        validate_metadata_text(
+            input.default_value.as_deref(),
+            "inputs.default",
+            &mut total_string_bytes,
+        )?;
+    }
+    if metadata.outputs.len() > MAX_METADATA_MAP_ENTRIES {
+        anyhow::bail!("metadata output count exceeds {MAX_METADATA_MAP_ENTRIES}");
+    }
+    for (name, output) in &metadata.outputs {
+        validate_metadata_text(Some(name), "outputs.name", &mut total_string_bytes)?;
+        validate_metadata_text(
+            output.description.as_deref(),
+            "outputs.description",
+            &mut total_string_bytes,
+        )?;
+        validate_metadata_text(
+            output.value.as_deref(),
+            "outputs.value",
+            &mut total_string_bytes,
+        )?;
+    }
+    validate_metadata_text(
+        Some(&metadata.runs.using),
+        "runs.using",
+        &mut total_string_bytes,
+    )?;
+    for (field, value) in [
+        ("runs.main", metadata.runs.main.as_deref()),
+        ("runs.pre", metadata.runs.pre.as_deref()),
+        ("runs.pre-if", metadata.runs.pre_if.as_deref()),
+        ("runs.post", metadata.runs.post.as_deref()),
+        ("runs.post-if", metadata.runs.post_if.as_deref()),
+        ("runs.image", metadata.runs.image.as_deref()),
+        ("runs.entrypoint", metadata.runs.entrypoint.as_deref()),
+    ] {
+        validate_metadata_text(value, field, &mut total_string_bytes)?;
+    }
+    if metadata.runs.args.len() > MAX_METADATA_MAP_ENTRIES {
+        anyhow::bail!("metadata argument count exceeds {MAX_METADATA_MAP_ENTRIES}");
+    }
+    for value in &metadata.runs.args {
+        validate_metadata_text(Some(value), "runs.args", &mut total_string_bytes)?;
+    }
+    if metadata.runs.steps.len() > MAX_COMPOSITE_STEPS {
+        anyhow::bail!("metadata step count exceeds {MAX_COMPOSITE_STEPS}");
+    }
+    for step in &metadata.runs.steps {
+        for (field, value) in [
+            ("steps.id", step.id.as_deref()),
+            ("steps.name", step.name.as_deref()),
+            ("steps.shell", step.shell.as_deref()),
+            ("steps.run", step.run.as_deref()),
+            ("steps.uses", step.uses.as_deref()),
+            ("steps.if", step.condition.as_deref()),
+            ("steps.working-directory", step.working_directory.as_deref()),
+            ("steps.continue-on-error", step.continue_on_error.as_deref()),
+        ] {
+            validate_metadata_text(value, field, &mut total_string_bytes)?;
+        }
+        validate_metadata_string_map(&step.with, "steps.with", &mut total_string_bytes)?;
+        validate_metadata_string_map(&step.env, "steps.env", &mut total_string_bytes)?;
+    }
+    Ok(())
+}
+
+fn validate_metadata_text(
+    value: Option<&str>,
+    field: &str,
+    total_string_bytes: &mut usize,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.len() > MAX_METADATA_STRING_BYTES {
+        anyhow::bail!("metadata {field} exceeds {MAX_METADATA_STRING_BYTES} bytes");
+    }
+    *total_string_bytes = total_string_bytes.saturating_add(value.len());
+    if *total_string_bytes > MAX_METADATA_TOTAL_STRING_BYTES {
+        anyhow::bail!("metadata strings exceed {MAX_METADATA_TOTAL_STRING_BYTES} bytes in total");
+    }
+    Ok(())
+}
+
+fn validate_metadata_string_map(
+    values: &BTreeMap<String, String>,
+    field: &str,
+    total_string_bytes: &mut usize,
+) -> Result<()> {
+    if values.len() > MAX_METADATA_MAP_ENTRIES {
+        anyhow::bail!("metadata {field} count exceeds {MAX_METADATA_MAP_ENTRIES}");
+    }
+    for (name, value) in values {
+        validate_metadata_text(Some(name), field, total_string_bytes)?;
+        validate_metadata_text(Some(value), field, total_string_bytes)?;
+    }
+    Ok(())
+}
+
 fn context_object_strings(context_data: &[(String, Value)], key: &str) -> BTreeMap<String, String> {
     context_data
         .iter()
@@ -927,6 +1462,95 @@ fn context_object_strings(context_data: &[(String, Value)], key: &str) -> BTreeM
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn context_within_admission_budget(context_data: &[(String, Value)]) -> bool {
+    let mut total = 0usize;
+    let mut pending = context_data
+        .iter()
+        .map(|(name, value)| (0usize, name.as_str(), value))
+        .collect::<Vec<_>>();
+    while let Some((depth, name, value)) = pending.pop() {
+        total = total.saturating_add(name.len());
+        if total > MAX_ADMISSION_CONTEXT_BYTES || depth > 64 {
+            return false;
+        }
+        match value {
+            Value::String(value) => total = total.saturating_add(value.len()),
+            Value::Array(values) => {
+                for value in values {
+                    pending.push((depth + 1, "", value));
+                }
+            }
+            Value::Object(values) => {
+                for (name, value) in values {
+                    pending.push((depth + 1, name, value));
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+        if total > MAX_ADMISSION_CONTEXT_BYTES {
+            return false;
+        }
+    }
+    true
+}
+
+fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
+    fn add(total: &mut usize, value: Option<&str>) {
+        *total = total.saturating_add(value.map_or(0, str::len));
+    }
+    fn add_map(total: &mut usize, values: &BTreeMap<String, String>) {
+        for (name, value) in values {
+            *total = total.saturating_add(name.len()).saturating_add(value.len());
+        }
+    }
+
+    let mut total = 0usize;
+    add(&mut total, metadata.name.as_deref());
+    add(&mut total, metadata.description.as_deref());
+    for (name, input) in &metadata.inputs {
+        total = total.saturating_add(name.len());
+        add(&mut total, input.description.as_deref());
+        add(&mut total, input.default_value.as_deref());
+    }
+    for (name, output) in &metadata.outputs {
+        total = total.saturating_add(name.len());
+        add(&mut total, output.description.as_deref());
+        add(&mut total, output.value.as_deref());
+    }
+    add(&mut total, Some(&metadata.runs.using));
+    for value in [
+        metadata.runs.main.as_deref(),
+        metadata.runs.pre.as_deref(),
+        metadata.runs.pre_if.as_deref(),
+        metadata.runs.post.as_deref(),
+        metadata.runs.post_if.as_deref(),
+        metadata.runs.image.as_deref(),
+        metadata.runs.entrypoint.as_deref(),
+    ] {
+        add(&mut total, value);
+    }
+    for value in &metadata.runs.args {
+        total = total.saturating_add(value.len());
+    }
+    for step in &metadata.runs.steps {
+        for value in [
+            step.id.as_deref(),
+            step.name.as_deref(),
+            step.shell.as_deref(),
+            step.run.as_deref(),
+            step.uses.as_deref(),
+            step.condition.as_deref(),
+            step.working_directory.as_deref(),
+            step.continue_on_error.as_deref(),
+        ] {
+            add(&mut total, value);
+        }
+        add_map(&mut total, &step.with);
+        add_map(&mut total, &step.env);
+    }
+    total
 }
 
 #[cfg(test)]
@@ -1019,22 +1643,100 @@ mod tests {
     const CACHE_SHA: &str = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
 
     #[test]
-    fn positive_root_local_local_remote_closure() {
+    fn case_distinct_local_subpaths_are_not_aliases() {
         let context = workflow_context();
+        let job = job(serde_json::json!([
+            repo_step(
+                "./.github/actions/Foo",
+                "",
+                Some("./.github/actions/Foo"),
+                serde_json::json!({})
+            ),
+            repo_step(
+                "./.github/actions/foo",
+                "",
+                Some("./.github/actions/foo"),
+                serde_json::json!({})
+            )
+        ]));
+        let source = FakeMetadataSource::new(&[
+            (
+                "acme/repo/.github/actions/Foo@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "runs:\n  using: node20\n  main: dist/index.js\n",
+            ),
+            (
+                "acme/repo/.github/actions/foo@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                &format!("runs:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        lookup-only: invalid\n"),
+            ),
+        ]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 2);
+        assert_eq!(error.field, "with.lookup-only");
+    }
+
+    #[test]
+    fn duplicate_case_folded_input_names_rejected_before_admission() {
+        let job = job(serde_json::json!([repo_step(
+            "actions/cache",
+            CACHE_SHA,
+            None,
+            serde_json::json!({"lookup-only": "true", "LOOKUP-ONLY": "false"})
+        )]));
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "inputs");
+    }
+
+    #[test]
+    fn oversized_metadata_body_rejected_before_parse() {
+        let body = vec![b'x'; MAX_ACTION_METADATA_BYTES + 1];
+        let error = read_bounded_metadata_body(body.as_slice(), None).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+        let error =
+            read_bounded_metadata_body([].as_slice(), Some(MAX_ACTION_METADATA_BYTES as u64 + 1))
+                .unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn workflow_sha_is_required_for_local_metadata_identity() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }),
+        )];
         let job = job(serde_json::json!([repo_step(
             "./.github/actions/outer",
             "",
             Some("./.github/actions/outer"),
             serde_json::json!({})
         )]));
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "uses");
+    }
+
+    #[test]
+    fn positive_root_local_local_remote_closure() {
+        let context = workflow_context();
+        let job = job(serde_json::json!([repo_step(
+            "./.github/actions/outer",
+            "",
+            Some("./.github/actions/outer"),
+            serde_json::json!({"LOOKUP_ONLY": "true"})
+        )]));
         let source = FakeMetadataSource::new(&[
             (
                 "acme/repo/.github/actions/outer@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n",
+                "inputs:\n  lookup_only:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n      with:\n        lookup_only: ${{ inputs.lookup_only }}\n",
             ),
             (
                 "acme/repo/.github/actions/inner@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                &format!("runs:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        path: target\n        key: k\n"),
+                &format!("inputs:\n  lookup_only:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        path: target\n        key: k\n        lookup-only: ${{{{ inputs.lookup_only }}}}\n"),
             ),
         ]);
         let graph = admit_job(&job, &context, &source).unwrap();
@@ -1043,6 +1745,145 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.kind == AdmissionNodeKind::LocalAction));
+    }
+
+    #[test]
+    fn invalid_nested_capability_input_uses_caller_value() {
+        let context = workflow_context();
+        let job = job(serde_json::json!([repo_step(
+            "./.github/actions/outer",
+            "",
+            Some("./.github/actions/outer"),
+            serde_json::json!({"lookup_only": "invalid"})
+        )]));
+        let source = FakeMetadataSource::new(&[
+            (
+                "acme/repo/.github/actions/outer@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "inputs:\n  lookup_only:\n    default: true\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n      with:\n        lookup_only: ${{ inputs.lookup_only }}\n",
+            ),
+            (
+                "acme/repo/.github/actions/inner@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                &format!("inputs:\n  lookup_only:\n    default: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        path: target\n        key: k\n        lookup-only: ${{{{ inputs.lookup_only }}}}\n"),
+            ),
+        ]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 2);
+        assert_eq!(error.field, "with.lookup-only");
+        assert_eq!(
+            error.accepted,
+            vec!["true".to_string(), "false".to_string()]
+        );
+    }
+
+    #[test]
+    fn repeated_local_composite_invocation_cannot_hide_inputs() {
+        let context = workflow_context();
+        let job = job(serde_json::json!([
+            repo_step(
+                "./.github/actions/outer",
+                "",
+                Some("./.github/actions/outer"),
+                serde_json::json!({"lookup_only": "true"})
+            ),
+            repo_step(
+                "./.github/actions/outer",
+                "",
+                Some("./.github/actions/outer"),
+                serde_json::json!({"lookup_only": "invalid"})
+            )
+        ]));
+        let source = FakeMetadataSource::new(&[
+            (
+                "acme/repo/.github/actions/outer@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "inputs:\n  lookup_only:\n    default: true\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/inner\n      with:\n        lookup_only: ${{ inputs.lookup_only }}\n",
+            ),
+            (
+                "acme/repo/.github/actions/inner@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                &format!("inputs:\n  lookup_only:\n    default: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/cache@{CACHE_SHA}\n      with:\n        path: target\n        key: k\n        lookup-only: ${{{{ inputs.lookup_only }}}}\n"),
+            ),
+        ]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 2);
+        assert_eq!(error.field, "with.lookup-only");
+    }
+
+    #[test]
+    fn runtime_dependent_capability_expression_rejected_before_rendering() {
+        let context = workflow_context();
+        for expression in [
+            "${{ steps.probe.outputs.flag != 'true' }}",
+            "${{ steps.probe.outputs.flag || 'false' }}",
+            "${{ runner.os || 'false' }}",
+            "${{ github.event.pull_request.draft }}",
+            "${{ github.action || 'docker-container' }}",
+            "${{ github['event']['pull_request']['draft'] }}",
+            "${{ hashFiles('**/Cargo.lock') }}",
+            "${{ format('{0}', 'false') }}",
+            "${{ success() && 'true' || 'false' }}",
+            "${{ failure() || cancelled() || always() }}",
+        ] {
+            let job = job(serde_json::json!([repo_step(
+                "actions/cache",
+                CACHE_SHA,
+                None,
+                serde_json::json!({"lookup-only": expression})
+            )]));
+            let source = FakeMetadataSource::new(&[]);
+            let error = admit_job(&job, &context, &source).unwrap_err();
+            assert_eq!(source.reads(), 0);
+            assert_eq!(error.field, "with.lookup-only");
+        }
+    }
+
+    #[test]
+    fn ordinary_github_context_expression_is_rejected_before_rendering() {
+        let context = workflow_context();
+        let job = job(serde_json::json!([repo_step(
+            "actions/cache",
+            CACHE_SHA,
+            None,
+            serde_json::json!({"lookup-only": "${{ github.ref }}"})
+        )]));
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "with.lookup-only");
+    }
+
+    #[test]
+    fn mixed_case_native_subpath_is_rejected_before_metadata_fetch() {
+        let context = workflow_context();
+        let job = job(serde_json::json!([repo_step(
+            "actions/cache",
+            CACHE_SHA,
+            Some("Restore"),
+            serde_json::json!({"key": "k", "path": "target"})
+        )]));
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "path");
+    }
+
+    #[test]
+    fn malformed_local_workflow_ref_rejected_before_metadata_fetch() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "workflow_sha": "refs/heads/main"
+            }),
+        )];
+        let job = job(serde_json::json!([repo_step(
+            "./.github/actions/outer",
+            "",
+            Some("./.github/actions/outer"),
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "ref");
     }
 
     #[test]
@@ -1059,6 +1900,20 @@ mod tests {
         // Native adapter: admitted without any metadata fetch.
         assert_eq!(source.reads(), 0);
         assert!(graph.contains_remote_action("actions/cache", CACHE_SHA, Some("restore")));
+    }
+
+    #[test]
+    fn absolute_remote_subpath_rejected_before_metadata_fetch() {
+        let job = job(serde_json::json!([repo_step(
+            "actions/cache",
+            CACHE_SHA,
+            Some("/restore"),
+            serde_json::json!({"path": "target", "key": "k"})
+        )]));
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "path");
     }
 
     #[test]
@@ -1263,7 +2118,7 @@ mod tests {
             serde_json::json!({})
         )]));
         // A composite whose nested step points back at itself must terminate via
-        // the visited guard rather than recursing forever.
+        // the input-sensitive expansion guard rather than recursing forever.
         let source = FakeMetadataSource::new(&[(
             "acme/repo/.github/actions/loop@deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/loop\n",

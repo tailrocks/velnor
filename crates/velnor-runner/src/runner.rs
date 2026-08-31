@@ -112,6 +112,11 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
+/// Keep blocking Contents-API admission off Tokio workers and bound the total
+/// time an acquired job can wait in the read-only gate.
+const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
+const ACTION_ADMISSION_BLOCKING_PERMITS: usize = 1;
+static ACTION_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// SQLite admission is a single-writer boundary. Keep the Tokio blocking
 /// queue bounded by acquiring the only admission permit before spawning work.
 const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
@@ -128,6 +133,13 @@ fn operational_admission_permits() -> Arc<Semaphore> {
     Arc::clone(
         OPERATIONAL_ADMISSION_PERMITS
             .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
+    )
+}
+
+fn action_admission_permits() -> Arc<Semaphore> {
+    Arc::clone(
+        ACTION_ADMISSION_PERMITS
+            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_BLOCKING_PERMITS))),
     )
 }
 
@@ -317,17 +329,56 @@ fn persist_in_flight_job(
         fs::remove_file(&temporary).ok();
         return Err(error).context("write temporary in-flight job lease");
     }
+    OpenOptions::new()
+        .read(true)
+        .open(&temporary)
+        .with_context(|| format!("open {} for sync", temporary.display()))?
+        .sync_all()
+        .with_context(|| format!("sync {}", temporary.display()))?;
     if let Err(error) = fs::rename(&temporary, &path) {
         fs::remove_file(&temporary).ok();
         return Err(error).context("publish in-flight job lease");
     }
+    sync_directory(path.parent())?;
+    Ok(())
+}
+
+fn sync_directory(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .with_context(|| format!("open directory {} for sync", path.display()))?
+            .sync_all()
+            .with_context(|| format!("sync directory {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
 fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
     let path = in_flight_job_path(config_dir);
-    if !path.exists() {
-        return Ok(None);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "in-flight job marker must not be a symlink: {}",
+                path.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            bail!(
+                "in-flight job marker is not a regular file: {}",
+                path.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let record = serde_json::from_slice(&bytes).context("parse in-flight job")?;
@@ -336,8 +387,25 @@ fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
 
 fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
     let path = in_flight_job_path(config_dir);
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "in-flight job marker must not be a symlink: {}",
+                path.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            bail!(
+                "in-flight job marker is not a regular file: {}",
+                path.display()
+            )
+        }
+        Ok(_) => {
+            fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+            sync_directory(path.parent())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
     Ok(())
 }
@@ -441,7 +509,7 @@ fn queued_jobs_to_cancel(
         .collect()
 }
 
-async fn complete_recorded_in_flight_job(
+pub(crate) async fn complete_recorded_in_flight_job(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
 ) -> Result<bool> {
@@ -470,6 +538,143 @@ async fn complete_recorded_in_flight_job(
         "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
     )
     .await?;
+    cleanup_recorded_in_flight_job(slot_dir)?;
+    Ok(true)
+}
+
+/// Replay a durable `Completing` payload byte-for-byte after a worker crash.
+///
+/// The completion intent and outbox are already durable, so this path must not
+/// manufacture a replacement failure payload. The journal acknowledgement is
+/// committed only after the exact payload is accepted remotely.
+pub(crate) async fn replay_recorded_completion(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    journal_dir: &Path,
+) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
+    let (generation, payload_sha256) = {
+        let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+        let state = journal
+            .materialized_state()
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.job_id.0 == record.job_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "recorded completing job {} is absent from the materialized journal",
+                    record.job_id
+                )
+            })?;
+        if job.phase != velnor_model::ActorPhase::Completing {
+            bail!(
+                "recorded completion job {} is in journal phase {:?}",
+                record.job_id,
+                job.phase
+            );
+        }
+        let row = state
+            .outbox
+            .iter()
+            .find(|row| {
+                row.job_id.0 == record.job_id
+                    && row.generation == job.generation
+                    && row.intended
+                    && !row.remote_acked
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "recorded completing job {} has no pending durable outbox row",
+                    record.job_id
+                )
+            })?;
+        (job.generation, row.payload_sha256.clone())
+    };
+    let payload =
+        load_recorded_completion_payload(journal_dir, &record, generation, &payload_sha256)?;
+    let token = oauth_access_token(stored).await?;
+    let client = RunServiceClient::new(token.token)?;
+    client
+        .complete_job_payload(&record.run_service_url, payload)
+        .await
+        .context("replay exact recorded completion payload")?;
+
+    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let acknowledged = journal.apply(velnor_control::journal::Event::RemoteAcked {
+        job_id: velnor_model::JobId(record.job_id.clone()),
+        generation,
+    })?;
+    if acknowledged.rejected {
+        bail!(
+            "remote acknowledgement rejected for recorded job {}",
+            record.job_id
+        );
+    }
+    crate::node::cleanup::remove_outbox(journal_dir, &record.job_id, generation.0)
+        .context("remove acknowledged recorded completion outbox")?;
+    cleanup_recorded_in_flight_job(slot_dir)?;
+    Ok(true)
+}
+
+fn load_recorded_completion_payload(
+    journal_dir: &Path,
+    record: &InFlightJobRecord,
+    generation: Generation,
+    expected_sha256: &str,
+) -> Result<Vec<u8>> {
+    let payload = crate::node::cleanup::read_outbox(journal_dir, &record.job_id, generation.0)?;
+    let actual_sha256 = velnor_control::journal::payload_checksum(&payload);
+    if actual_sha256 != expected_sha256 {
+        bail!(
+            "completion outbox checksum mismatch for job {}",
+            record.job_id
+        );
+    }
+    let value: Value = serde_json::from_slice(&payload).context("parse recorded completion")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("recorded completion payload must be a JSON object"))?;
+    let plan_id = object
+        .get("planId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("recorded completion payload has no planId"))?;
+    if plan_id != record.plan_id {
+        bail!(
+            "recorded completion plan {} does not match marker plan {}",
+            plan_id,
+            record.plan_id
+        );
+    }
+    let job_id = object
+        .get("jobId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("recorded completion payload has no jobId"))?;
+    if job_id != record.job_id {
+        bail!(
+            "recorded completion payload job {} does not match marker job {}",
+            job_id,
+            record.job_id
+        );
+    }
+    Ok(payload)
+}
+
+/// Finish local cleanup after a prior terminal remote acknowledgement.
+///
+/// The journal removes the job at `RemoteAcked`, before this local cleanup can
+/// run. A crash or storage error in that gap must remain retryable from the
+/// durable marker; callers must invoke this only after the journal proves the
+/// remote terminal transition.
+pub(crate) fn cleanup_recorded_in_flight_job(slot_dir: &Path) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
     let sink = crate::ops::global().ok_or_else(|| {
         anyhow::anyhow!(
             "operational store sink unavailable while releasing stale reservation for job {}",
@@ -480,6 +685,14 @@ async fn complete_recorded_in_flight_job(
         .context("release stale in-flight job storage reservation")?;
     clear_in_flight_job(slot_dir)?;
     Ok(true)
+}
+
+pub(crate) fn recorded_in_flight_job_exists(slot_dir: &Path) -> Result<bool> {
+    Ok(load_in_flight_job(slot_dir)?.is_some())
+}
+
+pub(crate) fn recorded_in_flight_job_id(slot_dir: &Path) -> Result<Option<String>> {
+    Ok(load_in_flight_job(slot_dir)?.map(|record| record.job_id))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -5313,7 +5526,7 @@ async fn handle_job_request(
             return Err(error);
         }
         let admission_graph =
-            match admit_job_closure(&job, &early_context, &broker_cancellation.stored) {
+            match admit_job_closure(&job, &early_context, &broker_cancellation.stored).await {
                 Ok(graph) => graph,
                 Err(error) => {
                     complete_acquired_job_failure(
@@ -7116,6 +7329,7 @@ fn microvm_executable_steps(
                     .as_ref()
                     .and_then(|reference| reference.git_ref.clone())
                     .unwrap_or_else(|| repository.to_string());
+                let inputs = crate::action::string_inputs(step)?;
                 let invocation = crate::action::NativeActionInvocation {
                     git_ref,
                     adapter,
@@ -7129,7 +7343,7 @@ fn microvm_executable_steps(
                         .reference
                         .as_ref()
                         .and_then(|reference| reference.path.clone()),
-                    inputs: crate::action::string_inputs(step)?,
+                    inputs: crate::action::canonicalize_input_map(&inputs)?,
                     env: crate::script_step::step_environment(step)?,
                 };
                 ordered.push(crate::executor::ExecutableStep::Native {
@@ -8606,8 +8820,7 @@ struct WorkflowSourceContext {
 fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowSourceContext> {
     let path = context_string(context_data, "job.workflow_file_path")
         .or_else(|| context_string(context_data, "github.event.workflow"))?;
-    let sha = context_string(context_data, "github.workflow_sha")
-        .or_else(|| context_string(context_data, "github.sha"))?;
+    let sha = context_string(context_data, "github.workflow_sha")?;
     let repository = context_string(context_data, "job.workflow_repository")
         .or_else(|| context_string(context_data, "github.repository"))
         .or_else(|| {
@@ -8630,7 +8843,28 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 /// repository token and admits every root (local and remote), recursing nested
 /// local and remote closures. Replaces the former flat + local-only preflight
 /// split; planning consumes the returned graph and never re-resolves identity.
-fn admit_job_closure(
+async fn admit_job_closure(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+    stored: &StoredRunnerConfig,
+) -> Result<crate::admission::AdmissionGraph> {
+    let permit = action_admission_permits()
+        .try_acquire_owned()
+        .context("action admission blocking worker is busy")?;
+    let job = job.clone();
+    let context_data = context_data.to_vec();
+    let stored = stored.clone();
+    let admission = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        admit_job_closure_sync(&job, &context_data, &stored)
+    });
+    tokio::time::timeout(ACTION_ADMISSION_TIMEOUT, admission)
+        .await
+        .context("action admission exceeded its deadline")?
+        .context("action admission blocking worker failed")?
+}
+
+fn admit_job_closure_sync(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
@@ -9911,9 +10145,9 @@ async fn send_guarded_run_service_complete(
         &job_id,
         generation,
         &payload,
-        async {
+        |payload| async move {
             client
-                .complete_job(run_service_url, completion)
+                .complete_job_payload(run_service_url, payload)
                 .await
                 .context("complete run-service job")
         },
@@ -11152,7 +11386,16 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
                 runner.status.as_deref(),
                 runner.busy,
             ),
-            None => load_in_flight_job(&slot_dir).ok().flatten().is_some(),
+            None => match load_in_flight_job(&slot_dir) {
+                Ok(record) => record.is_some(),
+                Err(error) => {
+                    eprintln!(
+                        "doctor: refusing to recover unreadable in-flight marker {}: {error:#}",
+                        in_flight_job_path(&slot_dir).display()
+                    );
+                    false
+                }
+            },
         };
         if !should_complete {
             continue;
@@ -11429,6 +11672,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workflow_source_context_requires_exact_workflow_sha() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "event": {"workflow": ".github/workflows/ci.yml"}
+            }),
+        )];
+        assert!(workflow_source_context(&context).is_none());
+
+        let mut context_with_workflow_sha = context;
+        context_with_workflow_sha[0].1["workflow_sha"] =
+            serde_json::json!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(
+            workflow_source_context(&context_with_workflow_sha)
+                .expect("exact workflow SHA should admit source lookup")
+                .sha,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        );
+    }
+
+    #[test]
     fn empty_network_sweep_removes_only_owned_containerless_networks() {
         // id → (daemon-id label, container count) or Err to simulate inspect
         // failure; records `network rm` calls.
@@ -11503,6 +11769,43 @@ mod tests {
     fn empty_network_sweep_is_noop_without_owned_containerless_networks() {
         let removed = prune_empty_velnor_networks_with("daemon-a", |_| None);
         assert_eq!(removed, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_flight_marker_symlink_fails_closed() {
+        let dir = unique_temp_dir("in-flight-marker-symlink");
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("missing-record.json", in_flight_job_path(&dir)).unwrap();
+
+        let error = recorded_in_flight_job_exists(&dir).unwrap_err();
+        assert!(error.to_string().contains("must not be a symlink"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recorded_completion_payload_is_checksum_and_identity_bound() {
+        let dir = unique_temp_dir("recorded-completion-payload");
+        fs::create_dir_all(&dir).unwrap();
+        let record = InFlightJobRecord {
+            plan_id: "plan-1".to_owned(),
+            job_id: "job-1".to_owned(),
+            run_service_url: "https://example.test/_apis/v1/AgentPools/1".to_owned(),
+            billing_owner_id: None,
+        };
+        let payload = br#"{"planId":"plan-1","jobId":"job-1","conclusion":"succeeded","outputs":{"answer":{"value":"kept","isSecret":false}}}"#.to_vec();
+        let checksum = velnor_control::journal::payload_checksum(&payload);
+        crate::node::cleanup::write_outbox(&dir, &record.job_id, 1, &payload).unwrap();
+
+        let loaded =
+            load_recorded_completion_payload(&dir, &record, Generation(1), &checksum).unwrap();
+        assert_eq!(loaded, payload);
+
+        let error =
+            load_recorded_completion_payload(&dir, &record, Generation(1), "wrong").unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -16006,7 +16309,7 @@ runs:
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
             assert!(request.contains(
-                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeef"
+                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
             ));
             let body =
                 "name: local\nruns:\n  using: composite\n  steps:\n    - uses: acme/unknown@v1\n";
@@ -16038,7 +16341,10 @@ runs:
         .unwrap();
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({ "repository": "acme/repo", "workflow_sha": "deadbeef" }),
+            serde_json::json!({
+                "repository": "acme/repo",
+                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }),
         )];
         let source =
             crate::admission::ContentsApiMetadataSource::new_for_test("token", api).unwrap();
