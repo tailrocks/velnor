@@ -189,7 +189,10 @@ fn crate_dependency_direction_matches_plan_064() {
         members_only(&graph["velnor-model"]).is_empty(),
         "model is the root"
     );
-    assert_eq!(members_only(&graph["velnor-control"]), vec!["velnor-model"]);
+    assert_eq!(
+        members_only(&graph["velnor-control"]),
+        vec!["velnor-action-journal", "velnor-model"]
+    );
     assert_eq!(members_only(&graph["velnor-render"]), vec!["velnor-model"]);
     let ctl = members_only(&graph["velnorctl"]);
     for required in [
