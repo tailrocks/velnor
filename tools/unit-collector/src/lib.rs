@@ -6,6 +6,8 @@
 //! source of unit records. Cargo versions that do not provide timing fields
 //! produce zero durations, which is explicit in the generated summary.
 
+#![forbid(unsafe_code)]
+
 pub mod evidence;
 pub mod fanout;
 
