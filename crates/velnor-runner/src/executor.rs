@@ -2042,8 +2042,54 @@ where
                     results.push(result);
                 }
                 Err(error) => {
-                    step_error = Some(error);
-                    break;
+                    // actions/runner parity (RunStepAsync catch + ApplyContinueOnError):
+                    // a step that fails by throwing still honors
+                    // continue-on-error — outcome stays failure, the reported
+                    // conclusion is success, and the job runs remaining steps.
+                    if step.continue_on_error() {
+                        eprintln!(
+                            "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
+                        );
+                        let result = StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: true,
+                            stdout: String::new(),
+                            stderr: format!("{error:#}"),
+                        };
+                        if let Some(frame) = composite_frame.as_mut() {
+                            if step.reports_timeline_start() {
+                                frame.append_inner(
+                                    &display_name,
+                                    &step_log_prelude(step, &step_state),
+                                    &result,
+                                );
+                            } else {
+                                frame.absorb(&result);
+                            }
+                        } else if step.reports_timeline_start() {
+                            let log = step_log_with_name(
+                                &step_backend_id,
+                                &display_name,
+                                timeline_order,
+                                &main_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &step_log_prelude(step, &step_state),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                        }
+                        state.apply(&step_context_id, &result);
+                        if step.reports_timeline_start() {
+                            executed_physical_actions += 1;
+                        }
+                        results.push(result);
+                    } else {
+                        step_error = Some(error);
+                        break;
+                    }
                 }
             }
             self.live_step = None;
@@ -13005,6 +13051,53 @@ mod tests {
     }
 
     #[derive(Default)]
+    /// Step command execution fails by throwing (Err), not by exit code —
+    /// the actions/runner exception path. `fail_execs` bounds how many
+    /// `docker exec` invocations fail so later steps still run.
+    struct ErroringExecRunner {
+        calls: Vec<(String, Vec<String>)>,
+        fail_execs: usize,
+    }
+
+    impl CommandRunner for ErroringExecRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.first().is_some_and(|arg| arg == "exec") && self.fail_execs > 0 {
+                self.fail_execs -= 1;
+                anyhow::bail!("docker daemon connection lost");
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
     struct FailingCheckoutRunner {
         calls: Vec<(String, Vec<String>)>,
     }
@@ -20080,6 +20173,125 @@ fi"#
             })
             .count();
         assert_eq!(exec_count, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    // actions/runner parity (RunStepAsync catch + ExecutionContext.ApplyContinueOnError):
+    // a step that fails by THROWING (not exit code) with continue-on-error: true
+    // keeps outcome=failure for `steps.<id>.outcome`, reports conclusion=success,
+    // and the job runs the remaining steps and finishes green.
+    // Regression: jackin-project/jackin Hygiene run 33319391723 ("miri jackin-config").
+    #[test]
+    fn script_step_execution_error_honors_continue_on_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "miri".into(),
+                display_name: "miri crate".into(),
+                script: "cargo +nightly miri test".into(),
+                shell: Shell::Bash,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: true,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "summary".into(),
+                display_name: "summary".into(),
+                script: "echo summary".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("success()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "outcome-probe".into(),
+                display_name: "probe".into(),
+                script: "echo probe".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("steps.miri.outcome == 'failure'".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+            calls: Vec::new(),
+            fail_execs: 1,
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .expect("continue-on-error step error must not fail the job");
+
+        assert_eq!(summary.step_results.len(), 3);
+        // outcome stays failure internally...
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(!summary.step_results[0].skipped);
+        // ...while the reported conclusion is success (failure_ignored).
+        assert!(summary.step_results[0].failure_ignored);
+        // The job continues: success() is true (conclusion-based)...
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert!(!summary.step_results[1].skipped);
+        // ...and steps.miri.outcome still reports failure.
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        assert!(!summary.step_results[2].skipped);
+        // The step record carries the error text but maps to success.
+        let log = &summary.step_logs[0];
+        assert_eq!(log.display_name, "miri crate");
+        assert!(log.failure_ignored);
+        assert!(log
+            .lines
+            .iter()
+            .any(|line| line.contains("docker daemon connection lost")));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn script_step_execution_error_without_continue_on_error_fails_job() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "miri".into(),
+            display_name: "miri crate".into(),
+            script: "cargo +nightly miri test".into(),
+            shell: Shell::Bash,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        })];
+        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+            calls: Vec::new(),
+            fail_execs: 1,
+        });
+
+        let error = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .expect_err("step execution error without continue-on-error must fail the job");
+        assert!(format!("{error:#}").contains("docker daemon connection lost"));
         fs::remove_dir_all(temp).unwrap();
     }
 
