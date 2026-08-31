@@ -214,6 +214,13 @@ restart are explicit. Only a `release-build` binary (built from a tagged commit
 whose tag == crate version == `Cargo.lock`) can emit a publishable record; a
 normal build reports `development` and refuses.
 
+`release verify-record --publication` may also consume expected and served APT
+metadata claims. This is a fail-closed coherence check over claims already
+produced by the trusted publisher-side verifier; it does not authenticate JSON,
+hash raw APT bytes, parse `Packages` entries, or verify GPG signatures and key
+trust. It never replaces the publisher's byte/signature checks and must not be
+used as publication or deployment authorization by itself.
+
 Primary-repository bare mirrors live in the regenerable `git-mirrors` cache
 class (`/var/cache/velnor/v1/<trust-scope>/git-mirrors`). Each mirror is keyed
 by owner/repository, locked across slots during delta fetch, and never stores a
