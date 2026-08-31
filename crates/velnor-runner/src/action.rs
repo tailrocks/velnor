@@ -1365,10 +1365,10 @@ fn render_composite_expression(
     if expression == "github.workspace" {
         return workspace_container.to_string();
     }
-    if let Some(name) = expression.strip_prefix("inputs.") {
-        if let Some(value) = inputs.get(name) {
-            return value.clone();
-        }
+    if let Some(name) = expression.strip_prefix("inputs.")
+        && let Some(value) = inputs.get(name)
+    {
+        return value.clone();
     }
 
     let mut rendered = expression
@@ -3403,10 +3403,10 @@ runs:
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key == "uses" {
-                        if let Some(uses) = value.as_str() {
-                            values.push(uses.to_string());
-                        }
+                    if key == "uses"
+                        && let Some(uses) = value.as_str()
+                    {
+                        values.push(uses.to_string());
                     }
                     collect_workflow_uses_values(value, values);
                 }

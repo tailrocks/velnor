@@ -312,14 +312,14 @@ pub fn validate_policy(policy: &OrgPolicy) -> Result<()> {
                 "field 'selected_workflows': entry '{value}' references repository '{owner_repo}' absent from field 'selected_repositories'"
             );
         }
-        if let Some(prior_ref) = seen_paths.get(&identity.path) {
-            if prior_ref != &identity.git_ref {
-                bail!(
-                    "field 'selected_workflows': contradictory entries for workflow path '{}': refs '{prior_ref}' and '{}'",
-                    identity.path,
-                    identity.git_ref
-                );
-            }
+        if let Some(prior_ref) = seen_paths.get(&identity.path)
+            && prior_ref != &identity.git_ref
+        {
+            bail!(
+                "field 'selected_workflows': contradictory entries for workflow path '{}': refs '{prior_ref}' and '{}'",
+                identity.path,
+                identity.git_ref
+            );
         }
         seen_paths.insert(identity.path.clone(), identity.git_ref.clone());
         covered_repos.insert(owner_repo);
@@ -570,13 +570,13 @@ pub fn validate_ledger(ledger: &ReleaseRefLedger) -> Result<()> {
                 entry.workflow_path
             );
         }
-        if let Some(expiry) = &entry.expiry {
-            if let Err(message) = ensure_calendar_date(expiry) {
-                bail!(
-                    "field 'entries.expiry': value '{expiry}' for '{slug}/{}' {message}",
-                    entry.workflow_path
-                );
-            }
+        if let Some(expiry) = &entry.expiry
+            && let Err(message) = ensure_calendar_date(expiry)
+        {
+            bail!(
+                "field 'entries.expiry': value '{expiry}' for '{slug}/{}' {message}",
+                entry.workflow_path
+            );
         }
         let exact = format!("{slug}/{}@{}", entry.workflow_path, entry.git_ref);
         if !seen_exact.insert(exact.clone()) {
@@ -792,10 +792,10 @@ pub struct FleetGenerateArgs {
 /// echoed; errors name only the variable.
 fn fleet_github_token() -> Result<String> {
     for variable in ["GITHUB_TOKEN", "GH_TOKEN"] {
-        if let Ok(value) = std::env::var(variable) {
-            if !value.trim().is_empty() {
-                return Ok(value);
-            }
+        if let Ok(value) = std::env::var(variable)
+            && !value.trim().is_empty()
+        {
+            return Ok(value);
         }
     }
     bail!("fleet operation requires a GitHub token in GITHUB_TOKEN (or GH_TOKEN); none found")
@@ -929,15 +929,15 @@ fn plan_policy_actions(
     }
     for stem in existing.keys() {
         let lowercase_stem = stem.to_ascii_lowercase();
-        if let Some(org) = planned_by_lowercase.get(lowercase_stem.as_str()) {
-            if *org != stem.as_str() {
-                bail!(
-                    "fleet policy generation: case-insensitive filename collision between \
-                     ledger organization '{org}' and existing policy stem '{stem}'; both map \
-                     to '{stem}-desired-policy.json' on a case-insensitive filesystem. Rename \
-                     or remove the stale file before generating."
-                );
-            }
+        if let Some(org) = planned_by_lowercase.get(lowercase_stem.as_str())
+            && *org != stem.as_str()
+        {
+            bail!(
+                "fleet policy generation: case-insensitive filename collision between \
+                 ledger organization '{org}' and existing policy stem '{stem}'; both map \
+                 to '{stem}-desired-policy.json' on a case-insensitive filesystem. Rename \
+                 or remove the stale file before generating."
+            );
         }
     }
     // Stale-file pair check (residual H2): plan_policy_actions performs no
@@ -2473,7 +2473,7 @@ mod tests {
             seen.insert(policy.organization.clone());
             let generated = format!("{}\n", policy.canonical_json().expect("canonical"));
             let snapshot = repo_root()
-                .join(".velnor-compare/2026-08-24-039-snapshots")
+                .join("crates/velnor-tools/tests/fixtures/fleet-policy")
                 .join(format!("{}-desired-policy.json", policy.organization));
             let committed = fs::read_to_string(&snapshot)
                 .unwrap_or_else(|error| panic!("read {snapshot:?}: {error}"));
