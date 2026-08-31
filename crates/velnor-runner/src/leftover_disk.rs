@@ -146,10 +146,10 @@ pub fn orphan_job_workspace_paths(
 pub fn disk_usage_percent_from_df(stdout: &str) -> Option<u8> {
     let line = stdout.lines().nth(1)?;
     let cols: Vec<&str> = line.split_whitespace().collect();
-    if cols.len() >= 5 {
-        if let Ok(percent) = cols[4].trim_end_matches('%').parse::<u8>() {
-            return Some(percent);
-        }
+    if cols.len() >= 5
+        && let Ok(percent) = cols[4].trim_end_matches('%').parse::<u8>()
+    {
+        return Some(percent);
     }
     if cols.len() >= 3 {
         let total: u64 = cols[1].parse().ok()?;

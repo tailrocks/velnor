@@ -150,10 +150,8 @@ fn cargo_lock_version(lock_path: &Path) -> Option<String> {
             in_target = true;
             continue;
         }
-        if in_target {
-            if let Some(rest) = line.strip_prefix("version = \"") {
-                return rest.strip_suffix('"').map(str::to_string);
-            }
+        if in_target && let Some(rest) = line.strip_prefix("version = \"") {
+            return rest.strip_suffix('"').map(str::to_string);
         }
     }
     None

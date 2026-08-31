@@ -94,10 +94,10 @@ pub fn resolve_backend(
     let backend = policy_backend
         .or(declared_backend)
         .unwrap_or(CompilerCacheBackend::Kache);
-    if let Some(declared) = declared_backend {
-        if backend != declared {
-            return Err(CacheAdmissionError::PolicyConflict { policy, declared });
-        }
+    if let Some(declared) = declared_backend
+        && backend != declared
+    {
+        return Err(CacheAdmissionError::PolicyConflict { policy, declared });
     }
     Ok(backend)
 }

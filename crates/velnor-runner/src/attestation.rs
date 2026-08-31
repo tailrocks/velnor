@@ -167,12 +167,12 @@ fn resolve_repository_visibility(
         .json()
         .context("decode repository visibility response")?;
     let visibility = parse_repository_visibility(&body)?;
-    if let Some(context_visibility) = context_visibility {
-        if context_visibility != visibility {
-            bail!(
+    if let Some(context_visibility) = context_visibility
+        && context_visibility != visibility
+    {
+        bail!(
                 "repository visibility disagrees between job context ({context_visibility}) and GitHub API ({visibility})"
             );
-        }
     }
     Ok(visibility.to_owned())
 }

@@ -514,12 +514,12 @@ where
         }
     }
 
-    if let Some(declared_size) = declared_size {
-        if declared_size != actual_size {
-            anyhow::bail!(
-                "cache upload size mismatch: declared {declared_size}, received {actual_size}"
-            );
-        }
+    if let Some(declared_size) = declared_size
+        && declared_size != actual_size
+    {
+        anyhow::bail!(
+            "cache upload size mismatch: declared {declared_size}, received {actual_size}"
+        );
     }
     file.flush().await?;
     drop(file);

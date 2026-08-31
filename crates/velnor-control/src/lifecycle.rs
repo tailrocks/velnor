@@ -224,13 +224,13 @@ impl MutationPort for LifecycleService {
 impl LifecycleService {
     fn validate_target(&self, target: &str) -> Result<(), PortError> {
         validate_target(target)?;
-        if let Some(instance) = &self.instance {
-            if target != instance {
-                return Err(PortError::Invalid {
-                    field: "target".to_owned(),
-                    message: "target must match the configured lifecycle instance".to_owned(),
-                });
-            }
+        if let Some(instance) = &self.instance
+            && target != instance
+        {
+            return Err(PortError::Invalid {
+                field: "target".to_owned(),
+                message: "target must match the configured lifecycle instance".to_owned(),
+            });
         }
         Ok(())
     }

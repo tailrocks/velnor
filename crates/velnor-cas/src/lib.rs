@@ -621,13 +621,13 @@ fn canonical_creation_path(path: &Path) -> io::Result<PathBuf> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    if let Ok(metadata) = fs::symlink_metadata(&absolute) {
-        if metadata.file_type().is_symlink() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "secure path cannot be a symlink",
-            ));
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&absolute)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "secure path cannot be a symlink",
+        ));
     }
     let mut unresolved = Vec::new();
     let mut existing = absolute.clone();

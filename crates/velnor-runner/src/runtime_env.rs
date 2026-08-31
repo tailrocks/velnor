@@ -161,10 +161,9 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
                 "ACTIONS_ID_TOKEN_REQUEST_URL",
             ],
             "ACTIONS_ID_TOKEN_REQUEST_URL",
-        ) {
-            if let Some(token) = endpoint_access_token(endpoint) {
-                set_env(&mut env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN", token);
-            }
+        ) && let Some(token) = endpoint_access_token(endpoint)
+        {
+            set_env(&mut env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN", token);
         }
         push_endpoint_data(
             &mut env,
@@ -344,10 +343,10 @@ fn environment_token_pairs(value: &Value) -> Vec<(String, String)> {
 }
 
 fn environment_object_pairs(object: &Map<String, Value>) -> Vec<(String, String)> {
-    if let (Some(name), Some(value)) = (object.get("name"), object.get("value")) {
-        if let Some(name) = environment_name(name) {
-            return vec![(name.to_string(), environment_value(value))];
-        }
+    if let (Some(name), Some(value)) = (object.get("name"), object.get("value"))
+        && let Some(name) = environment_name(name)
+    {
+        return vec![(name.to_string(), environment_value(value))];
     }
 
     for pair_key in ["pairs", "mapping", "map"] {
@@ -372,10 +371,9 @@ fn environment_pair_value(value: &Value) -> Vec<(String, String)> {
                     .or_else(|| object.get("name"))
                     .or_else(|| object.get("Key")),
                 object.get("value").or_else(|| object.get("Value")),
-            ) {
-                if let Some(key) = environment_name(key) {
-                    return vec![(key.to_string(), environment_value(value))];
-                }
+            ) && let Some(key) = environment_name(key)
+            {
+                return vec![(key.to_string(), environment_value(value))];
             }
             environment_object_pairs(object)
         }

@@ -537,14 +537,14 @@ pub fn collect_warnings(resources: &[AnyResource]) -> Vec<String> {
                 ));
             }
         }
-        if let AnyResource::Slot(slot) = resource {
-            if slot.phase.is_warning() {
-                warnings.push(format!(
-                    "{} phase={}",
-                    resource.identity(),
-                    slot.phase.as_str()
-                ));
-            }
+        if let AnyResource::Slot(slot) = resource
+            && slot.phase.is_warning()
+        {
+            warnings.push(format!(
+                "{} phase={}",
+                resource.identity(),
+                slot.phase.as_str()
+            ));
         }
     }
     warnings
@@ -587,12 +587,12 @@ fn render_one_table(
                 line.push_str("  ");
             }
             let mut painted = cell.clone();
-            if styled && columns[index] == "PHASE" {
-                if let AnyResource::Slot(slot) = items[row_index] {
-                    if slot.phase == SlotPhase::Error {
-                        painted = format!("{ANSI_RED}{cell}{ANSI_RESET}");
-                    }
-                }
+            if styled
+                && columns[index] == "PHASE"
+                && let AnyResource::Slot(slot) = items[row_index]
+                && slot.phase == SlotPhase::Error
+            {
+                painted = format!("{ANSI_RED}{cell}{ANSI_RESET}");
             }
             line.push_str(&painted);
             let pad = widths[index].saturating_sub(cell.chars().count());
