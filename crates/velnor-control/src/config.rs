@@ -394,10 +394,14 @@ impl SidecarLock {
         let path = open_anchored_parent(config_path, true)?.ok_or_else(|| {
             ConfigError::Io("context parent disappeared while opening it".to_owned())
         })?;
-        let _ = inspect_regular_entry(&path.parent, &path.name, "context file")?;
+        let context_exists = inspect_regular_entry(&path.parent, &path.name, "context file")?;
         let lock_name = lock_file_name(&path.name);
-        let opened = open_lock(&path.parent, &lock_name, true)?.ok_or_else(|| {
-            ConfigError::Io("context lock disappeared while opening it".to_owned())
+        let opened = open_lock(&path.parent, &lock_name, !context_exists)?.ok_or_else(|| {
+            if context_exists {
+                ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+            } else {
+                ConfigError::Io("context lock disappeared while opening it".to_owned())
+            }
         })?;
         let file = opened.file;
         file.lock()
@@ -1480,6 +1484,32 @@ mod tests {
                 .list()
                 .expect_err("reject context without sidecar lock"),
             ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert_eq!(
+            store
+                .set(named_context("secondary"))
+                .expect_err("mutator must reject context without sidecar lock"),
+            ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert_eq!(
+            store
+                .use_context("primary")
+                .expect_err("selection must reject context without sidecar lock"),
+            ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert_eq!(
+            store
+                .delete("primary")
+                .expect_err("deletion must reject context without sidecar lock"),
+            ConfigError::Io("refusing to use context file without sidecar lock".to_owned())
+        );
+        assert!(
+            !path
+                .parent()
+                .expect("context parent")
+                .join(".config.toml.lock")
+                .exists(),
+            "mutators must not recreate a missing lock"
         );
     }
 
