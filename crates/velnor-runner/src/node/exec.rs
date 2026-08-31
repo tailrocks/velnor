@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::args::DaemonArgs;
+use anyhow::bail;
 
 pub const EXEC_FILE: &str = "daemon-exec.json";
 
@@ -13,6 +14,9 @@ pub fn write_exec_config(
     args: &DaemonArgs,
     slot_count: usize,
 ) -> anyhow::Result<std::path::PathBuf> {
+    if slot_count == 0 {
+        bail!("daemon execution config must declare at least one slot");
+    }
     let mut exec = args.clone();
     exec.pat = None;
     exec.slots = slot_count;
@@ -37,6 +41,9 @@ pub fn load_exec_config(dir: &Path) -> anyhow::Result<DaemonArgs> {
     let mut args: DaemonArgs = serde_json::from_slice(&bytes)?;
     if args.pat.is_some() {
         anyhow::bail!("daemon-exec.json must not contain a GitHub token");
+    }
+    if args.slots == 0 {
+        bail!("daemon-exec.json must declare at least one slot");
     }
     args.pat = std::env::var("GITHUB_TOKEN").ok();
     Ok(args)
@@ -97,6 +104,30 @@ mod tests {
         let loaded = load_exec_config(&dir).unwrap();
         assert!(loaded.pat.is_none() || std::env::var_os("GITHUB_TOKEN").is_some());
         assert_eq!(loaded.slots, 3);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn zero_slot_exec_config_is_rejected_on_write_and_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-exec-zero-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let args = dummy_args();
+        assert!(write_exec_config(&dir, &args, 0).is_err());
+        assert!(!dir.exists());
+
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut invalid = args;
+        invalid.slots = 0;
+        invalid.pat = None;
+        std::fs::write(dir.join(EXEC_FILE), serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let error = load_exec_config(&dir).unwrap_err();
+        assert!(error.to_string().contains("at least one slot"));
         std::fs::remove_dir_all(dir).ok();
     }
 }
