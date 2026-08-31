@@ -843,7 +843,7 @@ jobs:
           done
           jq -S -n \
             --arg source_repository "$GITHUB_REPOSITORY" \
-            --arg source_ref "refs/tags/v${VERSION}" \
+            --arg source_ref "$COMMIT" \
             --arg source_commit "$COMMIT" \
             --arg version "$VERSION" \
             --slurpfile assets assets.jsonl \
@@ -956,7 +956,7 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.tar.gz
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   sign-arm64-tar:
     needs: [identity, release_gate, release]
@@ -968,7 +968,7 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.tar.gz
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   sign-amd64-deb:
     needs: [identity, release_gate, release]
@@ -980,7 +980,7 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.deb
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   sign-arm64-deb:
     needs: [identity, release_gate, release]
@@ -992,7 +992,7 @@ jobs:
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
-      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+      source-ref: ${{ needs.release_gate.outputs.default_branch_commit }}
 
   # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
   # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).
