@@ -178,6 +178,9 @@ define_telemetry_contracts! {
         ],
         optional: [
             "miss_reason" => String,
+            "physical_bytes_known" => Boolean,
+            "shared_bytes" => NonNegativeInteger,
+            "newly_allocated_bytes" => NonNegativeInteger,
         ]
     },
     CompileStart => "compile_start" {
@@ -238,7 +241,11 @@ define_telemetry_contracts! {
             "ms" => NonNegativeInteger,
             "subset" => String,
         ],
-        optional: []
+        optional: [
+            "physical_bytes_known" => Boolean,
+            "shared_bytes" => NonNegativeInteger,
+            "newly_allocated_bytes" => NonNegativeInteger,
+        ]
     },
     PassiveWait => "passive_wait" {
         lane: None,
@@ -1455,7 +1462,42 @@ fn validate_event_contract(
             ));
         }
     }
+    if matches!(
+        event,
+        TelemetryEvent::CacheLookup | TelemetryEvent::ArtifactMaterialize
+    ) {
+        validate_physical_byte_accounting(fields)?;
+    }
     Ok(())
+}
+
+fn validate_physical_byte_accounting(fields: &TelemetryFields) -> Result<(), InvalidTelemetry> {
+    let known = fields.as_map().get("physical_bytes_known");
+    let has_shared = fields.as_map().contains_key("shared_bytes");
+    let has_newly_allocated = fields.as_map().contains_key("newly_allocated_bytes");
+    let has_components = has_shared || has_newly_allocated;
+
+    match known {
+        None if !has_components => Ok(()),
+        None => Err(InvalidTelemetry::rule(
+            "physical_bytes_known",
+            "is required when physical-byte components are present",
+        )),
+        Some(Value::Bool(true)) if has_shared && has_newly_allocated => Ok(()),
+        Some(Value::Bool(true)) => Err(InvalidTelemetry::rule(
+            "fields",
+            "known physical-byte accounting requires both byte components",
+        )),
+        Some(Value::Bool(false)) if !has_components => Ok(()),
+        Some(Value::Bool(false)) => Err(InvalidTelemetry::rule(
+            "fields",
+            "unknown physical-byte accounting must omit both byte components",
+        )),
+        Some(_) => Err(InvalidTelemetry::rule(
+            "physical_bytes_known",
+            "must be a boolean",
+        )),
+    }
 }
 
 fn matches_field_kind(kind: TelemetryFieldKind, value: &Value) -> bool {
@@ -1481,7 +1523,7 @@ fn matches_field_kind(kind: TelemetryFieldKind, value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::{fs, thread};
+    use std::{fs, process::Command, thread};
 
     fn fields() -> TelemetryFields {
         TelemetryFields::new(BTreeMap::from([
@@ -1512,6 +1554,79 @@ mod tests {
             fields: fields(),
         })
         .expect("valid envelope")
+    }
+
+    fn cache_lookup_envelope(fields: BTreeMap<String, Value>) -> TelemetryEnvelope {
+        TelemetryEnvelope::new(TelemetryEnvelopeInput {
+            run_id: "run-123",
+            action_key_digest: None,
+            lane: TelemetryLane::Github,
+            repo: "tailrocks/velnor",
+            trust_domain: "trusted",
+            event: TelemetryEvent::CacheLookup,
+            ts_logical: 7,
+            ts_wall: Timestamp::UNIX_EPOCH,
+            fields: TelemetryFields::new(fields).expect("generic telemetry fields"),
+        })
+        .expect("valid cache lookup envelope")
+    }
+
+    fn artifact_materialize_envelope(fields: BTreeMap<String, Value>) -> TelemetryEnvelope {
+        TelemetryEnvelope::new(TelemetryEnvelopeInput {
+            run_id: "run-123",
+            action_key_digest: None,
+            lane: TelemetryLane::Github,
+            repo: "tailrocks/velnor",
+            trust_domain: "trusted",
+            event: TelemetryEvent::ArtifactMaterialize,
+            ts_logical: 7,
+            ts_wall: Timestamp::UNIX_EPOCH,
+            fields: TelemetryFields::new(fields).expect("generic telemetry fields"),
+        })
+        .expect("valid artifact materialize envelope")
+    }
+
+    fn assert_json_schema_result(value: &Value, expected: bool, case: &str) {
+        let data_path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-schema-{}-{}-{case}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is after Unix epoch")
+                .as_nanos()
+        ));
+        let schema_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/velnor.telemetry.v1.json");
+        fs::write(
+            &data_path,
+            serde_json::to_vec(value).expect("wire value serializes"),
+        )
+        .expect("write temporary telemetry wire value");
+        let result = Command::new("mise")
+            .args([
+                "exec",
+                "--no-deps",
+                "npm:ajv-cli",
+                "--",
+                "ajv",
+                "validate",
+                "--spec=draft2020",
+                "--validate-formats=false",
+                "-s",
+                schema_path.to_str().expect("schema path is UTF-8"),
+                "-d",
+                data_path.to_str().expect("data path is UTF-8"),
+            ])
+            .output()
+            .expect("mise-managed ajv-cli is executable");
+        let _ = fs::remove_file(&data_path);
+        assert_eq!(
+            result.status.success(),
+            expected,
+            "JSON-Schema result mismatch for {case}: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 
     #[test]
@@ -1620,6 +1735,207 @@ mod tests {
                 }
             }
         }
+        for event_fields in ["cache_lookup_fields", "artifact_materialize_fields"] {
+            assert_eq!(
+                schema
+                    .pointer(&format!("/$defs/{event_fields}/allOf"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(3)
+            );
+        }
+    }
+
+    #[test]
+    fn physical_byte_telemetry_preserves_unknown_and_known_invariants() {
+        let unknown = cache_lookup_envelope(BTreeMap::from([
+            ("hit".into(), json!(false)),
+            ("lookup_ms".into(), json!(1)),
+            ("physical_bytes_known".into(), json!(false)),
+            ("store".into(), json!("kache")),
+        ]));
+        let serialized = serde_json::to_value(unknown).expect("serialize unknown accounting");
+        assert_eq!(serialized["fields"]["physical_bytes_known"], false);
+        assert!(serialized["fields"].get("shared_bytes").is_none());
+        assert!(serialized["fields"].get("newly_allocated_bytes").is_none());
+
+        let known = cache_lookup_envelope(BTreeMap::from([
+            ("hit".into(), json!(true)),
+            ("lookup_ms".into(), json!(1)),
+            ("newly_allocated_bytes".into(), json!(23)),
+            ("physical_bytes_known".into(), json!(true)),
+            ("shared_bytes".into(), json!(11)),
+            ("store".into(), json!("kache")),
+        ]));
+        assert_eq!(
+            serde_json::to_value(known).expect("serialize known accounting")["fields"]
+                ["newly_allocated_bytes"],
+            23
+        );
+
+        for fields in [
+            BTreeMap::from([
+                ("hit".into(), json!(true)),
+                ("lookup_ms".into(), json!(1)),
+                ("physical_bytes_known".into(), json!(false)),
+                ("shared_bytes".into(), json!(11)),
+                ("store".into(), json!("kache")),
+            ]),
+            BTreeMap::from([
+                ("hit".into(), json!(true)),
+                ("lookup_ms".into(), json!(1)),
+                ("physical_bytes_known".into(), json!(true)),
+                ("shared_bytes".into(), json!(11)),
+                ("store".into(), json!("kache")),
+            ]),
+        ] {
+            assert!(TelemetryEnvelope::new(TelemetryEnvelopeInput {
+                run_id: "run-123",
+                action_key_digest: None,
+                lane: TelemetryLane::Github,
+                repo: "tailrocks/velnor",
+                trust_domain: "trusted",
+                event: TelemetryEvent::CacheLookup,
+                ts_logical: 7,
+                ts_wall: Timestamp::UNIX_EPOCH,
+                fields: TelemetryFields::new(fields).expect("generic fields"),
+            })
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn physical_byte_wire_records_validate_against_json_schema() {
+        let required_cache_fields = BTreeMap::from([
+            ("hit".into(), json!(true)),
+            ("lookup_ms".into(), json!(1)),
+            ("store".into(), json!("kache")),
+        ]);
+        let required_artifact_fields = BTreeMap::from([
+            ("digest".into(), json!("abc")),
+            ("ms".into(), json!(1)),
+            ("subset".into(), json!("runtime")),
+        ]);
+        for (case, envelope) in [
+            (
+                "cache-omitted",
+                cache_lookup_envelope(required_cache_fields.clone()),
+            ),
+            (
+                "cache-unknown",
+                cache_lookup_envelope(BTreeMap::from([
+                    ("hit".into(), json!(false)),
+                    ("lookup_ms".into(), json!(1)),
+                    ("physical_bytes_known".into(), json!(false)),
+                    ("store".into(), json!("kache")),
+                ])),
+            ),
+            (
+                "cache-known",
+                cache_lookup_envelope(BTreeMap::from([
+                    ("hit".into(), json!(true)),
+                    ("lookup_ms".into(), json!(1)),
+                    ("newly_allocated_bytes".into(), json!(0)),
+                    ("physical_bytes_known".into(), json!(true)),
+                    ("shared_bytes".into(), json!(0)),
+                    ("store".into(), json!("kache")),
+                ])),
+            ),
+            (
+                "artifact-omitted",
+                artifact_materialize_envelope(required_artifact_fields.clone()),
+            ),
+            (
+                "artifact-unknown",
+                artifact_materialize_envelope(BTreeMap::from([
+                    ("digest".into(), json!("abc")),
+                    ("ms".into(), json!(1)),
+                    ("physical_bytes_known".into(), json!(false)),
+                    ("subset".into(), json!("runtime")),
+                ])),
+            ),
+            (
+                "artifact-known",
+                artifact_materialize_envelope(BTreeMap::from([
+                    ("digest".into(), json!("abc")),
+                    ("ms".into(), json!(1)),
+                    ("newly_allocated_bytes".into(), json!(23)),
+                    ("physical_bytes_known".into(), json!(true)),
+                    ("shared_bytes".into(), json!(11)),
+                    ("subset".into(), json!("runtime")),
+                ])),
+            ),
+        ] {
+            assert_json_schema_result(
+                &serde_json::to_value(envelope).expect("serialize valid telemetry wire"),
+                true,
+                case,
+            );
+        }
+
+        let known = serde_json::to_value(cache_lookup_envelope(BTreeMap::from([
+            ("hit".into(), json!(true)),
+            ("lookup_ms".into(), json!(1)),
+            ("newly_allocated_bytes".into(), json!(23)),
+            ("physical_bytes_known".into(), json!(true)),
+            ("shared_bytes".into(), json!(11)),
+            ("store".into(), json!("kache")),
+        ])))
+        .expect("serialize known telemetry wire");
+        for (case, mutation) in [
+            (
+                "known-missing-component",
+                (|value: &mut Value| {
+                    value["fields"]
+                        .as_object_mut()
+                        .expect("fields object")
+                        .remove("shared_bytes");
+                }) as fn(&mut Value),
+            ),
+            (
+                "unknown-with-component",
+                (|value: &mut Value| {
+                    value["fields"]["physical_bytes_known"] = json!(false);
+                }) as fn(&mut Value),
+            ),
+            (
+                "component-without-known",
+                (|value: &mut Value| {
+                    value["fields"]
+                        .as_object_mut()
+                        .expect("fields object")
+                        .remove("physical_bytes_known");
+                }) as fn(&mut Value),
+            ),
+            (
+                "known-null-component",
+                (|value: &mut Value| {
+                    value["fields"]["shared_bytes"] = Value::Null;
+                }) as fn(&mut Value),
+            ),
+        ] {
+            let mut invalid = known.clone();
+            mutation(&mut invalid);
+            assert_json_schema_result(&invalid, false, case);
+            assert!(
+                serde_json::from_value::<TelemetryEnvelope>(invalid).is_err(),
+                "model must reject {case}"
+            );
+        }
+
+        let mut artifact_null =
+            serde_json::to_value(artifact_materialize_envelope(BTreeMap::from([
+                ("digest".into(), json!("abc")),
+                ("ms".into(), json!(1)),
+                ("newly_allocated_bytes".into(), json!(23)),
+                ("physical_bytes_known".into(), json!(true)),
+                ("shared_bytes".into(), json!(11)),
+                ("subset".into(), json!("runtime")),
+            ])))
+            .expect("serialize artifact telemetry wire");
+        artifact_null["fields"]["newly_allocated_bytes"] = Value::Null;
+        assert_json_schema_result(&artifact_null, false, "artifact-null-component");
+        assert!(serde_json::from_value::<TelemetryEnvelope>(artifact_null).is_err());
     }
 
     #[test]

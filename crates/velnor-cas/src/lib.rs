@@ -22,7 +22,7 @@ use std::{
     sync::Arc,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use velnor_action_model::{canonical_json_bytes, Digest, DigestError};
@@ -43,11 +43,130 @@ pub enum MaterializationMethod {
     VerifiedCopy,
 }
 
+/// Operation-scoped physical-byte evidence for one durable CAS object or
+/// materialized file.
+///
+/// `shared_bytes` describes durable bytes reused by the operation, while
+/// `newly_allocated_bytes` describes durable bytes allocated by it. The two
+/// fields are intentionally separate: callers must not add them to a logical
+/// length, include directory metadata, or infer either value when measurement
+/// is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PhysicalByteAccounting {
+    known: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    newly_allocated_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PhysicalByteAccountingWire {
+    known: bool,
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_optional_non_null")]
+    shared_bytes: Option<u64>,
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_optional_non_null")]
+    newly_allocated_bytes: Option<u64>,
+}
+
+fn deserialize_optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| D::Error::custom("physical-byte fields must be omitted instead of null"))
+}
+
+impl PhysicalByteAccounting {
+    /// Construct an unknown observation. Unknown observations omit both byte
+    /// components when serialized.
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            known: false,
+            shared_bytes: None,
+            newly_allocated_bytes: None,
+        }
+    }
+
+    /// Construct known, disjoint shared and newly allocated components.
+    #[must_use]
+    pub const fn known(shared_bytes: u64, newly_allocated_bytes: u64) -> Self {
+        Self {
+            known: true,
+            shared_bytes: Some(shared_bytes),
+            newly_allocated_bytes: Some(newly_allocated_bytes),
+        }
+    }
+
+    /// Whether both physical-byte components were observed truthfully.
+    #[must_use]
+    pub const fn is_known(self) -> bool {
+        self.known
+    }
+
+    /// Bytes reused by this operation, when known.
+    #[must_use]
+    pub const fn shared_bytes(self) -> Option<u64> {
+        self.shared_bytes
+    }
+
+    /// Bytes newly allocated by this operation, when known.
+    #[must_use]
+    pub const fn newly_allocated_bytes(self) -> Option<u64> {
+        self.newly_allocated_bytes
+    }
+
+    fn from_wire(wire: PhysicalByteAccountingWire) -> Result<Self, &'static str> {
+        match (wire.known, wire.shared_bytes, wire.newly_allocated_bytes) {
+            (true, Some(shared_bytes), Some(newly_allocated_bytes)) => {
+                Ok(Self::known(shared_bytes, newly_allocated_bytes))
+            }
+            (true, _, _) => Err("known physical-byte accounting requires both byte fields"),
+            (false, None, None) => Ok(Self::unknown()),
+            (false, _, _) => Err("unknown physical-byte accounting must omit both byte fields"),
+        }
+    }
+
+    fn combine(self, other: Self) -> Self {
+        match (
+            self.shared_bytes,
+            self.newly_allocated_bytes,
+            other.shared_bytes,
+            other.newly_allocated_bytes,
+        ) {
+            (Some(shared), Some(newly), Some(other_shared), Some(other_newly)) => {
+                let Some(shared) = shared.checked_add(other_shared) else {
+                    return Self::unknown();
+                };
+                let Some(newly) = newly.checked_add(other_newly) else {
+                    return Self::unknown();
+                };
+                Self::known(shared, newly)
+            }
+            _ => Self::unknown(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PhysicalByteAccounting {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        PhysicalByteAccountingWire::deserialize(deserializer)
+            .and_then(|wire| Self::from_wire(wire).map_err(D::Error::custom))
+    }
+}
+
 /// Aggregate evidence from one lazy materialization operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializationReport {
     pub paths: Vec<PathBuf>,
     pub methods: std::collections::BTreeMap<MaterializationMethod, usize>,
+    /// Physical-byte evidence for the successfully materialized file objects.
+    pub accounting: PhysicalByteAccounting,
 }
 
 /// Hook for TASK-028's bounded-store policy.
@@ -234,6 +353,15 @@ impl CasStore {
 
     /// Store bytes and return their BLAKE3 digest.
     pub fn put(&self, bytes: &[u8]) -> Result<Digest, CasError> {
+        self.put_inner(bytes, None).map(|(digest, _)| digest)
+    }
+
+    /// Store bytes and return their digest with post-publication physical-byte
+    /// evidence for this CAS operation.
+    pub fn put_with_accounting(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(Digest, PhysicalByteAccounting), CasError> {
         self.put_inner(bytes, None)
     }
 
@@ -244,13 +372,14 @@ impl CasStore {
         budget: &dyn BudgetCallback,
     ) -> Result<Digest, CasError> {
         self.put_inner(bytes, Some(budget))
+            .map(|(digest, _)| digest)
     }
 
     fn put_inner(
         &self,
         bytes: &[u8],
         budget: Option<&dyn BudgetCallback>,
-    ) -> Result<Digest, CasError> {
+    ) -> Result<(Digest, PhysicalByteAccounting), CasError> {
         #[cfg(unix)]
         {
             self.put_inner_secure(bytes, budget)
@@ -266,13 +395,13 @@ impl CasStore {
         &self,
         bytes: &[u8],
         budget: Option<&dyn BudgetCallback>,
-    ) -> Result<Digest, CasError> {
+    ) -> Result<(Digest, PhysicalByteAccounting), CasError> {
         let digest = Digest::from_bytes(bytes);
         let bucket = self.open_bucket(&digest, true)?;
         let object_name = &digest.as_str()[2..];
-        if open_existing_object(&bucket, object_name, &digest)?.is_some() {
+        if let Some(file) = open_existing_object(&bucket, object_name, &digest)? {
             let _ = self.get(&digest)?;
-            return Ok(digest);
+            return Ok((digest, file_accounting(&file, true)));
         }
 
         let mut reservation = if let Some(budget) = budget {
@@ -311,7 +440,8 @@ impl CasStore {
             Err(error) if error == rustix::io::Errno::EXIST => {
                 let _ = rustix::fs::unlinkat(&bucket, &temp_name, rustix::fs::AtFlags::empty());
                 let _ = self.get(&digest)?;
-                return Ok(digest);
+                let accounting = self.object_accounting(&digest, true);
+                return Ok((digest, accounting));
             }
             Err(error) => {
                 let _ = rustix::fs::unlinkat(&bucket, &temp_name, rustix::fs::AtFlags::empty());
@@ -322,7 +452,7 @@ impl CasStore {
         if let Some(reservation) = &mut reservation {
             reservation.committed = true;
         }
-        Ok(digest)
+        Ok((digest.clone(), self.object_accounting(&digest, false)))
     }
 
     #[cfg(not(unix))]
@@ -330,12 +460,12 @@ impl CasStore {
         &self,
         bytes: &[u8],
         budget: Option<&dyn BudgetCallback>,
-    ) -> Result<Digest, CasError> {
+    ) -> Result<(Digest, PhysicalByteAccounting), CasError> {
         let digest = Digest::from_bytes(bytes);
         let path = self.checked_object_path(&digest)?;
         if path.exists() {
             let _ = self.get(&digest)?;
-            return Ok(digest);
+            return Ok((digest, self.object_accounting(&digest, true)));
         }
 
         let mut reservation = if let Some(budget) = budget {
@@ -375,7 +505,8 @@ impl CasStore {
             Err(_error) if path.exists() => {
                 let _ = fs::remove_file(&temp);
                 let _ = self.get(&digest)?;
-                return Ok(digest);
+                let accounting = self.object_accounting(&digest, true);
+                return Ok((digest, accounting));
             }
             Err(error) => {
                 let _ = fs::remove_file(&temp);
@@ -386,7 +517,7 @@ impl CasStore {
         if let Some(reservation) = &mut reservation {
             reservation.committed = true;
         }
-        Ok(digest)
+        Ok((digest.clone(), self.object_accounting(&digest, false)))
     }
 
     /// Read and verify an object in full.
@@ -417,12 +548,21 @@ impl CasStore {
 
     /// Store a tree manifest and return its root digest.
     pub fn put_tree(&self, manifest: &TreeManifest) -> Result<Digest, CasError> {
+        self.put_tree_with_accounting(manifest)
+            .map(|(digest, _)| digest)
+    }
+
+    /// Store a tree manifest and return its digest with physical-byte evidence.
+    pub fn put_tree_with_accounting(
+        &self,
+        manifest: &TreeManifest,
+    ) -> Result<(Digest, PhysicalByteAccounting), CasError> {
         manifest.validate()?;
         let mut canonical_manifest = manifest.clone();
         canonical_manifest
             .entries
             .sort_by(|left, right| left.path.cmp(&right.path));
-        self.put(&canonical_json_bytes(&canonical_manifest)?)
+        self.put_with_accounting(&canonical_json_bytes(&canonical_manifest)?)
     }
 
     /// Materialize only the selected file classes from a tree manifest.
@@ -448,6 +588,13 @@ impl CasStore {
         manifest.validate()?;
         let mut materialized = Vec::new();
         let mut methods = std::collections::BTreeMap::new();
+        #[cfg(unix)]
+        let mut shared_digests = std::collections::BTreeSet::new();
+        let mut accounting = if cfg!(unix) {
+            PhysicalByteAccounting::known(0, 0)
+        } else {
+            PhysicalByteAccounting::unknown()
+        };
         for entry in manifest
             .entries
             .iter()
@@ -459,7 +606,7 @@ impl CasStore {
             #[cfg(unix)]
             let source = self.open_object(&entry.digest)?;
             #[cfg(unix)]
-            let method = materialize_file(
+            let (method, materialized_file) = materialize_file(
                 &source,
                 &target.parent,
                 &target.name,
@@ -467,21 +614,40 @@ impl CasStore {
                 &entry.digest,
                 entry.mode,
             )?;
+            #[cfg(unix)]
+            let path = target.path;
             #[cfg(not(unix))]
             let path = safe_destination_path(destination, &entry.path)?;
             #[cfg(not(unix))]
             let source = self.checked_object_path(&entry.digest)?;
             #[cfg(not(unix))]
             let method = materialize_file(&source, &path, &bytes, &entry.digest, entry.mode)?;
+            #[cfg(unix)]
+            let file_accounting = if matches!(
+                method,
+                MaterializationMethod::ApfsClone | MaterializationMethod::Reflink
+            ) {
+                if shared_digests.insert(entry.digest.clone()) {
+                    file_accounting(&materialized_file, true)
+                } else {
+                    PhysicalByteAccounting::known(0, 0)
+                }
+            } else {
+                file_accounting(&materialized_file, false)
+            };
+            #[cfg(not(unix))]
+            let file_accounting = physical_accounting_for_materialization(&path, method);
+            accounting = accounting.combine(file_accounting);
             *methods.entry(method).or_insert(0) += 1;
             #[cfg(unix)]
-            materialized.push(target.path);
+            materialized.push(path);
             #[cfg(not(unix))]
             materialized.push(path);
         }
         Ok(MaterializationReport {
             paths: materialized,
             methods,
+            accounting,
         })
     }
 
@@ -559,6 +725,30 @@ impl CasStore {
         }
         Ok(path)
     }
+
+    fn object_accounting(&self, digest: &Digest, shared: bool) -> PhysicalByteAccounting {
+        #[cfg(unix)]
+        {
+            let Ok(bucket) = self.open_bucket(digest, false) else {
+                return PhysicalByteAccounting::unknown();
+            };
+            let Ok(Some(file)) = open_existing_object(&bucket, &digest.as_str()[2..], digest)
+            else {
+                return PhysicalByteAccounting::unknown();
+            };
+            file_accounting(&file, shared)
+        }
+        #[cfg(not(unix))]
+        {
+            let Ok(path) = self.checked_object_path(digest) else {
+                return PhysicalByteAccounting::unknown();
+            };
+            let Ok(metadata) = fs::symlink_metadata(path) else {
+                return PhysicalByteAccounting::unknown();
+            };
+            metadata_accounting(&metadata, shared)
+        }
+    }
 }
 
 struct BudgetReservation<'a> {
@@ -572,6 +762,64 @@ impl Drop for BudgetReservation<'_> {
         if !self.committed {
             self.callback.release(self.bytes);
         }
+    }
+}
+
+fn file_accounting(file: &File, shared: bool) -> PhysicalByteAccounting {
+    file.metadata()
+        .ok()
+        .and_then(|metadata| physical_allocation_bytes(&metadata))
+        .map_or_else(PhysicalByteAccounting::unknown, |bytes| {
+            if shared {
+                PhysicalByteAccounting::known(bytes, 0)
+            } else {
+                PhysicalByteAccounting::known(0, bytes)
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn metadata_accounting(metadata: &fs::Metadata, shared: bool) -> PhysicalByteAccounting {
+    let Some(bytes) = physical_allocation_bytes(metadata) else {
+        return PhysicalByteAccounting::unknown();
+    };
+    if shared {
+        PhysicalByteAccounting::known(bytes, 0)
+    } else {
+        PhysicalByteAccounting::known(0, bytes)
+    }
+}
+
+#[cfg(not(unix))]
+fn physical_accounting_for_materialization(
+    path: &Path,
+    method: MaterializationMethod,
+) -> PhysicalByteAccounting {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return PhysicalByteAccounting::unknown();
+    };
+    let Some(bytes) = physical_allocation_bytes(&metadata) else {
+        return PhysicalByteAccounting::unknown();
+    };
+    match method {
+        MaterializationMethod::ApfsClone | MaterializationMethod::Reflink => {
+            PhysicalByteAccounting::known(bytes, 0)
+        }
+        MaterializationMethod::VerifiedCopy => PhysicalByteAccounting::known(0, bytes),
+    }
+}
+
+fn physical_allocation_bytes(metadata: &fs::Metadata) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        metadata.blocks().checked_mul(512)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
     }
 }
 
@@ -867,7 +1115,7 @@ fn materialize_file(
     bytes: &[u8],
     expected: &Digest,
     mode: u32,
-) -> Result<MaterializationMethod, CasError> {
+) -> Result<(MaterializationMethod, File), CasError> {
     let temp_name = format!(
         ".{}.materialize-{}",
         name.to_string_lossy(),
@@ -911,7 +1159,6 @@ fn materialize_file(
     )
     .map_err(io::Error::from)?;
     temp_file.sync_all()?;
-    drop(temp_file);
 
     match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) if rustix::fs::FileType::from_raw_mode(stat.st_mode).is_symlink() => {
@@ -936,7 +1183,7 @@ fn materialize_file(
         io::Error::from(error)
     })?;
     parent.sync_all()?;
-    Ok(method)
+    Ok((method, temp_file))
 }
 
 #[cfg(not(unix))]
@@ -1065,6 +1312,17 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    fn allocated_bytes(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+
+        fs::metadata(path)
+            .unwrap()
+            .blocks()
+            .checked_mul(512)
+            .unwrap()
+    }
+
     fn store() -> (TempDir, CasStore) {
         let temp = TempDir::new().unwrap();
         let store = CasStore::new(temp.path().join("cas")).unwrap();
@@ -1080,6 +1338,92 @@ mod tests {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"hello cas");
+    }
+
+    #[test]
+    fn physical_accounting_serialization_preserves_unknown_and_known_invariants() {
+        let unknown = PhysicalByteAccounting::unknown();
+        assert_eq!(
+            serde_json::to_value(unknown).unwrap(),
+            serde_json::json!({"known": false})
+        );
+        let known = PhysicalByteAccounting::known(11, 23);
+        assert_eq!(
+            serde_json::to_value(known).unwrap(),
+            serde_json::json!({
+                "known": true,
+                "shared_bytes": 11,
+                "newly_allocated_bytes": 23
+            })
+        );
+        assert!(
+            serde_json::from_value::<PhysicalByteAccounting>(serde_json::json!({
+                "known": true,
+                "shared_bytes": 11
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PhysicalByteAccounting>(serde_json::json!({
+                "known": false,
+                "shared_bytes": 11,
+                "newly_allocated_bytes": 23
+            }))
+            .is_err()
+        );
+        for known in [true, false] {
+            for field in ["shared_bytes", "newly_allocated_bytes"] {
+                let mut value = serde_json::json!({
+                    "known": known,
+                    "shared_bytes": 11,
+                    "newly_allocated_bytes": 23
+                });
+                if !known {
+                    value["shared_bytes"] = serde_json::Value::Null;
+                    value["newly_allocated_bytes"] = serde_json::Value::Null;
+                } else {
+                    value[field] = serde_json::Value::Null;
+                }
+                assert!(
+                    serde_json::from_value::<PhysicalByteAccounting>(value).is_err(),
+                    "explicit null must be rejected for {field} with known={known}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_cas_insert_is_new_and_duplicate_is_shared() {
+        let (_temp, store) = store();
+        let bytes = vec![0x5a; 8192];
+        let (digest, first) = store.put_with_accounting(&bytes).unwrap();
+        let allocated = allocated_bytes(&store.object_path(&digest));
+        assert_eq!(first, PhysicalByteAccounting::known(0, allocated));
+
+        let (duplicate_digest, duplicate) = store.put_with_accounting(&bytes).unwrap();
+        assert_eq!(duplicate_digest, digest);
+        assert_eq!(duplicate, PhysicalByteAccounting::known(allocated, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zero_size_cas_insert_reports_exact_zero_allocation() {
+        let (_temp, store) = store();
+        let (digest, accounting) = store.put_with_accounting(b"").unwrap();
+        let allocated = allocated_bytes(&store.object_path(&digest));
+        assert_eq!(allocated, 0);
+        assert_eq!(accounting, PhysicalByteAccounting::known(0, allocated));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_platform_reports_unknown_cas_accounting() {
+        let (_temp, store) = store();
+        let (_, accounting) = store.put_with_accounting(b"bytes").unwrap();
+        assert!(!accounting.is_known());
+        assert_eq!(accounting.shared_bytes(), None);
+        assert_eq!(accounting.newly_allocated_bytes(), None);
     }
 
     #[test]
@@ -1162,6 +1506,99 @@ mod tests {
                     .map(|path| path.strip_prefix(&destination).unwrap().to_str().unwrap())
                     .collect::<Vec<_>>(),
                 expected
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_reports_allocation_by_copy_or_shared_method() {
+        let (temp, store) = store();
+        let digest = store.put(&vec![0x33; 8192]).unwrap();
+        let root = store
+            .put_tree(&TreeManifest {
+                entries: vec![TreeEntry {
+                    path: "bin/tool".into(),
+                    digest,
+                    class: FileClass::Executable,
+                    mode: 0o755,
+                }],
+            })
+            .unwrap();
+
+        let report = store
+            .materialize_subset_report(
+                &root,
+                SubsetSelector::ExecutablesOnly,
+                &temp.path().join("materialized"),
+            )
+            .unwrap();
+        let allocated = allocated_bytes(&report.paths[0]);
+        let expected = if report
+            .methods
+            .contains_key(&MaterializationMethod::ApfsClone)
+            || report.methods.contains_key(&MaterializationMethod::Reflink)
+        {
+            PhysicalByteAccounting::known(allocated, 0)
+        } else {
+            PhysicalByteAccounting::known(0, allocated)
+        };
+        assert_eq!(report.accounting, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_deduplicates_shared_accounting_for_repeated_digest() {
+        let (temp, store) = store();
+        let digest = store.put(&vec![0x44; 8192]).unwrap();
+        let repeated_root = store
+            .put_tree(&TreeManifest {
+                entries: vec![
+                    TreeEntry {
+                        path: "first".into(),
+                        digest: digest.clone(),
+                        class: FileClass::Runtime,
+                        mode: 0o644,
+                    },
+                    TreeEntry {
+                        path: "second".into(),
+                        digest,
+                        class: FileClass::Runtime,
+                        mode: 0o644,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let repeated = store
+            .materialize_subset_report(
+                &repeated_root,
+                SubsetSelector::RuntimeFiles,
+                &temp.path().join("repeated-destination"),
+            )
+            .unwrap();
+
+        assert_eq!(repeated.paths.len(), 2);
+        if repeated
+            .methods
+            .contains_key(&MaterializationMethod::ApfsClone)
+            || repeated
+                .methods
+                .contains_key(&MaterializationMethod::Reflink)
+        {
+            assert_eq!(
+                repeated.accounting,
+                PhysicalByteAccounting::known(allocated_bytes(&repeated.paths[0]), 0)
+            );
+        } else {
+            assert_eq!(
+                repeated.accounting,
+                PhysicalByteAccounting::known(
+                    0,
+                    allocated_bytes(&repeated.paths[0])
+                        .checked_add(allocated_bytes(&repeated.paths[1]))
+                        .unwrap()
+                )
             );
         }
     }
