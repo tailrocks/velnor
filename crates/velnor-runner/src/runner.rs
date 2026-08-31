@@ -10361,11 +10361,11 @@ async fn complete_run_service_job_refreshing(
         run_service_url,
         job,
         result,
-        job_outputs.clone(),
-        step_logs.clone(),
-        environment_url.clone(),
-        billing_owner_id.clone(),
-        infrastructure_failure_category.clone(),
+        job_outputs,
+        step_logs,
+        environment_url,
+        billing_owner_id,
+        infrastructure_failure_category,
         publish_completion_timeline_logs,
         journal_dir,
     )
@@ -10378,19 +10378,79 @@ async fn complete_run_service_job_refreshing(
         return first;
     }
 
+    // The first attempt already committed `CompletionIntended` and claimed the
+    // one permitted send via `CompletionSendStarted`; the journal rejects a
+    // second claim. The credential-refresh retry must therefore re-send the
+    // exact durable payload through the replay path, reusing that claim.
     let refreshed = refresh_run_service_client(stored).await?;
-    complete_run_service_job(
-        &refreshed,
-        run_service_url,
-        job,
-        result,
-        job_outputs,
-        step_logs,
-        environment_url,
-        billing_owner_id,
-        infrastructure_failure_category,
-        publish_completion_timeline_logs,
+    resend_guarded_run_service_complete(&refreshed, run_service_url, &job.job_id, journal_dir)
+        .await
+}
+
+/// Re-send the durable completion payload with refreshed credentials after a
+/// 401/403. The outbox row is the single source of truth: the payload is read
+/// back from durable storage, checksum-verified, and replayed under the
+/// existing send claim instead of manufacturing a second claim.
+async fn resend_guarded_run_service_complete(
+    client: &RunServiceClient,
+    run_service_url: &str,
+    job_id: &str,
+    journal_dir: &Path,
+) -> Result<()> {
+    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let job_id = velnor_model::JobId(job_id.to_string());
+    let (generation, payload) = {
+        let state = journal
+            .materialized_state()
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.job_id == job_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "completion refresh job {} is absent from the materialized journal",
+                    job_id.0
+                )
+            })?;
+        let row = state
+            .outbox
+            .iter()
+            .find(|row| {
+                row.job_id == job_id
+                    && row.generation == job.generation
+                    && row.intended
+                    && !row.remote_acked
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "completion refresh job {} has no pending durable outbox row",
+                    job_id.0
+                )
+            })?;
+        let payload = crate::node::cleanup::read_outbox(journal_dir, &job_id.0, job.generation.0)?;
+        if velnor_control::journal::payload_checksum(&payload) != row.payload_sha256 {
+            bail!(
+                "completion refresh outbox checksum mismatch for job {}",
+                job_id.0
+            );
+        }
+        (job.generation, payload)
+    };
+    crate::node::complete::replay_claimed_completion_async(
+        &mut journal,
         journal_dir,
+        &job_id,
+        generation,
+        payload,
+        |payload| async move {
+            client
+                .complete_job_payload_with_acknowledgement(run_service_url, payload)
+                .await
+                .map(|acknowledgement| ((), acknowledgement))
+                .context("complete run-service job after credential refresh")
+        },
     )
     .await
 }
@@ -14839,6 +14899,112 @@ jobs:
         assert!(!in_flight_job_path(&config_dir).exists());
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn completion_refresh_resend_reuses_existing_send_claim() {
+        use velnor_control::journal::{Event, Journal};
+        use velnor_model::{Generation, JobId, SlotId};
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = unique_temp_dir("completion-refresh-resend");
+        fs::create_dir_all(&dir).unwrap();
+        let job_id = JobId("job-refresh".to_owned());
+        let slot = SlotId("velnor-1".to_owned());
+        let generation = Generation::INITIAL;
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot.clone(),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        crate::node::complete::accept_job(&mut journal, &job_id, &slot).unwrap();
+
+        // First attempt: durable intent plus the one send claim, then a
+        // 401-style transport failure leaves the claim held and the payload
+        // persisted in the outbox.
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "planId": "plan-1",
+            "jobId": job_id.0,
+            "conclusion": "Succeeded"
+        }))
+        .unwrap();
+        let first = crate::node::complete::guarded_complete_async_with_ack(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            &payload,
+            |_durable| async {
+                Err::<((), crate::protocol::CompletionAcknowledgement), _>(anyhow::anyhow!(
+                    "complete_job 401"
+                ))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(first.to_string().contains("complete_job 401"));
+
+        // The credential-refresh retry must replay the exact durable payload
+        // under the existing claim; re-claiming would be rejected by the
+        // journal (send_started is already true).
+        let client = RunServiceClient::new("token").unwrap();
+        resend_guarded_run_service_complete(
+            &client,
+            &format!("{}/run-service", server.uri()),
+            &job_id.0,
+            &dir,
+        )
+        .await
+        .unwrap();
+
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        assert!(journal.load_state().unwrap().jobs.is_empty());
+        server.verify().await;
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "test-support")]
