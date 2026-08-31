@@ -31,6 +31,9 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
 const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Completion-marker and orphan-outbox scans are recovery work, not a steady
+/// state tick. The first cycle runs them immediately; retries are bounded.
+const OUTBOX_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 /// Reserve half of the controller's 30s watchdog budget for local journal,
 /// process, and health work. Every remote operation in one cycle shares this
 /// deadline; one slow API cannot consume the budget of later operations.
@@ -398,6 +401,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut heartbeats: HashMap<String, (u32, u64)> = HashMap::new();
     let mut startup_deadlines: HashMap<String, Instant> = HashMap::new();
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
+    let mut last_outbox_reconcile = Instant::now() - OUTBOX_RECONCILIATION_INTERVAL;
     let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
     let mut last_reconcile_duration_ms = 1;
@@ -420,6 +424,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut heartbeats,
             &mut startup_deadlines,
             &mut last_registration_reconcile,
+            &mut last_outbox_reconcile,
             &mut pacing,
             &metrics,
         )
@@ -456,7 +461,8 @@ fn publish_controller_metrics(
     let wal_bytes = std::fs::metadata(state_dir.join("journal.db-wal"))
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    let cpu_phase = || json!({ "user_us": 0_u64, "system_us": 0_u64 });
+    let (user_us, system_us) = process_cpu_usage();
+    let zero_cpu_phase = || json!({ "user_us": 0_u64, "system_us": 0_u64 });
     let metrics = json!({
         "sequence": sequence,
         "slot_processes": slot_processes,
@@ -465,11 +471,14 @@ fn publish_controller_metrics(
         "reconcile_duration_ms": { "p95": reconcile_p95_ms },
         "journal": { "transactions": sequence.saturating_add(1), "wal_bytes": wal_bytes },
         "cpu": {
-            "journal": cpu_phase(),
-            "filesystem": cpu_phase(),
-            "github": cpu_phase(),
-            "broker": cpu_phase(),
-            "child_supervision": cpu_phase()
+            "controller": { "user_us": user_us, "system_us": system_us },
+            "phases": {
+                "journal": zero_cpu_phase(),
+                "filesystem": zero_cpu_phase(),
+                "github": zero_cpu_phase(),
+                "broker": zero_cpu_phase(),
+                "child_supervision": zero_cpu_phase()
+            }
         }
     });
     let temporary = state_dir.join(".controller-metrics.json.tmp");
@@ -477,6 +486,38 @@ fn publish_controller_metrics(
     std::fs::write(&temporary, serde_json::to_vec(&metrics)?)?;
     std::fs::rename(temporary, destination)?;
     Ok(())
+}
+
+/// Return process CPU time for the explicit aggregate controller metric. The
+/// phase buckets remain zero until phase-specific accounting exists.
+#[cfg(unix)]
+fn process_cpu_usage() -> (u64, u64) {
+    let mut raw = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `getrusage` initializes the provided rusage structure on a zero
+    // return; the pointer is valid for the duration of the syscall.
+    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, raw.as_mut_ptr()) };
+    if result != 0 {
+        return (0, 0);
+    }
+    // SAFETY: the successful syscall initialized every field we read.
+    let usage = unsafe { raw.assume_init() };
+    (
+        timeval_microseconds(&usage.ru_utime),
+        timeval_microseconds(&usage.ru_stime),
+    )
+}
+
+#[cfg(unix)]
+fn timeval_microseconds(value: &libc::timeval) -> u64 {
+    u64::try_from(value.tv_sec)
+        .unwrap_or(0)
+        .saturating_mul(1_000_000)
+        .saturating_add(u64::try_from(value.tv_usec).unwrap_or(0))
+}
+
+#[cfg(not(unix))]
+fn process_cpu_usage() -> (u64, u64) {
+    (0, 0)
 }
 
 fn job_process_counts<'a>(job_ids: impl Iterator<Item = &'a String>) -> (usize, usize) {
@@ -597,6 +638,7 @@ async fn reconcile_once(
     heartbeats: &mut HashMap<String, (u32, u64)>,
     startup_deadlines: &mut HashMap<String, Instant>,
     last_registration_reconcile: &mut Instant,
+    last_outbox_reconcile: &mut Instant,
     pacing: &mut GithubPacing,
     metrics: &MetricsPublisher,
 ) -> anyhow::Result<LocalCycle> {
@@ -768,7 +810,12 @@ async fn reconcile_once(
 
     spawn_ready_waiters(args, journal, jobs)?;
     reap(jobs);
-    reclaim_orphaned_jobs(args, journal)?;
+    let outbox_reconcile_due = last_outbox_reconcile.elapsed() >= OUTBOX_RECONCILIATION_INTERVAL;
+    reclaim_orphaned_jobs(args, journal, remote_deadline, outbox_reconcile_due).await?;
+    if outbox_reconcile_due {
+        reconcile_orphaned_outboxes(args, journal)?;
+        *last_outbox_reconcile = Instant::now();
+    }
 
     for row in journal.pending_outbox()? {
         preserve_outbox(
@@ -871,7 +918,10 @@ async fn execute_effect(
             isolation_id,
             generation,
         } => cleanup::remove_owned(&args.state_dir, &isolation_id, generation.0),
-        SideEffect::DeleteOutbox { .. } | SideEffect::FenceSlot { .. } => Ok(()),
+        SideEffect::DeleteOutbox { job_id, generation } => {
+            cleanup::remove_outbox(&args.state_dir, &job_id.0, generation.0)
+        }
+        SideEffect::FenceSlot { .. } => Ok(()),
     }
 }
 
@@ -1375,28 +1425,154 @@ fn spawn_ready_waiters(
 /// Return slots occupied by job workers that died without a terminal
 /// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
 /// slot stays `Assigned` forever and advertised capacity never recovers.
-fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow::Result<()> {
+async fn reclaim_orphaned_jobs(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    remote_deadline: tokio::time::Instant,
+    scan_persisted_markers: bool,
+) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
-    for job in &state.jobs {
-        if !matches!(
-            job.phase,
-            ActorPhase::Assigned | ActorPhase::Starting | ActorPhase::Running
-        ) {
-            continue;
-        }
+    let orphan_jobs: Vec<_> = state
+        .jobs
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.phase,
+                ActorPhase::Assigned
+                    | ActorPhase::Starting
+                    | ActorPhase::Running
+                    | ActorPhase::Completing
+            )
+        })
         // A ready-slot waiter is spawned before GitHub assigns a job, so its
         // durable ownership marker is keyed by the waiter identity rather
         // than the later journal job id. Check both markers independently:
         // a stale job marker must not suppress a live waiter marker.
-        let waiter_id = format!("wait-{}", job.slot_id.0);
-        let job_worker_live =
-            cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
-                .is_some_and(prove::pid_is_alive);
-        let waiter_live = cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0)
-            .is_some_and(prove::pid_is_alive);
-        let worker_live = job_worker_live || waiter_live;
-        if worker_live {
+        .filter(|job| {
+            let waiter_id = format!("wait-{}", job.slot_id.0);
+            let job_worker_live =
+                cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
+                    .is_some_and(prove::pid_is_alive);
+            let waiter_live =
+                cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0)
+                    .is_some_and(prove::pid_is_alive);
+            !(job_worker_live || waiter_live)
+        })
+        .cloned()
+        .collect();
+
+    if orphan_jobs.is_empty() && !scan_persisted_markers {
+        return Ok(());
+    }
+
+    let exec = match load_exec_config(&args.state_dir) {
+        Ok(exec) => Some(exec),
+        Err(error)
+            if orphan_jobs.is_empty()
+                || orphan_jobs.iter().all(|job| {
+                    job.phase == ActorPhase::Completing
+                        && state.outbox.iter().any(|row| {
+                            row.job_id == job.job_id
+                                && row.generation == job.generation
+                                && row.intended
+                                && !row.remote_acked
+                        })
+                }) =>
+        {
+            // A markerless pending completion has no persisted Run Service URL
+            // from which the controller can safely replay the remote call.
+            // Preserve the durable outbox barrier and retry after the worker
+            // or execution config returns; never discard it or invent a path.
+            eprintln!("orphan recovery deferred: cannot load daemon execution config: {error:#}");
+            None
+        }
+        Err(error) => {
+            return Err(error).context("load daemon execution config for orphan recovery")
+        }
+    };
+    let Some(exec) = exec else {
+        return Ok(());
+    };
+
+    for job in orphan_jobs {
+        let slot_dir = recovery_slot_config_dir(&args.state_dir, &exec, &state, &job.slot_id)?;
+        let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
+        let pending_completion = job.phase == ActorPhase::Completing
+            && state.outbox.iter().any(|row| {
+                row.job_id == job.job_id
+                    && row.generation == job.generation
+                    && row.intended
+                    && !row.remote_acked
+            });
+        if let Some(marker_job_id) = marker_job_id.as_deref()
+            && marker_job_id != job.job_id.0
+        {
+            return Err(anyhow::anyhow!(
+                "in-flight marker job {} does not match orphan job {}",
+                marker_job_id,
+                job.job_id.0
+            ));
+        }
+        if job.phase == ActorPhase::Completing && !pending_completion {
+            return Err(anyhow::anyhow!(
+                "completing job {} has no exact durable completion payload",
+                job.job_id.0
+            ));
+        }
+        if let Some(stored) = load_local_runner_config(&slot_dir)? {
+            if marker_job_id.is_some() {
+                let cleanup = if pending_completion {
+                    defer_remote_recovery_on_timeout(
+                        remaining_remote_budget(remote_deadline),
+                        crate::runner::replay_recorded_completion(
+                            &slot_dir,
+                            &stored,
+                            &args.state_dir,
+                        ),
+                        "replay recorded completion during orphan recovery",
+                    )
+                    .await?
+                } else {
+                    defer_remote_recovery_on_timeout(
+                        remaining_remote_budget(remote_deadline),
+                        crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
+                        "complete recorded in-flight job during orphan recovery",
+                    )
+                    .await?
+                };
+                let Some(cleanup) = cleanup else {
+                    continue;
+                };
+                if cleanup {
+                    eprintln!(
+                        "Recovered stale in-flight job {} before restoring slot {}",
+                        job.job_id.0, job.slot_id.0
+                    );
+                }
+            }
+        } else if marker_job_id.is_some() {
+            return Err(anyhow::anyhow!(
+                "runner credentials missing while recovering in-flight job {}",
+                job.job_id.0
+            ));
+        }
+        if crate::runner::recorded_in_flight_job_exists(&slot_dir)? && pending_completion {
+            return Err(anyhow::anyhow!(
+                "completing job {} retained its in-flight marker after recovery",
+                job.job_id.0
+            ));
+        }
+        let current = journal.materialized_state()?;
+        if current.jobs.iter().all(|row| row.job_id != job.job_id) {
+            // complete_recorded_in_flight_job already committed the terminal
+            // acknowledgement and removed this job from the journal.
             continue;
+        }
+        if pending_completion {
+            return Err(anyhow::anyhow!(
+                "completing job {} has no recoverable terminal acknowledgement",
+                job.job_id.0
+            ));
         }
         let lost = journal.apply(Event::JobWorkerLost {
             job_id: job.job_id.clone(),
@@ -1409,7 +1585,253 @@ fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow
             );
         }
     }
+
+    if !scan_persisted_markers {
+        return Ok(());
+    }
+
+    // A prior RemoteAcked event removes the journal job before local storage
+    // release and marker deletion. Scan every exact persisted slot path so a
+    // crash in that gap remains retryable even though no job row remains.
+    let current = journal.materialized_state()?;
+    for slot in &state.slots {
+        let slot_dir = recovery_slot_config_dir(&args.state_dir, &exec, &state, &slot.slot_id)?;
+        let Some(marker_job_id) = crate::runner::recorded_in_flight_job_id(&slot_dir)? else {
+            continue;
+        };
+        if let Some(job) = current
+            .jobs
+            .iter()
+            .find(|job| job.job_id.0 == marker_job_id)
+        {
+            if job.slot_id != slot.slot_id || job.generation != slot.generation {
+                return Err(anyhow::anyhow!(
+                    "in-flight marker job {} does not match journal slot {} generation {}",
+                    marker_job_id,
+                    slot.slot_id.0,
+                    slot.generation.0
+                ));
+            }
+            continue;
+        }
+        let remote_acked =
+            journal.has_remote_terminal_ack(&JobId(marker_job_id.clone()), slot.generation)?;
+        if !remote_acked {
+            return Err(anyhow::anyhow!(
+                "in-flight marker job {} has no durable remote terminal acknowledgement",
+                marker_job_id
+            ));
+        }
+        cleanup::remove_outbox(&args.state_dir, &marker_job_id, slot.generation.0)?;
+        crate::runner::cleanup_recorded_in_flight_job(&slot_dir)?;
+        if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
+            return Err(anyhow::anyhow!(
+                "orphaned in-flight marker remained for job {}",
+                marker_job_id
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Remote orphan recovery must not consume the controller's whole cycle. A
+/// timeout preserves the durable marker and lets the next cycle retry it.
+async fn defer_remote_recovery_on_timeout<F, T>(
+    timeout: Duration,
+    operation: F,
+    description: &'static str,
+) -> anyhow::Result<Option<T>>
+where
+    F: Future<Output = anyhow::Result<T>>,
+{
+    if timeout.is_zero() {
+        eprintln!("{description} deferred; remote recovery budget is exhausted");
+        return Ok(None);
+    }
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result.map(Some).context(description),
+        Err(_) => {
+            eprintln!("{description} timed out; preserving durable recovery state");
+            Ok(None)
+        }
+    }
+}
+
+/// Reconcile files left by a crash between durable outbox publication and
+/// `CompletionIntended`. A live ownership marker keeps the writer's file from
+/// being deleted during that tiny window; a dead or absent owner makes the
+/// file safe to remove because no journal intent can authorize a send.
+fn reconcile_orphaned_outboxes(args: &ControllerArgs, journal: &Journal) -> anyhow::Result<()> {
+    let outbox_dir = args.state_dir.join("outbox");
+    let metadata = match std::fs::symlink_metadata(&outbox_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(anyhow::anyhow!(
+                "completion outbox directory must not be a symlink: {}",
+                outbox_dir.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(anyhow::anyhow!(
+                "completion outbox path is not a directory: {}",
+                outbox_dir.display()
+            ));
+        }
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let _ = metadata;
+    let state = journal.materialized_state()?;
+    for entry in std::fs::read_dir(&outbox_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("completion outbox filename is not UTF-8"))?;
+        let file_metadata = std::fs::symlink_metadata(&path)?;
+        if file_metadata.file_type().is_symlink() || !file_metadata.is_file() {
+            return Err(anyhow::anyhow!(
+                "completion outbox entry is not a regular file: {}",
+                path.display()
+            ));
+        }
+        let (job_id, generation, temporary) = if let Some(stem) = name.strip_prefix('.') {
+            let Some((stem, _nonce)) = stem.rsplit_once(".tmp-") else {
+                continue;
+            };
+            let (job_id, generation) = parse_outbox_name(stem)?;
+            (job_id, generation, true)
+        } else {
+            let (job_id, generation) = parse_outbox_name(name)?;
+            (job_id, generation, false)
+        };
+        let row = state
+            .outbox
+            .iter()
+            .find(|row| row.job_id.0 == job_id && row.generation.0 == generation);
+        let keep = if temporary {
+            outbox_owner_is_live(&args.state_dir, &job_id, generation)?
+        } else {
+            row.is_some_and(|row| row.intended && !row.remote_acked)
+                || row.is_none() && outbox_owner_is_live(&args.state_dir, &job_id, generation)?
+        };
+        if keep {
+            continue;
+        }
+        if temporary {
+            std::fs::remove_file(&path)?;
+            #[cfg(unix)]
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(&outbox_dir)?
+                .sync_all()?;
+        } else {
+            cleanup::remove_outbox(&args.state_dir, &job_id, generation)?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_outbox_name(name: &str) -> anyhow::Result<(String, u64)> {
+    let (job_id, generation) = name
+        .rsplit_once('.')
+        .ok_or_else(|| anyhow::anyhow!("completion outbox filename has no generation: {name}"))?;
+    cleanup::assert_safe_id(job_id)?;
+    let generation = generation.parse::<u64>().map_err(|error| {
+        anyhow::anyhow!("completion outbox filename has invalid generation {generation}: {error}")
+    })?;
+    Ok((job_id.to_owned(), generation))
+}
+
+fn outbox_owner_is_live(state_dir: &Path, job_id: &str, generation: u64) -> anyhow::Result<bool> {
+    let path = cleanup::owned_path(state_dir, job_id, generation);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(anyhow::anyhow!(
+                "ownership marker must not be a symlink: {}",
+                path.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(anyhow::anyhow!(
+                "ownership marker is not a regular file: {}",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    let pid = cleanup::read_owned_pid(state_dir, job_id, generation)
+        .ok_or_else(|| anyhow::anyhow!("ownership marker has no valid pid: {}", path.display()))?;
+    Ok(prove::pid_is_alive(pid))
+}
+
+fn recovery_slot_config_dir(
+    default_base: &Path,
+    exec: &crate::args::DaemonArgs,
+    state: &velnor_control::journal::FleetState,
+    slot_id: &SlotId,
+) -> anyhow::Result<PathBuf> {
+    let slot_index = slot_id
+        .0
+        .rsplit('-')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("slot id {} has no numeric suffix", slot_id.0))?
+        .parse::<usize>()
+        .map_err(|error| {
+            anyhow::anyhow!("slot id {} has invalid numeric suffix: {error}", slot_id.0)
+        })?;
+    if slot_index == 0 {
+        return Err(anyhow::anyhow!("slot id {} has zero index", slot_id.0));
+    }
+    if exec.slots == 0 {
+        return Err(anyhow::anyhow!(
+            "daemon execution config has zero slots during orphan recovery"
+        ));
+    }
+    if slot_index > exec.slots {
+        return Err(anyhow::anyhow!(
+            "slot {} is outside daemon execution layout 1..={}",
+            slot_id.0,
+            exec.slots
+        ));
+    }
+    if !state.slots.iter().any(|slot| slot.slot_id == *slot_id) {
+        return Err(anyhow::anyhow!(
+            "orphan job references slot {} absent from durable state",
+            slot_id.0
+        ));
+    }
+    let config_base = exec
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| default_base.to_path_buf());
+    let slot_dir = crate::runner::daemon_slot_config_dir(&config_base, slot_index, exec.slots);
+    let alternate = if exec.slots == 1 {
+        config_base.join("slots").join(format!("slot-{slot_index}"))
+    } else {
+        config_base.clone()
+    };
+    if alternate != slot_dir && recovery_path_has_state(&alternate)? {
+        return Err(anyhow::anyhow!(
+            "daemon slot {} has state in both incompatible config layouts; refusing recovery",
+            slot_id.0
+        ));
+    }
+    Ok(slot_dir)
+}
+
+fn recovery_path_has_state(path: &Path) -> anyhow::Result<bool> {
+    for name in ["runner.json", "in-flight-job.json"] {
+        match std::fs::symlink_metadata(path.join(name)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
 }
 
 /// Keep a durable completion payload. Never replace it with the checksum
@@ -1421,11 +1843,7 @@ fn preserve_outbox(
     generation: Generation,
     payload_sha256: &str,
 ) -> anyhow::Result<()> {
-    let path = cleanup::outbox_path(&args.state_dir, &job_id.0, generation.0);
-    if !path.is_file() {
-        return Ok(());
-    }
-    let bytes = std::fs::read(&path)?;
+    let bytes = cleanup::read_outbox(&args.state_dir, &job_id.0, generation.0)?;
     let actual = velnor_control::journal::payload_checksum(&bytes);
     if actual != payload_sha256 {
         anyhow::bail!(
@@ -1986,6 +2404,52 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn metrics_publish_cpu_uses_explicit_controller_aggregate() {
+        let dir = metrics_test_dir("controller-cpu");
+        let mut checksum = 0_u64;
+        for value in 0..2_000_000_u64 {
+            checksum = checksum.wrapping_add(value.rotate_left(7));
+        }
+        std::hint::black_box(checksum);
+        publish_controller_metrics(&dir, 1, 0, 0, 0, 1).unwrap();
+        let metrics: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
+                .unwrap();
+        let controller_cpu = metrics["cpu"]["controller"]["user_us"]
+            .as_u64()
+            .unwrap()
+            .saturating_add(metrics["cpu"]["controller"]["system_us"].as_u64().unwrap());
+        assert!(
+            controller_cpu > 0,
+            "aggregate controller CPU must be measured"
+        );
+        assert_eq!(
+            metrics["cpu"]["phases"]["child_supervision"],
+            json!({
+                "user_us": 0,
+                "system_us": 0
+            })
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn orphan_recovery_timeout_is_deferred_without_error() {
+        let result = defer_remote_recovery_on_timeout(
+            Duration::from_millis(1),
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok::<_, anyhow::Error>(true)
+            },
+            "test orphan recovery",
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn drain_preserves_active_jobs_without_waiting_for_them() {
         let dir = metrics_test_dir("drain-active-job");
@@ -2115,6 +2579,41 @@ mod tests {
     }
 
     #[test]
+    fn orphan_recovery_uses_and_validates_persisted_slot_layout() {
+        let dir = metrics_test_dir("orphan-layout");
+        let mut state = FleetState::default();
+        state.slots.push(reserved_slot());
+        let mut exec = dummy_exec("https://github.com/tailrocks/fixture");
+        exec.slots = 2;
+
+        assert_eq!(
+            recovery_slot_config_dir(&dir, &exec, &state, &SlotId("velnor-1".to_owned())).unwrap(),
+            dir.join("slots").join("slot-1")
+        );
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("runner.json"), b"peer single-slot state").unwrap();
+        let error = recovery_slot_config_dir(&dir, &exec, &state, &SlotId("velnor-1".to_owned()))
+            .unwrap_err();
+        assert!(error.to_string().contains("incompatible config layouts"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn orphan_recovery_rejects_zero_slot_execution_config() {
+        let dir = metrics_test_dir("orphan-zero-slots");
+        let mut state = FleetState::default();
+        state.slots.push(reserved_slot());
+        let mut exec = dummy_exec("https://github.com/tailrocks/fixture");
+        exec.slots = 0;
+
+        let error = recovery_slot_config_dir(&dir, &exec, &state, &SlotId("velnor-1".to_owned()))
+            .unwrap_err();
+        assert!(error.to_string().contains("zero slots"));
+    }
+
+    #[test]
     fn stable_live_slot_suppresses_duplicate_permit() {
         let slot = reserved_slot();
 
@@ -2196,8 +2695,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn live_waiter_marker_is_not_hidden_by_stale_job_marker() {
+    #[tokio::test]
+    async fn live_waiter_marker_is_not_hidden_by_stale_job_marker() {
         let dir = std::env::temp_dir().join(format!(
             "velnor-orphan-reclaim-{}-{}",
             std::process::id(),
@@ -2290,7 +2789,14 @@ mod tests {
             once: true,
             spawn_slots: false,
         };
-        reclaim_orphaned_jobs(&args, &mut journal).unwrap();
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+        )
+        .await
+        .unwrap();
 
         let state = journal.load_state().unwrap();
         let job = state

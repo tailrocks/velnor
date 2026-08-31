@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use velnor_control::journal::{payload_checksum, Event, Journal};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
@@ -28,7 +29,7 @@ pub fn journal_dir_near(config_dir: &Path) -> PathBuf {
     config_dir.to_path_buf()
 }
 
-/// Apply `CompletionIntended`, write the outbox, then call `send`.
+/// Publish the outbox, apply `CompletionIntended`, then call `send`.
 /// If intent is rejected, `send` is never invoked.
 ///
 /// # Errors
@@ -44,7 +45,7 @@ pub fn guarded_complete<T, E>(
 where
     E: Into<anyhow::Error>,
 {
-    if !commit_intent(journal, state_dir, job_id, generation, payload)? {
+    if commit_intent(journal, state_dir, job_id, generation, payload)?.is_none() {
         anyhow::bail!("completion intent rejected for job {}", job_id.0);
     }
     let started = journal.apply(Event::CompletionSendStarted {
@@ -55,7 +56,7 @@ where
         anyhow::bail!("completion send-started rejected for job {}", job_id.0);
     }
     let result = send().map_err(Into::into)?;
-    ack_remote(journal, job_id, generation)?;
+    ack_remote(journal, state_dir, job_id, generation)?;
     Ok(result)
 }
 
@@ -63,17 +64,20 @@ where
 ///
 /// # Errors
 /// Journal rejection, outbox I/O, or `send`.
-pub async fn guarded_complete_async<T>(
+pub async fn guarded_complete_async<T, F, Fut>(
     journal: &mut Journal,
     state_dir: &Path,
     job_id: &JobId,
     generation: Generation,
     payload: &[u8],
-    send: impl std::future::Future<Output = anyhow::Result<T>>,
-) -> anyhow::Result<T> {
-    if !commit_intent(journal, state_dir, job_id, generation, payload)? {
-        anyhow::bail!("completion intent rejected for job {}", job_id.0);
-    }
+    send: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let durable_payload = commit_intent(journal, state_dir, job_id, generation, payload)?
+        .ok_or_else(|| anyhow::anyhow!("completion intent rejected for job {}", job_id.0))?;
     let started = journal.apply(Event::CompletionSendStarted {
         job_id: job_id.clone(),
         generation,
@@ -81,8 +85,8 @@ pub async fn guarded_complete_async<T>(
     if started.rejected {
         anyhow::bail!("completion send-started rejected for job {}", job_id.0);
     }
-    let result = send.await?;
-    ack_remote(journal, job_id, generation)?;
+    let result = send(durable_payload).await?;
+    ack_remote(journal, state_dir, job_id, generation)?;
     Ok(result)
 }
 
@@ -201,23 +205,68 @@ fn commit_intent(
     job_id: &JobId,
     generation: Generation,
     payload: &[u8],
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<Vec<u8>>> {
     let checksum = payload_checksum(payload);
+    let state = journal.materialized_state()?;
+    if let Some(row) = state.outbox.iter().find(|row| {
+        row.job_id == *job_id && row.generation == generation && row.intended && !row.remote_acked
+    }) {
+        if row.payload_sha256 != checksum {
+            anyhow::bail!(
+                "completion payload changed while job {} was pending",
+                job_id.0
+            );
+        }
+        let durable = cleanup::read_outbox(state_dir, &job_id.0, generation.0)?;
+        if payload_checksum(&durable) != row.payload_sha256 {
+            anyhow::bail!(
+                "completion outbox checksum mismatch for pending job {}",
+                job_id.0
+            );
+        }
+        return Ok(Some(durable));
+    }
+    // Publish durable bytes first. A crash between the journal intent and the
+    // old non-atomic write left `Completing` without a replayable payload.
+    // This is local staging only; no remote side effect occurs before intent.
+    // If another writer won no-replace publication, adopt only matching bytes.
+    // This also repairs a journal-apply failure on its next retry.
+    let durable = match cleanup::write_outbox(state_dir, &job_id.0, generation.0, payload) {
+        Ok(_) => payload.to_vec(),
+        Err(publish_error) => match cleanup::read_outbox(state_dir, &job_id.0, generation.0) {
+            Ok(existing) if payload_checksum(&existing) == checksum => existing,
+            Ok(_) => anyhow::bail!(
+                "completion outbox payload drifted while adopting job {}",
+                job_id.0
+            ),
+            Err(read_error) => {
+                return Err(publish_error).context(format!(
+                    "publish completion outbox and adopt existing payload: {read_error:#}"
+                ));
+            }
+        },
+    };
     let intended = journal.apply(Event::CompletionIntended {
         job_id: job_id.clone(),
         generation,
         payload_sha256: checksum,
     })?;
     if intended.rejected {
-        return Ok(false);
+        cleanup::remove_outbox(state_dir, &job_id.0, generation.0)
+            .context("remove rejected completion outbox")?;
+        return Ok(None);
     }
-    cleanup::write_outbox(state_dir, &job_id.0, generation.0, payload)?;
-    Ok(true)
+    Ok(Some(durable))
 }
 
-/// GitHub accepted `complete_job`. Commit that before the worker exits so
-/// crash recovery does not replay Completing forever.
-fn ack_remote(journal: &mut Journal, job_id: &JobId, generation: Generation) -> anyhow::Result<()> {
+/// GitHub accepted `complete_job`. Commit that before deleting the payload so
+/// crash recovery can prove the remote terminal transition before cleanup.
+fn ack_remote(
+    journal: &mut Journal,
+    state_dir: &Path,
+    job_id: &JobId,
+    generation: Generation,
+) -> anyhow::Result<()> {
     let outcome = journal.apply(Event::RemoteAcked {
         job_id: job_id.clone(),
         generation,
@@ -225,6 +274,8 @@ fn ack_remote(journal: &mut Journal, job_id: &JobId, generation: Generation) -> 
     if outcome.rejected {
         anyhow::bail!("remote ack rejected for job {}", job_id.0);
     }
+    cleanup::remove_outbox(state_dir, &job_id.0, generation.0)
+        .context("remove acknowledged completion outbox")?;
     Ok(())
 }
 
@@ -338,6 +389,7 @@ mod tests {
             journal.pending_outbox().unwrap().is_empty(),
             "successful complete_job must RemoteAcked so the outbox is not replayed"
         );
+        assert!(!cleanup::outbox_path(&dir, &job_id.0, generation.0).exists());
         let state = journal.load_state().unwrap();
         assert!(state.jobs.is_empty(), "{:?}", state.jobs);
         assert_eq!(state.slots[0].phase, ActorPhase::Ready);
@@ -419,7 +471,10 @@ mod tests {
             &job_id,
             generation,
             b"conclusion=success",
-            async { Ok(()) },
+            |durable| async move {
+                assert_eq!(durable, b"conclusion=success");
+                Ok(())
+            },
         )
         .await
         .unwrap();
@@ -456,6 +511,63 @@ mod tests {
         .unwrap_err();
         assert!(!sent, "send must not run without durable intent: {error}");
         assert!(journal.pending_outbox().unwrap().is_empty());
+        assert!(!cleanup::outbox_path(&dir, &job_id.0, Generation::INITIAL.0).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn retry_reuses_pending_payload_and_rejects_payload_drift() {
+        let dir = tmp("retry-exact");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-retry".into());
+        let generation = prime_owned(&mut journal, &job_id);
+
+        let first = guarded_complete_async(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"first-payload",
+            |_payload| async { Err::<(), _>(anyhow::anyhow!("temporary send failure")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(first.to_string().contains("temporary send failure"));
+        assert_eq!(
+            cleanup::read_outbox(&dir, &job_id.0, generation.0).unwrap(),
+            b"first-payload"
+        );
+
+        let drift = guarded_complete_async(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"different-payload",
+            |_payload| async { Ok::<(), anyhow::Error>(()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(drift.to_string().contains("payload changed"));
+        assert_eq!(
+            cleanup::read_outbox(&dir, &job_id.0, generation.0).unwrap(),
+            b"first-payload"
+        );
+
+        guarded_complete_async(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"first-payload",
+            |durable| async move {
+                assert_eq!(durable, b"first-payload");
+                Ok::<(), anyhow::Error>(())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!cleanup::outbox_path(&dir, &job_id.0, generation.0).exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
