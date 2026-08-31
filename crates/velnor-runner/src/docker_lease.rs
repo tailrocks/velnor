@@ -54,6 +54,7 @@ const MAX_PROXY_HEADER: usize = 64 * 1024;
 const MAX_PROXY_LINE: usize = 8 * 1024;
 const MAX_LEASE_CONNECTIONS: usize = 64;
 const MAX_LEASE_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
+const PROXY_COPY_BUFFER: usize = 64 * 1024;
 const PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const PROXY_MAX_UPGRADE_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
@@ -2384,7 +2385,7 @@ fn read_http_response_head(
             bail!("Docker API response headers exceed lease proxy limit");
         }
         wait_for_host_response(host, client)?;
-        let mut scratch = [0_u8; 8192];
+        let mut scratch = [0_u8; PROXY_COPY_BUFFER];
         let read = host
             .read(&mut scratch)
             .context("read Docker API response headers")?;
@@ -2473,7 +2474,7 @@ fn forward_exact_response_body(
         buffered.drain(..take);
         remaining -= take;
     }
-    let mut scratch = [0_u8; 8192];
+    let mut scratch = [0_u8; PROXY_COPY_BUFFER];
     while remaining != 0 {
         let read_len = remaining.min(scratch.len());
         wait_for_host_response(host, client)?;
@@ -2566,7 +2567,7 @@ fn forward_unframed_response(
     host: &mut std::os::unix::net::UnixStream,
     client: &mut std::os::unix::net::UnixStream,
 ) -> Result<()> {
-    let mut scratch = [0_u8; 8192];
+    let mut scratch = [0_u8; PROXY_COPY_BUFFER];
     loop {
         wait_for_host_response(host, client)?;
         let read = host
@@ -2666,9 +2667,14 @@ fn read_http_request_with_budget_from(
     budget.reserve(prefix.len())?;
     let mut buf = prefix;
     let mut chunk = [0_u8; 8192];
+    let mut scan_from: usize = 0;
     let header_end = loop {
-        if let Some(relative) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
-            let end = relative + 4;
+        let search_start = scan_from.saturating_sub(3);
+        if let Some(relative) = buf[search_start..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            let end = search_start + relative + 4;
             if end > MAX_PROXY_HEADER {
                 bail!("Docker API request headers exceed lease proxy limit");
             }
@@ -2684,19 +2690,9 @@ fn read_http_request_with_budget_from(
         if read == 0 {
             bail!("client closed Docker API request before headers finished");
         }
+        scan_from = previous_len;
         budget.reserve(read)?;
         buf.extend_from_slice(&chunk[..read]);
-        let search_start = previous_len.saturating_sub(3);
-        if let Some(relative) = buf[search_start..]
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-        {
-            let end = search_start + relative + 4;
-            if end > MAX_PROXY_HEADER {
-                bail!("Docker API request headers exceed lease proxy limit");
-            }
-            break end;
-        }
     };
     let header_text =
         std::str::from_utf8(&buf[..header_end]).context("Docker API headers must be UTF-8")?;
@@ -2782,7 +2778,7 @@ fn read_chunked_http_request(
 ) -> Result<HttpRequest> {
     let max_raw = MAX_PROXY_BODY.saturating_add(MAX_PROXY_HEADER);
     let mut cursor = header_end;
-    let mut decoded = Vec::new();
+    let mut write_cursor = header_end;
     loop {
         let line_end = loop {
             if let Some(relative) = buf[cursor..]
@@ -2808,8 +2804,8 @@ fn read_chunked_http_request(
         let data_end = data_start
             .checked_add(size)
             .context("Docker API chunk size overflows usize")?;
-        if decoded
-            .len()
+        let decoded_len = write_cursor.saturating_sub(header_end);
+        if decoded_len
             .checked_add(size)
             .is_none_or(|length| length > MAX_PROXY_BODY)
         {
@@ -2855,24 +2851,24 @@ fn read_chunked_http_request(
         if &buf[data_end..framing_end] != b"\r\n" {
             bail!("Docker API chunk is missing its terminating CRLF");
         }
-        budget.reserve(size)?;
-        decoded.extend_from_slice(&buf[data_start..data_end]);
+        buf.copy_within(data_start..data_end, write_cursor);
+        write_cursor = write_cursor
+            .checked_add(size)
+            .context("decoded Docker API chunk body overflows usize")?;
         cursor = framing_end;
     }
-    let mut normalized = normalize_chunked_request_header(&buf[..header_end], decoded.len())?;
+    let decoded_len = write_cursor.saturating_sub(header_end);
+    let mut normalized = normalize_chunked_request_header(&buf[..header_end], decoded_len)?;
     let normalized_body_len = normalized
         .len()
-        .checked_add(decoded.len())
+        .checked_add(decoded_len)
         .context("normalized Docker API request size overflows usize")?;
     budget.reserve(normalized_body_len)?;
+    normalized.extend_from_slice(&buf[header_end..write_cursor]);
     let remainder = buf.split_off(cursor);
     let raw_request_bytes = buf.len();
     drop(buf);
     budget.release(raw_request_bytes);
-    normalized.extend_from_slice(&decoded);
-    let decoded_len = decoded.len();
-    drop(decoded);
-    budget.release(decoded_len);
     Ok(HttpRequest {
         bytes: normalized,
         remainder,
