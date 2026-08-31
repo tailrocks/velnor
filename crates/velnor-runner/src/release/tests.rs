@@ -672,6 +672,154 @@ fn verify_installed_rejects_missing_host_arch() {
 
 // --- assemble --------------------------------------------------------------
 
+fn write_assemble_fixture(root: &Path) -> (PathBuf, PathBuf) {
+    let record = valid_record();
+    let record_path = root.join("record.json");
+    let artifacts = root.join("artifacts");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(&record_path, record.to_canonical_json()).unwrap();
+    for arch in REQUIRED_ARCHES {
+        let record_arch = record.architecture(arch).unwrap();
+        std::fs::write(
+            artifacts.join(format!("velnor-runner-{}.bin.sha256", arch.as_str())),
+            format!("{}\n", record_arch.binary_sha256),
+        )
+        .unwrap();
+        std::fs::write(
+            artifacts.join(format!(
+                "velnor-runner-{}-{}.deb.sha256",
+                record.build.debian_version,
+                arch.as_str()
+            )),
+            format!("{}\n", record_arch.deb_sha256),
+        )
+        .unwrap();
+        std::fs::write(
+            artifacts.join(format!(
+                "velnor-runner-{}-{}.deb",
+                record.build.debian_version,
+                arch.as_str()
+            )),
+            format!("deb-{}", arch.as_str()),
+        )
+        .unwrap();
+    }
+    (record_path, artifacts)
+}
+
+#[test]
+fn assemble_command_requires_complete_binary_and_deb_sidecars() {
+    let root = TempDir::new("assemble-sidecars");
+    let (record, artifacts) = write_assemble_fixture(root.path());
+    assemble_command(ReleaseAssembleArgs {
+        record,
+        artifacts,
+        out: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn assemble_command_rejects_missing_deb_sidecar() {
+    let root = TempDir::new("assemble-missing-deb-sidecar");
+    let (record, artifacts) = write_assemble_fixture(root.path());
+    std::fs::remove_file(artifacts.join("velnor-runner-0.1.121-arm64.deb.sha256")).unwrap();
+    let error = assemble_command(ReleaseAssembleArgs {
+        record,
+        artifacts,
+        out: None,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("read deb checksum"));
+}
+
+#[test]
+fn assemble_command_rejects_extra_artifact_checksum_tokens() {
+    let root = TempDir::new("assemble-extra-checksum-token");
+    let (record, artifacts) = write_assemble_fixture(root.path());
+    std::fs::write(
+        artifacts.join("velnor-runner-amd64.bin.sha256"),
+        format!("{}  velnor-runner\n", digest_of("bin-amd64")),
+    )
+    .unwrap();
+    let error = assemble_command(ReleaseAssembleArgs {
+        record,
+        artifacts,
+        out: None,
+    })
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("artifact checksum file must contain only one checksum"));
+}
+
+#[test]
+fn assemble_command_rejects_mismatched_deb_sidecar() {
+    let root = TempDir::new("assemble-mismatched-deb-sidecar");
+    let (record, artifacts) = write_assemble_fixture(root.path());
+    std::fs::write(
+        artifacts.join("velnor-runner-0.1.121-amd64.deb.sha256"),
+        format!("{}\n", digest_of("tampered-deb")),
+    )
+    .unwrap();
+    let error = assemble_command(ReleaseAssembleArgs {
+        record,
+        artifacts,
+        out: None,
+    })
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("assembled deb checksum for amd64 disagrees with the artifact"));
+}
+
+#[test]
+fn assemble_command_rejects_tampered_deb_with_forged_sidecar() {
+    let root = TempDir::new("assemble-tampered-deb");
+    let (record, artifacts) = write_assemble_fixture(root.path());
+    std::fs::write(
+        artifacts.join("velnor-runner-0.1.121-amd64.deb"),
+        b"tampered-deb",
+    )
+    .unwrap();
+    std::fs::write(
+        artifacts.join("velnor-runner-0.1.121-amd64.deb.sha256"),
+        format!("{}\n", digest_of("tampered-deb")),
+    )
+    .unwrap();
+    let error = assemble_command(ReleaseAssembleArgs {
+        record,
+        artifacts,
+        out: None,
+    })
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("assembled deb artifact digest for amd64 disagrees with the record"));
+}
+
+#[test]
+fn assemble_command_rejects_unsafe_version_path_component() {
+    let root = TempDir::new("assemble-unsafe-version");
+    let mut record = valid_record();
+    record.build.debian_version = "/../".into();
+    let record_path = root.path().join("record.json");
+    let artifacts = root.path().join("artifacts");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(&record_path, record.to_canonical_json()).unwrap();
+
+    let error = assemble_command(ReleaseAssembleArgs {
+        record: record_path,
+        artifacts,
+        out: None,
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "release version is not a safe artifact path component"
+    );
+}
+
 #[test]
 fn assemble_sorts_and_verifies() {
     let record = valid_record();

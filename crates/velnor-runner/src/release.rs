@@ -1277,6 +1277,28 @@ fn parse_checksum(text: &str) -> Result<Sha256Hex> {
     Sha256Hex::parse(first)
 }
 
+fn parse_artifact_checksum(text: &str) -> Result<Sha256Hex> {
+    let mut fields = text.split_whitespace();
+    let first = fields.next().context("artifact checksum file is empty")?;
+    if fields.next().is_some() {
+        bail!("artifact checksum file must contain only one checksum");
+    }
+    Sha256Hex::parse(first)
+}
+
+fn validate_artifact_version_component(version: &str) -> Result<()> {
+    if version.is_empty()
+        || version == "."
+        || version == ".."
+        || version
+            .bytes()
+            .any(|byte| byte == b'/' || byte == b'\\' || byte.is_ascii_control())
+    {
+        bail!("release version is not a safe artifact path component");
+    }
+    Ok(())
+}
+
 fn emit_command(args: ReleaseEmitArgs) -> Result<()> {
     let (_, record) = read_record_file(&args.record)?;
     let identity = embedded();
@@ -1291,18 +1313,51 @@ fn assemble_command(args: ReleaseAssembleArgs) -> Result<()> {
     let (_, candidate) = read_record_file(&args.record)?;
     // Recompute the per-arch digests from the downloaded artifacts and require an
     // exact match before trusting the record.
-    if let Some(dir) = &args.artifacts {
-        for arch in &candidate.architectures {
-            let binary = dir.join(format!("velnor-runner-{}.bin.sha256", arch.arch.as_str()));
-            if binary.exists() {
-                let expected = parse_checksum(&fs::read_to_string(&binary)?)?;
-                if expected != arch.binary_sha256 {
-                    bail!(
-                        "assembled binary digest for {} disagrees with the record",
-                        arch.arch.as_str()
-                    );
-                }
-            }
+    let dir = &args.artifacts;
+    validate_artifact_version_component(&candidate.build.debian_version)?;
+    for arch in REQUIRED_ARCHES {
+        let record_arch = candidate
+            .architecture(arch)
+            .with_context(|| format!("record has no {} architecture", arch.as_str()))?;
+        let binary = dir.join(format!("velnor-runner-{}.bin.sha256", arch.as_str()));
+        let expected_binary = parse_artifact_checksum(
+            &fs::read_to_string(&binary)
+                .with_context(|| format!("read binary checksum {}", binary.display()))?,
+        )?;
+        if expected_binary != record_arch.binary_sha256 {
+            bail!(
+                "assembled binary digest for {} disagrees with the record",
+                arch.as_str()
+            );
+        }
+
+        let deb = dir.join(format!(
+            "velnor-runner-{}-{}.deb.sha256",
+            candidate.build.debian_version,
+            arch.as_str()
+        ));
+        let expected_deb = parse_artifact_checksum(
+            &fs::read_to_string(&deb)
+                .with_context(|| format!("read deb checksum {}", deb.display()))?,
+        )?;
+        let deb_payload = dir.join(format!(
+            "velnor-runner-{}-{}.deb",
+            candidate.build.debian_version,
+            arch.as_str()
+        ));
+        let actual_deb = sha256_file(&deb_payload)
+            .with_context(|| format!("hash deb artifact {}", deb_payload.display()))?;
+        if expected_deb != actual_deb {
+            bail!(
+                "assembled deb checksum for {} disagrees with the artifact",
+                arch.as_str()
+            );
+        }
+        if actual_deb != record_arch.deb_sha256 {
+            bail!(
+                "assembled deb artifact digest for {} disagrees with the record",
+                arch.as_str()
+            );
         }
     }
     // Re-assemble from the candidate's parts so the emitted record is canonical

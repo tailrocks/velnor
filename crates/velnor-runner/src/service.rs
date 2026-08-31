@@ -300,10 +300,10 @@ pub struct ReleaseAssembleArgs {
     /// Candidate record JSON.
     #[arg(long)]
     pub record: PathBuf,
-    /// Directory of downloaded artifacts (per-arch `*.bin.sha256` sidecars) to
-    /// cross-check the record's digests against.
+    /// Required directory of downloaded artifacts (per-arch binary/Debian
+    /// sidecars and Debian payloads) to cross-check the record's digests against.
     #[arg(long)]
-    pub artifacts: Option<PathBuf>,
+    pub artifacts: PathBuf,
     /// Write the re-verified canonical record + checksum here.
     #[arg(long)]
     pub out: Option<PathBuf>,
