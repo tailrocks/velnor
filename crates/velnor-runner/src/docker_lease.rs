@@ -1444,26 +1444,34 @@ fn accept_loop(
     listen_path: PathBuf,
     wake_reader: std::os::unix::net::UnixStream,
 ) {
-    use rustix::event::{poll, PollFd, PollFlags};
-    use rustix::io::Errno;
+    use std::os::fd::AsRawFd;
 
     let mut poll_fds = [
-        PollFd::new(&listener, PollFlags::IN),
-        PollFd::new(&wake_reader, PollFlags::IN),
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake_reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
     ];
     while !conns.is_shutdown() {
-        match poll(&mut poll_fds, None) {
-            Ok(_) => {}
-            Err(Errno::INTR) => continue,
-            Err(_) => break,
-        }
-        if !poll_fds[1].revents().is_empty() {
+        poll_fds[0].revents = 0;
+        poll_fds[1].revents = 0;
+        let polled = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, -1) };
+        if polled < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
             break;
         }
-        if !poll_fds[0]
-            .revents()
-            .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP)
-        {
+        if poll_fds[1].revents != 0 {
+            break;
+        }
+        if poll_fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) == 0 {
             continue;
         }
         let stream = match listener.accept() {
