@@ -5,7 +5,6 @@ cargo-binstall = "1.22.0"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
 "cargo:cargo-zigbuild" = "0.23.3"
 "cargo:cargo-deb" = "3.7.0"
-"npm:ajv-cli" = "5.0.0"
 zig = "0.16.0"
 
 [settings]
