@@ -650,56 +650,59 @@ fn filter_privileged_container_options(
 ) -> Vec<String> {
     if allow_privileged {
         let mut filtered = Vec::with_capacity(options.len());
-        let mut index = 0;
-        while index < options.len() {
-            let option = options[index].as_str();
-            if option == "--" {
-                log_dropped_container_option(option, "Docker option terminator is runner-owned");
-                index += 1;
-            } else if option == "--name" {
-                log_dropped_container_option(option, "container name is runner-owned");
-                index += consumed_option_count(&options, index);
-            } else if option.starts_with("--name=") {
-                log_dropped_container_option(option, "container name is runner-owned");
-                index += 1;
-            } else if matches!(option, "-e" | "--env") {
-                if options
-                    .get(index + 1)
-                    .is_some_and(|value| container_env_option_is_control(value))
-                {
+        let mut options = options.into_iter().peekable();
+        while let Some(option) = options.next() {
+            let option_name = option.as_str();
+            if option_name == "--" {
+                log_dropped_container_option(
+                    option_name,
+                    "Docker option terminator is runner-owned",
+                );
+            } else if option_name == "--name" {
+                log_dropped_container_option(option_name, "container name is runner-owned");
+                if options.peek().is_some_and(|value| !value.starts_with('-')) {
+                    options.next();
+                }
+            } else if option_name.starts_with("--name=") {
+                log_dropped_container_option(option_name, "container name is runner-owned");
+            } else if matches!(option_name, "-e" | "--env") {
+                let Some(value) = options.peek() else {
+                    log_dropped_container_option(option_name, "missing Docker option value");
+                    continue;
+                };
+                if value.starts_with('-') {
+                    log_dropped_container_option(option_name, "missing Docker option value");
+                } else if container_env_option_is_control(value) {
                     log_dropped_container_option(
-                        option,
+                        option_name,
                         "Docker endpoint environment is runner-owned",
                     );
-                    index += 2;
+                    options.next();
                 } else {
-                    filtered.push(options[index].clone());
-                    if let Some(value) = options.get(index + 1) {
-                        filtered.push(value.clone());
-                        index += 2;
-                    } else {
-                        index += 1;
+                    filtered.push(option);
+                    if let Some(value) = options.next() {
+                        filtered.push(value);
                     }
                 }
-            } else if option.starts_with("--env=") || option.starts_with("-e") && option.len() > 2 {
-                if option
+            } else if option_name.starts_with("--env=")
+                || option_name.starts_with("-e") && option_name.len() > 2
+            {
+                if option_name
                     .split_once('=')
                     .is_some_and(|(_, value)| container_env_option_is_control(value))
-                    || option
+                    || option_name
                         .strip_prefix("-e")
                         .is_some_and(container_env_option_is_control)
                 {
                     log_dropped_container_option(
-                        option,
+                        option_name,
                         "Docker endpoint environment is runner-owned",
                     );
                 } else {
-                    filtered.push(options[index].clone());
+                    filtered.push(option);
                 }
-                index += 1;
             } else {
-                filtered.push(options[index].clone());
-                index += 1;
+                filtered.push(option);
             }
         }
         return filtered;
@@ -1518,6 +1521,33 @@ mod tests {
         assert_eq!(
             filter_privileged_container_options(options, true),
             vec!["--env", "SAFE=value", "--hostname", "allowed"]
+        );
+    }
+
+    #[test]
+    fn trusted_container_options_drop_missing_values_without_consuming_options() {
+        let options = vec![
+            "--name".into(),
+            "--hostname".into(),
+            "allowed".into(),
+            "--name".into(),
+            "-malformed-name".into(),
+            "--env".into(),
+            "--cpus=2".into(),
+            "-e".into(),
+            "--memory=4g".into(),
+            "--env".into(),
+        ];
+
+        assert_eq!(
+            filter_privileged_container_options(options, true),
+            vec![
+                "--hostname",
+                "allowed",
+                "-malformed-name",
+                "--cpus=2",
+                "--memory=4g"
+            ]
         );
     }
 

@@ -4,6 +4,7 @@ set -e
 JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
 JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
 PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
+WORKER_UNIT_GLOB=velnor-job@*.service
 
 fail() {
   echo "velnor-runner postrm: $1" >&2
@@ -43,6 +44,14 @@ require_package_transaction_lock() {
   fail "exclusive lock owner is not an apt-wrapper ancestor; keeping CPU quota"
 }
 
+verify_worker_units_inactive() {
+  worker_units=$(systemctl list-units --type=service --all --no-legend --plain \
+    "$WORKER_UNIT_GLOB" 2>/dev/null) || return 1
+  active_workers=$(printf '%s\n' "$worker_units" \
+    | awk '$3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
+  [ -z "$active_workers" ]
+}
+
 verify_jobs_slice_inactive() {
   load_state=$(systemctl show --property=LoadState --value velnor-jobs.slice 2>/dev/null) \
     || return 1
@@ -71,6 +80,15 @@ case "$1" in
       all_units=$(systemctl list-unit-files --no-legend --plain \
         'velnor*.service' 'velnor*.timer' 2>/dev/null) \
         || fail "cannot enumerate Velnor units; keeping CPU quota"
+
+      # Runtime masks close the activation race for every enumerated Velnor
+      # service and timer. They remain until the drop-in is removed, systemd
+      # is reloaded, and the final worker and slice proofs pass.
+      for unit in $(printf '%s\n' "$all_units" | awk '{print $1}'); do
+        systemctl mask --runtime "$unit" \
+          || fail "cannot mask $unit; keeping CPU quota"
+      done
+
       for unit in $(printf '%s\n' "$all_units" | awk '{print $1}'); do
         systemctl disable "$unit" \
           || fail "cannot disable $unit; keeping CPU quota"
@@ -78,9 +96,9 @@ case "$1" in
           || fail "cannot reset $unit; keeping CPU quota"
       done
 
-      # Disable first, then synchronously stop every loaded Velnor service and
-      # timer instance. This closes the start-after-check race before the final
-      # slice proof below.
+      # With masks in place, disable first, then synchronously stop every
+      # loaded Velnor service and timer instance. This closes the start-after-
+      # check race before the final slice proof below.
       runtime_units=$(systemctl list-units --type=service --type=timer --all \
         --no-legend --plain 'velnor*.service' 'velnor*.timer' 2>/dev/null) \
         || fail "cannot enumerate loaded Velnor units; keeping CPU quota"
@@ -88,6 +106,9 @@ case "$1" in
         systemctl stop "$unit" \
           || fail "cannot stop $unit; keeping CPU quota"
       done
+
+      verify_worker_units_inactive \
+        || fail "Velnor job worker is active or activating; keeping CPU quota"
 
       # This is intentionally immediately before rm: a stale pre-stop check
       # permits a job started in the gap to run outside its aggregate cap.
@@ -101,6 +122,16 @@ case "$1" in
         echo "velnor-runner postrm: daemon-reload failed after removing the CPU quota" >&2
         exit 1
       }
+
+      # Keep runtime masks installed through maintainer-script exit. Removing
+      # them here would reopen activation between the final proof and release
+      # of the exclusive package lock. Runtime masks leave no persistent file
+      # and disappear on reboot; a same-boot reinstall must explicitly unmask
+      # the removed fleet before operator-controlled activation.
+      verify_worker_units_inactive \
+        || fail "Velnor job worker became active or activating; CPU quota was removed"
+      verify_jobs_slice_inactive \
+        || fail "velnor-jobs.slice is not provably inactive after daemon-reload"
     fi
     ;;
 esac
