@@ -439,17 +439,179 @@ fn host_workspace_path(container: &JobContainerSpec, container_path: &str) -> Op
 
 fn digest_workspace_tree(root: &Path, exclude_generated: bool) -> Result<ActionDigest> {
     let mut entries = BTreeMap::new();
-    if !root.is_dir() || fs::symlink_metadata(root)?.file_type().is_symlink() {
-        bail!(
-            "compiler-cache input root is not a regular directory: {}",
-            root.display()
-        );
-    }
     let mut budget = CompilerInputBudget::default();
-    collect_workspace_digest_entries(root, root, exclude_generated, &mut entries, &mut budget)?;
+    #[cfg(unix)]
+    {
+        let root_dir = open_workspace_directory(root)?;
+        if !root_dir.metadata()?.is_dir() {
+            bail!(
+                "compiler-cache input root is not a regular directory: {}",
+                root.display()
+            );
+        }
+        collect_workspace_digest_entries_secure(
+            root,
+            root,
+            &root_dir,
+            exclude_generated,
+            &mut entries,
+            &mut budget,
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        if !root.is_dir() || fs::symlink_metadata(root)?.file_type().is_symlink() {
+            bail!(
+                "compiler-cache input root is not a regular directory: {}",
+                root.display()
+            );
+        }
+        collect_workspace_digest_entries(root, root, exclude_generated, &mut entries, &mut budget)?;
+    }
     Ok(ActionDigest::from_bytes(&canonical_json_bytes(&entries)?))
 }
 
+#[cfg(unix)]
+fn workspace_directory_flags() -> rustix::fs::OFlags {
+    rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+}
+
+#[cfg(unix)]
+fn open_workspace_directory(root: &Path) -> Result<fs::File> {
+    let base = if root.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut current = fs::File::from(
+        rustix::fs::open(base, workspace_directory_flags(), rustix::fs::Mode::empty())
+            .map_err(std::io::Error::from)
+            .with_context(|| format!("open compiler-cache input base {}", base.display()))?,
+    );
+    for component in root.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                current = fs::File::from(
+                    rustix::fs::openat(
+                        &current,
+                        name,
+                        workspace_directory_flags(),
+                        rustix::fs::Mode::empty(),
+                    )
+                    .map_err(std::io::Error::from)
+                    .with_context(|| {
+                        format!("open compiler-cache input directory {}", root.display())
+                    })?,
+                );
+            }
+            std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
+                bail!("compiler-cache input root contains a non-normal path component")
+            }
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn collect_workspace_digest_entries_secure(
+    root: &Path,
+    current: &Path,
+    current_dir: &fs::File,
+    exclude_generated: bool,
+    entries: &mut BTreeMap<String, CompilerTreeEntry>,
+    budget: &mut CompilerInputBudget,
+) -> Result<()> {
+    let mut children = fs::read_dir(current)
+        .with_context(|| format!("read compiler-cache digest root {}", current.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.file_name());
+    let directory_flags = workspace_directory_flags();
+    let file_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK;
+    for entry in children {
+        let name = entry.file_name();
+        let path = current.join(&name);
+        let relative = path
+            .strip_prefix(root)
+            .with_context(|| format!("strip compiler-cache digest path {}", path.display()))?;
+        if exclude_generated
+            && relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(name) if name == ".git" || name == "target"
+                )
+            })
+        {
+            continue;
+        }
+        let relative_key = relative.to_string_lossy().replace('\\', "/");
+        match rustix::fs::openat(
+            current_dir,
+            &name,
+            directory_flags,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(child_dir) => {
+                let child_dir: fs::File = child_dir.into();
+                collect_workspace_digest_entries_secure(
+                    root,
+                    &path,
+                    &child_dir,
+                    exclude_generated,
+                    entries,
+                    budget,
+                )?;
+            }
+            Err(error) if error == rustix::io::Errno::NOTDIR => {
+                let mut file: fs::File =
+                    rustix::fs::openat(current_dir, &name, file_flags, rustix::fs::Mode::empty())
+                        .map_err(std::io::Error::from)
+                        .with_context(|| format!("open compiler-cache input {}", path.display()))?
+                        .into();
+                let metadata = file.metadata()?;
+                if !metadata.is_file() {
+                    bail!("unsupported compiler-cache digest entry {}", path.display());
+                }
+                if metadata.len() > MAX_COMPILER_CACHE_INPUT_BYTES {
+                    bail!(
+                        "compiler-cache input file exceeds {MAX_COMPILER_CACHE_INPUT_BYTES} bytes: {}",
+                        path.display()
+                    );
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                budget.account(&path, bytes.len() as u64)?;
+                entries.insert(
+                    relative_key,
+                    CompilerTreeEntry {
+                        kind: "file",
+                        digest: ActionDigest::from_bytes(&bytes),
+                        mode: metadata.permissions().mode() & 0o777,
+                    },
+                );
+            }
+            Err(error) if error == rustix::io::Errno::LOOP => {
+                bail!(
+                    "compiler-cache input symlink is not admitted: {}",
+                    path.display()
+                )
+            }
+            Err(error) => {
+                return Err(std::io::Error::from(error))
+                    .with_context(|| format!("open compiler-cache input {}", path.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
 fn collect_workspace_digest_entries(
     root: &Path,
     current: &Path,
@@ -14826,6 +14988,29 @@ esac
                 ("RUSTFLAGS".into(), "new".into()),
             ]
         );
+    }
+
+    #[test]
+    fn compiler_cache_rejects_mutable_container_images() {
+        assert!(immutable_container_image_digest("ubuntu:latest").is_err());
+        assert!(immutable_container_image_digest(
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_cache_input_digest_rejects_symlinked_files() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("outside"), b"outside").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("input")).unwrap();
+
+        let error = digest_workspace_tree(&root, true).unwrap_err();
+
+        assert!(error.to_string().contains("compiler-cache input"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

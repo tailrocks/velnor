@@ -44,6 +44,39 @@ const MAX_OUTPUT_TREE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_COMPILER_CACHE_CAS_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 static OUTPUT_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
+struct CompilerCacheLifecycleLock {
+    #[cfg(unix)]
+    _file: fs::File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompilerCacheGcReport {
+    pub deleted_objects: usize,
+}
+
+impl CompilerCacheLifecycleLock {
+    fn acquire(storage_root: &Path) -> Result<Self, CacheError> {
+        #[cfg(unix)]
+        {
+            let path = storage_root.join(".lifecycle.lock");
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+                .map_err(|error| CacheError::Io(std::io::Error::from(error)))?;
+            Ok(Self { _file: file })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = storage_root;
+            Ok(Self {})
+        }
+    }
+}
+
 struct CompilerCasBudget {
     metadata_path: PathBuf,
 }
@@ -511,6 +544,10 @@ impl<C: Clock> CompilerCacheService<C> {
         &self.storage_root
     }
 
+    fn lifecycle_lock(&self) -> Result<CompilerCacheLifecycleLock, CacheError> {
+        CompilerCacheLifecycleLock::acquire(&self.storage_root)
+    }
+
     /// Return daemon-owned wrapper variables for one job.
     #[must_use]
     pub fn environment(&self) -> CompilerCacheEnvironment {
@@ -563,6 +600,7 @@ impl<C: Clock> CompilerCacheService<C> {
     /// Return a digest-identified, immutable output tree stored in this
     /// service's trust/backend namespace.
     pub fn store_output_tree(&self, root: &Path) -> Result<Digest, CacheError> {
+        let _lifecycle = self.lifecycle_lock()?;
         if !root.is_dir() || fs::symlink_metadata(root)?.file_type().is_symlink() {
             return Err(CacheError::InvalidOutput(format!(
                 "compiler output root is not a regular directory: {}",
@@ -654,6 +692,66 @@ impl<C: Clock> CompilerCacheService<C> {
             let _ = fs::remove_dir_all(&staging);
         }
         result
+    }
+
+    /// Delete compiler-cache CAS objects that no published metadata entry can
+    /// reach, then reconcile the durable quota with the filesystem.
+    pub fn gc_sync(&self) -> Result<CompilerCacheGcReport, CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Ok(CompilerCacheGcReport { deleted_objects: 0 });
+        }
+        let _lifecycle = self.lifecycle_lock()?;
+        let references = {
+            let metadata = self.lock_metadata()?;
+            let mut statement = metadata
+                .prepare("SELECT result_digest, output_digest FROM compiler_cache_entries")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut protected = BTreeSet::new();
+        for (result_digest, output_digest) in references {
+            let result_digest = Digest::parse(result_digest)?;
+            let output_digest = Digest::parse(output_digest)?;
+            protected.insert(result_digest.clone());
+            protected.insert(output_digest.clone());
+            let result: CompilerResult = serde_json::from_slice(&self.cas.get(&result_digest)?)?;
+            protected.extend([
+                result.action_key.command_digest,
+                result.action_key.input_root,
+                result.action_key.image_digest,
+                result.action_key.toolchain_digest,
+                result.action_key.environment_digest,
+            ]);
+            protected.extend(result.action_key.dependency_outputs);
+            protected.extend([
+                result.output_root.clone(),
+                result.stdout_digest,
+                result.stderr_digest,
+                result.provenance.source_digest,
+            ]);
+            let manifest = self.cas.validate_tree(&output_digest)?;
+            protected.extend(manifest.entries.into_iter().map(|entry| entry.digest));
+        }
+
+        let mut deleted_objects = 0;
+        for digest in self.cas.list_digests()? {
+            if !protected.contains(&digest) && self.cas.remove(&digest)? {
+                deleted_objects += 1;
+            }
+        }
+        let used_bytes = i64::try_from(directory_size(self.cas.root())?).map_err(|_| {
+            CacheError::InvalidOutput("compiler-cache CAS size exceeds SQLite range".into())
+        })?;
+        let metadata = self.lock_metadata()?;
+        metadata.execute(
+            "UPDATE compiler_cache_quota SET used_bytes = ?1 WHERE id = 1",
+            [used_bytes],
+        )?;
+        Ok(CompilerCacheGcReport { deleted_objects })
     }
 
     /// Begin a producer lease with cancellation-safe abandonment.
@@ -801,6 +899,7 @@ impl<C: Clock> CompilerCacheService<C> {
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<(), CacheError> {
+        let _lifecycle = self.lifecycle_lock()?;
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
@@ -1522,6 +1621,35 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn gc_removes_unreferenced_objects_and_preserves_published_tree() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let orphan = cache.cas.put(b"orphan").expect("orphan");
+        let action_key = key(13);
+        let expected = result(action_key.clone());
+        let lease = cache.begin_sync(&action_key).expect("lease");
+        cache
+            .publish_sync(lease, expected.clone())
+            .expect("publish");
+
+        let report = cache.gc_sync().expect("gc");
+
+        assert!(report.deleted_objects >= 1);
+        assert!(matches!(
+            cache.cas.get(&orphan),
+            Err(CasError::Absent { .. })
+        ));
+        assert_eq!(
+            cache.lookup_sync(&action_key).expect("lookup"),
+            Some(expected)
+        );
     }
 
     #[tokio::test]

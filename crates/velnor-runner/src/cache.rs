@@ -201,6 +201,7 @@ fn run_gc(
     let log_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.log_root)
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
+    reclaim_compiler_cache_cas(work_root)?;
     for candidate in candidates {
         let result = remove_candidate(&candidate);
         let outcome = if result.is_ok() { "deleted" } else { "failed" };
@@ -237,6 +238,48 @@ fn run_gc(
             );
         }
         Err(error) => eprintln!("leftover-after-Velnor reclaim failed: {error:#}"),
+    }
+    Ok(())
+}
+
+fn reclaim_compiler_cache_cas(work_root: &Path) -> Result<()> {
+    use velnor_action_model::TrustClass;
+    use velnor_cache_service::{
+        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
+    };
+
+    let base = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.cache_root)
+        .unwrap_or_else(|| crate::container::daemon_shared_root(work_root.to_path_buf()));
+    for (trust_name, trust_class) in [
+        ("untrusted", TrustClass::Untrusted),
+        ("trusted", TrustClass::Trusted),
+        ("release", TrustClass::Release),
+    ] {
+        for (backend_name, policy) in [
+            ("sccache", CompilerCachePolicy::Sccache),
+            ("kache", CompilerCachePolicy::Kache),
+        ] {
+            let namespace = base.join(trust_name).join("compiler").join(backend_name);
+            if !namespace.join("metadata.sqlite").is_file() {
+                continue;
+            }
+            let mut config = CompilerCacheConfig::new(base.clone(), "cache-gc");
+            config.policy = policy;
+            config.trust_class = trust_class;
+            let service =
+                CompilerCacheService::open_production(config, WrapperDeclaration::default())
+                    .with_context(|| {
+                        format!("open compiler-cache GC namespace {}", namespace.display())
+                    })?;
+            let report = service
+                .gc_sync()
+                .with_context(|| format!("reconcile compiler-cache CAS {}", namespace.display()))?;
+            println!(
+                "compiler_cache_gc\t{}\t{}\t{}",
+                trust_name, backend_name, report.deleted_objects
+            );
+        }
     }
     Ok(())
 }
@@ -533,6 +576,7 @@ pub(crate) fn reclaim_work_root(
     // Publish/snapshot leases under one filesystem-wide coordinator. A daemon
     // starting a job cannot race between this snapshot and candidate deletion.
     let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+    reclaim_compiler_cache_cas(work_root)?;
     let mut protected = in_use_scopes.clone();
     protected.extend(crate::capacity::active_scopes(
         run_root,
