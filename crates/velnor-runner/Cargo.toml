@@ -117,7 +117,7 @@ base64.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rayon.workspace = true
-rustix = { workspace = true, features = ["event", "process", "system"] }
+rustix = { workspace = true, features = ["fs", "event", "process", "system"] }
 rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
