@@ -888,6 +888,33 @@ enum PolicyFileAction {
 /// would persist (`None` for removals).
 type PlannedPolicyChange = (PolicyFileAction, Option<Vec<u8>>);
 
+#[cfg(unix)]
+type PolicyFileIdentity = (u64, u64, u64);
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ExistingPolicyFile {
+    bytes: Vec<u8>,
+    identity: PolicyFileIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum PolicyFileExpectation {
+    Absent,
+    Existing(PolicyFileIdentity),
+}
+
+#[cfg(unix)]
+impl PolicyFileExpectation {
+    fn identity(self) -> Option<PolicyFileIdentity> {
+        match self {
+            Self::Absent => None,
+            Self::Existing(identity) => Some(identity),
+        }
+    }
+}
+
 /// Pure decision core of [`fleet_generate`]: map every generated policy and
 /// every existing `<org>-desired-policy.json` file (keyed by its org stem) to
 /// a per-org action. `existing` must contain only entries whose filename
@@ -1430,11 +1457,22 @@ fn clear_errno() {
 #[cfg(all(unix, test))]
 fn write_policy_file(directory: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
     let directory = PolicyDirectory::open_or_create(directory)?;
-    write_policy_file_at(&directory, file_name, bytes)
+    let file_name_c = CString::new(file_name)
+        .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+    let expected = policy_file_identity_at(directory.file.as_raw_fd(), &file_name_c)?.map_or(
+        PolicyFileExpectation::Absent,
+        PolicyFileExpectation::Existing,
+    );
+    write_policy_file_at(&directory, file_name, bytes, expected)
 }
 
 #[cfg(unix)]
-fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u8]) -> Result<()> {
+fn write_policy_file_at(
+    directory: &PolicyDirectory,
+    file_name: &str,
+    bytes: &[u8],
+    expected: PolicyFileExpectation,
+) -> Result<()> {
     let file_name_c = CString::new(file_name)
         .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
 
@@ -1464,6 +1502,24 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
                 file_name
             );
         }
+        let actual = regular_policy_file_identity_from_stat(&stat)?;
+        match expected {
+            PolicyFileExpectation::Absent => {
+                bail!(
+                    "fleet policy entry {}/{} changed during generation; refusing mutation",
+                    directory.path.display(),
+                    file_name
+                )
+            }
+            PolicyFileExpectation::Existing(expected) if expected != actual => {
+                bail!(
+                    "fleet policy entry {}/{} changed during generation; refusing mutation",
+                    directory.path.display(),
+                    file_name
+                )
+            }
+            PolicyFileExpectation::Existing(_) => {}
+        }
         existing_mode = Some(stat.st_mode & 0o7777);
     } else if io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
         return Err(io::Error::last_os_error()).with_context(|| {
@@ -1473,6 +1529,12 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
                 file_name
             )
         });
+    } else if matches!(expected, PolicyFileExpectation::Existing(_)) {
+        bail!(
+            "fleet policy entry {}/{} changed during generation; refusing mutation",
+            directory.path.display(),
+            file_name
+        );
     }
 
     let nonce = std::time::SystemTime::now()
@@ -1517,17 +1579,7 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
         let result = (|| -> io::Result<()> {
             temp_file.write_all(bytes)?;
             temp_file.sync_all()?;
-            let rename_result = unsafe {
-                libc::renameat(
-                    directory.file.as_raw_fd(),
-                    temp_name_c.as_ptr(),
-                    directory.file.as_raw_fd(),
-                    file_name_c.as_ptr(),
-                )
-            };
-            if rename_result < 0 {
-                return Err(io::Error::last_os_error());
-            }
+            rename_policy_file_at(directory, &temp_name_c, &file_name_c, expected)?;
             renamed = true;
             directory.file.sync_all()?;
             Ok(())
@@ -1552,9 +1604,14 @@ fn write_policy_file_at(directory: &PolicyDirectory, file_name: &str, bytes: &[u
 }
 
 #[cfg(unix)]
-fn remove_policy_file_at(directory: &PolicyDirectory, file_name: &str) -> Result<()> {
+fn remove_policy_file_at(
+    directory: &PolicyDirectory,
+    file_name: &str,
+    expected: PolicyFileIdentity,
+) -> Result<()> {
     let file_name_c = CString::new(file_name)
         .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+    revalidate_policy_file_identity(directory, file_name, Some(expected))?;
     let result = unsafe { libc::unlinkat(directory.file.as_raw_fd(), file_name_c.as_ptr(), 0) };
     if result < 0 {
         return Err(io::Error::last_os_error()).with_context(|| {
@@ -1575,7 +1632,9 @@ fn remove_policy_file_at(directory: &PolicyDirectory, file_name: &str) -> Result
 }
 
 #[cfg(unix)]
-fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<String, Vec<u8>>> {
+fn read_existing_policy_files(
+    directory: &PolicyDirectory,
+) -> Result<BTreeMap<String, ExistingPolicyFile>> {
     let mut existing = BTreeMap::new();
     let scan_fd = unsafe { libc::dup(directory.file.as_raw_fd()) };
     if scan_fd < 0 {
@@ -1657,6 +1716,13 @@ fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<St
                 directory.path.display()
             ),
         }
+        let identity = regular_policy_file_identity_from_stat(&stat).map_err(|error| {
+            anyhow::Error::new(error).context(format!(
+                "inspecting {}/{}",
+                directory.path.display(),
+                name
+            ))
+        })?;
         let fd = unsafe {
             libc::openat(
                 directory.file.as_raw_fd(),
@@ -1686,23 +1752,243 @@ fn read_existing_policy_files(directory: &PolicyDirectory) -> Result<BTreeMap<St
             });
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("inspecting {}/{}", directory.path.display(), name))?;
-        if !metadata.is_file() {
-            bail!(
-                "refusing non-regular fleet policy entry {}/{}; expected a regular file inside {}",
-                directory.path.display(),
-                name,
-                directory.path.display()
-            );
-        }
+        let opened_identity =
+            policy_file_identity_from_fd(file.as_raw_fd()).with_context(|| {
+                format!(
+                    "inspecting opened fleet policy entry {}/{}",
+                    directory.path.display(),
+                    name
+                )
+            })?;
+        ensure_scanned_file_identity(directory, name, identity, opened_identity)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .with_context(|| format!("reading {}/{}", directory.path.display(), name))?;
-        existing.insert(stem.to_owned(), bytes);
+        let current_identity = policy_file_identity_at(directory.file.as_raw_fd(), &name_c)
+            .with_context(|| format!("rechecking {}/{}", directory.path.display(), name))?;
+        if current_identity != Some(identity) {
+            bail!(
+                "fleet policy entry {}/{} changed during generation scan; refusing to plan",
+                directory.path.display(),
+                name
+            );
+        }
+        existing.insert(stem.to_owned(), ExistingPolicyFile { bytes, identity });
     }
     Ok(existing)
+}
+
+#[cfg(unix)]
+fn regular_policy_file_identity_from_stat(stat: &libc::stat) -> io::Result<PolicyFileIdentity> {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    Ok((stat.st_dev as _, stat.st_ino, stat.st_mode as u64))
+}
+
+#[cfg(unix)]
+fn policy_file_identity_from_fd(fd: RawFd) -> io::Result<PolicyFileIdentity> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe { libc::fstat(fd, stat.as_mut_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stat = unsafe { stat.assume_init() };
+    regular_policy_file_identity_from_stat(&stat)
+}
+
+#[cfg(unix)]
+fn ensure_scanned_file_identity(
+    directory: &PolicyDirectory,
+    file_name: &str,
+    expected: PolicyFileIdentity,
+    actual: PolicyFileIdentity,
+) -> Result<()> {
+    if actual != expected {
+        bail!(
+            "fleet policy entry {}/{} changed before reading; refusing to plan",
+            directory.path.display(),
+            file_name
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn policy_file_identity_at(
+    directory: RawFd,
+    name: &CStr,
+) -> io::Result<Option<PolicyFileIdentity>> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            directory,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    let stat = unsafe { stat.assume_init() };
+    Ok(Some(regular_policy_file_identity_from_stat(&stat)?))
+}
+
+#[cfg(unix)]
+fn revalidate_policy_file_identity(
+    directory: &PolicyDirectory,
+    file_name: &str,
+    expected: Option<PolicyFileIdentity>,
+) -> Result<()> {
+    let file_name_c = CString::new(file_name)
+        .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+    let actual =
+        policy_file_identity_at(directory.file.as_raw_fd(), &file_name_c).with_context(|| {
+            format!(
+                "rechecking fleet policy {}/{}",
+                directory.path.display(),
+                file_name
+            )
+        })?;
+    if actual != expected {
+        bail!(
+            "fleet policy entry {}/{} changed during generation; refusing mutation",
+            directory.path.display(),
+            file_name
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn revalidate_policy_file_contents(
+    directory: &PolicyDirectory,
+    file_name: &str,
+    expected_identity: PolicyFileIdentity,
+    expected_bytes: &[u8],
+) -> Result<()> {
+    let file_name_c = CString::new(file_name)
+        .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
+    let initial_path_identity = policy_file_identity_at(directory.file.as_raw_fd(), &file_name_c)
+        .with_context(|| {
+        format!(
+            "inspecting fleet policy {}/{} before skip",
+            directory.path.display(),
+            file_name
+        )
+    })?;
+    if initial_path_identity != Some(expected_identity) {
+        bail!(
+            "fleet policy entry {}/{} changed during generation; refusing to skip",
+            directory.path.display(),
+            file_name
+        );
+    }
+    let fd = unsafe {
+        libc::openat(
+            directory.file.as_raw_fd(),
+            file_name_c.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "opening fleet policy {}/{} before skip",
+                directory.path.display(),
+                file_name
+            )
+        });
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let opened_identity = policy_file_identity_from_fd(file.as_raw_fd()).with_context(|| {
+        format!(
+            "inspecting opened fleet policy {}/{} before skip",
+            directory.path.display(),
+            file_name
+        )
+    })?;
+    if opened_identity != expected_identity {
+        bail!(
+            "fleet policy entry {}/{} changed before skip; refusing to skip",
+            directory.path.display(),
+            file_name
+        );
+    }
+    let mut actual_bytes = Vec::new();
+    file.read_to_end(&mut actual_bytes).with_context(|| {
+        format!(
+            "reading fleet policy {}/{} before skip",
+            directory.path.display(),
+            file_name
+        )
+    })?;
+    let final_fd_identity = policy_file_identity_from_fd(file.as_raw_fd()).with_context(|| {
+        format!(
+            "rechecking opened fleet policy {}/{} after skip read",
+            directory.path.display(),
+            file_name
+        )
+    })?;
+    let final_path_identity = policy_file_identity_at(directory.file.as_raw_fd(), &file_name_c)
+        .with_context(|| {
+            format!(
+                "rechecking fleet policy {}/{} after skip read",
+                directory.path.display(),
+                file_name
+            )
+        })?;
+    if final_fd_identity != expected_identity || final_path_identity != Some(expected_identity) {
+        bail!(
+            "fleet policy entry {}/{} changed during generation; refusing to skip",
+            directory.path.display(),
+            file_name
+        );
+    }
+    if actual_bytes != expected_bytes {
+        bail!(
+            "fleet policy entry {}/{} content changed during generation; refusing to skip",
+            directory.path.display(),
+            file_name
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn rename_policy_file_at(
+    directory: &PolicyDirectory,
+    temporary_name: &CStr,
+    file_name: &CStr,
+    expected: PolicyFileExpectation,
+) -> io::Result<()> {
+    let actual = policy_file_identity_at(directory.file.as_raw_fd(), file_name)?;
+    if actual != expected.identity() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "fleet policy entry {} changed during generation; refusing mutation",
+                directory.path.display()
+            ),
+        ));
+    }
+    let result = unsafe {
+        libc::renameat(
+            directory.file.as_raw_fd(),
+            temporary_name.as_ptr(),
+            directory.file.as_raw_fd(),
+            file_name.as_ptr(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -1719,7 +2005,12 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
     #[cfg(unix)]
     let policy_directory = PolicyDirectory::open_or_create(&args.out_dir)?;
     #[cfg(unix)]
-    let existing = read_existing_policy_files(&policy_directory)?;
+    let existing_files = read_existing_policy_files(&policy_directory)?;
+    #[cfg(unix)]
+    let existing: BTreeMap<String, Vec<u8>> = existing_files
+        .iter()
+        .map(|(stem, file)| (stem.clone(), file.bytes.clone()))
+        .collect();
     #[cfg(not(unix))]
     fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("creating {}", args.out_dir.display()))?;
@@ -1733,13 +2024,23 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
     for (org, (action, bytes)) in &plan {
         let file_name = format!("{org}-desired-policy.json");
         let path = args.out_dir.join(&file_name);
+        #[cfg(unix)]
+        let expected_identity = existing_files.get(org).map(|file| file.identity);
         match action {
             PolicyFileAction::Written => {
                 let bytes = bytes
                     .as_deref()
                     .expect("written actions always carry generated bytes");
                 #[cfg(unix)]
-                write_policy_file_at(&policy_directory, &file_name, bytes)?;
+                write_policy_file_at(
+                    &policy_directory,
+                    &file_name,
+                    bytes,
+                    expected_identity.map_or(
+                        PolicyFileExpectation::Absent,
+                        PolicyFileExpectation::Existing,
+                    ),
+                )?;
                 #[cfg(not(unix))]
                 write_policy_file(&args.out_dir, &file_name, bytes)?;
                 let policy = by_org[org.as_str()];
@@ -1752,11 +2053,24 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
                 );
             }
             PolicyFileAction::Skipped => {
+                #[cfg(unix)]
+                revalidate_policy_file_contents(
+                    &policy_directory,
+                    &file_name,
+                    expected_identity.expect("skipped actions always have an existing file"),
+                    bytes
+                        .as_deref()
+                        .expect("skipped actions always carry generated bytes"),
+                )?;
                 println!("{}: already current; left untouched", path.display());
             }
             PolicyFileAction::Removed => {
                 #[cfg(unix)]
-                remove_policy_file_at(&policy_directory, &file_name)?;
+                remove_policy_file_at(
+                    &policy_directory,
+                    &file_name,
+                    expected_identity.expect("removed actions always have an existing file"),
+                )?;
                 #[cfg(not(unix))]
                 fs::remove_file(&path)
                     .with_context(|| format!("removing stale fleet policy {}", path.display()))?;
@@ -2752,6 +3066,240 @@ mod tests {
             metadata.modified().expect("mtime"),
             pinned,
             "file rewritten"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_rejects_replaced_policy_before_mutation() {
+        let dir = PolicyDir::new("replacement-race");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        fs::write(&path, b"original\n").expect("seed policy");
+
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let existing = read_existing_policy_files(&directory).expect("scan policy files");
+        let expected = existing.get("ghost-org").expect("scanned policy").identity;
+
+        let replacement = dir.path.join("replacement.tmp");
+        fs::write(&replacement, b"replacement\n").expect("write replacement");
+        fs::rename(&replacement, &path).expect("replace policy atomically");
+
+        let error = remove_policy_file_at(&directory, file_name, expected)
+            .expect_err("replacement must abort removal");
+        assert!(
+            error.to_string().contains("changed during generation"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("replacement remains"),
+            b"replacement\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_accepts_matching_opened_identity() {
+        let dir = PolicyDir::new("opened-identity");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        fs::write(&path, b"original\n").expect("seed policy");
+
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let existing = read_existing_policy_files(&directory).expect("scan policy files");
+        let expected = existing.get("ghost-org").expect("scanned policy").identity;
+        let file_name_c = CString::new(file_name).expect("file name");
+        let fd = unsafe {
+            libc::openat(
+                directory.file.as_raw_fd(),
+                file_name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        assert!(fd >= 0, "openat failed: {}", io::Error::last_os_error());
+        let file = unsafe { File::from_raw_fd(fd) };
+        let opened = policy_file_identity_from_fd(file.as_raw_fd()).expect("opened identity");
+
+        ensure_scanned_file_identity(&directory, file_name, expected, opened)
+            .expect("matching opened identity must allow the scan");
+        assert_eq!(fs::read(&path).expect("policy remains"), b"original\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_rejects_opened_replacement_identity() {
+        let dir = PolicyDir::new("opened-replacement-race");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        fs::write(&path, b"original\n").expect("seed policy");
+
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let existing = read_existing_policy_files(&directory).expect("scan policy files");
+        let expected = existing.get("ghost-org").expect("scanned policy").identity;
+
+        let replacement = dir.path.join("replacement.tmp");
+        fs::write(&replacement, b"replacement\n").expect("write replacement");
+        fs::rename(&replacement, &path).expect("replace policy atomically");
+        let file_name_c = CString::new(file_name).expect("file name");
+        let fd = unsafe {
+            libc::openat(
+                directory.file.as_raw_fd(),
+                file_name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        assert!(fd >= 0, "openat failed: {}", io::Error::last_os_error());
+        let file = unsafe { File::from_raw_fd(fd) };
+        let opened = policy_file_identity_from_fd(file.as_raw_fd()).expect("opened identity");
+
+        let error = ensure_scanned_file_identity(&directory, file_name, expected, opened)
+            .expect_err("opened replacement must abort planning");
+        assert!(
+            error.to_string().contains("changed before reading"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("replacement remains"),
+            b"replacement\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_rejects_same_inode_content_change_before_skip() {
+        let dir = PolicyDir::new("same-inode-content-race");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        fs::write(&path, b"original\n").expect("seed policy");
+
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let existing = read_existing_policy_files(&directory).expect("scan policy files");
+        let expected = existing.get("ghost-org").expect("scanned policy").identity;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open policy for in-place edit");
+        file.set_len(0).expect("truncate policy in place");
+        file.write_all(b"changed\n").expect("write policy in place");
+
+        let error = revalidate_policy_file_contents(&directory, file_name, expected, b"original\n")
+            .expect_err("same-inode content change must abort skip");
+        assert!(
+            error
+                .to_string()
+                .contains("content changed during generation"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("changed policy remains"),
+            b"changed\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_accepts_matching_final_rename_identity() {
+        let dir = PolicyDir::new("final-rename-identity");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        fs::write(&path, b"original\n").expect("seed policy");
+
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let existing = read_existing_policy_files(&directory).expect("scan policy files");
+        let expected = existing.get("ghost-org").expect("scanned policy").identity;
+        let temporary_name = ".ghost-org-desired-policy.json.tmp-test";
+        let temporary = dir.path.join(temporary_name);
+        fs::write(&temporary, b"generated\n").expect("seed generated policy");
+        let temporary_c = CString::new(temporary_name).expect("temporary name");
+        let file_name_c = CString::new(file_name).expect("file name");
+
+        rename_policy_file_at(
+            &directory,
+            &temporary_c,
+            &file_name_c,
+            PolicyFileExpectation::Existing(expected),
+        )
+        .expect("matching final identity must allow rename");
+        assert_eq!(fs::read(&path).expect("generated policy"), b"generated\n");
+        assert!(!temporary.exists(), "renamed temporary must be gone");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_rejects_replacement_at_final_rename_check() {
+        let dir = PolicyDir::new("final-rename-race");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        fs::write(&path, b"original\n").expect("seed policy");
+
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let existing = read_existing_policy_files(&directory).expect("scan policy files");
+        let expected = existing.get("ghost-org").expect("scanned policy").identity;
+        let temporary_name = ".ghost-org-desired-policy.json.tmp-test";
+        let temporary = dir.path.join(temporary_name);
+        fs::write(&temporary, b"generated\n").expect("seed generated policy");
+
+        let replacement = dir.path.join("replacement.tmp");
+        fs::write(&replacement, b"replacement\n").expect("write replacement");
+        fs::rename(&replacement, &path).expect("replace policy atomically");
+        let temporary_c = CString::new(temporary_name).expect("temporary name");
+        let file_name_c = CString::new(file_name).expect("file name");
+
+        let error = rename_policy_file_at(
+            &directory,
+            &temporary_c,
+            &file_name_c,
+            PolicyFileExpectation::Existing(expected),
+        )
+        .expect_err("replacement must abort final rename");
+        assert!(
+            error.to_string().contains("changed during generation"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("replacement remains"),
+            b"replacement\n"
+        );
+        assert_eq!(
+            fs::read(&temporary).expect("temporary remains"),
+            b"generated\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_rejects_appeared_policy_at_final_rename_check() {
+        let dir = PolicyDir::new("appeared-final-rename-race");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let temporary_name = ".ghost-org-desired-policy.json.tmp-test";
+        let temporary = dir.path.join(temporary_name);
+        fs::write(&temporary, b"generated\n").expect("seed generated policy");
+
+        fs::write(&path, b"appeared\n").expect("create replacement target");
+        let temporary_c = CString::new(temporary_name).expect("temporary name");
+        let file_name_c = CString::new(file_name).expect("file name");
+
+        let error = rename_policy_file_at(
+            &directory,
+            &temporary_c,
+            &file_name_c,
+            PolicyFileExpectation::Absent,
+        )
+        .expect_err("appeared target must abort final rename");
+        assert!(
+            error.to_string().contains("changed during generation"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("appeared target remains"),
+            b"appeared\n"
+        );
+        assert_eq!(
+            fs::read(&temporary).expect("temporary remains"),
+            b"generated\n"
         );
     }
 
