@@ -616,14 +616,22 @@ pub fn admit_job(
 
 /// Admit the approved reusable workflow when the job was dispatched by one.
 fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), AdmissionError> {
-    let Some(job_workflow_ref) = context_string(walk.context_data, "github.job_workflow_ref")
-    else {
-        return Ok(());
-    };
     // A reusable-workflow call is identified by the presence of the job-defining
     // workflow identity. Once present, all related identity fields are required
     // and validated before the action graph can perform any metadata read.
     let ancestry = root.child("reusable workflow context".to_string());
+    let Some(job_workflow_ref) =
+        context_string_strict(walk.context_data, "github.job_workflow_ref").map_err(|()| {
+            AdmissionError::new(
+                &ancestry,
+                "github.job_workflow_ref",
+                "reusable workflow identity must be a scalar string, number, or boolean",
+                vec!["a string, number, or boolean scalar".to_string()],
+            )
+        })?
+    else {
+        return Ok(());
+    };
     let Some(top_level) = context_string(walk.context_data, "github.workflow_ref") else {
         return Err(AdmissionError::new(
             &ancestry,
@@ -700,7 +708,14 @@ fn admit_reusable_workflow(walk: &mut Walk, root: &Ancestry) -> Result<(), Admis
             vec!["the exact 40-hex workflow commit SHA".to_string()],
         ));
     }
-    let inputs = context_object_strings(walk.context_data, "inputs");
+    let inputs = context_object_strings(walk.context_data, "inputs").map_err(|field| {
+        AdmissionError::new(
+            &ancestry,
+            field,
+            "reusable workflow input must be a scalar string, number, or boolean",
+            vec!["a string, number, or boolean scalar".to_string()],
+        )
+    })?;
     let inputs = canonicalize_admission_inputs(&inputs, &ancestry)?;
     manifest::validate_reusable_workflow(
         &ancestry.to_string(),
@@ -1252,15 +1267,54 @@ fn workflow_source(context_data: &[(String, Value)]) -> Option<(String, String)>
 }
 
 fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
+    match context_value(context_data, path) {
+        ContextLookup::Present(value) => context_scalar_string(value),
+        ContextLookup::Missing | ContextLookup::Malformed => None,
+    }
+}
+
+fn context_string_strict(
+    context_data: &[(String, Value)],
+    path: &str,
+) -> Result<Option<String>, ()> {
+    match context_value(context_data, path) {
+        ContextLookup::Missing => Ok(None),
+        ContextLookup::Malformed => Err(()),
+        ContextLookup::Present(value) => context_scalar_string(value).map(Some).ok_or(()),
+    }
+}
+
+enum ContextLookup<'a> {
+    Missing,
+    Malformed,
+    Present(&'a Value),
+}
+
+fn context_value<'a>(context_data: &'a [(String, Value)], path: &str) -> ContextLookup<'a> {
     let mut parts = path.split('.');
-    let first = parts.next()?;
-    let mut value = context_data
+    let Some(first) = parts.next() else {
+        return ContextLookup::Missing;
+    };
+    let Some(mut value) = context_data
         .iter()
         .find(|(name, _)| name == first)
-        .map(|(_, value)| value)?;
+        .map(|(_, value)| value)
+    else {
+        return ContextLookup::Missing;
+    };
     for part in parts {
-        value = value.as_object()?.get(part)?;
+        let Some(object) = value.as_object() else {
+            return ContextLookup::Malformed;
+        };
+        let Some(next) = object.get(part) else {
+            return ContextLookup::Missing;
+        };
+        value = next;
     }
+    ContextLookup::Present(value)
+}
+
+fn context_scalar_string(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
         Value::Number(value) => Some(value.to_string()),
@@ -1445,23 +1499,28 @@ fn validate_metadata_string_map(
     Ok(())
 }
 
-fn context_object_strings(context_data: &[(String, Value)], key: &str) -> BTreeMap<String, String> {
-    context_data
+fn context_object_strings(
+    context_data: &[(String, Value)],
+    key: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let Some(value) = context_data
         .iter()
         .find(|(name, _)| name == key)
-        .and_then(|(_, value)| value.as_object())
-        .map(|object| {
-            object
-                .iter()
-                .filter_map(|(name, value)| match value {
-                    Value::String(value) => Some((name.clone(), value.clone())),
-                    Value::Number(value) => Some((name.clone(), value.to_string())),
-                    Value::Bool(value) => Some((name.clone(), value.to_string())),
-                    _ => None,
-                })
-                .collect()
+        .map(|(_, value)| value)
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(object) = value.as_object() else {
+        return Err(key.to_string());
+    };
+    object
+        .iter()
+        .map(|(name, value)| {
+            context_scalar_string(value)
+                .map(|value| (name.clone(), value))
+                .ok_or_else(|| format!("{key}.{name}"))
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn context_within_admission_budget(context_data: &[(String, Value)]) -> bool {
@@ -2106,6 +2165,207 @@ mod tests {
         let error = admit_job(&job(serde_json::json!([])), &context, &source).unwrap_err();
         assert_eq!(source.reads(), 0);
         assert_eq!(error.field, "github.job_workflow_ref");
+    }
+
+    fn reusable_workflow_context(
+        job_workflow_ref: Value,
+        inputs: Option<Value>,
+    ) -> Vec<(String, Value)> {
+        let mut context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "job_workflow_ref": job_workflow_ref,
+                "workflow_ref": "acme/repo/.github/workflows/ci.yml@refs/heads/main",
+                "job_workflow_sha": "80a1acd07257a23b441c546e6fcad12239ef7626",
+                "repository": "acme/repo",
+                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }),
+        )];
+        if let Some(inputs) = inputs {
+            context.push(("inputs".to_string(), inputs));
+        }
+        context
+    }
+
+    const NON_NATIVE_ACTION_SHA: &str = "80a1acd07257a23b441c546e6fcad12239ef7626";
+
+    fn metadata_fetching_job() -> AgentJobRequestMessage {
+        job(serde_json::json!([repo_step(
+            "jackin-project/jackin-role-action",
+            NON_NATIVE_ACTION_SHA,
+            None,
+            serde_json::json!({})
+        )]))
+    }
+
+    fn matching_metadata_source() -> FakeMetadataSource {
+        FakeMetadataSource::new(&[(
+            "jackin-project/jackin-role-action@80a1acd07257a23b441c546e6fcad12239ef7626",
+            "runs:\n  using: node20\n  main: dist/index.js\n",
+        )])
+    }
+
+    #[test]
+    fn reusable_workflow_non_scalar_identity_rejected_before_metadata_fetch() {
+        for malformed in [Value::Null, serde_json::json!({}), serde_json::json!([])] {
+            let context = reusable_workflow_context(malformed, None);
+            let source = matching_metadata_source();
+            let error = admit_job(&metadata_fetching_job(), &context, &source).unwrap_err();
+            assert_eq!(source.reads(), 0);
+            assert_eq!(error.field, "github.job_workflow_ref");
+            assert_eq!(
+                error.reason,
+                "reusable workflow identity must be a scalar string, number, or boolean"
+            );
+            assert_eq!(
+                error.accepted,
+                vec!["a string, number, or boolean scalar".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn reusable_workflow_numeric_boolean_identity_rejected_before_metadata_fetch() {
+        for scalar in [serde_json::json!(42), serde_json::json!(true)] {
+            let context = reusable_workflow_context(scalar, None);
+            let source = matching_metadata_source();
+            let error = admit_job(&metadata_fetching_job(), &context, &source).unwrap_err();
+            assert_eq!(source.reads(), 0);
+            assert_eq!(error.field, "github.job_workflow_ref");
+            assert_eq!(error.reason, "reusable workflow identity is malformed");
+            assert_eq!(
+                error.accepted,
+                vec!["owner/repository/.github/workflows/name.yml@<40-hex-SHA>".to_string()]
+            );
+        }
+    }
+
+    fn assert_malformed_github_parent_rejected(github: Value) {
+        let context = vec![("github".to_string(), github)];
+        let job = job(serde_json::json!([repo_step(
+            "jackin-project/jackin-role-action",
+            "80a1acd07257a23b441c546e6fcad12239ef7626",
+            None,
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[]);
+        let error = admit_job(&job, &context, &source).unwrap_err();
+        assert_eq!(source.reads(), 0);
+        assert_eq!(error.field, "github.job_workflow_ref");
+        assert_eq!(
+            error.reason,
+            "reusable workflow identity must be a scalar string, number, or boolean"
+        );
+        assert_eq!(
+            error.accepted,
+            vec!["a string, number, or boolean scalar".to_string()]
+        );
+    }
+
+    #[test]
+    fn reusable_workflow_null_github_parent_rejected_before_metadata_fetch() {
+        assert_malformed_github_parent_rejected(Value::Null);
+    }
+
+    #[test]
+    fn reusable_workflow_scalar_github_parent_rejected_before_metadata_fetch() {
+        assert_malformed_github_parent_rejected(serde_json::json!("malformed"));
+    }
+
+    #[test]
+    fn reusable_workflow_array_github_parent_rejected_before_metadata_fetch() {
+        assert_malformed_github_parent_rejected(serde_json::json!([]));
+    }
+
+    #[test]
+    fn reusable_workflow_non_scalar_input_rejected_before_metadata_fetch() {
+        for malformed in [Value::Null, serde_json::json!({}), serde_json::json!([])] {
+            let context = reusable_workflow_context(
+                serde_json::json!(
+                    "jackin-project/jackin-role-action/.github/workflows/publish.yml@80a1acd07257a23b441c546e6fcad12239ef7626"
+                ),
+                Some(serde_json::json!({"publish": malformed})),
+            );
+            let source = matching_metadata_source();
+            let error = admit_job(&metadata_fetching_job(), &context, &source).unwrap_err();
+            assert_eq!(source.reads(), 0);
+            assert_eq!(error.field, "inputs.publish");
+            assert_eq!(
+                error.accepted,
+                vec!["a string, number, or boolean scalar".to_string()]
+            );
+            assert_eq!(
+                error.reason,
+                "reusable workflow input must be a scalar string, number, or boolean"
+            );
+        }
+    }
+
+    #[test]
+    fn reusable_workflow_malformed_top_level_inputs_rejected_before_metadata_fetch() {
+        for malformed in [
+            Value::Null,
+            serde_json::json!("not-an-object"),
+            serde_json::json!(42),
+            serde_json::json!(true),
+            serde_json::json!([]),
+        ] {
+            let context = reusable_workflow_context(
+                serde_json::json!(
+                    "jackin-project/jackin-role-action/.github/workflows/publish.yml@80a1acd07257a23b441c546e6fcad12239ef7626"
+                ),
+                Some(malformed),
+            );
+            let source = matching_metadata_source();
+            let error = admit_job(&metadata_fetching_job(), &context, &source).unwrap_err();
+            assert_eq!(source.reads(), 0);
+            assert_eq!(error.field, "inputs");
+            assert_eq!(
+                error.reason,
+                "reusable workflow input must be a scalar string, number, or boolean"
+            );
+            assert_eq!(
+                error.accepted,
+                vec!["a string, number, or boolean scalar".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn reusable_workflow_scalar_input_values_are_stringified() {
+        let context = vec![(
+            "inputs".to_string(),
+            serde_json::json!({
+                "publish": true,
+                "runner-amd64": 42,
+                "registry": "ghcr.io"
+            }),
+        )];
+        let inputs = context_object_strings(&context, "inputs").unwrap();
+        assert_eq!(inputs.get("publish").map(String::as_str), Some("true"));
+        assert_eq!(inputs.get("runner-amd64").map(String::as_str), Some("42"));
+        assert_eq!(inputs.get("registry").map(String::as_str), Some("ghcr.io"));
+    }
+
+    #[test]
+    fn reusable_workflow_scalar_inputs_keep_string_number_and_boolean_conversion() {
+        let context = reusable_workflow_context(
+            serde_json::json!(
+                "jackin-project/jackin-role-action/.github/workflows/publish.yml@80a1acd07257a23b441c546e6fcad12239ef7626"
+            ),
+            Some(serde_json::json!({
+                "publish": true,
+                "runner-amd64": 42,
+                "registry": "ghcr.io"
+            })),
+        );
+        let source = FakeMetadataSource::new(&[]);
+        let graph = admit_job(&job(serde_json::json!([])), &context, &source).unwrap();
+        assert_eq!(source.reads(), 0);
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == AdmissionNodeKind::ReusableWorkflow));
     }
 
     #[test]
