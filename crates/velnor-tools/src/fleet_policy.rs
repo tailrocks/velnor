@@ -899,6 +899,13 @@ struct ExistingPolicyFile {
 }
 
 #[cfg(unix)]
+impl AsRef<[u8]> for ExistingPolicyFile {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 enum PolicyFileExpectation {
     Absent,
@@ -920,9 +927,9 @@ impl PolicyFileExpectation {
 /// a per-org action. `existing` must contain only entries whose filename
 /// strictly matches `<org>-desired-policy.json`; callers never pass anything
 /// else, so this function cannot decide to touch unrelated files.
-fn plan_policy_actions(
+fn plan_policy_actions<T: AsRef<[u8]>>(
     policies: &[OrgPolicy],
-    existing: &BTreeMap<String, Vec<u8>>,
+    existing: &BTreeMap<String, T>,
 ) -> Result<BTreeMap<String, PlannedPolicyChange>> {
     // Fail closed on ASCII-case-insensitive filename collisions (review G2,
     // residual H1/H2): on case-insensitive filesystems (macOS APFS, Windows
@@ -998,7 +1005,7 @@ fn plan_policy_actions(
         let bytes = format!("{}\n", policy.canonical_json()?);
         let action = if existing
             .get(&policy.organization)
-            .is_some_and(|on_disk| on_disk.as_slice() == bytes.as_bytes())
+            .is_some_and(|on_disk| on_disk.as_ref() == bytes.as_bytes())
         {
             PolicyFileAction::Skipped
         } else {
@@ -2052,10 +2059,7 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
     #[cfg(unix)]
     let existing_files = read_existing_policy_files(&policy_directory)?;
     #[cfg(unix)]
-    let existing: BTreeMap<String, Vec<u8>> = existing_files
-        .iter()
-        .map(|(stem, file)| (stem.clone(), file.bytes.clone()))
-        .collect();
+    let existing = &existing_files;
     #[cfg(not(unix))]
     fs::create_dir_all(&args.out_dir)
         .with_context(|| format!("creating {}", args.out_dir.display()))?;
@@ -3083,7 +3087,8 @@ mod tests {
         );
 
         // Missing on-disk state means every ledger org is written.
-        let fresh = plan_policy_actions(&policies, &BTreeMap::new()).expect("fresh plan");
+        let fresh = plan_policy_actions(&policies, &BTreeMap::<String, Vec<u8>>::new())
+            .expect("fresh plan");
         assert_eq!(fresh.len(), 2);
         assert_eq!(fresh["tailrocks"].0, PolicyFileAction::Written);
         assert_eq!(
@@ -3827,7 +3832,7 @@ mod tests {
         let upper = OrgPolicy::new("Tailrocks").normalized();
         assert_ne!(lower.organization, upper.organization);
 
-        let err = plan_policy_actions(&[lower, upper], &BTreeMap::new())
+        let err = plan_policy_actions(&[lower, upper], &BTreeMap::<String, Vec<u8>>::new())
             .expect_err("intra-ledger ASCII-case duplicate orgs must abort planning")
             .to_string();
         assert!(err.contains("case-insensitive"), "{err}");
