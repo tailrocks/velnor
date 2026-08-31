@@ -2,7 +2,7 @@
 
 use crate::{
     checkout::fetch_git_ref,
-    executor::{render_context_expressions, CommandRunner},
+    executor::CommandRunner,
     job_message::{ActionReferenceType, ActionStep},
     script_step::{step_environment, value_truthy, ScriptStep},
 };
@@ -292,7 +292,38 @@ pub struct CompositeActionOutputs {
 }
 
 pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
+    if !metadata_document_within_budget(contents) {
+        bail!("action metadata nesting exceeds the admission parser budget");
+    }
     serde_yaml::from_str(contents).context("parse action metadata")
+}
+
+const MAX_METADATA_PARSE_NESTING: usize = 64;
+
+fn metadata_document_within_budget(contents: &str) -> bool {
+    let mut flow_depth = 0usize;
+    for line in contents.lines() {
+        let indentation = line
+            .bytes()
+            .take_while(|byte| *byte == b' ' || *byte == b'\t')
+            .count();
+        if indentation > MAX_METADATA_PARSE_NESTING * 2 {
+            return false;
+        }
+        for byte in line.bytes() {
+            match byte {
+                b'[' | b'{' => {
+                    flow_depth = flow_depth.saturating_add(1);
+                    if flow_depth > MAX_METADATA_PARSE_NESTING {
+                        return false;
+                    }
+                }
+                b']' | b'}' => flow_depth = flow_depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    true
 }
 
 fn deserialize_optional_string_scalar<'de, D>(
@@ -598,7 +629,7 @@ impl ResolvedAction {
             ),
             ("GITHUB_ACTION_REF".to_string(), self.plan.git_ref.clone()),
         ];
-        let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
+        let inputs = effective_inputs(&self.metadata, &self.plan.inputs)?;
         env.extend(
             self.plan
                 .env
@@ -629,7 +660,7 @@ impl ResolvedAction {
             bail!("action '{}' is not a Docker action", self.plan.repository)
         };
         let action_container_path = container_path(actions_host, &self.plan.action_dir)?;
-        let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
+        let inputs = effective_inputs(&self.metadata, &self.plan.inputs)?;
         let mut env = vec![
             ("GITHUB_ACTION".to_string(), self.plan.step_id.clone()),
             (
@@ -741,7 +772,7 @@ pub fn native_invocation_from_plan(
         adapter,
         cache_kind,
         source_path: plan.source_path.clone(),
-        inputs: plan.inputs.clone(),
+        inputs: canonicalize_input_map(&plan.inputs)?,
         env: plan.env.clone(),
     }))
 }
@@ -816,7 +847,7 @@ fn composite_action_invocations_with_path(
     if depth > MAX_LOCAL_COMPOSITE_DEPTH {
         bail!("nested local composite depth exceeds {MAX_LOCAL_COMPOSITE_DEPTH}")
     }
-    let action_inputs = effective_inputs(metadata, inputs);
+    let action_inputs = effective_inputs(metadata, inputs)?;
     let mut invocations = Vec::new();
     let mut step_ids = BTreeMap::new();
     for (index, step) in metadata.runs.steps.iter().enumerate() {
@@ -1302,7 +1333,7 @@ fn render_inputs(
             let rendered = if contains_step_output_expression(value) {
                 value.clone()
             } else {
-                render_context_expressions(value, context_data)
+                crate::executor::render_context_expressions_bounded(value, context_data)
             };
             (name.clone(), rendered)
         })
@@ -1366,7 +1397,7 @@ fn render_composite_expression(
         return workspace_container.to_string();
     }
     if let Some(name) = expression.strip_prefix("inputs.")
-        && let Some(value) = inputs.get(name)
+        && let Some(value) = input_value_case_insensitive(inputs, name)
     {
         return value.clone();
     }
@@ -1378,7 +1409,11 @@ fn render_composite_expression(
             &expression_single_quote(workspace_container),
         );
     for (name, value) in inputs_by_descending_name_len(inputs) {
-        rendered = rendered.replace(&format!("inputs.{name}"), &expression_single_quote(value));
+        rendered = replace_ascii_case_insensitive(
+            &rendered,
+            &format!("inputs.{name}"),
+            &expression_single_quote(value),
+        );
     }
     format!("${{{{ {rendered} }}}}")
 }
@@ -1393,7 +1428,7 @@ fn replace_composite_bare_tokens(
         .replace("github.action_path", action_path)
         .replace("github.workspace", workspace_container);
     for (name, value) in inputs_by_descending_name_len(inputs) {
-        rendered = rendered.replace(&format!("inputs.{name}"), value);
+        rendered = replace_ascii_case_insensitive(&rendered, &format!("inputs.{name}"), value);
     }
     rendered
 }
@@ -1464,22 +1499,70 @@ fn composite_step_id(prefix: &str, id: Option<&str>, index: usize) -> String {
         .unwrap_or_else(|| format!("{prefix}-{}", index + 1))
 }
 
+pub fn canonicalize_input_map(
+    inputs: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut canonical = BTreeMap::new();
+    for (name, value) in inputs {
+        let canonical_name = name.to_ascii_lowercase();
+        if canonical
+            .insert(canonical_name.clone(), value.clone())
+            .is_some()
+        {
+            bail!("action input names differ only by ASCII case: {canonical_name}");
+        }
+    }
+    Ok(canonical)
+}
+
 fn effective_inputs(
     metadata: &ActionMetadata,
     provided: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut inputs = metadata
-        .inputs
-        .iter()
-        .filter_map(|(name, input)| {
-            input
-                .default_value
-                .as_ref()
-                .map(|value| (name.clone(), value.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    inputs.extend(provided.clone());
-    inputs
+) -> Result<BTreeMap<String, String>> {
+    let mut inputs = BTreeMap::new();
+    let mut declared_names = BTreeSet::new();
+    for (name, input) in &metadata.inputs {
+        let canonical_name = name.to_ascii_lowercase();
+        if !declared_names.insert(canonical_name.clone()) {
+            bail!("metadata input names differ only by ASCII case: {canonical_name}");
+        }
+        if let Some(value) = &input.default_value {
+            inputs.insert(canonical_name, value.clone());
+        }
+    }
+    inputs.extend(canonicalize_input_map(provided)?);
+    Ok(inputs)
+}
+
+fn input_value_case_insensitive<'a>(
+    inputs: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Option<&'a String> {
+    inputs.get(&name.to_ascii_lowercase())
+}
+
+fn replace_ascii_case_insensitive(value: &str, needle: &str, replacement: &str) -> String {
+    let lower_value = value.to_ascii_lowercase();
+    let lower_needle = needle.to_ascii_lowercase();
+    if !lower_value.contains(&lower_needle) {
+        return value.to_string();
+    }
+    let mut rendered = String::with_capacity(
+        value
+            .len()
+            .saturating_add(replacement.len().saturating_sub(needle.len())),
+    );
+    let mut cursor = 0;
+    for (start, _) in lower_value.match_indices(&lower_needle) {
+        if start < cursor {
+            continue;
+        }
+        rendered.push_str(&value[cursor..start]);
+        rendered.push_str(replacement);
+        cursor = start + needle.len();
+    }
+    rendered.push_str(&value[cursor..]);
+    rendered
 }
 
 fn workspace_path(workspace_container: &str, path: &str) -> String {
@@ -1606,6 +1689,12 @@ runs:
     }
 
     #[test]
+    fn metadata_parser_rejects_excessive_nesting_before_yaml_parse() {
+        let nested = format!("{}true{}", "[".repeat(65), "]".repeat(65));
+        assert!(parse_action_metadata(&nested).is_err());
+    }
+
+    #[test]
     fn parses_composite_action_metadata() {
         let metadata = parse_action_metadata(
             r#"
@@ -1631,6 +1720,43 @@ runs:
         assert_eq!(metadata.runs.steps[0].env["COUNT"], "7");
         assert_eq!(metadata.runs.steps[1].with["cleanup"], "false");
         assert_eq!(metadata.runs.steps[1].with["retries"], "3");
+    }
+
+    #[test]
+    fn composite_inputs_are_canonicalized_for_case_insensitive_rendering() {
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  lookup-only:
+    default: false
+runs:
+  using: composite
+  steps:
+    - run: echo ${{ inputs.LOOKUP-ONLY }}
+      shell: bash
+"#,
+        )
+        .unwrap();
+        let provided = [("LOOKUP-ONLY".to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
+        let inputs = effective_inputs(&metadata, &provided).unwrap();
+        assert_eq!(inputs.get("lookup-only").map(String::as_str), Some("true"));
+        assert_eq!(
+            render_composite_value("${{ inputs.LOOKUP-ONLY }}", &inputs, "/__a", "/__w"),
+            "true"
+        );
+    }
+
+    #[test]
+    fn canonical_input_map_rejects_case_collisions() {
+        let inputs = [
+            ("lookup-only".to_string(), "true".to_string()),
+            ("LOOKUP-ONLY".to_string(), "false".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert!(canonicalize_input_map(&inputs).is_err());
     }
 
     #[test]

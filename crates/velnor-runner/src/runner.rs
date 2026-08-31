@@ -7116,6 +7116,7 @@ fn microvm_executable_steps(
                     .as_ref()
                     .and_then(|reference| reference.git_ref.clone())
                     .unwrap_or_else(|| repository.to_string());
+                let inputs = crate::action::string_inputs(step)?;
                 let invocation = crate::action::NativeActionInvocation {
                     git_ref,
                     adapter,
@@ -7129,7 +7130,7 @@ fn microvm_executable_steps(
                         .reference
                         .as_ref()
                         .and_then(|reference| reference.path.clone()),
-                    inputs: crate::action::string_inputs(step)?,
+                    inputs: crate::action::canonicalize_input_map(&inputs)?,
                     env: crate::script_step::step_environment(step)?,
                 };
                 ordered.push(crate::executor::ExecutableStep::Native {
