@@ -223,10 +223,7 @@ impl FileContextStore {
 
     /// Save or replace one context.
     pub fn set(&self, mut context: ContextConfig) -> Result<(), ConfigError> {
-        validate_context_name(&context.name)?;
-        if context.endpoint.as_str().is_empty() {
-            return Err(ConfigError::Empty("endpoint"));
-        }
+        validate_context_config(&context)?;
         let path = self.absolute_path()?;
         let _lock = SidecarLock::acquire(&path)?;
         let mut file = read_file(&path)?;
@@ -262,10 +259,13 @@ impl FileContextStore {
             context.current = context.name == name;
         }
         write_file(&path, &file)?;
-        file.contexts
+        let context = file
+            .contexts
             .into_iter()
             .find(|context| context.name == name)
-            .ok_or(ConfigError::ContextNotFound)
+            .ok_or(ConfigError::ContextNotFound)?;
+        validate_context_config(&context)?;
+        Ok(context)
     }
 
     /// Delete a non-current context.
@@ -448,7 +448,13 @@ fn read_file(path: &std::path::Path) -> Result<ContextFile, ConfigError> {
     inspect_read_path(path)?;
     match std::fs::read_to_string(path) {
         Ok(contents) => {
-            toml::from_str(&contents).map_err(|error| ConfigError::Decode(error.to_string()))
+            let file =
+                toml::from_str::<ContextFile>(&contents)
+                    .map_err(|error| ConfigError::Decode(error.to_string()))?;
+            for context in &file.contexts {
+                validate_context_config(context)?;
+            }
+            Ok(file)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ContextFile {
             contexts: Vec::new(),
@@ -620,17 +626,23 @@ impl ContextStore for FileContextStore {
     fn list(&self) -> Result<Vec<ContextConfig>, ConfigError> {
         let path = self.absolute_path()?;
         let _lock = SidecarLock::acquire_existing_shared(&path)?;
-        Ok(read_file(&path)?.contexts)
+        let file = read_file(&path)?;
+        for context in &file.contexts {
+            validate_context_config(context)?;
+        }
+        Ok(file.contexts)
     }
 
     fn select(&self, name: &str) -> Result<ContextConfig, ConfigError> {
         let path = self.absolute_path()?;
         let _lock = SidecarLock::acquire_existing_shared(&path)?;
-        read_file(&path)?
+        let context = read_file(&path)?
             .contexts
             .into_iter()
             .find(|context| context.name == name)
-            .ok_or(ConfigError::ContextNotFound)
+            .ok_or(ConfigError::ContextNotFound)?;
+        validate_context_config(&context)?;
+        Ok(context)
     }
 }
 
@@ -732,6 +744,17 @@ fn validate_context_name(name: &str) -> Result<(), ConfigError> {
         })
     {
         return Err(ConfigError::Empty("context name"));
+    }
+    Ok(())
+}
+
+fn validate_context_config(context: &ContextConfig) -> Result<(), ConfigError> {
+    validate_context_name(&context.name)?;
+    if context.endpoint.as_str().is_empty() {
+        return Err(ConfigError::Empty("endpoint"));
+    }
+    if let Some(reference) = &context.credential {
+        validate_reference(reference)?;
     }
     Ok(())
 }
@@ -848,6 +871,54 @@ mod tests {
         store.set(context.clone()).expect("write context");
 
         assert_eq!(store.select("primary").expect("read context"), context);
+    }
+
+    #[test]
+    fn valid_credential_reference_round_trips_through_context_store() {
+        let temp = RelativeTempDir::new("valid-credential");
+        let path = temp.path.join("nested").join("config.toml");
+        let store = FileContextStore::new(path);
+        let mut context = test_context();
+        context.credential = Some(SecretRef::named("GITHUB_TOKEN"));
+
+        store.set(context.clone()).expect("write context");
+
+        assert_eq!(store.list().expect("list context"), vec![context.clone()]);
+        assert_eq!(store.select("primary").expect("select context"), context);
+    }
+
+    #[test]
+    fn invalid_credential_reference_is_rejected_for_set_and_persisted_context() {
+        let temp = RelativeTempDir::new("invalid-credential");
+        let path = temp.path.join("nested").join("config.toml");
+        let mut invalid_context = test_context();
+        invalid_context.credential = Some(SecretRef::named("token=value"));
+        let store = FileContextStore::new(path.clone());
+
+        assert_eq!(
+            store.set(invalid_context.clone()).expect_err("reject invalid set"),
+            ConfigError::InvalidCredentialReference
+        );
+        assert!(!path.exists(), "invalid set must not persist a context");
+
+        std::fs::create_dir_all(path.parent().expect("context parent"))
+            .expect("create context parent");
+        std::fs::write(
+            &path,
+            toml::to_string(&ContextFile {
+                contexts: vec![invalid_context],
+                current: Some("primary".to_owned()),
+            })
+            .expect("serialize invalid context"),
+        )
+        .expect("persist invalid context");
+
+        assert_eq!(
+            FileContextStore::new(path)
+                .list()
+                .expect_err("reject invalid persisted context"),
+            ConfigError::InvalidCredentialReference
+        );
     }
 
     #[test]
