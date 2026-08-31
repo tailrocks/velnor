@@ -1855,6 +1855,92 @@ mod tests {
     }
 
     #[test]
+    fn release_signers_use_validated_tag_ref_not_raw_commit() {
+        let workflow_text = include_str!("../../../.github/workflows/release.yml");
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(workflow_text).expect("release workflow must parse");
+        assert!(workflow_text.contains("EXPECTED_TAG_REF"));
+        assert!(workflow_text.contains("git ls-remote --exit-code origin"));
+        assert!(workflow_text.contains("$2 == expected \"^{}\""));
+        assert!(workflow_text.contains("\"$remote_tag_commit\" = \"$EXPECTED_TAG_COMMIT\""));
+        assert!(workflow_text.contains("tags_here"));
+        assert!(workflow_text.contains("refs\\/tags\\/v[0-9]"));
+        assert!(workflow_text.contains("[ \"$tags_here\" = \"1\" ]"));
+        assert!(workflow_text
+            .contains("[ \"$default_branch_commit\" = \"$EXPECTED_DEFAULT_BRANCH_COMMIT\" ]"));
+        assert!(
+            workflow_text.contains("[ \"$default_branch_commit\" = \"$EXPECTED_RELEASE_COMMIT\" ]")
+        );
+        assert!(workflow_text.contains("[ \"$default_branch_commit\" = \"$EXPECTED_TAG_COMMIT\" ]"));
+        assert!(
+            workflow_text.contains("case \"$TAG\" in\n            v[0-9]*)"),
+            "identity gate must reject tags outside v[0-9]*"
+        );
+        assert!(
+            workflow_text.contains("tag_ref: ${{ steps.gate.outputs.tag_ref }}"),
+            "release_gate outputs must expose the gate's verified canonical tag ref"
+        );
+        assert!(
+            workflow_text.contains("tag_ref=\"refs/tags/$TAG\""),
+            "identity gate must construct the canonical tag ref"
+        );
+        assert!(
+            workflow_text.contains("git show-ref --verify --quiet \"$tag_ref\""),
+            "identity gate must verify the requested tag ref exists"
+        );
+        assert!(
+            workflow_text.contains("git rev-list -n 1 \"$tag_ref\""),
+            "identity gate must peel the canonical tag ref"
+        );
+        assert!(
+            workflow_text.contains("[ \"$default_branch_commit\" = \"$tag_commit\" ] || {"),
+            "identity gate must require the tag to equal the current default-branch tip"
+        );
+        assert!(
+            workflow_text.contains(
+                "tags_here=\"$(git tag --points-at \"$tag_commit\" | grep -c '^v' || true)\""
+            ) && workflow_text.contains("[ \"$tags_here\" = \"1\" ] || {"),
+            "identity gate must require exactly one v* tag at the release commit"
+        );
+        assert!(
+            workflow_text.contains("echo \"tag_ref=$tag_ref\""),
+            "identity gate must output the verified canonical tag ref"
+        );
+        let signer_jobs = [
+            "sign-amd64-tar",
+            "sign-arm64-tar",
+            "sign-amd64-deb",
+            "sign-arm64-deb",
+        ];
+        let expected = "${{ needs.release_gate.outputs.tag_ref }}";
+        let expected_signer =
+            "tailrocks/velnor-actions/.github/workflows/package-signer.yml@77d323dcfdb176b332edc24bfc92cb625b3ab4c8";
+
+        for job in signer_jobs {
+            assert_eq!(
+                workflow["jobs"][job]["uses"].as_str(),
+                Some(expected_signer),
+                "{job} must use the pinned package-signer workflow"
+            );
+            let source_ref = workflow["jobs"][job]["with"]["source-ref"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{job} must define a string source-ref"));
+            assert_eq!(
+                source_ref, expected,
+                "{job} must use release_gate's validated canonical tag ref"
+            );
+            assert!(
+                source_ref.starts_with("${{ needs.release_gate.outputs."),
+                "{job} source-ref must come from release_gate validation"
+            );
+            assert_ne!(
+                source_ref, "${{ needs.release_gate.outputs.default_branch_commit }}",
+                "{job} must not pass a raw commit SHA to package-signer"
+            );
+        }
+    }
+
+    #[test]
     fn create_github_app_token_admits_current_client_id_input() {
         let capability = ACTIONS
             .iter()
