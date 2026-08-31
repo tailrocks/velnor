@@ -4,11 +4,16 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Daemon-side control-plane application services for Velnor"
 
 [dependencies]
 aho-corasick.workspace = true
 rusqlite.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -18,3 +23,5 @@ uuid.workspace = true
 unicode-normalization.workspace = true
 velnor-action-journal = { path = "../velnor-action-journal", version = "0.1.0" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
+[lints]
+workspace = true

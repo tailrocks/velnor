@@ -12,7 +12,6 @@
 //! `retention_state` singleton for accounting.
 
 use std::collections::BTreeSet;
-use std::ffi::CString;
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
@@ -1756,48 +1755,16 @@ fn passive_checkpoint(conn: &rusqlite::Connection) -> StoreResult<WalCheckpointS
 }
 
 /// Return available bytes on the filesystem containing `path` without
-/// invoking a shell or parsing human-formatted `df` output. The small FFI
-/// buffer intentionally contains more words than every supported Unix
-/// `statvfs` layout; only the POSIX prefix (block size and available blocks)
-/// is read. The call writes a plain C structure into an aligned buffer and
-/// does not retain any pointer after returning.
+/// invoking a shell or parsing human-formatted `df` output.
 #[cfg(unix)]
 fn filesystem_free_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-
-    #[repr(C)]
-    struct StatvfsBuffer {
-        words: [usize; 32],
-    }
-
-    unsafe extern "C" {
-        fn statvfs(path: *const std::ffi::c_char, buffer: *mut StatvfsBuffer) -> i32;
-    }
-
     let probe = if path.exists() {
         path
     } else {
         path.parent().filter(|parent| parent.exists())?
     };
-    let path = CString::new(probe.as_os_str().as_bytes()).ok()?;
-    let mut buffer = StatvfsBuffer { words: [0; 32] };
-    // POSIX statvfs stores f_frsize at word 1. Linux keeps f_bavail at word
-    // 4; macOS uses 32-bit block counters packed into the preceding words.
-    // The oversized repr(C) buffer is aligned and large enough for the full
-    // platform structure, while avoiding shell utilities and platform-
-    // specific struct declarations.
-    let result = unsafe { statvfs(path.as_ptr(), &mut buffer) };
-    if result != 0 {
-        return None;
-    }
-    let block_size = buffer.words[1];
-    #[cfg(target_os = "macos")]
-    let available_blocks = buffer.words[3] & (u32::MAX as usize);
-    #[cfg(not(target_os = "macos"))]
-    let available_blocks = buffer.words[4];
-    block_size
-        .checked_mul(available_blocks)
-        .and_then(|bytes| u64::try_from(bytes).ok())
+    let stats = rustix::fs::statvfs(probe).ok()?;
+    stats.f_frsize.checked_mul(stats.f_bavail)
 }
 
 #[cfg(not(unix))]
@@ -2163,7 +2130,7 @@ fn select_transition_event_ids(
     let instance = instance_slug.to_owned();
     let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(transition_ids.len() + 2);
     values.push(&instance);
-    values.extend(transition_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+    values.extend(transition_ids.iter().map(|id| id));
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     values.push(&limit);
     let mut rows = statement.query(params_from_iter(values.iter()))?;
@@ -2189,7 +2156,7 @@ fn delete_transition_rows_by_ids(
     let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 2);
     values.push(&instance);
     values.push(&job);
-    values.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+    values.extend(ids.iter().map(|id| id));
     Ok(conn.execute(
         &format!(
             "DELETE FROM job_transitions
@@ -2382,7 +2349,7 @@ fn delete_events_for_instance_by_ids(
     let instance = instance_slug.to_owned();
     let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 1);
     values.push(&instance);
-    values.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+    values.extend(ids.iter().map(|id| id));
     let deleted = conn.execute(
         &format!(
             "DELETE FROM events
