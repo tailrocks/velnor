@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Velnor operator CLI"
 
 [lib]
@@ -43,3 +47,5 @@ release-build = ["velnor-runner/release-build"]
 
 [dev-dependencies]
 sha2 = { workspace = true }
+[lints]
+workspace = true

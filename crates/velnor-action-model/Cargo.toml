@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Canonical, I/O-free model for Velnor physical actions"
 
 [dependencies]
@@ -14,3 +18,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 proptest = "=1.11.0"
+[lints]
+workspace = true

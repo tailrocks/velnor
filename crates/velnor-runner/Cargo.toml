@@ -4,6 +4,10 @@ version = "0.1.247"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Velnor self-hosted GitHub Actions runner daemon"
 
 # Two-binary estate: /usr/bin/velnor-runner is the daemon/service binary
@@ -117,7 +121,7 @@ base64.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rayon.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["event"] }
 rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -167,3 +171,5 @@ otel = [
   "dep:opentelemetry_sdk",
   "dep:opentelemetry-otlp",
 ]
+[lints]
+workspace = true
