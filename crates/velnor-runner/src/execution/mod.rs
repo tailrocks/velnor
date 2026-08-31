@@ -29,6 +29,8 @@ pub use backend::{
     ValidatedService, ValidatedStep,
 };
 pub use cache_transport::{publish_on_success, CacheBlob, CacheTransportError};
+pub(crate) use docker::invalidate_docker_job_cgroup_boundary;
+pub(crate) use docker::verify_docker_job_cgroup_boundary;
 pub use docker::DockerBackend;
 pub use firecracker::{
     create_golden_snapshot, restore_or_cold_boot, FirecrackerApi, FirecrackerBackend,
@@ -485,6 +487,12 @@ pub struct RecordingCommands {
     pub next: CommandResult,
     pub results: Vec<CommandResult>,
     pub codes: Vec<i32>,
+    /// Default Docker contract fixture: a systemd-backed cgroup-v2 daemon.
+    /// Set to `None` or a failing result when testing admission failures.
+    pub docker_cgroup_probe: Option<CommandResult>,
+    pub docker_cgroup_cpu_count: Option<CommandResult>,
+    pub docker_cgroup_unit: Option<CommandResult>,
+    pub docker_cgroup_quota: Option<CommandResult>,
     pub next_pid: u32,
     pub fail_spawn: Option<String>,
     pub fail_kill: Option<String>,
@@ -503,12 +511,41 @@ impl Default for RecordingCommands {
             },
             results: Vec::new(),
             codes: Vec::new(),
+            docker_cgroup_probe: Some(CommandResult {
+                code: 0,
+                stdout: "systemd 2".into(),
+                stderr: String::new(),
+            }),
+            docker_cgroup_cpu_count: Some(CommandResult {
+                code: 0,
+                stdout: "1\n".into(),
+                stderr: String::new(),
+            }),
+            docker_cgroup_unit: Some(CommandResult {
+                code: 0,
+                stdout: "[Slice]\nCPUQuota=95%\n".into(),
+                stderr: String::new(),
+            }),
+            docker_cgroup_quota: Some(CommandResult {
+                code: 0,
+                stdout: "950ms\n".into(),
+                stderr: String::new(),
+            }),
             next_pid: 1,
             fail_spawn: None,
             fail_kill: None,
             spawned: Vec::new(),
             killed: Vec::new(),
         }
+    }
+}
+
+impl RecordingCommands {
+    fn finish_result(&mut self, mut result: CommandResult) -> anyhow::Result<CommandResult> {
+        if !self.codes.is_empty() {
+            result.code = self.codes.remove(0);
+        }
+        Ok(result)
     }
 }
 
@@ -520,10 +557,52 @@ impl CommandRunner for RecordingCommands {
         } else {
             self.results.remove(0)
         };
-        if !self.codes.is_empty() {
-            result.code = self.codes.remove(0);
+        if program == "docker"
+            && args
+                == [
+                    "info".to_string(),
+                    "--format".to_string(),
+                    "{{.CgroupDriver}} {{.CgroupVersion}}".to_string(),
+                ]
+        {
+            if let Some(probe) = &self.docker_cgroup_probe {
+                result = probe.clone();
+            }
+        } else if program == "getconf" && args == ["_NPROCESSORS_ONLN".to_string()] {
+            if let Some(cpu_count) = &self.docker_cgroup_cpu_count {
+                result = cpu_count.clone();
+            }
+        } else if program == "systemctl"
+            && args
+                == [
+                    "cat".to_string(),
+                    crate::docker_lease::JOB_CGROUP_PARENT.to_string(),
+                ]
+        {
+            if let Some(unit) = &self.docker_cgroup_unit {
+                result = unit.clone();
+            }
+        } else if program == "systemctl"
+            && args.first().is_some_and(|arg| arg == "show")
+            && args.len() == 5
+            && args[1] == "--property=LoadState"
+            && args[2] == "--property=CPUQuotaPerSecUSec"
+            && args[3] == "--value"
+            && args[4] == crate::docker_lease::JOB_CGROUP_PARENT
+        {
+            let quota = self
+                .docker_cgroup_quota
+                .as_ref()
+                .map_or_else(|| "950ms\n".into(), |quota| quota.stdout.clone());
+            result.stdout = format!("loaded\n{quota}");
+            if let Some(quota) = &self.docker_cgroup_quota {
+                result.code = quota.code;
+                if !quota.stderr.is_empty() {
+                    result.stderr = quota.stderr.clone();
+                }
+            }
         }
-        Ok(result)
+        self.finish_result(result)
     }
 
     fn spawn(&mut self, program: &str, args: &[String]) -> anyhow::Result<SpawnedProcess> {

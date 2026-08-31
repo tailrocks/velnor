@@ -207,13 +207,33 @@ case "$1" in
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload \
         || fail "systemd refused to reload the host-scaled velnor-jobs.slice quota"
+      effective_unit=$(systemctl cat velnor-jobs.slice 2>/dev/null) \
+        || fail "could not read the effective velnor-jobs.slice configuration"
+      effective_cpu_quota_percent=$(printf '%s\n' "$effective_unit" \
+        | sed -n 's/^[[:space:]]*CPUQuota=//p' | tail -n1)
+      [ "$effective_cpu_quota_percent" = "${cpu_quota}%" ] \
+        || fail "velnor-jobs.slice effective CPUQuota is '$effective_cpu_quota_percent', expected '${cpu_quota}%'"
       effective_cpu_quota=$(systemctl show \
-        --property=CPUQuotaPerSecUSec --value velnor-jobs.slice 2>/dev/null || true)
+        --property=CPUQuotaPerSecUSec --value velnor-jobs.slice 2>/dev/null) \
+        || fail "could not read effective CPUQuota after daemon-reload"
       case "$effective_cpu_quota" in
-        ''|infinity)
-          fail "velnor-jobs.slice has no effective CPUQuota after daemon-reload"
+        ''|infinity|Infinity|INFINITY)
+          fail "no effective CPUQuota after daemon-reload"
           ;;
       esac
+      expected_cpu_quota_usec=$((cpu_quota * 10000))
+      effective_cpu_quota_usec=$(busctl get-property \
+        org.freedesktop.systemd1 \
+        /org/freedesktop/systemd1/unit/velnor_2djobs_2eslice \
+        org.freedesktop.systemd1.Slice CPUQuotaPerSecUSec 2>/dev/null \
+        | awk '$1 == "t" { print $2; exit }' || true)
+      case "$effective_cpu_quota_usec" in
+        ''|*[!0-9]*)
+          fail "no effective CPUQuota after daemon-reload"
+          ;;
+      esac
+      [ "$effective_cpu_quota_usec" = "$expected_cpu_quota_usec" ] \
+        || fail "velnor-jobs.slice effective CPUQuotaPerSecUSec is '$effective_cpu_quota_usec', expected '$expected_cpu_quota_usec'"
       # Unit enablement, masking, and activation belong to the operator. Package
       # upgrades preserve systemd's existing state by doing nothing here; fresh
       # installs remain disabled. In particular, never revive the obsolete

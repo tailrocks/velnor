@@ -79,6 +79,16 @@ that temporary mismatch until the operator activates the new signed record.
   `velnor-control.slice`, while their Docker workloads still use the capped
   parent. `MemoryHigh=90%` throttles and `MemoryMax=95%` kills within the same
   slice; daemons and the broker stay in `velnor-control.slice`, outside that cap.
+  Docker admission fails closed unless `docker info` reports the systemd cgroup
+  driver on cgroup v2 and `velnor-jobs.slice` is loaded with the exact
+  host-scaled finite effective CPU quota. Host Docker calls are pinned to the
+  package-owned local socket. The per-job lease rejects ambiguous JSON/HTTP
+  framing, nested host binds, capabilities, devices, privileged/security
+  options, host namespace requests, and host-backed volume driver options; it
+  forwards only validated Docker TCP/h2c hijacks as raw streams. Untrusted
+  job/service container options use an explicit safe allowlist: names,
+  endpoint environment, mounts, network joins, port publishing, cross-container
+  volumes, and unknown Docker flags are dropped.
 - Rust compile-cache defaults: every job starts with
   `CARGO_INCREMENTAL=0`, `SCCACHE_CACHE_SIZE=20G`, and
   `SCCACHE_BASEDIRS=/__w:/github/home`. Workflow environment may explicitly

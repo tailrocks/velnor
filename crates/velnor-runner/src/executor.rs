@@ -74,6 +74,7 @@ const PAGES_ARCHIVE_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+static DOCKER_TIMEOUT_CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Return a stable test-runner label only when a shell segment starts with a
 /// recognized test command. Matching the command position avoids treating
@@ -354,9 +355,95 @@ fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
+const PACKAGE_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+
+fn record_docker_result(program: &str, result: &CommandResult) {
+    if program == "docker" && result.code != 0 {
+        crate::execution::invalidate_docker_job_cgroup_boundary();
+    }
+}
+
+pub(crate) fn configure_host_docker_command(
+    command: &mut Command,
+    program: &str,
+    args: &[String],
+) -> Result<()> {
+    if program != "docker" {
+        return Ok(());
+    }
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        // Docker global options end at the first subcommand. A command passed
+        // to `docker run`, such as `sh -c ...`, is opaque payload and must not
+        // be mistaken for Docker's global `-c` context option.
+        if argument == "--" || !argument.starts_with('-') {
+            break;
+        }
+        if argument == "--host" || argument == "-H" {
+            let host = args
+                .get(index + 1)
+                .ok_or_else(|| anyhow::anyhow!("docker {argument} is missing its endpoint"))?;
+            if host != PACKAGE_DOCKER_HOST {
+                bail!("refusing remote Docker endpoint {host:?}; only {PACKAGE_DOCKER_HOST} is package-owned");
+            }
+            index += 2;
+            continue;
+        }
+        if argument == "--context"
+            || argument.starts_with("--context=")
+            || argument == "-c"
+            || argument.starts_with("-c=")
+            || (argument.starts_with("-c") && argument.len() > 2)
+        {
+            bail!("refusing explicit Docker context; only the package-owned local socket is supported");
+        }
+        if let Some(host) = argument
+            .strip_prefix("--host=")
+            .or_else(|| argument.strip_prefix("-H="))
+            .or_else(|| argument.strip_prefix("-H").filter(|host| !host.is_empty()))
+        {
+            if host != PACKAGE_DOCKER_HOST {
+                bail!("refusing remote Docker endpoint {host:?}; only {PACKAGE_DOCKER_HOST} is package-owned");
+            }
+            index += 1;
+            continue;
+        }
+        let value_option = argument == "--config"
+            || argument == "-l"
+            || argument == "--log-level"
+            || argument == "--tlscacert"
+            || argument == "--tlscert"
+            || argument == "--tlskey";
+        let attached_value_option = argument.starts_with("--config=")
+            || argument.starts_with("--log-level=")
+            || argument.starts_with("--tlscacert=")
+            || argument.starts_with("--tlscert=")
+            || argument.starts_with("--tlskey=")
+            || argument.starts_with("-l=")
+            || (argument.starts_with("-l") && argument.len() > 2);
+        if value_option {
+            if args.get(index + 1).is_none() {
+                bail!("docker {argument} is missing its value");
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+        if attached_value_option {
+            continue;
+        }
+    }
+    command
+        .env("DOCKER_HOST", PACKAGE_DOCKER_HOST)
+        .env_remove("DOCKER_CONTEXT");
+    Ok(())
+}
+
 impl CommandRunner for ProcessCommandRunner {
     fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        configure_host_docker_command(&mut command, program, args)?;
+        let child = command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -439,12 +526,15 @@ impl CommandRunner for ProcessCommandRunner {
             .as_ref()
             .map(|claim| crate::docker_lease::container_rm_args_with_claimed_ids(args, &claim.ids));
         let args = claimed_args.as_deref().unwrap_or(args);
+        let owned_args = timed_docker_args(program, args)?;
+        let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
         command
             .args(args)
             .envs(env.iter().map(|(name, value)| (name, value)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_host_docker_command(&mut command, program, args)?;
         let child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
@@ -459,15 +549,17 @@ impl CommandRunner for ProcessCommandRunner {
         }
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(timeout_command_result(stdout, stderr));
-        }
-
-        Ok(CommandResult {
-            code: exit_code(output.status)?,
-            stdout,
-            stderr,
-        })
+        let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            timeout_command_result(stdout, stderr)
+        } else {
+            CommandResult {
+                code: exit_code(output.status)?,
+                stdout,
+                stderr,
+            }
+        };
+        record_docker_result(program, &result);
+        Ok(result)
     }
 
     fn run_streaming(
@@ -497,12 +589,15 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
         on_output: &mut dyn FnMut(CommandStream, &str),
     ) -> Result<CommandResult> {
+        let owned_args = timed_docker_args(program, args)?;
+        let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
         command
             .args(args)
             .envs(env.iter().map(|(name, value)| (name, value)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_host_docker_command(&mut command, program, args)?;
         let mut child = command
             .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
@@ -544,14 +639,17 @@ impl CommandRunner for ProcessCommandRunner {
         if let Some(watchdog) = watchdog {
             let _ = watchdog.join();
         }
-        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(timeout_command_result(stdout, stderr));
-        }
-        Ok(CommandResult {
-            code: exit_code(status)?,
-            stdout,
-            stderr,
-        })
+        let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            timeout_command_result(stdout, stderr)
+        } else {
+            CommandResult {
+                code: exit_code(status)?,
+                stdout,
+                stderr,
+            }
+        };
+        record_docker_result(program, &result);
+        Ok(result)
     }
 
     fn run_with_env(
@@ -565,15 +663,18 @@ impl CommandRunner for ProcessCommandRunner {
         for (name, value) in env {
             command.env(name, value);
         }
+        configure_host_docker_command(&mut command, program, args)?;
         let output = command
             .output()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
 
-        Ok(CommandResult {
+        let result = CommandResult {
             code: exit_code(output.status)?,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        };
+        record_docker_result(program, &result);
+        Ok(result)
     }
 
     fn run_with_stdin(
@@ -603,6 +704,8 @@ impl CommandRunner for ProcessCommandRunner {
         stdin: &str,
         timeout: Duration,
     ) -> Result<CommandResult> {
+        let owned_args = timed_docker_args(program, args)?;
+        let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
         command
             .args(args)
@@ -610,6 +713,7 @@ impl CommandRunner for ProcessCommandRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_host_docker_command(&mut command, program, args)?;
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
@@ -629,15 +733,17 @@ impl CommandRunner for ProcessCommandRunner {
         }
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            return Ok(timeout_command_result(stdout, stderr));
-        }
-
-        Ok(CommandResult {
-            code: exit_code(output.status)?,
-            stdout,
-            stderr,
-        })
+        let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            timeout_command_result(stdout, stderr)
+        } else {
+            CommandResult {
+                code: exit_code(output.status)?,
+                stdout,
+                stderr,
+            }
+        };
+        record_docker_result(program, &result);
+        Ok(result)
     }
 }
 
@@ -1239,7 +1345,7 @@ where
             workflow_env: Vec::new(),
             job_timeout_minutes: None,
             secret_masks: Vec::new(),
-            trust_scope: "trusted".to_string(),
+            trust_scope: "untrusted".to_string(),
             live_step: None,
             job_environment_started: false,
             docker_lease: None,
@@ -2943,6 +3049,12 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
+        if !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope) {
+            bail!(
+                "docker/setup-qemu-action requires trust scope 'trusted'; got '{}'",
+                self.trust_scope
+            );
+        }
         let action_state = state.with_env(state.resolve_env(&action.env));
         let requested_image =
             native_input_or(&action_state, action, "image", SETUP_QEMU_BINFMT_IMAGE);
@@ -2961,6 +3073,8 @@ where
                 "run".to_string(),
                 "--rm".to_string(),
                 "--privileged".to_string(),
+                "--cgroup-parent".to_string(),
+                crate::docker_lease::JOB_CGROUP_PARENT.to_string(),
                 image.clone(),
                 "--uninstall".to_string(),
                 "qemu-*".to_string(),
@@ -2974,6 +3088,8 @@ where
             "run".to_string(),
             "--rm".to_string(),
             "--privileged".to_string(),
+            "--cgroup-parent".to_string(),
+            crate::docker_lease::JOB_CGROUP_PARENT.to_string(),
             image,
             "--install".to_string(),
             platforms.clone(),
@@ -12249,10 +12365,11 @@ fn spawn_docker_timeout_watchdog(
         if watchdog_cancelled.recv_timeout(timeout).is_err() {
             timed_out_thread.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(container_name) = container_name {
-                let _ = Command::new("docker")
-                    .arg("kill")
-                    .arg(container_name)
-                    .status();
+                let kill_args = vec!["kill".to_string(), container_name];
+                let mut docker = Command::new("docker");
+                if configure_host_docker_command(&mut docker, "docker", &kill_args).is_ok() {
+                    let _ = docker.args(&kill_args).status();
+                }
             }
             let _ = Command::new("/bin/kill")
                 .args(["-KILL", &child_pid.to_string()])
@@ -12260,6 +12377,130 @@ fn spawn_docker_timeout_watchdog(
         }
     }));
     (timed_out, watchdog_cancel, watchdog)
+}
+
+fn timed_docker_args(program: &str, args: &[String]) -> Result<Option<Vec<String>>> {
+    if program != "docker"
+        || args.first().map(String::as_str) != Some("run")
+        || docker_run_container_name(&args[1..]).is_some()
+    {
+        return Ok(None);
+    }
+    let image_index =
+        docker_run_image_index(args).context("docker run has no image before timed execution")?;
+    let sequence = DOCKER_TIMEOUT_CONTAINER_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = format!("velnor-timeout-{}-{sequence}", std::process::id());
+    let mut owned = args.to_vec();
+    owned.splice(image_index..image_index, [String::from("--name"), name]);
+    Ok(Some(owned))
+}
+
+fn docker_run_image_index(args: &[String]) -> Option<usize> {
+    let mut index = 1;
+    while index < args.len() {
+        let option = args[index].as_str();
+        if option == "--" {
+            return (index + 1 < args.len()).then_some(index + 1);
+        }
+        if !option.starts_with('-') {
+            return Some(index);
+        }
+        if docker_run_option_takes_value(option) && !option.contains('=') {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn docker_run_option_takes_value(option: &str) -> bool {
+    let name = option.split_once('=').map_or(option, |(name, _)| name);
+    matches!(
+        name,
+        "--add-host"
+            | "--annotation"
+            | "--attach"
+            | "--cap-add"
+            | "--cap-drop"
+            | "--cgroup-parent"
+            | "--cidfile"
+            | "--cpu-period"
+            | "--cpu-quota"
+            | "--cpu-rt-period"
+            | "--cpu-rt-runtime"
+            | "--cpus"
+            | "--cpuset-cpus"
+            | "--cpuset-mems"
+            | "--device"
+            | "--device-cgroup-rule"
+            | "--device-read-bps"
+            | "--device-read-iops"
+            | "--device-write-bps"
+            | "--device-write-iops"
+            | "--dns"
+            | "--dns-option"
+            | "--dns-search"
+            | "--entrypoint"
+            | "--env"
+            | "--env-file"
+            | "--expose"
+            | "--group-add"
+            | "--health-cmd"
+            | "--health-interval"
+            | "--health-retries"
+            | "--health-start-interval"
+            | "--health-start-period"
+            | "--health-timeout"
+            | "--hostname"
+            | "--ip"
+            | "--ip6"
+            | "--ipc"
+            | "--label"
+            | "--label-file"
+            | "--log-driver"
+            | "--log-opt"
+            | "--mac-address"
+            | "--memory"
+            | "--memory-reservation"
+            | "--memory-swap"
+            | "--memory-swappiness"
+            | "--mount"
+            | "--name"
+            | "--network"
+            | "--network-alias"
+            | "--oom-score-adj"
+            | "--pid"
+            | "--pids-limit"
+            | "--platform"
+            | "--pull"
+            | "--restart"
+            | "--runtime"
+            | "--security-opt"
+            | "--shm-size"
+            | "--stop-signal"
+            | "--stop-timeout"
+            | "--storage-opt"
+            | "--sysctl"
+            | "--tmpfs"
+            | "--ulimit"
+            | "--user"
+            | "--uts"
+            | "--volume"
+            | "--volume-driver"
+            | "--volumes-from"
+            | "--workdir"
+            | "-a"
+            | "-c"
+            | "-e"
+            | "-h"
+            | "-l"
+            | "-m"
+            | "-p"
+            | "-u"
+            | "-v"
+            | "-w"
+    )
 }
 
 fn docker_timeout_container_name(program: &str, args: &[String]) -> Option<String> {
@@ -12360,6 +12601,83 @@ mod tests {
         assert!(kache.contains("0.14.2"));
         assert!(!sccache.contains("node"));
         assert!(!kache.contains("node"));
+    }
+
+    #[test]
+    fn host_docker_commands_are_pinned_to_the_package_socket() {
+        let mut command = Command::new("sh");
+        command.env("DOCKER_HOST", "tcp://docker.example:2376");
+        configure_host_docker_command(&mut command, "docker", &[]).unwrap();
+        let output = command
+            .args(["-c", "printf %s \"$DOCKER_HOST\""])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), PACKAGE_DOCKER_HOST);
+    }
+
+    #[test]
+    fn host_docker_commands_reject_remote_endpoints_and_contexts() {
+        for args in [
+            vec!["--host".into(), "tcp://docker.example:2376".into()],
+            vec!["--host=tcp://docker.example:2376".into()],
+            vec!["-H".into(), "tcp://docker.example:2376".into()],
+            vec!["-H=tcp://docker.example:2376".into()],
+            vec!["-Htcp://docker.example:2376".into()],
+            vec!["--context".into(), "remote".into()],
+            vec!["--context=remote".into()],
+            vec!["-c".into(), "remote".into()],
+            vec!["-c=remote".into()],
+            vec!["-cremote".into()],
+            vec![
+                "--config".into(),
+                "/tmp/client".into(),
+                "--host=tcp://docker.example:2376".into(),
+                "run".into(),
+            ],
+            vec![
+                "-l".into(),
+                "info".into(),
+                "--context".into(),
+                "remote".into(),
+                "run".into(),
+            ],
+        ] {
+            let mut command = Command::new("true");
+            let error = configure_host_docker_command(&mut command, "docker", &args)
+                .expect_err("remote Docker target must fail closed");
+            assert!(error.to_string().contains("refusing"), "{error}");
+        }
+    }
+
+    #[test]
+    fn host_docker_commands_leave_subcommand_payload_opaque() {
+        let mut command = Command::new("true");
+        configure_host_docker_command(
+            &mut command,
+            "docker",
+            &[
+                "run".into(),
+                "alpine:3.20".into(),
+                "sh".into(),
+                "-c".into(),
+                "printf payload".into(),
+            ],
+        )
+        .expect("shell -c belongs to docker run payload");
+
+        let mut command = Command::new("true");
+        configure_host_docker_command(
+            &mut command,
+            "docker",
+            &[
+                "exec".into(),
+                "container".into(),
+                "sh".into(),
+                "-c".into(),
+                "true".into(),
+            ],
+        )
+        .expect("shell -c belongs to docker exec payload");
     }
 
     #[test]
@@ -12829,6 +13147,38 @@ mod tests {
             Some("velnor-node-action-velnor-job-1")
         );
         assert_eq!(docker_timeout_container_name("git", &args), None);
+    }
+
+    #[test]
+    fn timed_docker_run_gets_runner_owned_cleanup_name_before_image() {
+        let args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "--cgroup-parent".to_string(),
+            "velnor-jobs.slice".to_string(),
+            "alpine:3.20".to_string(),
+            "sleep".to_string(),
+            "60".to_string(),
+        ];
+        let owned = timed_docker_args("docker", &args).unwrap().unwrap();
+        let image = owned.iter().position(|arg| arg == "alpine:3.20").unwrap();
+        assert_eq!(owned[image - 2], "--name");
+        assert!(owned[image - 1].starts_with("velnor-timeout-"));
+        assert_eq!(
+            docker_timeout_container_name("docker", &owned),
+            owned.get(image - 1).cloned()
+        );
+    }
+
+    #[test]
+    fn timed_docker_run_preserves_existing_runner_name() {
+        let args = vec![
+            "run".to_string(),
+            "--name".to_string(),
+            "velnor-job-1".to_string(),
+            "alpine:3.20".to_string(),
+        ];
+        assert!(timed_docker_args("docker", &args).unwrap().is_none());
     }
 
     #[derive(Default)]
@@ -14789,7 +15139,7 @@ esac
     /// common case of an empty action ref and no runner os/arch in the env.
     fn cache_scope_store_dir(root: &Path, repo_key: &str, path: &str) -> PathBuf {
         root.join("_velnor_caches")
-            .join("trusted")
+            .join("untrusted")
             .join(repo_key)
             .join(cache_scope_version("", "", "", path))
     }
@@ -14810,7 +15160,7 @@ esac
         let store = cache_store_dir(&state, version).unwrap();
 
         // Trust/repo remain the outer boundary; the version segment sits below.
-        assert!(store.ends_with("_velnor_caches/trusted/Org_Repo.Name/cv1-abc123"));
+        assert!(store.ends_with("_velnor_caches/untrusted/Org_Repo.Name/cv1-abc123"));
         assert!(store.starts_with(root.join("_velnor_caches")));
         assert_eq!(
             store.parent().unwrap().file_name().unwrap(),
@@ -16941,7 +17291,8 @@ type=sha,format=long,prefix=,enable=true"
             stdin: Vec::new(),
             env: Vec::new(),
             codes: vec![0, 0, 1],
-        });
+        })
+        .with_trust_scope("trusted");
         let mut spec = container(&temp);
         spec.resource_options = vec!["--cpus".into(), "4".into(), "--memory".into(), "12g".into()];
 
@@ -25363,7 +25714,8 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn setup_qemu_uses_pinned_image() {
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor =
+            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("trusted");
         let mut inputs = BTreeMap::new();
         inputs.insert(
             "image".to_string(),
@@ -25394,6 +25746,28 @@ bitcoin-processor-app.push=true")
         assert!(!calls[0]
             .1
             .contains(&"evil.example/binfmt:latest".to_string()));
+    }
+
+    #[test]
+    fn setup_qemu_rejects_untrusted_scope_before_host_docker() {
+        let mut executor =
+            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("public-forks");
+        let error = executor
+            .native_setup_qemu(
+                &NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::SetupQemu,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                &JobExecutionState::default(),
+                DEFAULT_STEP_TIMEOUT,
+            )
+            .expect_err("public fork QEMU setup must be rejected");
+        assert!(error.to_string().contains("requires trust scope 'trusted'"));
+        assert!(executor.runner().calls.is_empty());
     }
 
     #[test]
