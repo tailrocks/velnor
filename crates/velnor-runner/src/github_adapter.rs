@@ -36,6 +36,7 @@ pub fn github_job_container_spec(
     daemon_id: String,
     trust_scope: &str,
 ) -> Result<JobContainerSpec, CacheAdmissionError> {
+    let trust_scope = crate::container::normalize_compiler_cache_trust_scope(trust_scope);
     // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
@@ -48,6 +49,8 @@ pub fn github_job_container_spec(
             )
         })
         .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
+    let mut env = backend_advertising_env(job_container_env(job), paths.execution_backend);
+    env.push(("VELNOR_TRUST_SCOPE".into(), trust_scope.into()));
     Ok(JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -59,7 +62,7 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
-        env: backend_advertising_env(job_container_env(job), paths.execution_backend),
+        env,
         resource_options,
         options: job_container_options(job),
         services: service_containers(job),

@@ -53,16 +53,29 @@ pub struct JobContainerSpec {
 
 impl JobContainerSpec {
     pub(crate) fn compiler_cache_runtime(&self) -> CompilerCacheRuntime {
+        let trust_scope = self.compiler_cache_trust_scope();
         match self.compiler_cache_backend {
             CompilerCacheBackend::Sccache => CompilerCacheRuntime::new(
                 CompilerCacheBackend::Sccache,
-                sccache_host(&self.temp_host),
+                compiler_cache_host(&self.temp_host, CompilerCacheBackend::Sccache, &trust_scope),
             ),
-            CompilerCacheBackend::Kache => {
-                CompilerCacheRuntime::new(CompilerCacheBackend::Kache, kache_host(&self.temp_host))
-            }
+            CompilerCacheBackend::Kache => CompilerCacheRuntime::new(
+                CompilerCacheBackend::Kache,
+                compiler_cache_host(&self.temp_host, CompilerCacheBackend::Kache, &trust_scope),
+            ),
             CompilerCacheBackend::Off => CompilerCacheRuntime::off(),
         }
+    }
+
+    fn compiler_cache_trust_scope(&self) -> String {
+        let configured = self
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "VELNOR_TRUST_SCOPE")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| "trusted");
+        normalize_compiler_cache_trust_scope(configured).to_string()
     }
 
     fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
@@ -1040,6 +1053,40 @@ pub(crate) fn kache_host(temp_host: &Path) -> PathBuf {
     )
 }
 
+pub(crate) fn compiler_cache_host(
+    temp_host: &Path,
+    backend: CompilerCacheBackend,
+    trust_scope: &str,
+) -> PathBuf {
+    let backend = match backend {
+        CompilerCacheBackend::Sccache => "sccache",
+        CompilerCacheBackend::Kache => "kache",
+        CompilerCacheBackend::Off => return temp_host.to_path_buf(),
+    };
+    if let Some(layout) = crate::storage::StorageLayout::resolve() {
+        return layout
+            .cache_root
+            .join(normalize_compiler_cache_trust_scope(trust_scope))
+            .join("compiler")
+            .join(backend)
+            .join("wrapper");
+    }
+    daemon_store_root(temp_host)
+        .join(format!("_velnor_{backend}"))
+        .join(normalize_compiler_cache_trust_scope(trust_scope))
+        .join("compiler")
+        .join(backend)
+        .join("wrapper")
+}
+
+pub(crate) fn normalize_compiler_cache_trust_scope(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "release" => "release",
+        "trusted" => "trusted",
+        _ => "untrusted",
+    }
+}
+
 /// Host-persistent Cargo download/index store, daemon-shared like sccache.
 /// Extracted registry sources and git checkouts remain job-local because they
 /// are mutable during materialization and are unsafe to share across slots.
@@ -1167,7 +1214,7 @@ pub(crate) fn playwright_browser_store_host(temp_host: &Path, repository: &str) 
 
 /// Resolve the daemon-shared store root from a job temp dir
 /// (`…/work/slot-N/<job>/temp` → `…/work`).
-fn daemon_store_root(temp_host: &Path) -> PathBuf {
+pub(crate) fn daemon_store_root(temp_host: &Path) -> PathBuf {
     let per_slot_root = if temp_host.file_name().is_some_and(|name| name == "temp") {
         if let Some(job_dir) = temp_host.parent() {
             if job_dir.file_name().is_some_and(|name| name == "tmp") {
@@ -1484,7 +1531,9 @@ mod tests {
         );
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache".into()
+        ));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(
             &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
@@ -1607,7 +1656,10 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
-        assert!(args.contains(&"/daemon/work/_velnor_sccache:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/daemon/work/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache"
+                .into()
+        ));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
@@ -1875,7 +1927,9 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache".into()
+        ));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
@@ -2018,7 +2072,9 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache".into()
+        ));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));

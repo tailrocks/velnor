@@ -7113,6 +7113,44 @@ fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
     }
 }
 
+fn open_compiler_cache_for_job(
+    container: &crate::container::JobContainerSpec,
+    daemon_id: &str,
+    trust_scope: &str,
+) -> Result<Option<Arc<velnor_cache_service::ProductionCompilerCache>>> {
+    use velnor_cache_service::{
+        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
+    };
+
+    let policy = match container.compiler_cache_backend {
+        velnor_cache_service::CompilerCacheBackend::Sccache => CompilerCachePolicy::Sccache,
+        velnor_cache_service::CompilerCacheBackend::Kache => CompilerCachePolicy::Kache,
+        velnor_cache_service::CompilerCacheBackend::Off => return Ok(None),
+    };
+    let root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.cache_root)
+        .unwrap_or_else(|| {
+            crate::container::daemon_store_root(&container.temp_host)
+                // Keep the lifecycle service below the same daemon/backend
+                // namespace used by the mounted wrapper. The service adds
+                // trust/compiler/backend below this base.
+                .join(match policy {
+                    velnor_cache_service::CompilerCachePolicy::Sccache => "_velnor_sccache",
+                    velnor_cache_service::CompilerCachePolicy::Kache => "_velnor_kache",
+                    velnor_cache_service::CompilerCachePolicy::Auto
+                    | velnor_cache_service::CompilerCachePolicy::Off => {
+                        unreachable!("resolved compiler-cache policy")
+                    }
+                })
+        });
+    let mut config = CompilerCacheConfig::new(root, format!("{daemon_id}:{}", container.name));
+    config.policy = policy;
+    config.trust_class = crate::executor::compiler_cache_trust_class(trust_scope);
+    let service = CompilerCacheService::open_production(config, WrapperDeclaration::default())
+        .context("open compiler-cache lifecycle service")?;
+    Ok(Some(Arc::new(service)))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_script_job_inner(
     job_dir: &std::path::Path,
@@ -7192,9 +7230,10 @@ fn execute_script_job_inner(
         docker_image,
         resource_options,
         node_action_image,
-        daemon_id,
+        daemon_id.clone(),
         trust_scope,
     )?;
+    let compiler_cache = open_compiler_cache_for_job(&container, &daemon_id, trust_scope)?;
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -7482,6 +7521,9 @@ fn execute_script_job_inner(
     }
     if let (Some(sink), Some(admission)) = (crate::ops::global().cloned(), telemetry_admission) {
         executor = executor.with_tool_prep_telemetry(sink, admission);
+    }
+    if let Some(compiler_cache) = compiler_cache {
+        executor = executor.with_compiler_cache(compiler_cache);
     }
     let steps_started = Instant::now();
     let first_step_ms = duration_ms(execution_started.elapsed());

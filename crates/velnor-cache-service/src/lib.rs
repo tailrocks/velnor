@@ -11,7 +11,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -22,7 +26,12 @@ use velnor_action_model::{
     canonical_json_bytes, ActionKey, ActionResult, ActionState, Clock, Digest, ProducerLease,
     TrustClass,
 };
-use velnor_cas::{CasError, CasStore};
+use velnor_cas::{
+    BudgetCallback, CasError, CasStore, FileClass, SubsetSelector, TreeEntry, TreeManifest,
+};
+
+#[cfg(unix)]
+use std::{io::Read, os::unix::fs::PermissionsExt};
 
 /// Compiler-cache metadata schema written beside each backend namespace.
 pub const COMPILER_CACHE_SCHEMA_VERSION: u32 = 1;
@@ -30,6 +39,142 @@ pub const KACHE_VERSION: &str = "0.14.2";
 pub const SCCACHE_VERSION: &str = "0.16.0";
 const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
+const MAX_OUTPUT_TREE_FILES: usize = 100_000;
+const MAX_OUTPUT_TREE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const MAX_COMPILER_CACHE_CAS_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+static OUTPUT_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+
+struct CompilerCasBudget {
+    metadata_path: PathBuf,
+}
+
+impl CompilerCasBudget {
+    fn open(cas_root: &Path, metadata_path: &Path) -> Result<Arc<Self>, CacheError> {
+        let mut connection = Connection::open(metadata_path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let initialized: Option<i64> = transaction
+            .query_row(
+                "SELECT used_bytes FROM compiler_cache_quota WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if initialized.is_none() {
+            let initial = directory_size(cas_root)?;
+            transaction.execute(
+                "INSERT INTO compiler_cache_quota(id, used_bytes, inflight_bytes) VALUES (1, ?1, 0)",
+                [i64::try_from(initial).map_err(|_| {
+                    CacheError::InvalidOutput("compiler-cache CAS size exceeds SQLite range".into())
+                })?],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(Arc::new(Self {
+            metadata_path: metadata_path.to_path_buf(),
+        }))
+    }
+}
+
+impl BudgetCallback for CompilerCasBudget {
+    fn reserve(&self, bytes: u64) -> Result<(), String> {
+        let mut connection = Connection::open(&self.metadata_path)
+            .map_err(|error| format!("open compiler-cache quota: {error}"))?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| format!("set compiler-cache quota timeout: {error}"))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("begin compiler-cache quota: {error}"))?;
+        let (used, inflight): (i64, i64) = transaction
+            .query_row(
+                "SELECT used_bytes, inflight_bytes FROM compiler_cache_quota WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| format!("read compiler-cache quota: {error}"))?;
+        let next = u64::try_from(used)
+            .ok()
+            .and_then(|used| {
+                u64::try_from(inflight)
+                    .ok()
+                    .and_then(|inflight| used.checked_add(inflight))
+            })
+            .and_then(|reserved| reserved.checked_add(bytes))
+            .ok_or_else(|| "compiler-cache CAS quota arithmetic overflow".to_string())?;
+        if next > MAX_COMPILER_CACHE_CAS_BYTES {
+            return Err(format!(
+                "compiler-cache CAS quota exceeded: {next} > {MAX_COMPILER_CACHE_CAS_BYTES} bytes"
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE compiler_cache_quota SET inflight_bytes = inflight_bytes + ?1 WHERE id = 1",
+                [i64::try_from(bytes)
+                    .map_err(|_| "compiler-cache reservation exceeds SQLite range".to_string())?],
+            )
+            .map_err(|error| format!("reserve compiler-cache quota: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("commit compiler-cache quota: {error}"))
+    }
+
+    fn release(&self, bytes: u64) {
+        self.finish_reservation(bytes, false);
+    }
+
+    fn commit(&self, bytes: u64) {
+        self.finish_reservation(bytes, true);
+    }
+}
+
+impl CompilerCasBudget {
+    fn finish_reservation(&self, bytes: u64, committed: bool) {
+        let Ok(mut connection) = Connection::open(&self.metadata_path) else {
+            eprintln!("forensics.lifecycle: compiler-cache quota cleanup could not open metadata");
+            return;
+        };
+        if connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .is_err()
+        {
+            eprintln!("forensics.lifecycle: compiler-cache quota cleanup timeout setup failed");
+            return;
+        }
+        let Ok(transaction) = connection.transaction_with_behavior(TransactionBehavior::Immediate)
+        else {
+            eprintln!("forensics.lifecycle: compiler-cache quota cleanup transaction failed");
+            return;
+        };
+        let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
+        let result = if committed {
+            transaction.execute(
+                "UPDATE compiler_cache_quota
+                 SET used_bytes = used_bytes + ?1, inflight_bytes = inflight_bytes - ?1
+                 WHERE id = 1 AND inflight_bytes >= ?1",
+                [bytes],
+            )
+        } else {
+            transaction.execute(
+                "UPDATE compiler_cache_quota SET inflight_bytes = inflight_bytes - ?1
+                 WHERE id = 1 AND inflight_bytes >= ?1",
+                [bytes],
+            )
+        };
+        if result
+            .and_then(|changed| {
+                if changed == 1 {
+                    transaction.commit()
+                } else {
+                    Err(rusqlite::Error::QueryReturnedNoRows)
+                }
+            })
+            .is_err()
+        {
+            eprintln!("forensics.lifecycle: compiler-cache quota reservation cleanup failed");
+        }
+    }
+}
 
 /// One mutually exclusive compiler-cache implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,10 +300,10 @@ impl CompilerCacheConfig {
         }
         if self.lease_duration_ms == 0
             || self.heartbeat_every_ms == 0
-            || self.heartbeat_every_ms >= self.lease_duration_ms
+            || self.heartbeat_every_ms.saturating_mul(2) >= self.lease_duration_ms
         {
             return Err(CacheError::InvalidConfig(
-                "compiler-cache lease duration and heartbeat must be positive and heartbeat must be strictly less than lease duration".into(),
+                "compiler-cache lease duration and heartbeat must be positive and heartbeat must leave a full renewal margin".into(),
             ));
         }
         Ok(())
@@ -310,9 +455,14 @@ pub struct CompilerCacheService<C: Clock> {
     lease_duration_ms: u64,
     heartbeat_every_ms: u64,
     cas: CasStore,
+    cas_budget: Arc<CompilerCasBudget>,
     metadata: Mutex<Connection>,
     journal: Mutex<LeaseManager<C>>,
 }
+
+/// Production compiler-cache service type used by the synchronous Docker
+/// executor.
+pub type ProductionCompilerCache = CompilerCacheService<velnor_action_journal::TokioClock>;
 
 impl<C: Clock> CompilerCacheService<C> {
     /// Open the selected backend namespace and initialize durable metadata.
@@ -330,8 +480,10 @@ impl<C: Clock> CompilerCacheService<C> {
             .join(backend.namespace());
         fs::create_dir_all(&storage_root)?;
         let cas = CasStore::new(storage_root.join("cas"))?;
-        let metadata = Connection::open(storage_root.join("metadata.sqlite"))?;
+        let metadata_path = storage_root.join("metadata.sqlite");
+        let metadata = Connection::open(&metadata_path)?;
         initialize_metadata(&metadata)?;
+        let cas_budget = CompilerCasBudget::open(cas.root(), &metadata_path)?;
         let journal = LeaseManager::open(storage_root.join("journal.sqlite"), clock)?;
         Ok(Self {
             backend,
@@ -341,6 +493,7 @@ impl<C: Clock> CompilerCacheService<C> {
             lease_duration_ms: config.lease_duration_ms,
             heartbeat_every_ms: config.heartbeat_every_ms,
             cas,
+            cas_budget,
             metadata: Mutex::new(metadata),
             journal: Mutex::new(journal),
         })
@@ -407,95 +560,157 @@ impl<C: Clock> CompilerCacheService<C> {
         })
     }
 
+    /// Return a digest-identified, immutable output tree stored in this
+    /// service's trust/backend namespace.
+    pub fn store_output_tree(&self, root: &Path) -> Result<Digest, CacheError> {
+        if !root.is_dir() || fs::symlink_metadata(root)?.file_type().is_symlink() {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output root is not a regular directory: {}",
+                root.display()
+            )));
+        }
+        let mut entries = Vec::new();
+        let mut budget = OutputTreeBudget::default();
+        collect_output_tree(
+            root,
+            root,
+            &self.cas,
+            &mut entries,
+            &mut budget,
+            self.cas_budget.as_ref(),
+        )?;
+        Ok(self
+            .cas
+            .put_tree_with_budget(&TreeManifest { entries }, self.cas_budget.as_ref())?)
+    }
+
+    /// Materialize a previously stored output tree through a private staging
+    /// directory, then atomically replace the destination directory.
+    pub fn materialize_output_tree(
+        &self,
+        root_digest: &Digest,
+        destination: &Path,
+    ) -> Result<(), CacheError> {
+        let parent = destination.parent().ok_or_else(|| {
+            CacheError::InvalidOutput(format!(
+                "compiler output destination has no parent: {}",
+                destination.display()
+            ))
+        })?;
+        fs::create_dir_all(parent)?;
+        if let Ok(metadata) = fs::symlink_metadata(destination) {
+            if metadata.file_type().is_symlink() {
+                return Err(CacheError::InvalidOutput(format!(
+                    "compiler output destination is a symlink: {}",
+                    destination.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(CacheError::InvalidOutput(format!(
+                    "compiler output destination is not a directory: {}",
+                    destination.display()
+                )));
+            }
+        }
+        let sequence = OUTPUT_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let staging = parent.join(format!(
+            ".{}.compiler-restore-{nonce}-{sequence}",
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("output")
+        ));
+        let backup = parent.join(format!(
+            ".{}.compiler-backup-{nonce}-{sequence}",
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("output")
+        ));
+        let result = (|| {
+            fs::create_dir(&staging)?;
+            self.cas
+                .materialize_subset(root_digest, SubsetSelector::RuntimeFiles, &staging)?;
+            let had_destination = fs::symlink_metadata(destination).is_ok();
+            if had_destination {
+                fs::rename(destination, &backup)?;
+            }
+            if let Err(error) = fs::rename(&staging, destination) {
+                if had_destination {
+                    let _ = fs::rename(&backup, destination);
+                }
+                return Err(CacheError::Io(error));
+            }
+            if had_destination {
+                remove_output_path(&backup)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+
     /// Begin a producer lease with cancellation-safe abandonment.
     pub async fn begin_guard(
         &self,
         key: &CompilerActionKey,
     ) -> Result<CompilerLeaseGuard<'_, C>, CacheError> {
-        let lease = <Self as CompilerCache>::begin(self, key).await?;
+        let lease = self.begin_sync(key)?;
         Ok(CompilerLeaseGuard {
             service: self,
             lease: Some(lease),
         })
     }
 
-    fn renew_lease(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+    /// Begin a producer lease for synchronous execution paths.
+    ///
+    /// The runner's Docker command boundary is deliberately synchronous and
+    /// runs on a blocking thread. Keep the durable transition synchronous at
+    /// its storage boundary instead of entering a nested Tokio runtime.
+    pub fn begin_sync(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
-        self.ensure_trust_scope(&lease.action)?;
+        self.ensure_trust_scope(key)?;
         let mut journal = self.lock_journal()?;
-        journal.renew(lease)?;
-        Ok(())
-    }
-
-    fn abandon_lease(&self, lease: &ProducerLease) -> Result<(), CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(&lease.action)?;
-        let mut journal = self.lock_journal()?;
-        journal.abandon(lease)?;
-        Ok(())
-    }
-}
-
-impl<C: Clock> CompilerLeaseGuard<'_, C> {
-    /// Return the current fencing token for diagnostics or a heartbeat.
-    #[must_use]
-    pub fn lease(&self) -> Option<&ProducerLease> {
-        self.lease.as_ref()
-    }
-
-    /// Extend the durable lease before its heartbeat deadline.
-    pub async fn renew(&mut self) -> Result<(), CacheError> {
-        let lease = self.lease.as_mut().ok_or(CacheError::LeaseConsumed)?;
-        self.service.renew_lease(lease)
-    }
-
-    /// Publish the result and consume the guard only after fencing succeeds.
-    pub async fn publish(&mut self, result: CompilerResult) -> Result<(), CacheError> {
-        let lease = self
-            .lease
-            .as_ref()
-            .ok_or(CacheError::LeaseConsumed)?
-            .clone();
-        <CompilerCacheService<C> as CompilerCache>::publish(self.service, lease, result).await?;
-        self.lease.take();
-        Ok(())
-    }
-}
-
-impl<C: Clock> Drop for CompilerLeaseGuard<'_, C> {
-    fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
-            return;
+        let lease = journal.acquire(
+            key,
+            self.owner.clone(),
+            self.lease_duration_ms,
+            self.heartbeat_every_ms,
+        )?;
+        let record = ActionRecord {
+            action_key: key.clone(),
+            state: ActionState::Leased,
+            producer_lease_ref: Some(lease_reference(&lease)),
+            consumer_run_ids: BTreeSet::new(),
+            output_digests: BTreeMap::new(),
+            timing: Default::default(),
+            worker_id: Some(self.owner.clone()),
+            trust_class: key.execution_policy.trust_class,
         };
-        // LeaseManager is synchronous, so Drop cannot await. Keep the
-        // fail-closed fencing attempt here and surface a failure for recovery
-        // telemetry instead of silently leaving the lease to expire.
-        if let Err(error) = self.service.abandon_lease(&lease) {
-            eprintln!("forensics.lifecycle: compiler cache lease abandon on drop failed: {error}");
+        if let Err(error) = journal.append_action(&record) {
+            if let Err(cleanup_error) = journal.abandon(&lease) {
+                eprintln!(
+                    "forensics.lifecycle: compiler cache begin cleanup failed: {cleanup_error}"
+                );
+            }
+            return Err(error.into());
         }
+        Ok(lease)
     }
-}
 
-impl CompilerCacheService<velnor_action_journal::TokioClock> {
-    /// Open a production service with the journal's wall-clock lease source.
-    pub fn open_production(
-        config: CompilerCacheConfig,
-        declaration: WrapperDeclaration,
-    ) -> Result<Self, CacheError> {
-        Self::open(
-            config,
-            declaration,
-            velnor_action_journal::TokioClock::default(),
-        )
-    }
-}
-
-impl<C: Clock> CompilerCache for CompilerCacheService<C> {
-    async fn lookup(&self, key: &CompilerActionKey) -> Result<Option<CompilerResult>, CacheError> {
+    /// Look up a validated compiler result from a synchronous execution path.
+    pub fn lookup_sync(
+        &self,
+        key: &CompilerActionKey,
+    ) -> Result<Option<CompilerResult>, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Ok(None);
         }
@@ -533,96 +748,103 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
                 "published compiler result does not match its metadata".into(),
             ));
         }
+        self.validate_output_tree(&result.output_root)?;
         drop(metadata);
         drop(journal);
         Ok(Some(result))
     }
 
-    async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
+    /// Renew a producer lease from a synchronous heartbeat.
+    pub fn renew_sync(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
-        self.ensure_trust_scope(key)?;
+        self.ensure_trust_scope(&lease.action)?;
         let mut journal = self.lock_journal()?;
-        let lease = journal.acquire(
-            key,
-            self.owner.clone(),
-            self.lease_duration_ms,
-            self.heartbeat_every_ms,
-        )?;
-        let record = ActionRecord {
-            action_key: key.clone(),
-            state: ActionState::Leased,
-            producer_lease_ref: Some(lease_reference(&lease)),
-            consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::new(),
-            timing: Default::default(),
-            worker_id: Some(self.owner.clone()),
-            trust_class: key.execution_policy.trust_class,
-        };
-        if let Err(error) = journal.append_action(&record) {
-            let _ = journal.abandon(&lease);
-            return Err(error.into());
+        journal.renew(lease)?;
+        Ok(())
+    }
+
+    /// Abandon a producer lease from a synchronous cancellation/failure path.
+    pub fn abandon_sync(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
         }
-        Ok(lease)
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.abandon(lease)?;
+        Ok(())
     }
 
-    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
-        self.renew_lease(lease)
-    }
-
-    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
-        self.abandon_lease(lease)
-    }
-
-    async fn publish(
+    pub fn publish_sync(
         &self,
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<(), CacheError> {
         let lease_for_cleanup = lease.clone();
-        let outcome = async {
-            if self.backend == CompilerCacheBackend::Off {
-                return Err(CacheError::Disabled);
+        let outcome = self.publish_sync_inner(lease, result);
+        if outcome.is_err() {
+            // Publication may fail after the result envelope or metadata has
+            // been written. Fencing the producer remains mandatory; a
+            // released lease simply makes this cleanup a harmless no-op.
+            if let Err(cleanup_error) = self.abandon_sync(&lease_for_cleanup) {
+                eprintln!(
+                    "forensics.lifecycle: compiler cache publication cleanup failed: {cleanup_error}"
+                );
             }
-            self.ensure_trust_scope(&lease.action)?;
-            if lease.action != result.action_key {
-                return Err(CacheError::LeaseKeyMismatch);
-            }
-            if result.action_key.execution_policy.trust_class
-                != lease.action.execution_policy.trust_class
-            {
-                return Err(CacheError::TrustMismatch);
-            }
-            if result.exit_code != 0 {
-                return Err(CacheError::FailedResult {
-                    exit_code: result.exit_code,
-                });
-            }
-            let result_bytes = serde_json::to_vec(&result)?;
-            let result_digest = self.cas.put(&result_bytes)?;
-            let key_digest = lease.action.digest()?.to_string();
-            let key_json = canonical_key_json(&lease.action)?;
-            let trust_json = serde_json::to_string(&lease.action.execution_policy.trust_class)?;
-            let complete = ActionRecord {
-                action_key: lease.action.clone(),
-                state: ActionState::Complete,
-                producer_lease_ref: Some(lease_reference(&lease)),
-                consumer_run_ids: BTreeSet::new(),
-                output_digests: BTreeMap::from([(
-                    String::from("output_root"),
-                    result.output_root.clone(),
-                )]),
-                timing: result.timing,
-                worker_id: Some(lease.owner.clone()),
-                trust_class: lease.action.execution_policy.trust_class,
-            };
+        }
+        outcome
+    }
 
-            let mut journal = self.lock_journal()?;
-            let mut metadata = self.lock_metadata()?;
-            let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute(
-                "INSERT INTO compiler_cache_entries(
+    fn publish_sync_inner(
+        &self,
+        lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        if lease.action != result.action_key {
+            return Err(CacheError::LeaseKeyMismatch);
+        }
+        if result.action_key.execution_policy.trust_class
+            != lease.action.execution_policy.trust_class
+        {
+            return Err(CacheError::TrustMismatch);
+        }
+        if result.exit_code != 0 {
+            return Err(CacheError::FailedResult {
+                exit_code: result.exit_code,
+            });
+        }
+        self.validate_output_tree(&result.output_root)?;
+        let result_bytes = serde_json::to_vec(&result)?;
+        let result_digest = self
+            .cas
+            .put_with_budget(&result_bytes, self.cas_budget.as_ref())?;
+        let key_digest = lease.action.digest()?.to_string();
+        let key_json = canonical_key_json(&lease.action)?;
+        let trust_json = serde_json::to_string(&lease.action.execution_policy.trust_class)?;
+        let complete = ActionRecord {
+            action_key: lease.action.clone(),
+            state: ActionState::Complete,
+            producer_lease_ref: Some(lease_reference(&lease)),
+            consumer_run_ids: BTreeSet::new(),
+            output_digests: BTreeMap::from([(
+                String::from("output_root"),
+                result.output_root.clone(),
+            )]),
+            timing: result.timing,
+            worker_id: Some(lease.owner.clone()),
+            trust_class: lease.action.execution_policy.trust_class,
+        };
+
+        let mut journal = self.lock_journal()?;
+        let mut metadata = self.lock_metadata()?;
+        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO compiler_cache_entries(
                  action_key_digest, action_key_json, result_digest, output_digest,
                  trust_class, schema_version, lease_generation
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -633,31 +855,111 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
                  trust_class = excluded.trust_class,
                  schema_version = excluded.schema_version,
                  lease_generation = excluded.lease_generation",
-                params![
-                    key_digest,
-                    key_json,
-                    result_digest.to_string(),
-                    result.output_root.to_string(),
-                    trust_json,
-                    i64::from(COMPILER_CACHE_SCHEMA_VERSION),
-                    i64::try_from(lease.generation).map_err(|_| CacheError::InvalidMetadata(
-                        "lease generation overflow".into()
-                    ))?,
-                ],
-            )?;
-            transaction.commit()?;
-            drop(metadata);
-            journal.append_action_and_release(&lease, &complete)?;
-            Ok(())
+            params![
+                key_digest,
+                key_json,
+                result_digest.to_string(),
+                result.output_root.to_string(),
+                trust_json,
+                i64::from(COMPILER_CACHE_SCHEMA_VERSION),
+                i64::try_from(lease.generation)
+                    .map_err(|_| CacheError::InvalidMetadata("lease generation overflow".into()))?,
+            ],
+        )?;
+        transaction.commit()?;
+        drop(metadata);
+        journal.append_action_and_release(&lease, &complete)?;
+        Ok(())
+    }
+}
+
+impl<C: Clock> CompilerLeaseGuard<'_, C> {
+    /// Return the current fencing token for diagnostics or a heartbeat.
+    #[must_use]
+    pub fn lease(&self) -> Option<&ProducerLease> {
+        self.lease.as_ref()
+    }
+
+    /// Extend the durable lease before its heartbeat deadline.
+    pub async fn renew(&mut self) -> Result<(), CacheError> {
+        self.renew_sync()
+    }
+
+    /// Extend the durable lease before its heartbeat deadline synchronously.
+    pub fn renew_sync(&mut self) -> Result<(), CacheError> {
+        let lease = self.lease.as_mut().ok_or(CacheError::LeaseConsumed)?;
+        self.service.renew_sync(lease)
+    }
+
+    /// Publish the result and consume the guard only after fencing succeeds.
+    pub async fn publish(&mut self, result: CompilerResult) -> Result<(), CacheError> {
+        self.publish_sync(result)
+    }
+
+    /// Publish the result and consume the guard only after fencing succeeds.
+    pub fn publish_sync(&mut self, result: CompilerResult) -> Result<(), CacheError> {
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or(CacheError::LeaseConsumed)?
+            .clone();
+        self.service.publish_sync(lease, result)?;
+        self.lease.take();
+        Ok(())
+    }
+}
+
+impl<C: Clock> Drop for CompilerLeaseGuard<'_, C> {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        // LeaseManager is synchronous, so Drop cannot await. Keep the
+        // fail-closed fencing attempt here and surface a failure for recovery
+        // telemetry instead of silently leaving the lease to expire.
+        if let Err(error) = self.service.abandon_sync(&lease) {
+            eprintln!("forensics.lifecycle: compiler cache lease abandon on drop failed: {error}");
         }
-        .await;
-        if outcome.is_err() {
-            // A failed publication must not strand the producer lease until
-            // its normal expiry. A fenced lease is already safe; cleanup
-            // errors are secondary to the publication error.
-            let _ = self.abandon_lease(&lease_for_cleanup);
-        }
-        outcome
+    }
+}
+
+impl CompilerCacheService<velnor_action_journal::TokioClock> {
+    /// Open a production service with the journal's wall-clock lease source.
+    pub fn open_production(
+        config: CompilerCacheConfig,
+        declaration: WrapperDeclaration,
+    ) -> Result<Self, CacheError> {
+        Self::open(
+            config,
+            declaration,
+            velnor_action_journal::TokioClock::default(),
+        )
+    }
+}
+
+impl<C: Clock> CompilerCache for CompilerCacheService<C> {
+    async fn lookup(&self, key: &CompilerActionKey) -> Result<Option<CompilerResult>, CacheError> {
+        self.lookup_sync(key)
+    }
+
+    async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
+        self.begin_sync(key)
+    }
+
+    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        self.renew_sync(lease)
+    }
+
+    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        self.abandon_sync(lease)
+    }
+
+    async fn publish(
+        &self,
+        lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<(), CacheError> {
+        self.publish_sync(lease, result)
     }
 }
 
@@ -695,6 +997,8 @@ pub enum CacheError {
     FailedResult { exit_code: i32 },
     #[error("invalid compiler-cache metadata: {0}")]
     InvalidMetadata(String),
+    #[error("invalid compiler output: {0}")]
+    InvalidOutput(String),
     #[error("invalid compiler-cache configuration: {0}")]
     InvalidConfig(String),
     #[error("compiler-cache mutex is poisoned")]
@@ -723,8 +1027,223 @@ fn initialize_metadata(connection: &Connection) -> Result<(), CacheError> {
              trust_class TEXT NOT NULL,
              schema_version INTEGER NOT NULL,
              lease_generation INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS compiler_cache_quota (
+             id INTEGER PRIMARY KEY CHECK (id = 1),
+             used_bytes INTEGER NOT NULL,
+             inflight_bytes INTEGER NOT NULL
          );",
     )?;
+    Ok(())
+}
+
+fn directory_size(path: &Path) -> Result<u64, CacheError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CacheError::InvalidOutput(format!(
+            "compiler-cache CAS path is a symlink: {}",
+            path.display()
+        )));
+    }
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path)? {
+        total = total
+            .checked_add(directory_size(&entry?.path())?)
+            .ok_or_else(|| CacheError::InvalidOutput("compiler-cache CAS size overflow".into()))?;
+    }
+    Ok(total)
+}
+
+fn collect_output_tree(
+    root: &Path,
+    current: &Path,
+    cas: &CasStore,
+    entries: &mut Vec<TreeEntry>,
+    budget: &mut OutputTreeBudget,
+    cas_budget: &dyn BudgetCallback,
+) -> Result<(), CacheError> {
+    let mut children = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.path());
+    for child in children {
+        let path = child.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| CacheError::InvalidOutput(error.to_string()))?;
+        let file_type = fs::symlink_metadata(&path)?.file_type();
+        if file_type.is_dir() {
+            collect_output_tree(root, &path, cas, entries, budget, cas_budget)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output contains non-regular entry: {}",
+                path.display()
+            )));
+        }
+        let (bytes, mode) = read_output_file(root, relative)?;
+        if bytes.len() as u64 > MAX_OUTPUT_TREE_BYTES {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output file exceeds {MAX_OUTPUT_TREE_BYTES} bytes: {}",
+                path.display()
+            )));
+        }
+        budget.account(&path, bytes.len() as u64)?;
+        entries.push(TreeEntry {
+            path: relative.to_string_lossy().replace('\\', "/"),
+            digest: cas.put_with_budget(&bytes, cas_budget)?,
+            class: if mode & 0o111 != 0 {
+                FileClass::Executable
+            } else {
+                FileClass::Runtime
+            },
+            mode,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_output_file(root: &Path, relative: &Path) -> Result<(Vec<u8>, u32), CacheError> {
+    let directory_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW;
+    let mut parent = open_output_directory(root, directory_flags)?;
+    let mut components = relative.components().peekable();
+    let Some(std::path::Component::Normal(file_name)) = components.next_back() else {
+        return Err(CacheError::InvalidOutput(
+            "compiler output file has no name".into(),
+        ));
+    };
+    for component in components {
+        let std::path::Component::Normal(name) = component else {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output path is not normal: {}",
+                relative.display()
+            )));
+        };
+        parent = std::fs::File::from(
+            rustix::fs::openat(&parent, name, directory_flags, rustix::fs::Mode::empty())
+                .map_err(std::io::Error::from)?,
+        );
+    }
+    let file_flags =
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW;
+    let mut file = std::fs::File::from(
+        rustix::fs::openat(&parent, file_name, file_flags, rustix::fs::Mode::empty())
+            .map_err(std::io::Error::from)?,
+    );
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(CacheError::InvalidOutput(format!(
+            "compiler output entry is not a regular file: {}",
+            relative.display()
+        )));
+    }
+    if metadata.len() > MAX_OUTPUT_TREE_BYTES {
+        return Err(CacheError::InvalidOutput(format!(
+            "compiler output file exceeds {MAX_OUTPUT_TREE_BYTES} bytes: {}",
+            relative.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, metadata.permissions().mode() & 0o777))
+}
+
+#[cfg(unix)]
+fn open_output_directory(
+    root: &Path,
+    directory_flags: rustix::fs::OFlags,
+) -> Result<std::fs::File, CacheError> {
+    let base = if root.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut current = std::fs::File::from(
+        rustix::fs::open(base, directory_flags, rustix::fs::Mode::empty())
+            .map_err(std::io::Error::from)?,
+    );
+    for component in root.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                current = std::fs::File::from(
+                    rustix::fs::openat(&current, name, directory_flags, rustix::fs::Mode::empty())
+                        .map_err(std::io::Error::from)?,
+                );
+            }
+            std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
+                return Err(CacheError::InvalidOutput(
+                    "compiler output root contains a non-normal path component".into(),
+                ));
+            }
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(not(unix))]
+fn read_output_file(root: &Path, relative: &Path) -> Result<(Vec<u8>, u32), CacheError> {
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CacheError::InvalidOutput(format!(
+            "compiler output entry is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok((fs::read(path)?, 0o644))
+}
+
+#[derive(Default)]
+struct OutputTreeBudget {
+    files: usize,
+    bytes: u64,
+}
+
+impl OutputTreeBudget {
+    fn account(&mut self, path: &Path, bytes: u64) -> Result<(), CacheError> {
+        self.files = self.files.checked_add(1).ok_or_else(|| {
+            CacheError::InvalidOutput("compiler output file count overflow".into())
+        })?;
+        if self.files > MAX_OUTPUT_TREE_FILES {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output exceeds {MAX_OUTPUT_TREE_FILES} files at {}",
+                path.display()
+            )));
+        }
+        self.bytes = self.bytes.checked_add(bytes).ok_or_else(|| {
+            CacheError::InvalidOutput("compiler output byte count overflow".into())
+        })?;
+        if self.bytes > MAX_OUTPUT_TREE_BYTES {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output exceeds {MAX_OUTPUT_TREE_BYTES} bytes at {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn remove_output_path(path: &Path) -> Result<(), CacheError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
     Ok(())
 }
 
@@ -815,6 +1334,20 @@ fn trust_namespace(trust_class: TrustClass) -> &'static str {
 }
 
 impl<C: Clock> CompilerCacheService<C> {
+    fn validate_output_tree(&self, root_digest: &Digest) -> Result<(), CacheError> {
+        let manifest = self.cas.validate_tree(root_digest)?;
+        if manifest
+            .entries
+            .iter()
+            .any(|entry| !matches!(entry.class, FileClass::Executable | FileClass::Runtime))
+        {
+            return Err(CacheError::InvalidOutput(
+                "compiler output tree contains a non-runtime entry".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_trust_scope(&self, key: &CompilerActionKey) -> Result<(), CacheError> {
         if key.execution_policy.trust_class != self.trust_class {
             return Err(CacheError::TrustScopeMismatch);
@@ -899,7 +1432,7 @@ mod tests {
         let digest = Digest::from_bytes(b"compiler-output");
         CompilerResult {
             action_key,
-            output_root: digest.clone(),
+            output_root: empty_tree_digest(),
             stdout_digest: digest.clone(),
             stderr_digest: digest.clone(),
             exit_code: 0,
@@ -919,7 +1452,15 @@ mod tests {
     ) -> CompilerCacheService<TokioClock> {
         let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
         config.policy = policy;
-        CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service")
+        let cache =
+            CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service");
+        cache
+            .cas
+            .put_tree(&TreeManifest {
+                entries: Vec::new(),
+            })
+            .expect("empty output tree");
+        cache
     }
 
     fn service_with_clock(
@@ -930,7 +1471,24 @@ mod tests {
         config.policy = CompilerCachePolicy::Kache;
         config.lease_duration_ms = 30;
         config.heartbeat_every_ms = 10;
-        CompilerCacheService::open(config, WrapperDeclaration::default(), clock).expect("service")
+        let cache = CompilerCacheService::open(config, WrapperDeclaration::default(), clock)
+            .expect("service");
+        cache
+            .cas
+            .put_tree(&TreeManifest {
+                entries: Vec::new(),
+            })
+            .expect("empty output tree");
+        cache
+    }
+
+    fn empty_tree_digest() -> Digest {
+        Digest::from_bytes(
+            &canonical_json_bytes(&TreeManifest {
+                entries: Vec::new(),
+            })
+            .expect("tree JSON"),
+        )
     }
 
     #[tokio::test]
@@ -964,6 +1522,25 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn publication_rejects_a_missing_output_tree() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(12);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        let mut result = result(action_key.clone());
+        result.output_root = Digest::from_bytes(b"missing-output-tree");
+        assert!(matches!(
+            cache.publish(lease, result).await,
+            Err(CacheError::Cas(CasError::Absent { .. }))
+        ));
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
     }
 
     #[tokio::test]
@@ -1091,6 +1668,12 @@ mod tests {
             TokioClock::new(),
         )
         .expect("trusted service");
+        trusted
+            .cas
+            .put_tree(&TreeManifest {
+                entries: Vec::new(),
+            })
+            .expect("empty output tree");
         assert_ne!(untrusted.storage_root(), trusted.storage_root());
         assert!(untrusted
             .storage_root()
@@ -1130,6 +1713,18 @@ mod tests {
         )
         .expect_err("mixed wrappers");
         assert_eq!(error.to_string(), "compiler-cache backend conflict: sccache and kache wrappers cannot be enabled together");
+    }
+
+    #[test]
+    fn heartbeat_requires_a_full_renewal_margin() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
+        config.lease_duration_ms = 20;
+        config.heartbeat_every_ms = 10;
+        assert!(matches!(
+            CompilerCacheService::open(config, WrapperDeclaration::default(), TokioClock::new()),
+            Err(CacheError::InvalidConfig(_))
+        ));
     }
 
     #[test]

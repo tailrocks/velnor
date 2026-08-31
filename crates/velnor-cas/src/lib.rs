@@ -57,6 +57,9 @@ pub trait BudgetCallback {
 
     /// Release a reservation when publication fails.
     fn release(&self, bytes: u64);
+
+    /// Convert a successful reservation into committed usage.
+    fn commit(&self, _bytes: u64) {}
 }
 
 /// CAS operation failure.
@@ -320,7 +323,7 @@ impl CasStore {
         }
         bucket.sync_all()?;
         if let Some(reservation) = &mut reservation {
-            reservation.committed = true;
+            reservation.commit();
         }
         Ok(digest)
     }
@@ -384,7 +387,7 @@ impl CasStore {
         }
         sync_directory(parent)?;
         if let Some(reservation) = &mut reservation {
-            reservation.committed = true;
+            reservation.commit();
         }
         Ok(digest)
     }
@@ -425,6 +428,31 @@ impl CasStore {
         self.put(&canonical_json_bytes(&canonical_manifest)?)
     }
 
+    /// Store a tree manifest while applying a bounded-store reservation.
+    pub fn put_tree_with_budget(
+        &self,
+        manifest: &TreeManifest,
+        budget: &dyn BudgetCallback,
+    ) -> Result<Digest, CasError> {
+        manifest.validate()?;
+        let mut canonical_manifest = manifest.clone();
+        canonical_manifest
+            .entries
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        self.put_with_budget(&canonical_json_bytes(&canonical_manifest)?, budget)
+    }
+
+    /// Read and fully integrity-check a tree manifest and all referenced
+    /// objects without materializing files into a caller-owned directory.
+    pub fn validate_tree(&self, root_digest: &Digest) -> Result<TreeManifest, CasError> {
+        let manifest: TreeManifest = serde_json::from_slice(&self.get(root_digest)?)?;
+        manifest.validate()?;
+        for entry in &manifest.entries {
+            self.get(&entry.digest)?;
+        }
+        Ok(manifest)
+    }
+
     /// Materialize only the selected file classes from a tree manifest.
     pub fn materialize_subset(
         &self,
@@ -444,8 +472,7 @@ impl CasStore {
         selector: SubsetSelector,
         destination: &Path,
     ) -> Result<MaterializationReport, CasError> {
-        let manifest: TreeManifest = serde_json::from_slice(&self.get(root_digest)?)?;
-        manifest.validate()?;
+        let manifest = self.validate_tree(root_digest)?;
         let mut materialized = Vec::new();
         let mut methods = std::collections::BTreeMap::new();
         for entry in manifest
@@ -565,6 +592,13 @@ struct BudgetReservation<'a> {
     callback: &'a dyn BudgetCallback,
     bytes: u64,
     committed: bool,
+}
+
+impl BudgetReservation<'_> {
+    fn commit(&mut self) {
+        self.callback.commit(self.bytes);
+        self.committed = true;
+    }
 }
 
 impl Drop for BudgetReservation<'_> {

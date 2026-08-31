@@ -29,12 +29,16 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc::UnboundedSender;
+use velnor_action_model::{
+    canonical_json_bytes, ActionKey, ActionTiming, Digest as ActionDigest, ExecutionPolicy,
+    PlatformIdentity, ProducerLease, Provenance, TrustClass,
+};
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -62,6 +66,8 @@ const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_TEST_END_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_COMPILE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_COMPILER_CACHE_INPUT_FILES: usize = 100_000;
+const MAX_COMPILER_CACHE_INPUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PREPARED_ARTIFACT_SHA256_PREFIX: &str = "sha256:";
 const CACHE_GLOB_MAX_MATCHES: usize = 100_000;
 const CACHE_GLOB_MAX_VISITED_ENTRIES: usize = 1_000_000;
@@ -134,6 +140,39 @@ fn compile_command_kind(script: &str) -> Option<&'static str> {
         .next()
 }
 
+fn cacheable_compile_command_kind(script: &str) -> Option<&'static str> {
+    let mut lines = script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let line = lines.next()?;
+    if lines.next().is_some()
+        || line.contains([
+            ';', '|', '&', '\\', '>', '<', '$', '`', '(', ')', '*', '?', '{', '}', '!',
+        ])
+    {
+        return None;
+    }
+    let mut tokens = line.split_whitespace().peekable();
+    while let Some(token) = tokens.peek().copied() {
+        if token == "sudo" {
+            return None;
+        }
+        if token == "env" || token.contains('=') {
+            if token.starts_with("CARGO_TARGET_DIR=") {
+                return None;
+            }
+            tokens.next();
+        } else {
+            break;
+        }
+    }
+    match (tokens.next()?, tokens.next()?) {
+        ("cargo", "build" | "check" | "clippy" | "rustc") => Some("cargo"),
+        _ => None,
+    }
+}
+
 /// Return a stable linker label only when a shell segment starts with an
 /// explicit command whose successful completion includes linking. Do not
 /// infer a link boundary from test or check commands.
@@ -159,6 +198,491 @@ fn link_command_kind(script: &str) -> Option<&'static str> {
             }
         })
         .next()
+}
+
+#[derive(Debug, Serialize)]
+struct CompilerTreeEntry {
+    kind: &'static str,
+    digest: ActionDigest,
+    mode: u32,
+}
+
+pub(crate) fn compiler_cache_trust_class(trust_scope: &str) -> TrustClass {
+    match trust_scope.trim().to_ascii_lowercase().as_str() {
+        "release" => TrustClass::Release,
+        "trusted" => TrustClass::Trusted,
+        _ => TrustClass::Untrusted,
+    }
+}
+
+fn immutable_container_image_digest(image: &str) -> Result<ActionDigest> {
+    let Some((_, digest)) = image.rsplit_once('@') else {
+        bail!("compiler-cache requires an immutable container image digest: {image}");
+    };
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        bail!("compiler-cache requires a sha256 container image digest: {image}");
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("compiler-cache image digest is not a valid sha256: {image}");
+    }
+    Ok(ActionDigest::from_bytes(image.as_bytes()))
+}
+
+fn compiler_cache_action_key(
+    container: &JobContainerSpec,
+    plan: &ScriptStepPlan,
+    compiler: &str,
+    env: &[(String, String)],
+    trust_scope: &str,
+    timeout: Duration,
+) -> Result<ActionKey> {
+    let script = fs::read_to_string(&plan.script_host_path).with_context(|| {
+        format!(
+            "read compiler-cache script {}",
+            plan.script_host_path.display()
+        )
+    })?;
+    let command_digest = ActionDigest::from_bytes(&canonical_json_bytes(&serde_json::json!({
+        "compiler": compiler,
+        "script": script,
+        "shell": format!("{:?}", plan.shell),
+        "working_directory": plan.working_directory_container,
+    }))?);
+    let input_root = digest_workspace_tree(&container.workspace_host, true)?;
+    let image = container.image.trim();
+    let image_digest = immutable_container_image_digest(image)?;
+    let execution_options = container
+        .options
+        .iter()
+        .chain(container.resource_options.iter())
+        .collect::<Vec<_>>();
+    let network = container.network.trim() != "none";
+    let privileged = execution_options
+        .iter()
+        .any(|option| matches!(option.as_str(), "--privileged" | "--privileged=true"));
+    let toolchain_digest = ActionDigest::from_bytes(&canonical_json_bytes(&serde_json::json!({
+        "image": image,
+        "compiler": compiler,
+        "backend": format!("{:?}", container.compiler_cache_backend),
+        "execution_options": execution_options,
+    }))?);
+    let environment_digest =
+        ActionDigest::from_bytes(&canonical_json_bytes(&compiler_cache_environment(env))?);
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    Ok(ActionKey {
+        command_digest,
+        input_root,
+        image_digest,
+        toolchain_digest,
+        platform: compiler_cache_platform(container)?,
+        environment_digest,
+        dependency_outputs: Vec::new(),
+        execution_policy: ExecutionPolicy {
+            trust_class: compiler_cache_trust_class(trust_scope),
+            network,
+            privileged,
+            timeout_ms,
+            adoptable: false,
+        },
+    })
+}
+
+fn compiler_cache_environment(env: &[(String, String)]) -> Vec<(String, String)> {
+    // These paths are recreated for each step and are consumed by the
+    // runner's workflow-command protocol, not by the compiler. Keeping them
+    // out of the action identity preserves cross-job reuse without dropping
+    // any user-controlled compiler flags or toolchain variables.
+    const WORKFLOW_COMMAND_ENV: [&str; 6] = [
+        "GITHUB_ENV",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_STATE",
+        "GITHUB_STEP_SUMMARY",
+    ];
+    let mut canonical = BTreeMap::new();
+    for (name, value) in env {
+        if !WORKFLOW_COMMAND_ENV.contains(&name.as_str()) {
+            canonical.insert(name.clone(), value.clone());
+        }
+    }
+    canonical.into_iter().collect()
+}
+
+fn compiler_cache_platform(container: &JobContainerSpec) -> Result<PlatformIdentity> {
+    let options = container
+        .options
+        .iter()
+        .chain(container.resource_options.iter());
+    let mut requested: Option<String> = None;
+    let mut options = options.peekable();
+    while let Some(option) = options.next() {
+        if let Some(value) = option.strip_prefix("--platform=") {
+            requested = Some(value.to_string());
+        } else if option == "--platform" {
+            requested = Some(
+                options
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("compiler-cache platform value is missing"))?
+                    .to_string(),
+            );
+        }
+    }
+    let platform = requested.unwrap_or_else(|| format!("linux/{}", std::env::consts::ARCH));
+    let (os, arch) = platform
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("compiler-cache platform must be OS/architecture"))?;
+    if os.is_empty() || arch.is_empty() || arch.contains('/') {
+        bail!("compiler-cache platform must be OS/architecture");
+    }
+    Ok(PlatformIdentity::new(os, arch, None))
+}
+
+fn compiler_cache_output_root(
+    container: &JobContainerSpec,
+    plan: &ScriptStepPlan,
+    compiler: &str,
+    env: &[(String, String)],
+) -> Option<PathBuf> {
+    if compiler != "cargo" {
+        // Go may write an arbitrary `-o` path or mutate the working tree. Do
+        // not publish until its output-root contract is explicit.
+        return None;
+    }
+    let script = fs::read_to_string(&plan.script_host_path).ok()?;
+    if script.contains("--target-dir")
+        || script.contains("--manifest-path")
+        || script.contains("CARGO_TARGET_DIR=")
+    {
+        // The executor cannot prove the output directory for these forms
+        // without a shell-aware Cargo argument parser. Refuse publication
+        // rather than fingerprinting an unrelated target tree.
+        return None;
+    }
+    let working_directory = host_workspace_path(container, &plan.working_directory_container)?;
+    let target = env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "CARGO_TARGET_DIR")
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            if !Path::new(value).is_absolute()
+                && value
+                    .split('/')
+                    .any(|component| component.is_empty() || component == "." || component == "..")
+            {
+                return None;
+            }
+            if value == "/__w" || value.starts_with("/__w/") {
+                host_workspace_path(container, value)
+            } else if Path::new(value).is_absolute() {
+                None
+            } else {
+                Some(working_directory.join(value))
+            }
+        });
+    let target = target.unwrap_or_else(|| working_directory.join("target"));
+    if !target.starts_with(&container.workspace_host)
+        || target == container.workspace_host
+        || has_symlink_ancestor(&container.workspace_host, &target)
+    {
+        return None;
+    }
+    Some(target)
+}
+
+fn has_symlink_ancestor(root: &Path, candidate: &Path) -> bool {
+    let Ok(relative) = candidate.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    if fs::symlink_metadata(&current)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(true)
+    {
+        return true;
+    }
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return true;
+        };
+        current.push(name);
+        if fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn host_workspace_path(container: &JobContainerSpec, container_path: &str) -> Option<PathBuf> {
+    let relative = if container_path == "/__w" {
+        ""
+    } else {
+        container_path.strip_prefix("/__w/")?
+    };
+    if relative
+        .split('/')
+        .any(|component| component.is_empty() || component == "..")
+    {
+        return None;
+    }
+    Some(if relative.is_empty() {
+        container.workspace_host.clone()
+    } else {
+        container.workspace_host.join(relative)
+    })
+}
+
+fn digest_workspace_tree(root: &Path, exclude_generated: bool) -> Result<ActionDigest> {
+    let mut entries = BTreeMap::new();
+    if !root.is_dir() || fs::symlink_metadata(root)?.file_type().is_symlink() {
+        bail!(
+            "compiler-cache input root is not a regular directory: {}",
+            root.display()
+        );
+    }
+    let mut budget = CompilerInputBudget::default();
+    collect_workspace_digest_entries(root, root, exclude_generated, &mut entries, &mut budget)?;
+    Ok(ActionDigest::from_bytes(&canonical_json_bytes(&entries)?))
+}
+
+fn collect_workspace_digest_entries(
+    root: &Path,
+    current: &Path,
+    exclude_generated: bool,
+    entries: &mut BTreeMap<String, CompilerTreeEntry>,
+    budget: &mut CompilerInputBudget,
+) -> Result<()> {
+    let mut children = fs::read_dir(current)
+        .with_context(|| format!("read compiler-cache digest root {}", current.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.path());
+    for entry in children {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .with_context(|| format!("strip compiler-cache digest path {}", path.display()))?;
+        let relative_key = relative.to_string_lossy().replace('\\', "/");
+        let file_type = fs::symlink_metadata(&path)?.file_type();
+        if file_type.is_dir() {
+            if exclude_generated
+                && relative
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::Normal(name) if name == ".git" || name == "target"))
+            {
+                continue;
+            }
+            collect_workspace_digest_entries(root, &path, exclude_generated, entries, budget)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            if file_type.is_symlink() {
+                bail!(
+                    "compiler-cache input symlink is not admitted: {}",
+                    path.display()
+                );
+            }
+            bail!("unsupported compiler-cache digest entry {}", path.display());
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.len() > MAX_COMPILER_CACHE_INPUT_BYTES {
+            bail!(
+                "compiler-cache input file exceeds {MAX_COMPILER_CACHE_INPUT_BYTES} bytes: {}",
+                path.display()
+            );
+        }
+        let bytes = fs::read(&path)?;
+        budget.account(&path, bytes.len() as u64)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        #[cfg(unix)]
+        let mode = metadata.permissions().mode() & 0o777;
+        #[cfg(not(unix))]
+        let mode = 0o644;
+        entries.insert(
+            relative_key,
+            CompilerTreeEntry {
+                kind: "file",
+                digest: ActionDigest::from_bytes(&bytes),
+                mode,
+            },
+        );
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct CompilerInputBudget {
+    files: usize,
+    bytes: u64,
+}
+
+impl CompilerInputBudget {
+    fn account(&mut self, path: &Path, bytes: u64) -> Result<()> {
+        self.files = self
+            .files
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("compiler-cache input file count overflow"))?;
+        if self.files > MAX_COMPILER_CACHE_INPUT_FILES {
+            bail!(
+                "compiler-cache input exceeds {MAX_COMPILER_CACHE_INPUT_FILES} files at {}",
+                path.display()
+            );
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("compiler-cache input byte count overflow"))?;
+        if self.bytes > MAX_COMPILER_CACHE_INPUT_BYTES {
+            bail!(
+                "compiler-cache input exceeds {MAX_COMPILER_CACHE_INPUT_BYTES} bytes at {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+struct CompilerCacheLease {
+    service: Arc<velnor_cache_service::ProductionCompilerCache>,
+    lease: Option<ProducerLease>,
+    heartbeat_control: Arc<(Mutex<bool>, Condvar)>,
+    heartbeat_error: Arc<Mutex<Option<String>>>,
+    heartbeat: Option<thread::JoinHandle<()>>,
+}
+
+impl CompilerCacheLease {
+    fn begin(
+        service: Arc<velnor_cache_service::ProductionCompilerCache>,
+        key: &ActionKey,
+    ) -> Result<Self> {
+        let lease = service.begin_sync(key)?;
+        let heartbeat_control = Arc::new((Mutex::new(false), Condvar::new()));
+        let heartbeat_error = Arc::new(Mutex::new(None));
+        let heartbeat_service = Arc::clone(&service);
+        let heartbeat_control_thread = Arc::clone(&heartbeat_control);
+        let heartbeat_error_thread = Arc::clone(&heartbeat_error);
+        let mut heartbeat_lease = lease.clone();
+        let heartbeat_every = Duration::from_millis(heartbeat_lease.heartbeat_every.max(1));
+        let heartbeat = match thread::Builder::new()
+            .name("velnor-compiler-cache-heartbeat".into())
+            .spawn(move || loop {
+                let (stop, wake) = &*heartbeat_control_thread;
+                let guard = match stop.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => break,
+                };
+                let (guard, _) =
+                    match wake.wait_timeout_while(guard, heartbeat_every, |stop| !*stop) {
+                        Ok(result) => result,
+                        Err(_) => break,
+                    };
+                if *guard {
+                    break;
+                }
+                drop(guard);
+                if let Err(error) = heartbeat_service.renew_sync(&mut heartbeat_lease) {
+                    if let Ok(mut slot) = heartbeat_error_thread.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                    break;
+                }
+            }) {
+            Ok(heartbeat) => heartbeat,
+            Err(error) => {
+                if let Err(cleanup_error) = service.abandon_sync(&lease) {
+                    eprintln!(
+                        "forensics.lifecycle: compiler cache heartbeat spawn cleanup failed: {cleanup_error}"
+                    );
+                }
+                return Err(error).context("spawn compiler-cache lease heartbeat");
+            }
+        };
+        Ok(Self {
+            service,
+            lease: Some(lease),
+            heartbeat_control,
+            heartbeat_error,
+            heartbeat: Some(heartbeat),
+        })
+    }
+
+    fn stop_heartbeat(&mut self) -> Result<()> {
+        if let Ok(mut stop) = self.heartbeat_control.0.lock() {
+            *stop = true;
+            self.heartbeat_control.1.notify_all();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat
+                .join()
+                .map_err(|panic| anyhow::anyhow!("compiler-cache heartbeat panicked: {panic:?}"))?;
+        }
+        if let Some(error) = self
+            .heartbeat_error
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            bail!("compiler-cache lease heartbeat failed: {error}");
+        }
+        Ok(())
+    }
+
+    fn abandon(mut self) -> Result<()> {
+        let heartbeat = self.stop_heartbeat();
+        let abandon = if let Some(lease) = self.lease.take() {
+            self.service
+                .abandon_sync(&lease)
+                .map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
+        match (heartbeat, abandon) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(heartbeat), Ok(())) => Err(heartbeat),
+            (Ok(()), Err(abandon)) => Err(abandon),
+            (Err(heartbeat), Err(abandon)) => Err(anyhow::anyhow!(
+                "compiler-cache heartbeat failed: {heartbeat:#}; lease abandonment failed: {abandon:#}"
+            )),
+        }
+    }
+
+    fn publish(mut self, result: velnor_cache_service::CompilerResult) -> Result<()> {
+        let heartbeat = self.stop_heartbeat();
+        let Some(lease) = self.lease.take() else {
+            return heartbeat.and(Ok(()));
+        };
+        if let Err(error) = heartbeat {
+            if let Err(cleanup_error) = self.service.abandon_sync(&lease) {
+                eprintln!(
+                    "forensics.lifecycle: compiler cache heartbeat cleanup failed: {cleanup_error}"
+                );
+            }
+            return Err(error);
+        }
+        let outcome = self.service.publish_sync(lease, result);
+        outcome.map_err(anyhow::Error::from)
+    }
+}
+
+impl Drop for CompilerCacheLease {
+    fn drop(&mut self) {
+        if let Ok(mut stop) = self.heartbeat_control.0.lock() {
+            *stop = true;
+            self.heartbeat_control.1.notify_all();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            let _ = heartbeat.join();
+        }
+        if let Some(lease) = self.lease.take() {
+            if let Err(error) = self.service.abandon_sync(&lease) {
+                eprintln!("forensics.lifecycle: compiler cache lease abandon failed: {error}");
+            }
+        }
+    }
 }
 
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
@@ -1211,6 +1735,7 @@ pub(crate) struct DockerJobEngine<R> {
     job_environment_started: bool,
     docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
+    compiler_cache: Option<Arc<velnor_cache_service::ProductionCompilerCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1240,6 +1765,7 @@ where
             job_environment_started: false,
             docker_lease: None,
             lifecycle_telemetry: None,
+            compiler_cache: None,
         }
     }
 
@@ -1294,6 +1820,14 @@ where
         admission: crate::ops::JobAdmission,
     ) -> Self {
         self.lifecycle_telemetry = Some(LifecycleTelemetry { sink, admission });
+        self
+    }
+
+    pub(crate) fn with_compiler_cache(
+        mut self,
+        service: Arc<velnor_cache_service::ProductionCompilerCache>,
+    ) -> Self {
+        self.compiler_cache = Some(service);
         self
     }
 
@@ -1850,13 +2384,80 @@ where
                             &live_masks,
                         );
                     };
-                    let compile_started = match (compiler, self.lifecycle_telemetry.as_ref()) {
-                        (Some(compiler), Some(telemetry)) => {
-                            telemetry.emit_compile_start(compiler);
-                            Some(Instant::now())
+                    let step_timeout =
+                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
+                    let cacheable_compiler = cacheable_compile_command_kind(&step.script);
+                    let compiler_output_root = cacheable_compiler.and_then(|compiler| {
+                        compiler_cache_output_root(container, &plan, compiler, &env)
+                    });
+                    let mut compiler_cache_lease = None;
+                    // A mutable tag cannot identify the compiler toolchain.
+                    // Keep the normal Docker execution path for it; only an
+                    // immutable image can enter the durable result cache.
+                    let immutable_image =
+                        immutable_container_image_digest(container.image.trim()).is_ok();
+                    if immutable_image {
+                        if let (Some(compiler), Some(output_root), Some(service)) = (
+                            cacheable_compiler,
+                            compiler_output_root,
+                            self.compiler_cache.as_ref(),
+                        ) {
+                            match compiler_cache_action_key(
+                                container,
+                                &plan,
+                                compiler,
+                                &env,
+                                &self.trust_scope,
+                                step_timeout,
+                            ) {
+                                Ok(key) => match service.lookup_sync(&key) {
+                                    Ok(Some(hit)) => {
+                                        if let Err(error) = service
+                                            .materialize_output_tree(&hit.output_root, &output_root)
+                                        {
+                                            eprintln!(
+                                                "forensics.lifecycle: compiler-cache hit rejected; running compiler: {error}"
+                                            );
+                                        }
+                                        // Restoring a warm target tree is only a
+                                        // seed. Cargo still runs so build scripts
+                                        // and proc macros retain normal effects.
+                                    }
+                                    Ok(None) => match CompilerCacheLease::begin(
+                                        Arc::clone(service),
+                                        &key,
+                                    ) {
+                                        Ok(lease) => {
+                                            compiler_cache_lease = Some((lease, output_root, key));
+                                        }
+                                        Err(error) => eprintln!(
+                                            "forensics.lifecycle: compiler-cache lease admission refused; running compiler: {error:#}"
+                                        ),
+                                    },
+                                    Err(error) => eprintln!(
+                                        "forensics.lifecycle: compiler-cache lookup refused; running compiler: {error}"
+                                    ),
+                                },
+                                Err(error) => eprintln!(
+                                    "forensics.lifecycle: compiler-cache key admission refused; running compiler: {error:#}"
+                                ),
+                            }
                         }
-                        _ => None,
-                    };
+                    }
+                    let compile_started_at_ms = compiler.map(|_| {
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX)
+                    });
+                    let compile_started = compiler.map(|compiler| {
+                        if let Some(telemetry) = self.lifecycle_telemetry.as_ref() {
+                            telemetry.emit_compile_start(compiler);
+                        }
+                        Instant::now()
+                    });
                     let link_started = match (linker, self.lifecycle_telemetry.as_ref()) {
                         (Some(_), Some(_)) => Some(Instant::now()),
                         _ => None,
@@ -1865,9 +2466,56 @@ where
                         "docker",
                         exec_args.args(),
                         exec_args.process_env(),
-                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
+                        step_timeout,
                         &mut on_output,
                     )?;
+                    if let Some((lease, output_root, key)) = compiler_cache_lease.take() {
+                        let cache_result = if step_result.code == 0 {
+                            match lease.service.store_output_tree(&output_root) {
+                                Ok(output_root) => lease.publish(velnor_cache_service::CompilerResult {
+                                    action_key: key.clone(),
+                                    output_root,
+                                    stdout_digest: ActionDigest::from_bytes(
+                                        step_result.stdout.as_bytes(),
+                                    ),
+                                    stderr_digest: ActionDigest::from_bytes(
+                                        step_result.stderr.as_bytes(),
+                                    ),
+                                    exit_code: step_result.code,
+                                    provenance: Provenance {
+                                        builder: container.daemon_id.clone(),
+                                        source_digest: key.input_root.clone(),
+                                        metadata: BTreeMap::from([(
+                                            "compiler".to_string(),
+                                            compiler.unwrap_or("unknown").to_string(),
+                                        )]),
+                                    },
+                                    timing: ActionTiming {
+                                        started_at_ms: compile_started_at_ms.unwrap_or_default(),
+                                        duration_ms: u64::try_from(
+                                            compile_started
+                                                .map(|started| started.elapsed().as_millis())
+                                                .unwrap_or_default(),
+                                        )
+                                        .unwrap_or(u64::MAX),
+                                        cpu_ms: None,
+                                    },
+                                }),
+                                Err(error) => lease.abandon().map_err(|abandon| {
+                                    anyhow::anyhow!(
+                                        "store compiler output failed: {error:#}; abandon failed: {abandon:#}"
+                                    )
+                                }),
+                            }
+                        } else {
+                            lease.abandon()
+                        };
+                        if let Err(error) = cache_result {
+                            eprintln!(
+                                "forensics.lifecycle: compiler-cache publication failed; preserving compiler result: {error:#}"
+                            );
+                        }
+                    }
                     if let (Some(compiler), Some(compile_started), Some(telemetry)) =
                         (compiler, compile_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -12798,6 +13446,18 @@ mod tests {
         }
     }
 
+    struct DelayedRecordingRunner {
+        inner: RecordingRunner,
+        delay: Duration,
+    }
+
+    impl CommandRunner for DelayedRecordingRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            thread::sleep(self.delay);
+            self.inner.run(program, args)
+        }
+    }
+
     #[derive(Default)]
     struct BuildkitCleanupRunner {
         calls: Vec<Vec<String>>,
@@ -14116,6 +14776,259 @@ esac
         assert_eq!(link_command_kind("go build ./..."), Some("go"));
         assert_eq!(link_command_kind("cargo check -p private"), None);
         assert_eq!(link_command_kind("echo cargo build"), None);
+    }
+
+    #[test]
+    fn compiler_cache_admission_requires_one_structured_compile_invocation() {
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build -p private"),
+            Some("cargo")
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("env RUSTFLAGS=-Dwarnings cargo check"),
+            Some("cargo")
+        );
+        assert_eq!(cacheable_compile_command_kind("echo cargo build"), None);
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build && echo done"),
+            None
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build > build.log"),
+            None
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build $(cat flags)"),
+            None
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build `cat flags`"),
+            None
+        );
+        assert_eq!(cacheable_compile_command_kind("cd repo\ncargo build"), None);
+        assert_eq!(
+            cacheable_compile_command_kind("CARGO_TARGET_DIR=out cargo build"),
+            None
+        );
+    }
+
+    #[test]
+    fn compiler_cache_environment_is_canonical_and_excludes_workflow_paths() {
+        assert_eq!(
+            compiler_cache_environment(&[
+                ("RUSTFLAGS".into(), "old".into()),
+                ("GITHUB_OUTPUT".into(), "/tmp/output".into()),
+                ("RUSTFLAGS".into(), "new".into()),
+                ("CARGO_HOME".into(), "/cargo".into()),
+            ]),
+            vec![
+                ("CARGO_HOME".into(), "/cargo".into()),
+                ("RUSTFLAGS".into(), "new".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_compile_boundary_publishes_only_after_output_digest() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.image =
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        let target = job.workspace_host.join("repo/target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(
+            job.workspace_host.join("repo/Cargo.toml"),
+            "[package]\nname='demo'\n",
+        )
+        .unwrap();
+        fs::write(target.join("debug/demo"), b"compiled").unwrap();
+
+        let mut config = velnor_cache_service::CompilerCacheConfig::new(
+            temp.join("compiler-cache"),
+            "test-worker",
+        );
+        config.policy = velnor_cache_service::CompilerCachePolicy::Sccache;
+        config.trust_class = TrustClass::Trusted;
+        config.lease_duration_ms = 500;
+        config.heartbeat_every_ms = 100;
+        let service = Arc::new(
+            velnor_cache_service::CompilerCacheService::open_production(
+                config,
+                velnor_cache_service::WrapperDeclaration::default(),
+            )
+            .unwrap(),
+        );
+        let mut executor = DockerJobEngine::new(DelayedRecordingRunner {
+            inner: RecordingRunner::default(),
+            delay: Duration::from_millis(250),
+        })
+        .with_trust_scope("trusted")
+        .with_compiler_cache(Arc::clone(&service));
+        let step = ScriptStep {
+            id: "compile".into(),
+            display_name: "Compile".into(),
+            script: "cargo build".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let result = executor.execute_step(&job, &step, &temp).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let metadata =
+            rusqlite::Connection::open(service.storage_root().join("metadata.sqlite")).unwrap();
+        let entries: i64 = metadata
+            .query_row("SELECT COUNT(*) FROM compiler_cache_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(entries, 1);
+        let journal =
+            rusqlite::Connection::open(service.storage_root().join("journal.sqlite")).unwrap();
+        let released: i64 = journal
+            .query_row(
+                "SELECT COUNT(*) FROM producer_leases WHERE state = 'released'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(released, 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cargo_compile_boundary_restores_verified_hit_before_running_command() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.image =
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        let target = job.workspace_host.join("repo/target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(
+            job.workspace_host.join("repo/Cargo.toml"),
+            "[package]\nname='demo'\n",
+        )
+        .unwrap();
+        fs::write(target.join("debug/demo"), b"compiled").unwrap();
+
+        let mut config = velnor_cache_service::CompilerCacheConfig::new(
+            temp.join("compiler-cache"),
+            "test-worker",
+        );
+        config.policy = velnor_cache_service::CompilerCachePolicy::Sccache;
+        config.trust_class = TrustClass::Trusted;
+        let service = Arc::new(
+            velnor_cache_service::CompilerCacheService::open_production(
+                config,
+                velnor_cache_service::WrapperDeclaration::default(),
+            )
+            .unwrap(),
+        );
+        let step = ScriptStep {
+            id: "compile".into(),
+            display_name: "Compile".into(),
+            script: "cargo build".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let first = DockerJobEngine::new(RecordingRunner::default())
+            .with_trust_scope("trusted")
+            .with_compiler_cache(Arc::clone(&service))
+            .execute_step(&job, &step, &temp)
+            .unwrap();
+        assert_eq!(first.exit_code, 0);
+        fs::remove_dir_all(&target).unwrap();
+
+        let mut second = DockerJobEngine::new(RecordingRunner {
+            codes: vec![0, 0, 0],
+            ..RecordingRunner::default()
+        })
+        .with_trust_scope("trusted")
+        .with_compiler_cache(Arc::clone(&service));
+        let second_result = second.execute_step(&job, &step, &temp).unwrap();
+
+        assert_eq!(second_result.exit_code, 0);
+        assert!(second
+            .runner()
+            .calls
+            .iter()
+            .any(|(program, args)| program == "docker"
+                && args.first().is_some_and(|arg| arg == "exec")));
+        assert_eq!(fs::read(target.join("debug/demo")).unwrap(), b"compiled");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cargo_compile_failure_abandons_cache_lease_without_publication() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.image =
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        let target = job.workspace_host.join("repo/target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("debug/demo"), b"partial").unwrap();
+
+        let mut config = velnor_cache_service::CompilerCacheConfig::new(
+            temp.join("compiler-cache"),
+            "test-worker",
+        );
+        config.policy = velnor_cache_service::CompilerCachePolicy::Sccache;
+        config.trust_class = TrustClass::Trusted;
+        let service = Arc::new(
+            velnor_cache_service::CompilerCacheService::open_production(
+                config,
+                velnor_cache_service::WrapperDeclaration::default(),
+            )
+            .unwrap(),
+        );
+        let mut executor = DockerJobEngine::new(RecordingRunner {
+            codes: vec![0, 0, 17],
+            ..RecordingRunner::default()
+        })
+        .with_trust_scope("trusted")
+        .with_compiler_cache(Arc::clone(&service));
+        let step = ScriptStep {
+            id: "compile".into(),
+            display_name: "Compile".into(),
+            script: "cargo build".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let result = executor.execute_step(&job, &step, &temp).unwrap();
+
+        assert_eq!(result.exit_code, 17);
+        let metadata =
+            rusqlite::Connection::open(service.storage_root().join("metadata.sqlite")).unwrap();
+        let entries: i64 = metadata
+            .query_row("SELECT COUNT(*) FROM compiler_cache_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(entries, 0);
+        let journal =
+            rusqlite::Connection::open(service.storage_root().join("journal.sqlite")).unwrap();
+        let abandoned: i64 = journal
+            .query_row(
+                "SELECT COUNT(*) FROM producer_leases WHERE state = 'abandoned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(abandoned, 1);
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

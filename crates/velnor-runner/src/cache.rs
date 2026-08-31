@@ -427,7 +427,13 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         },
         StoreRoot {
             kind: CacheStore::Sccache,
-            path: crate::container::sccache_host(work_root),
+            path: crate::container::compiler_cache_host(
+                work_root,
+                velnor_cache_service::CompilerCacheBackend::Sccache,
+                crate::container::normalize_compiler_cache_trust_scope(
+                    &crate::github_adapter::cargo_target_trust_scope(),
+                ),
+            ),
             scope_prefix: Vec::new(),
             scope_depth: 1,
             candidate_depth: 1,
