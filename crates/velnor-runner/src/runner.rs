@@ -13,8 +13,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
-        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -24,7 +24,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tracing::Instrument as _;
-use velnor_model::{Generation, SlotId, SlotPhase, Slug, TelemetryEvent, Timestamp};
+use velnor_model::{Generation, SlotId, SlotPhase, TelemetryEvent, Timestamp};
 
 use crate::{
     action::{
@@ -112,11 +112,6 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
-/// Keep blocking Contents-API admission off Tokio workers and bound the total
-/// time an acquired job can wait in the read-only gate.
-const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
-const ACTION_ADMISSION_BLOCKING_PERMITS: usize = 1;
-static ACTION_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// SQLite admission is a single-writer boundary. Keep the Tokio blocking
 /// queue bounded by acquiring the only admission permit before spawning work.
 const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
@@ -133,13 +128,6 @@ fn operational_admission_permits() -> Arc<Semaphore> {
     Arc::clone(
         OPERATIONAL_ADMISSION_PERMITS
             .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
-    )
-}
-
-fn action_admission_permits() -> Arc<Semaphore> {
-    Arc::clone(
-        ACTION_ADMISSION_PERMITS
-            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_BLOCKING_PERMITS))),
     )
 }
 
@@ -329,56 +317,17 @@ fn persist_in_flight_job(
         fs::remove_file(&temporary).ok();
         return Err(error).context("write temporary in-flight job lease");
     }
-    OpenOptions::new()
-        .read(true)
-        .open(&temporary)
-        .with_context(|| format!("open {} for sync", temporary.display()))?
-        .sync_all()
-        .with_context(|| format!("sync {}", temporary.display()))?;
     if let Err(error) = fs::rename(&temporary, &path) {
         fs::remove_file(&temporary).ok();
         return Err(error).context("publish in-flight job lease");
     }
-    sync_directory(path.parent())?;
-    Ok(())
-}
-
-fn sync_directory(path: Option<&Path>) -> Result<()> {
-    let Some(path) = path else {
-        return Ok(());
-    };
-    #[cfg(unix)]
-    {
-        OpenOptions::new()
-            .read(true)
-            .open(path)
-            .with_context(|| format!("open directory {} for sync", path.display()))?
-            .sync_all()
-            .with_context(|| format!("sync directory {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
 fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
     let path = in_flight_job_path(config_dir);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!(
-                "in-flight job marker must not be a symlink: {}",
-                path.display()
-            )
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            bail!(
-                "in-flight job marker is not a regular file: {}",
-                path.display()
-            )
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    if !path.exists() {
+        return Ok(None);
     }
     let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let record = serde_json::from_slice(&bytes).context("parse in-flight job")?;
@@ -387,25 +336,8 @@ fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
 
 fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
     let path = in_flight_job_path(config_dir);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!(
-                "in-flight job marker must not be a symlink: {}",
-                path.display()
-            )
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            bail!(
-                "in-flight job marker is not a regular file: {}",
-                path.display()
-            )
-        }
-        Ok(_) => {
-            fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
-            sync_directory(path.parent())?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
 }
@@ -509,7 +441,7 @@ fn queued_jobs_to_cancel(
         .collect()
 }
 
-pub(crate) async fn complete_recorded_in_flight_job(
+async fn complete_recorded_in_flight_job(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
 ) -> Result<bool> {
@@ -538,143 +470,6 @@ pub(crate) async fn complete_recorded_in_flight_job(
         "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
     )
     .await?;
-    cleanup_recorded_in_flight_job(slot_dir)?;
-    Ok(true)
-}
-
-/// Replay a durable `Completing` payload byte-for-byte after a worker crash.
-///
-/// The completion intent and outbox are already durable, so this path must not
-/// manufacture a replacement failure payload. The journal acknowledgement is
-/// committed only after the exact payload is accepted remotely.
-pub(crate) async fn replay_recorded_completion(
-    slot_dir: &Path,
-    stored: &StoredRunnerConfig,
-    journal_dir: &Path,
-) -> Result<bool> {
-    let Some(record) = load_in_flight_job(slot_dir)? else {
-        return Ok(false);
-    };
-    let (generation, payload_sha256) = {
-        let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
-            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
-        let state = journal
-            .materialized_state()
-            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
-        let job = state
-            .jobs
-            .iter()
-            .find(|job| job.job_id.0 == record.job_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "recorded completing job {} is absent from the materialized journal",
-                    record.job_id
-                )
-            })?;
-        if job.phase != velnor_model::ActorPhase::Completing {
-            bail!(
-                "recorded completion job {} is in journal phase {:?}",
-                record.job_id,
-                job.phase
-            );
-        }
-        let row = state
-            .outbox
-            .iter()
-            .find(|row| {
-                row.job_id.0 == record.job_id
-                    && row.generation == job.generation
-                    && row.intended
-                    && !row.remote_acked
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "recorded completing job {} has no pending durable outbox row",
-                    record.job_id
-                )
-            })?;
-        (job.generation, row.payload_sha256.clone())
-    };
-    let payload =
-        load_recorded_completion_payload(journal_dir, &record, generation, &payload_sha256)?;
-    let token = oauth_access_token(stored).await?;
-    let client = RunServiceClient::new(token.token)?;
-    client
-        .complete_job_payload(&record.run_service_url, payload)
-        .await
-        .context("replay exact recorded completion payload")?;
-
-    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
-        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
-    let acknowledged = journal.apply(velnor_control::journal::Event::RemoteAcked {
-        job_id: velnor_model::JobId(record.job_id.clone()),
-        generation,
-    })?;
-    if acknowledged.rejected {
-        bail!(
-            "remote acknowledgement rejected for recorded job {}",
-            record.job_id
-        );
-    }
-    crate::node::cleanup::remove_outbox(journal_dir, &record.job_id, generation.0)
-        .context("remove acknowledged recorded completion outbox")?;
-    cleanup_recorded_in_flight_job(slot_dir)?;
-    Ok(true)
-}
-
-fn load_recorded_completion_payload(
-    journal_dir: &Path,
-    record: &InFlightJobRecord,
-    generation: Generation,
-    expected_sha256: &str,
-) -> Result<Vec<u8>> {
-    let payload = crate::node::cleanup::read_outbox(journal_dir, &record.job_id, generation.0)?;
-    let actual_sha256 = velnor_control::journal::payload_checksum(&payload);
-    if actual_sha256 != expected_sha256 {
-        bail!(
-            "completion outbox checksum mismatch for job {}",
-            record.job_id
-        );
-    }
-    let value: Value = serde_json::from_slice(&payload).context("parse recorded completion")?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("recorded completion payload must be a JSON object"))?;
-    let plan_id = object
-        .get("planId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("recorded completion payload has no planId"))?;
-    if plan_id != record.plan_id {
-        bail!(
-            "recorded completion plan {} does not match marker plan {}",
-            plan_id,
-            record.plan_id
-        );
-    }
-    let job_id = object
-        .get("jobId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("recorded completion payload has no jobId"))?;
-    if job_id != record.job_id {
-        bail!(
-            "recorded completion payload job {} does not match marker job {}",
-            job_id,
-            record.job_id
-        );
-    }
-    Ok(payload)
-}
-
-/// Finish local cleanup after a prior terminal remote acknowledgement.
-///
-/// The journal removes the job at `RemoteAcked`, before this local cleanup can
-/// run. A crash or storage error in that gap must remain retryable from the
-/// durable marker; callers must invoke this only after the journal proves the
-/// remote terminal transition.
-pub(crate) fn cleanup_recorded_in_flight_job(slot_dir: &Path) -> Result<bool> {
-    let Some(record) = load_in_flight_job(slot_dir)? else {
-        return Ok(false);
-    };
     let sink = crate::ops::global().ok_or_else(|| {
         anyhow::anyhow!(
             "operational store sink unavailable while releasing stale reservation for job {}",
@@ -685,14 +480,6 @@ pub(crate) fn cleanup_recorded_in_flight_job(slot_dir: &Path) -> Result<bool> {
         .context("release stale in-flight job storage reservation")?;
     clear_in_flight_job(slot_dir)?;
     Ok(true)
-}
-
-pub(crate) fn recorded_in_flight_job_exists(slot_dir: &Path) -> Result<bool> {
-    Ok(load_in_flight_job(slot_dir)?.is_some())
-}
-
-pub(crate) fn recorded_in_flight_job_id(slot_dir: &Path) -> Result<Option<String>> {
-    Ok(load_in_flight_job(slot_dir)?.map(|record| record.job_id))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -819,10 +606,17 @@ fn emit_plan_summary_telemetry(
 /// Instance slug naming this daemon in the shared operational store:
 /// hostname when resolvable, sanitized to the store's slug charset.
 fn instance_slug_for_store() -> String {
-    #[cfg(unix)]
-    let host = String::from_utf8_lossy(rustix::system::uname().nodename().to_bytes()).into_owned();
-    #[cfg(not(unix))]
-    let host = String::new();
+    let mut buffer = [0u8; 256];
+    let host = unsafe {
+        // POSIX gethostname: writes at most `buffer.len()` bytes, always
+        // NUL-terminated on glibc/musl/Darwin for this buffer size.
+        if libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len()) == 0 {
+            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
+            String::from_utf8_lossy(&buffer[..end]).into_owned()
+        } else {
+            String::new()
+        }
+    };
     crate::ops::sanitize_slug_for_instance(&host)
 }
 
@@ -963,10 +757,10 @@ fn due_idle_health_actions(
     now: Instant,
     max_idle_age: Option<Duration>,
 ) -> Vec<IdleHealthAction> {
-    if let Some(max_age) = max_idle_age
-        && now.duration_since(health.session_started) >= max_age
-    {
-        return vec![IdleHealthAction::RecycleMaxIdleAge];
+    if let Some(max_age) = max_idle_age {
+        if now.duration_since(health.session_started) >= max_age {
+            return vec![IdleHealthAction::RecycleMaxIdleAge];
+        }
     }
     let mut actions = Vec::new();
     if now.duration_since(health.token_acquired) >= token_refresh_deadline(health.token_expires_in)
@@ -1998,12 +1792,11 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // and `systemctl restart` (or a server-side token re-enable) recovers it
     // without a systemd restart storm in the meantime.
     let token_problem = diagnose_github_token(args.pat.as_deref());
-    if let Some(problem) = &token_problem
-        && args.url.is_some()
-        && !args.dry_run_registration
-    {
-        eprintln!("GITHUB_TOKEN problem: {problem}");
-        crate::sd_notify::status(&format!("token problem: {problem}"));
+    if let Some(problem) = &token_problem {
+        if args.url.is_some() && !args.dry_run_registration {
+            eprintln!("GITHUB_TOKEN problem: {problem}");
+            crate::sd_notify::status(&format!("token problem: {problem}"));
+        }
     }
 
     // One-shot modes (dry runs, --once, no-URL local mode) keep their
@@ -2012,8 +1805,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // must never give up — every failure is retried with backoff forever.
     let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
 
-    if supervised && let Ok(config_base) = daemon_config_dir(&args) {
-        start_drain_listener(config_base);
+    if supervised {
+        if let Ok(config_base) = daemon_config_dir(&args) {
+            start_drain_listener(config_base);
+        }
     }
 
     // P1: host the GitHub cache contract when the operator enables it. The
@@ -2184,10 +1979,10 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         resolved_args.once,
     )
     .await;
-    if let Some(sink) = crate::ops::global()
-        && sink.degraded()
-    {
-        daemon_forensic_log(&config_base, "ops-store=degraded after slot supervision");
+    if let Some(sink) = crate::ops::global() {
+        if sink.degraded() {
+            daemon_forensic_log(&config_base, "ops-store=degraded after slot supervision");
+        }
     }
     if draining() {
         emit_drain_completed_once();
@@ -2237,9 +2032,7 @@ async fn retention_lifecycle_with_sink(
         return;
     }
     let Some(sink) = injected_sink.or_else(|| crate::ops::global().cloned()) else {
-        eprintln!(
-            "forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness"
-        );
+        eprintln!("forensics.ops event=retention-worker-failed reason=operational store unavailable after readiness");
         return;
     };
     loop {
@@ -2353,50 +2146,40 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
         roots.push(work_dir);
     }
     let probe = work_dir.unwrap_or(config_base);
-    if let Some(percent) = crate::leftover_disk::disk_usage_percent(probe)
-        && percent >= crate::leftover_disk::HARD_PRESSURE_PERCENT
-    {
-        // H0.4: never park for disk without first reclaiming leftover
-        // job UUID trees and dangling untagged images.
-        let backend = crate::execution::load_execution_file(config_base, None)
-            .ok()
-            .map(|file| file.backend());
-        if let Err(error) =
-            crate::leftover_disk::reclaim_production_if_hard_pressure_for(backend, percent)
-        {
-            eprintln!(
-                "leftover-after-Velnor reclaim failed: {}",
-                sanitized_retry_error(&error)
-            );
+    if let Some(percent) = crate::leftover_disk::disk_usage_percent(probe) {
+        if percent >= crate::leftover_disk::HARD_PRESSURE_PERCENT {
+            // H0.4: never park for disk without first reclaiming leftover
+            // job UUID trees and dangling untagged images.
+            let backend = crate::execution::load_execution_file(config_base, None)
+                .ok()
+                .map(|file| file.backend());
+            if let Err(error) =
+                crate::leftover_disk::reclaim_production_if_hard_pressure_for(backend, percent)
+            {
+                eprintln!(
+                    "leftover-after-Velnor reclaim failed: {}",
+                    sanitized_retry_error(&error)
+                );
+            }
         }
     }
     for root in roots {
-        if let Some(free) = free_space_bytes(root)
-            && free < DISK_MIN_FREE_BYTES
-        {
-            let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
-            let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
-            if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
-                eprintln!(
-                    "disk-pressure cache reclaim freed {} bytes across {} entries ({} failures)",
-                    cache_report.freed_bytes,
-                    cache_report.deleted.len(),
-                    cache_report.failures.len()
-                );
-            }
-            let backend = crate::execution::load_execution_file(config_base, None)
-                .ok()
-                .map(|file| file.backend())
-                .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
-            let _ = crate::leftover_disk::reclaim_production_leftovers_for(backend, false);
-            let free = free_space_bytes(root).unwrap_or(free);
+        if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
-                return Some(format!(
-                    "low disk space at {} ({} MiB free, need {} MiB)",
-                    root.display(),
-                    free / (1024 * 1024),
-                    DISK_MIN_FREE_BYTES / (1024 * 1024)
-                ));
+                let backend = crate::execution::load_execution_file(config_base, None)
+                    .ok()
+                    .map(|file| file.backend())
+                    .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
+                let _ = crate::leftover_disk::reclaim_production_leftovers_for(backend, false);
+                let free = free_space_bytes(root).unwrap_or(free);
+                if free < DISK_MIN_FREE_BYTES {
+                    return Some(format!(
+                        "low disk space at {} ({} MiB free, need {} MiB)",
+                        root.display(),
+                        free / (1024 * 1024),
+                        DISK_MIN_FREE_BYTES / (1024 * 1024)
+                    ));
+                }
             }
         }
     }
@@ -2465,18 +2248,12 @@ pub(crate) async fn run_daemon_slot(
     slot_id: SlotId,
     generation: Generation,
 ) -> Result<()> {
+    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation)?;
     let storage_mode = daemon_storage_mode(&args);
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         return run_with_jit_prewarmer(slot_args, None, storage_mode).await;
     }
-
-    let slot_config_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
-    // Let the normal job-runner preflight classify missing, corrupt, or
-    // incomplete runner.json as LocalRunnerIdentityUnavailable. That error is
-    // handled below by the existing JIT reconfiguration loop. Loading the
-    // config here would bypass that recovery path before the loop exists.
-    let durable_slot = DurableSlotLifecycle::new(slot_id, slot_index, generation, slot_config_dir)?;
 
     // The controller launches this loop in a separate job-worker process. A
     // signal listener in the controller alone cannot cancel that process's
@@ -2541,42 +2318,15 @@ pub(crate) async fn run_daemon_slot(
             (Some(trigger), Some(prewarm_waiter))
         };
         let run_result = run_with_jit_prewarmer(slot_args, prewarm_trigger, storage_mode).await;
-        if let Some(prewarm_waiter) = prewarm_waiter
-            && let Err(join_error) = prewarm_waiter.await
-        {
-            eprintln!(
-                "daemon slot-{slot_index} successor JIT prewarm task failed: {}",
-                sanitized_retry_error(&join_error)
-            );
+        if let Some(prewarm_waiter) = prewarm_waiter {
+            if let Err(join_error) = prewarm_waiter.await {
+                eprintln!(
+                    "daemon slot-{slot_index} successor JIT prewarm task failed: {}",
+                    sanitized_retry_error(&join_error)
+                );
+            }
         }
         if let Err(error) = run_result {
-            let error_detail = sanitized_retry_error(&error);
-            if error
-                .downcast_ref::<LocalRunnerIdentityUnavailable>()
-                .is_some()
-            {
-                local_failure_streak = 0;
-                eprintln!(
-                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error_detail}"
-                );
-                daemon_forensic_log(
-                    &config_base,
-                    &format!(
-                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error_detail}"
-                    ),
-                );
-                reconfigure_daemon_slot_forever(
-                    &args,
-                    &config_base,
-                    slot_index,
-                    slots,
-                    cycle,
-                    &durable_slot,
-                )
-                .await;
-                cycle += 1;
-                continue;
-            }
             if args.once {
                 cleanup_failed_daemon_slot(
                     &args,
@@ -2589,6 +2339,7 @@ pub(crate) async fn run_daemon_slot(
                 .await;
                 return Err(error);
             }
+            let error_detail = sanitized_retry_error(&error);
             if registration_was_deleted(&error) {
                 local_failure_streak = 0;
                 cleanup_failed_daemon_slot(
@@ -2622,6 +2373,32 @@ pub(crate) async fn run_daemon_slot(
                 if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
                     continue;
                 }
+                continue;
+            }
+            if error
+                .downcast_ref::<LocalRunnerIdentityUnavailable>()
+                .is_some()
+            {
+                local_failure_streak = 0;
+                eprintln!(
+                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error_detail}"
+                );
+                daemon_forensic_log(
+                    &config_base,
+                    &format!(
+                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error_detail}"
+                    ),
+                );
+                reconfigure_daemon_slot_forever(
+                    &args,
+                    &config_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                    &durable_slot,
+                )
+                .await;
+                cycle += 1;
                 continue;
             }
             if error.downcast_ref::<LocalRunnerFailure>().is_some() {
@@ -2660,9 +2437,7 @@ pub(crate) async fn run_daemon_slot(
             );
             daemon_forensic_log(
                 &config_base,
-                &format!(
-                    "slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"
-                ),
+                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error_detail}"),
             );
             reconfigure_daemon_slot_forever(
                 &args,
@@ -2733,25 +2508,10 @@ struct DurableSlotLifecycle {
     slot_id: SlotId,
     slot_index: u32,
     generation: Generation,
-    config_dir: PathBuf,
-    agent_id: Arc<AtomicI64>,
-    agent_id_available: Arc<AtomicBool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunnerIdentityState {
-    Available(i64),
-    Configless,
-    Unavailable,
 }
 
 impl DurableSlotLifecycle {
-    fn new(
-        slot_id: SlotId,
-        one_based_index: usize,
-        generation: Generation,
-        config_dir: PathBuf,
-    ) -> Result<Self> {
+    fn new(slot_id: SlotId, one_based_index: usize, generation: Generation) -> Result<Self> {
         let zero_based_index = one_based_index.checked_sub(1).ok_or_else(|| {
             anyhow::anyhow!("durable slot index must be one-based at the runner boundary")
         })?;
@@ -2761,101 +2521,16 @@ impl DurableSlotLifecycle {
             slot_id,
             slot_index,
             generation,
-            config_dir,
-            agent_id: Arc::new(AtomicI64::new(0)),
-            agent_id_available: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    /// Refresh the registration identity used for durable transition keys.
-    ///
-    /// A missing runner.json is the expected configless gap while a consumed
-    /// JIT registration is being torn down. Preserve the prior identity only
-    /// for that gap. Existing-but-invalid JSON and valid config without an
-    /// agent id clear the identity and fail closed.
-    fn refresh_agent_id(&self) -> RunnerIdentityState {
-        let config_path = self.config_dir.join("runner.json");
-        // Teardown temporarily removes runner.json. Keep the prior identity
-        // for that boundary, then adopt the replacement as soon as configure
-        // or promotion makes the live config available again.
-        match config::load(&self.config_dir) {
-            Ok(stored) => {
-                if let Some(agent_id) = stored.settings.agent_id {
-                    self.agent_id.store(agent_id, Ordering::Release);
-                    self.agent_id_available.store(true, Ordering::Release);
-                    RunnerIdentityState::Available(agent_id)
-                } else {
-                    self.agent_id_available.store(false, Ordering::Release);
-                    RunnerIdentityState::Unavailable
-                }
-            }
-            Err(_) => {
-                let configless = fs::symlink_metadata(&config_path)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-                if configless {
-                    if self.agent_id_available.load(Ordering::Acquire) {
-                        RunnerIdentityState::Available(self.agent_id.load(Ordering::Acquire))
-                    } else {
-                        RunnerIdentityState::Configless
-                    }
-                } else {
-                    self.agent_id_available.store(false, Ordering::Release);
-                    RunnerIdentityState::Unavailable
-                }
-            }
-        }
-    }
-
-    fn request_key(&self, target: SlotPhase) -> Option<String> {
-        self.request_key_with_sink(crate::ops::global().map(AsRef::as_ref), target)
-    }
-
-    fn request_key_with_sink(
-        &self,
-        sink: Option<&crate::ops::OpsSink>,
-        target: SlotPhase,
-    ) -> Option<String> {
-        match self.refresh_agent_id() {
-            RunnerIdentityState::Available(agent_id) => Some(format!(
-                "jit-agent-{agent_id}-generation-{}-{}",
-                self.generation.0,
-                target.as_str()
-            )),
-            RunnerIdentityState::Configless => {
-                let sink = sink?;
-                let intent = match sink.latest_slot_transition_request_key(
-                    &self.slot_id,
-                    self.slot_index,
-                    self.generation,
-                ) {
-                    Ok(Some(intent)) => intent,
-                    Ok(None) => return None,
-                    Err(error) => {
-                        sink.record_slot_transition_lookup_failure(&error);
-                        eprintln!(
-                            "forensics.ops event=slot-transition-rejected reason=store-request-ledger-unavailable slot={} generation={} phase={}",
-                            self.slot_id.0,
-                            self.generation.0,
-                            target.as_str()
-                        );
-                        return None;
-                    }
-                };
-                if intent.target == target {
-                    return Some(intent.request_key);
-                }
-                recover_following_request_key(&intent.request_key, intent.target, target)
-            }
-            RunnerIdentityState::Unavailable => None,
-        }
-    }
-
-    fn transition(&self, target: SlotPhase, message: impl Into<String>) -> bool {
-        let Some(request_key) = self.request_key(target) else {
+    fn transition(&self, cycle: u64, target: SlotPhase, message: impl Into<String>) -> bool {
+        let Some(sequence) = daemon_slot_transition_sequence(cycle, target) else {
             eprintln!(
-                "forensics.ops event=slot-transition-rejected reason=runner-identity-unavailable slot={} generation={} phase={}",
+                "forensics.ops event=slot-transition-rejected reason=invalid-boundary-sequence slot={} generation={} cycle={} phase={}",
                 self.slot_id.0,
                 self.generation.0,
+                cycle,
                 target.as_str()
             );
             return false;
@@ -2865,7 +2540,7 @@ impl DurableSlotLifecycle {
                 &self.slot_id,
                 self.slot_index,
                 self.generation,
-                &request_key,
+                sequence,
                 target,
                 Some(message.into()),
             )
@@ -2873,21 +2548,14 @@ impl DurableSlotLifecycle {
     }
 }
 
-fn recover_following_request_key(
-    previous_key: &str,
-    previous_target: SlotPhase,
-    target: SlotPhase,
-) -> Option<String> {
-    let expected_target = match (previous_target, target) {
-        (SlotPhase::Teardown, SlotPhase::Recycling) | (SlotPhase::Recycling, SlotPhase::Idle) => {
-            target
-        }
+fn daemon_slot_transition_sequence(cycle: u64, target: SlotPhase) -> Option<u64> {
+    let offset = match target {
+        SlotPhase::Teardown => 1,
+        SlotPhase::Recycling => 2,
+        SlotPhase::Idle => 3,
         _ => return None,
     };
-    let suffix = format!("-{}", previous_target.as_str());
-    let prefix = previous_key.strip_suffix(&suffix)?;
-    let key = format!("{prefix}-{}", expected_target.as_str());
-    Slug::validate("request_key", &key).ok().map(|_| key)
+    cycle.checked_sub(1)?.checked_mul(3)?.checked_add(offset)
 }
 
 /// Re-create this slot's JIT config, retrying forever with capped backoff.
@@ -2903,6 +2571,7 @@ async fn reconfigure_daemon_slot_forever(
     durable_slot: &DurableSlotLifecycle,
 ) {
     let _ = durable_slot.transition(
+        cycle,
         SlotPhase::Recycling,
         format!("reconfiguring JIT identity after cycle {cycle}"),
     );
@@ -2912,6 +2581,7 @@ async fn reconfigure_daemon_slot_forever(
         match retry_daemon_slot_jit_config(args, config_base, slot_index, slots, cycle).await {
             Ok(()) => {
                 let _ = durable_slot.transition(
+                    cycle,
                     SlotPhase::Idle,
                     format!("JIT identity ready after cycle {cycle}"),
                 );
@@ -3015,6 +2685,7 @@ async fn recycle_daemon_slot(
     durable_slot: &DurableSlotLifecycle,
 ) -> Result<()> {
     let _ = durable_slot.transition(
+        cycle,
         SlotPhase::Teardown,
         format!("tearing down consumed JIT identity after cycle {cycle}"),
     );
@@ -3040,6 +2711,7 @@ async fn recycle_daemon_slot(
             .with_context(|| format!("promote successor JIT config for daemon slot-{slot_index}"))?
     };
     let _ = durable_slot.transition(
+        cycle,
         SlotPhase::Recycling,
         format!("recycling JIT identity after cycle {cycle}"),
     );
@@ -3049,6 +2721,7 @@ async fn recycle_daemon_slot(
             daemon_slot_name(slot_index)
         );
         let _ = durable_slot.transition(
+            cycle,
             SlotPhase::Idle,
             format!("promoted prewarmed JIT identity after cycle {cycle}"),
         );
@@ -3067,6 +2740,7 @@ async fn recycle_daemon_slot(
         unix_now_iso8601()
     );
     let _ = durable_slot.transition(
+        cycle,
         SlotPhase::Idle,
         format!("recycled JIT identity after cycle {cycle}"),
     );
@@ -3122,6 +2796,7 @@ async fn cleanup_failed_daemon_slot(
     durable_slot: &DurableSlotLifecycle,
 ) {
     let _ = durable_slot.transition(
+        cycle,
         SlotPhase::Teardown,
         format!("cleaning failed JIT identity after cycle {cycle}"),
     );
@@ -3147,13 +2822,14 @@ async fn cleanup_failed_daemon_slot(
         cycle,
         slot_cleanup.is_ok(),
         successor_cleanup.is_ok(),
-    ) && let Some(sink) = crate::ops::global()
-    {
-        sink.emit(
-            velnor_model::EventReason::ReadinessDegraded,
-            &durable_slot.slot_id.0,
-            Some(detail),
-        );
+    ) {
+        if let Some(sink) = crate::ops::global() {
+            sink.emit(
+                velnor_model::EventReason::ReadinessDegraded,
+                &durable_slot.slot_id.0,
+                Some(detail),
+            );
+        }
     }
 }
 
@@ -3471,31 +3147,8 @@ async fn delete_runner_keeping_busy_identity(
     {
         Ok(()) => {
             if let Some(dir) = slot_dir {
-                let has_in_flight_job = load_in_flight_job(dir)
-                    .map_err(local_failure)
-                    .with_context(|| {
-                        format!(
-                            "inspect in-flight job after remote runner deletion of runner id {agent_id}; local identity preserved"
-                        )
-                    })?
-                    .is_some();
-                if has_in_flight_job {
-                    let stored = config::load(dir)
-                        .map_err(local_failure)
-                        .with_context(|| {
-                            format!(
-                                "load runner identity before completing in-flight job for runner id {agent_id}; local identity preserved"
-                            )
-                        })?;
-                    complete_recorded_in_flight_job(dir, &stored)
-                        .await
-                        .map_err(local_failure)
-                        .with_context(|| {
-                            format!(
-                                "complete recorded in-flight job after remote runner deletion of runner id {agent_id}; local identity preserved"
-                            )
-                        })?;
-                }
+                clear_in_flight_job(dir)
+                    .context("clear in-flight job after remote runner deletion")?;
             }
             Ok(())
         }
@@ -3587,21 +3240,21 @@ async fn delete_and_remove_daemon_slot_jit_config_locked(
         reap_pending_jit_registration(slot_dir, &scope, pat).await?;
     }
 
-    if let Some(stored) = stored
-        && let Some(agent_id) = stored.settings.agent_id
-    {
-        let pat = args.pat.as_ref().ok_or_else(|| {
+    if let Some(stored) = stored {
+        if let Some(agent_id) = stored.settings.agent_id {
+            let pat = args.pat.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "cannot delete daemon JIT runner id {agent_id} without a GitHub PAT; local identity preserved"
                 )
             })?;
-        let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(slot_dir))
-            .await
-            .with_context(|| {
-                format!("delete daemon JIT runner id {agent_id}; local identity preserved")
-            })?;
-        println!("Deleted or confirmed absent daemon JIT runner id {agent_id}.");
+            let scope = GitHubScope::parse(&stored.settings.github_url)?;
+            delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(slot_dir))
+                .await
+                .with_context(|| {
+                    format!("delete daemon JIT runner id {agent_id}; local identity preserved")
+                })?;
+            println!("Deleted or confirmed absent daemon JIT runner id {agent_id}.");
+        }
     }
 
     if config::remove(slot_dir)? {
@@ -3809,9 +3462,9 @@ fn maybe_startup_host_docker_reclaim_with(
 /// job network + container leak; enough leaked `velnor-net-*` networks exhaust
 /// Docker's address pool and then EVERY new job fails to create its network
 /// ("all predefined address pools have been fully subnetted"). Pruning on
-/// startup makes a crash self-healing. Best-effort — never fails startup. Use
-/// non-force removal so Docker refuses a container that is still live while
-/// stopped stale containers can be cleaned.
+/// startup makes a crash self-healing. Best-effort — never fails startup. Safe
+/// because a daemon restart already orphans any in-flight job (JIT runners are
+/// per-job), so anything matching here is dead.
 fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     let docker = |args: &[&str]| {
         std::process::Command::new("docker")
@@ -3852,7 +3505,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         })
         .collect::<Vec<_>>();
     if !containers.is_empty() {
-        let mut args = vec!["rm".to_string()];
+        let mut args = vec!["rm".to_string(), "-f".to_string()];
         args.extend(containers.iter().cloned());
         let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
         eprintln!(
@@ -3868,20 +3521,12 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
                 "network",
                 "inspect",
                 "--format",
-                DOCKER_NETWORK_INSPECT_FORMAT,
+                "{{ index .Labels \"velnor.daemon-id\" }}",
                 id,
             ])
             .filter(|output| output.status.success())
             .is_some_and(|output| {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let mut parts = text.trim().split('\t');
-                let owner = parts.next().unwrap_or("");
-                // Unknown endpoint count stays conservative: never removed.
-                let endpoints = parts
-                    .next()
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-                    .unwrap_or(1);
-                stale_network_prunable(owner, endpoints, daemon_id)
+                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
             })
         })
         .collect::<Vec<_>>();
@@ -3898,133 +3543,6 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
     crate::docker_lease::daemon_owns_label(owner, daemon_id)
-}
-
-const DOCKER_NETWORK_INSPECT_FORMAT: &str =
-    r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#;
-
-/// True when a `velnor-net-*` network is safe to remove at startup. Networks
-/// carrying THIS daemon's ownership label are stale by definition (a daemon
-/// restart orphans any in-flight job). Networks with no ownership label at
-/// all predate the guest-plan ownership labels; the `velnor-net-` prefix is
-/// Velnor-owned, so an endpoint-less one is dead weight and is reclaimed as a
-/// backstop. A foreign daemon's labeled network is never touched.
-fn stale_network_prunable(owner: &str, connected_endpoints: usize, daemon_id: &str) -> bool {
-    if daemon_owns_resource(owner, daemon_id) {
-        return true;
-    }
-    owner.is_empty() && connected_endpoints == 0
-}
-
-/// How often an idle slot sweeps for its daemon's orphaned job networks.
-const EMPTY_JOB_NETWORK_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
-/// Bound every Docker CLI invocation of the sweep: a stalled dockerd must
-/// never park an idle slot's broker poll loop indefinitely.
-const EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Remove this daemon's `velnor-net-*` networks that no longer have any
-/// attached container. Reconciliation runs while the daemon serves jobs — not
-/// only at startup like [`prune_stale_velnor_docker_resources`] — because a
-/// daemon that serves jobs for weeks without restarting must not accumulate
-/// leaked networks until Docker's address pool is exhausted and every new job
-/// fails ("all predefined address pools have been fully subnetted"). Startup
-/// pruning self-heals a crash; periodic sweeping self-heals every leak class,
-/// including cleanup failures and resources orphaned by an operator kill.
-///
-/// Removal is safe at any time: a network with active endpoints cannot be
-/// removed (`docker network rm` refuses), so a network backing a live job is
-/// never touched, and the daemon-id label scopes the sweep to THIS daemon so
-/// co-located daemons are untouched. Best-effort — never fails the slot.
-fn prune_empty_velnor_networks(daemon_id: &str) -> usize {
-    prune_empty_velnor_networks_with(daemon_id, |args| {
-        let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
-        // Bounded execution: the sweep runs beside the async broker poll loop,
-        // so an unbounded Docker CLI wait there would also stall message
-        // polling, credential refresh, and drain observation for the slot.
-        crate::docker_lease::run_host_docker_bounded(
-            &owned,
-            crate::docker_lease::docker_cli_timeout(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT),
-        )
-        .ok()
-        .map(|stdout| std::process::Output {
-            status: success_exit_status(),
-            stdout: stdout.into_bytes(),
-            stderr: Vec::new(),
-        })
-    })
-}
-
-/// A successful `std::process::Output` status for results produced by the
-/// bounded Docker runner, which already reports failures via `Err`.
-fn success_exit_status() -> std::process::ExitStatus {
-    #[cfg(unix)]
-    {
-        std::os::unix::process::ExitStatusExt::from_raw(0)
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::process::ExitStatusExt::from_raw(0)
-    }
-}
-
-fn prune_empty_velnor_networks_with(
-    daemon_id: &str,
-    mut docker: impl FnMut(&[&str]) -> Option<std::process::Output>,
-) -> usize {
-    let mut stdout_of = |args: &[&str]| -> String {
-        docker(args)
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
-            .unwrap_or_default()
-    };
-    let networks = stdout_of(&["network", "ls", "-q", "--filter", "name=velnor-net"])
-        .split_whitespace()
-        .map(ToOwned::to_owned)
-        .filter(|id| {
-            let state = stdout_of(&[
-                "network",
-                "inspect",
-                "--format",
-                DOCKER_NETWORK_INSPECT_FORMAT,
-                id,
-            ]);
-            let mut fields = state.trim().splitn(2, '\t');
-            let owner = fields.next().unwrap_or_default().trim();
-            let containers = fields.next().unwrap_or_default().trim();
-            daemon_owns_resource(owner, daemon_id) && containers == "0"
-        })
-        .collect::<Vec<_>>();
-    if networks.is_empty() {
-        return 0;
-    }
-    let mut args = vec!["network".to_string(), "rm".to_string()];
-    args.extend(networks.iter().cloned());
-    let owned = daemon_id.to_string();
-    let removed = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
-    if removed.is_some_and(|output| output.status.success()) {
-        eprintln!(
-            "Pruned {} empty velnor-net network(s) for daemon {owned}.",
-            networks.len()
-        );
-        networks.len()
-    } else {
-        0
-    }
-}
-
-/// Run the periodic empty-job-network sweep for the daemon this slot serves,
-/// skipping backends that never touch the host Docker socket.
-fn maybe_prune_empty_velnor_networks(
-    backend: Option<velnor_model::ExecutionBackendKind>,
-    daemon_id: &str,
-) {
-    if let Some(reason) =
-        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
-    {
-        eprintln!("periodic empty job-network sweep skipped: {reason}");
-        return;
-    }
-    prune_empty_velnor_networks(daemon_id);
 }
 
 fn daemon_slot_configure_args(
@@ -4284,18 +3802,6 @@ async fn run_v2(
     let mut health = IdleSlotHealth::new(Instant::now());
     health.token_expires_in = token.expires_in;
     let max_idle_age = max_idle_slot_age(args.max_idle_slot_age_seconds);
-    // Periodic reconciliation of orphaned job networks (see
-    // `prune_empty_velnor_networks`): one sweep per interval, on whichever
-    // idle slot notices the deadline first.
-    let mut last_network_sweep = Instant::now();
-    let slot_daemon_id = args
-        .work_dir
-        .as_deref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "default".to_string());
-    let slot_backend = crate::execution::load_execution_file(&config_dir, None)
-        .ok()
-        .map(|file| file.backend());
 
     let registry_pat = args
         .pat
@@ -4379,7 +3885,8 @@ async fn run_v2(
                             health.last_registry_check = Instant::now();
                             if let (Some(pat), Some(scope)) =
                                 (registry_pat.as_deref(), registry_scope.as_ref())
-                                && let Some(reason) = check_runner_registry(
+                            {
+                                if let Some(reason) = check_runner_registry(
                                     scope,
                                     pat,
                                     agent_id,
@@ -4398,21 +3905,9 @@ async fn run_v2(
                                         stored.settings.agent_name
                                     ));
                                 }
+                            }
                         }
                     }
-                }
-
-                if last_network_sweep.elapsed() >= EMPTY_JOB_NETWORK_SWEEP_INTERVAL {
-                    last_network_sweep = Instant::now();
-                    // Offload the blocking Docker sweep from the async poll
-                    // task: a slow sweep must never stop this slot from
-                    // polling messages, refreshing credentials, or observing
-                    // drain.
-                    let sweep_backend = slot_backend;
-                    let sweep_daemon_id = slot_daemon_id.clone();
-                    tokio::task::spawn_blocking(move || {
-                        maybe_prune_empty_velnor_networks(sweep_backend, &sweep_daemon_id);
-                    });
                 }
 
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -5060,20 +4555,21 @@ async fn handle_v2_message(
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
-    if reference.should_acknowledge
-        && let Err(error) = broker
+    if reference.should_acknowledge {
+        if let Err(error) = broker
             .acknowledge_runner_request(
                 session_id,
                 &reference.runner_request_id,
                 RunnerStatus::Busy,
             )
             .await
-    {
-        eprintln!(
-            "Best-effort broker acknowledge failed for request {}: {}",
-            reference.runner_request_id,
-            sanitized_retry_error(&error)
-        );
+        {
+            eprintln!(
+                "Best-effort broker acknowledge failed for request {}: {}",
+                reference.runner_request_id,
+                sanitized_retry_error(&error)
+            );
+        }
     }
     let run_service_url = reference
         .run_service_url
@@ -5526,7 +5022,7 @@ async fn handle_job_request(
             return Err(error);
         }
         let admission_graph =
-            match admit_job_closure(&job, &early_context, &broker_cancellation.stored).await {
+            match admit_job_closure(&job, &early_context, &broker_cancellation.stored) {
                 Ok(graph) => graph,
                 Err(error) => {
                     complete_acquired_job_failure(
@@ -5620,22 +5116,23 @@ async fn handle_job_request(
                         emitted_pressure = true;
                     }
                     let wait_ms = u64::try_from(sleep.as_millis()).unwrap_or(u64::MAX);
-                    if wait_ms >= 1_000
-                        && let (Some(sink), Some(admission)) =
+                    if wait_ms >= 1_000 {
+                        if let (Some(sink), Some(admission)) =
                             (crate::ops::global(), telemetry_admission.as_ref())
-                    {
-                        let fields = BTreeMap::from([
-                            (
-                                "cause".to_owned(),
-                                Value::String("host_capacity".to_owned()),
-                            ),
-                            ("ms".to_owned(), Value::from(wait_ms)),
-                        ]);
-                        let _ = sink.emit_telemetry_for_admission(
-                            admission,
-                            TelemetryEvent::PassiveWait,
-                            fields,
-                        );
+                        {
+                            let fields = BTreeMap::from([
+                                (
+                                    "cause".to_owned(),
+                                    Value::String("host_capacity".to_owned()),
+                                ),
+                                ("ms".to_owned(), Value::from(wait_ms)),
+                            ]);
+                            let _ = sink.emit_telemetry_for_admission(
+                                admission,
+                                TelemetryEvent::PassiveWait,
+                                fields,
+                            );
+                        }
                     }
                     eprintln!(
                         "Job {} waiting for host capacity: {}. Retrying in {}s.",
@@ -5646,17 +5143,19 @@ async fn handle_job_request(
                     tokio::time::sleep(sleep).await;
                     let waited = capacity_wait_started.elapsed();
                     let no_progress_ms = duration_ms(waited);
-                    if no_progress_telemetry_due(waited, emitted_no_progress)
-                        && let (Some(sink), Some(admission)) =
+                    if no_progress_telemetry_due(waited, emitted_no_progress) {
+                        if let (Some(sink), Some(admission)) =
                             (crate::ops::global(), telemetry_admission.as_ref())
-                    {
-                        let fields = no_progress_telemetry_fields(no_progress_ms, "passive_wait");
-                        let _ = sink.emit_telemetry_for_admission(
-                            admission,
-                            TelemetryEvent::NoProgress,
-                            fields,
-                        );
-                        emitted_no_progress = true;
+                        {
+                            let fields =
+                                no_progress_telemetry_fields(no_progress_ms, "passive_wait");
+                            let _ = sink.emit_telemetry_for_admission(
+                                admission,
+                                TelemetryEvent::NoProgress,
+                                fields,
+                            );
+                            emitted_no_progress = true;
+                        }
                     }
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortRegistrationLost => {
@@ -5786,16 +5285,8 @@ async fn handle_job_request(
             args.work_dir.clone(),
             &job,
         ));
-        // Every StepLog the executor streams is mirrored here so the
-        // cancellation path (where the executor never returns its final
-        // ScriptJobResult) can still persist the partial job log.
-        let streamed_step_logs = Arc::new(Mutex::new(Vec::new()));
-        let step_logs_publisher = start_step_log_publisher(
-            job.clone(),
-            step_log_receiver,
-            console_log_path,
-            Arc::clone(&streamed_step_logs),
-        );
+        let step_logs_publisher =
+            start_step_log_publisher(job.clone(), step_log_receiver, console_log_path);
         let config_dir = config_dir.to_path_buf();
         let teardown_config_dir = config_dir.clone();
         let work_dir = args.work_dir.clone();
@@ -5878,9 +5369,6 @@ async fn handle_job_request(
                         result: TaskResult::Canceled,
                         outputs: BTreeMap::new(),
                         environment_url: None,
-                        // Placeholder: replaced from the streamed StepLog
-                        // mirror after the step publishers drain below, so a
-                        // canceled job still persists its partial log.
                         step_logs: Vec::new(),
                         teardown: None,
                         timings: ExecutionTimings::default(),
@@ -5920,28 +5408,15 @@ async fn handle_job_request(
                 job_result.executed_physical_actions,
             );
         }
+        let outputs = job_result.outputs;
+        let step_logs = job_result.step_logs;
+        let teardown = job_result.teardown;
+        let execution_timings = job_result.timings;
         // Keep terminal completion ordered after best-effort Results Service
         // step updates, matching the official runner. Drain both publishers
         // concurrently so the old 5s + 30s sequential tail is capped at the
-        // slower publisher deadline; abort only a stalled publisher. Drain
-        // BEFORE reading the streamed-step-log mirror so a canceled job's
-        // partial logs below are complete.
+        // slower publisher deadline; abort only a stalled publisher.
         drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
-        let outputs = job_result.outputs;
-        let mut step_logs = job_result.step_logs;
-        if step_logs.is_empty() && matches!(job_result.result, TaskResult::Canceled) {
-            // Cancel path: the executor errored before returning its final
-            // step_logs, but the publisher mirrored every streamed StepLog.
-            // Persist what ran instead of completing with an empty log.
-            let streamed = std::mem::take(
-                &mut *streamed_step_logs
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            );
-            step_logs = merged_partial_step_logs(streamed);
-        }
-        let teardown = job_result.teardown;
-        let execution_timings = job_result.timings;
         let finalize_started = Instant::now();
         let finalize_span = tracing::info_span!("job-finalize");
         let completion = complete_run_service_job_refreshing(
@@ -6187,8 +5662,10 @@ fn sanitize_secret_variables(value: &mut Value) {
         let is_secret = object_field(variable, &["IsSecret", "isSecret"])
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if is_secret && let Some(value) = object_field_mut(variable, &["Value", "value"]) {
-            *value = Value::String("***".to_string());
+        if is_secret {
+            if let Some(value) = object_field_mut(variable, &["Value", "value"]) {
+                *value = Value::String("***".to_string());
+            }
         }
     }
 }
@@ -6461,8 +5938,8 @@ fn start_broker_cancellation_poll(
                                     Ok(refreshed) => {
                                         broker = refreshed;
                                         println!(
-                                            "Cancellation poller refreshed broker credentials mid-job."
-                                        );
+                                        "Cancellation poller refreshed broker credentials mid-job."
+                                    );
                                     }
                                     Err(error) => eprintln!(
                                         "Cancellation poller failed to rebuild broker client: {}",
@@ -6603,7 +6080,6 @@ fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: UnboundedReceiver<StepLog>,
     console_log_path: Option<PathBuf>,
-    streamed_step_logs: Arc<Mutex<Vec<StepLog>>>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -6696,14 +6172,15 @@ fn start_step_log_publisher(
                     None => break,
                 },
                 _ = ping_interval.tick() => {
-                    if let Some(ws) = ws_conn.as_mut()
-                        && let Err(e) = crate::protocol::FeedStreamClient::send_ping(ws).await {
+                    if let Some(ws) = ws_conn.as_mut() {
+                        if let Err(e) = crate::protocol::FeedStreamClient::send_ping(ws).await {
                             eprintln!(
                                 "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
                                 sanitized_retry_error(&e)
                             );
                             ws_conn = None;
                         }
+                    }
                     continue;
                 }
             };
@@ -6711,10 +6188,6 @@ fn start_step_log_publisher(
             let mut processed = Vec::with_capacity(logs.len());
             let mut live_batches = Vec::new();
             for log in logs {
-                streamed_step_logs
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(log.clone());
                 let masker = job_masks.with_extra(&log.masks);
                 let lines = mask_log_lines_with(&log.lines, &masker);
                 let line_count = lines.len() as i64;
@@ -6725,8 +6198,10 @@ fn start_step_log_publisher(
                 let already_streamed = !live_chunk && streamed_steps.contains(&log.step_id);
 
                 // Mirror this step to the container's live console file (docker logs).
-                if !already_streamed && let Some(writer) = console_writer.as_mut() {
-                    append_job_console(writer, &log.display_name, &lines);
+                if !already_streamed {
+                    if let Some(writer) = console_writer.as_mut() {
+                        append_job_console(writer, &log.display_name, &lines);
+                    }
                 }
 
                 if !already_streamed && !lines.is_empty() {
@@ -6806,25 +6281,24 @@ fn start_step_log_publisher(
                             .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
                             .await
                         {
-                            tracing::warn!(
-                                job_id = %job_id,
-                                blob_kind = "step-log",
-                                step_id = %log.step_id,
-                                error = %sanitized_retry_error(&e),
-                                "best-effort Results Service step-log upload failed"
-                            );
-                        }
-                        // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
-                        if !log.summary.is_empty()
-                            && let Err(e) = client
-                                .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
-                                .await
-                        {
                             eprintln!(
-                                "Best-effort step summary upload failed for '{}': {}",
+                                "Best-effort Results Service log upload failed for '{}': {}",
                                 log.step_id,
                                 sanitized_retry_error(&e)
                             );
+                        }
+                        // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
+                        if !log.summary.is_empty() {
+                            if let Err(e) = client
+                                .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
+                                .await
+                            {
+                                eprintln!(
+                                    "Best-effort step summary upload failed for '{}': {}",
+                                    log.step_id,
+                                    sanitized_retry_error(&e)
+                                );
+                            }
                         }
                     }
                 }
@@ -6899,12 +6373,13 @@ async fn send_live_feed_batch(
     job_id: &str,
     batch: LiveFeedBatch,
 ) {
-    if ws_conn.is_none()
-        && let Some(client) = feed_client
-        && let Ok(ws) = client.connect().await
-    {
-        eprintln!("[feed] WebSocket reconnected.");
-        *ws_conn = Some(ws);
+    if ws_conn.is_none() {
+        if let Some(client) = feed_client {
+            if let Ok(ws) = client.connect().await {
+                eprintln!("[feed] WebSocket reconnected.");
+                *ws_conn = Some(ws);
+            }
+        }
     }
     let Some(ws) = ws_conn.as_mut() else {
         return;
@@ -6929,21 +6404,23 @@ async fn send_live_feed_batch(
         );
         *ws_conn = None;
         // Reconnect once and resend this batch so no step's live log is lost.
-        if let Some(client) = feed_client
-            && let Ok(mut ws2) = client.connect().await
-            && crate::protocol::FeedStreamClient::send_log_lines(
-                &mut ws2,
-                &batch.step_id,
-                feed_lines,
-                Some(batch.start_line),
-                Some(plan_id),
-                Some(job_id),
-            )
-            .await
-            .is_ok()
-        {
-            eprintln!("[feed] resent {} lines after reconnect.", batch.lines.len());
-            *ws_conn = Some(ws2);
+        if let Some(client) = feed_client {
+            if let Ok(mut ws2) = client.connect().await {
+                if crate::protocol::FeedStreamClient::send_log_lines(
+                    &mut ws2,
+                    &batch.step_id,
+                    feed_lines,
+                    Some(batch.start_line),
+                    Some(plan_id),
+                    Some(job_id),
+                )
+                .await
+                .is_ok()
+                {
+                    eprintln!("[feed] resent {} lines after reconnect.", batch.lines.len());
+                    *ws_conn = Some(ws2);
+                }
+            }
         }
     }
 }
@@ -7165,13 +6642,13 @@ fn execute_script_job(
         telemetry_admission,
         execution_backend,
     );
-    if result.is_err()
-        && let Err(e) = fs::remove_dir_all(&job_dir)
-    {
-        eprintln!(
-            "Warning: failed to clean up job workspace at {}: {e:#}",
-            job_dir.display()
-        );
+    if result.is_err() {
+        if let Err(e) = fs::remove_dir_all(&job_dir) {
+            eprintln!(
+                "Warning: failed to clean up job workspace at {}: {e:#}",
+                job_dir.display()
+            );
+        }
     }
     result
 }
@@ -7360,7 +6837,6 @@ fn microvm_executable_steps(
                     .as_ref()
                     .and_then(|reference| reference.git_ref.clone())
                     .unwrap_or_else(|| repository.to_string());
-                let inputs = crate::action::string_inputs(step)?;
                 let invocation = crate::action::NativeActionInvocation {
                     git_ref,
                     adapter,
@@ -7374,7 +6850,7 @@ fn microvm_executable_steps(
                         .reference
                         .as_ref()
                         .and_then(|reference| reference.path.clone()),
-                    inputs: crate::action::canonicalize_input_map(&inputs)?,
+                    inputs: crate::action::string_inputs(step)?,
                     env: crate::script_step::step_environment(step)?,
                 };
                 ordered.push(crate::executor::ExecutableStep::Native {
@@ -7592,14 +7068,14 @@ fn reject_unguestable_steps(steps: &[crate::executor::ExecutableStep]) -> Result
     // The guest checkout adapter fetches no LFS objects; an explicit opt-in is
     // a silent behavior change, so refuse it instead of approximating.
     for (index, step) in steps.iter().enumerate() {
-        if let crate::executor::ExecutableStep::Checkout(plan) = step
-            && plan.lfs
-        {
-            return Err(microvm_capability_error(
-                &format!("jobs.steps[{index}].inputs.lfs"),
-                "true",
-                "false (guest checkout downloads no LFS objects)",
-            ));
+        if let crate::executor::ExecutableStep::Checkout(plan) = step {
+            if plan.lfs {
+                return Err(microvm_capability_error(
+                    &format!("jobs.steps[{index}].inputs.lfs"),
+                    "true",
+                    "false (guest checkout downloads no LFS objects)",
+                ));
+            }
         }
     }
     Ok(())
@@ -7635,6 +7111,44 @@ fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
         }
         _ => false,
     }
+}
+
+fn open_compiler_cache_for_job(
+    container: &crate::container::JobContainerSpec,
+    daemon_id: &str,
+    trust_scope: &str,
+) -> Result<Option<Arc<velnor_cache_service::ProductionCompilerCache>>> {
+    use velnor_cache_service::{
+        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
+    };
+
+    let policy = match container.compiler_cache_backend {
+        velnor_cache_service::CompilerCacheBackend::Sccache => CompilerCachePolicy::Sccache,
+        velnor_cache_service::CompilerCacheBackend::Kache => CompilerCachePolicy::Kache,
+        velnor_cache_service::CompilerCacheBackend::Off => return Ok(None),
+    };
+    let root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.cache_root)
+        .unwrap_or_else(|| {
+            crate::container::daemon_store_root(&container.temp_host)
+                // Keep the lifecycle service below the same daemon/backend
+                // namespace used by the mounted wrapper. The service adds
+                // trust/compiler/backend below this base.
+                .join(match policy {
+                    velnor_cache_service::CompilerCachePolicy::Sccache => "_velnor_sccache",
+                    velnor_cache_service::CompilerCachePolicy::Kache => "_velnor_kache",
+                    velnor_cache_service::CompilerCachePolicy::Auto
+                    | velnor_cache_service::CompilerCachePolicy::Off => {
+                        unreachable!("resolved compiler-cache policy")
+                    }
+                })
+        });
+    let mut config = CompilerCacheConfig::new(root, format!("{daemon_id}:{}", container.name));
+    config.policy = policy;
+    config.trust_class = crate::executor::compiler_cache_trust_class(trust_scope);
+    let service = CompilerCacheService::open_production(config, WrapperDeclaration::default())
+        .context("open compiler-cache lifecycle service")?;
+    Ok(Some(Arc::new(service)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7716,9 +7230,10 @@ fn execute_script_job_inner(
         docker_image,
         resource_options,
         node_action_image,
-        daemon_id,
+        daemon_id.clone(),
         trust_scope,
     )?;
+    let compiler_cache = open_compiler_cache_for_job(&container, &daemon_id, trust_scope)?;
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -8007,6 +7522,9 @@ fn execute_script_job_inner(
     if let (Some(sink), Some(admission)) = (crate::ops::global().cloned(), telemetry_admission) {
         executor = executor.with_tool_prep_telemetry(sink, admission);
     }
+    if let Some(compiler_cache) = compiler_cache {
+        executor = executor.with_compiler_cache(compiler_cache);
+    }
     let steps_started = Instant::now();
     let first_step_ms = duration_ms(execution_started.elapsed());
     let mut docker_engine = RunnerDockerEngine {
@@ -8055,10 +7573,10 @@ fn execute_script_job_inner(
         "forensics.lifecycle event=last-step-end timestamp={}",
         unix_now_iso8601()
     );
-    if summary_result.is_err()
-        && let Err(error) = executor.cleanup(&plan.execution.job_container)
-    {
-        eprintln!("Warning: cleanup failed after executor error: {error:#}");
+    if summary_result.is_err() {
+        if let Err(error) = executor.cleanup(&plan.execution.job_container) {
+            eprintln!("Warning: cleanup failed after executor error: {error:#}");
+        }
     }
     let mut command_runner = executor.into_runner();
     let cleanup_result = cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans);
@@ -8327,11 +7845,11 @@ fn resolve_checkout_plan_context(
     base_env: &[(String, String)],
     context_data: &[(String, Value)],
 ) -> CheckoutPlan {
-    if let Some(version) = plan.version.as_mut()
-        && !contains_step_output_expression(version)
-    {
-        *version =
-            crate::executor::render_expressions_with_context(version, base_env, context_data);
+    if let Some(version) = plan.version.as_mut() {
+        if !contains_step_output_expression(version) {
+            *version =
+                crate::executor::render_expressions_with_context(version, base_env, context_data);
+        }
     }
     plan
 }
@@ -8738,10 +8256,10 @@ fn expand_broker_context_value(value: Value) -> Value {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string();
-                        if let Some(v) = item_obj.get("v")
-                            && !k.is_empty()
-                        {
-                            map.insert(k, expand_broker_context_value(v.clone()));
+                        if let Some(v) = item_obj.get("v") {
+                            if !k.is_empty() {
+                                map.insert(k, expand_broker_context_value(v.clone()));
+                            }
                         }
                     }
                 }
@@ -8851,7 +8369,8 @@ struct WorkflowSourceContext {
 fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowSourceContext> {
     let path = context_string(context_data, "job.workflow_file_path")
         .or_else(|| context_string(context_data, "github.event.workflow"))?;
-    let sha = context_string(context_data, "github.workflow_sha")?;
+    let sha = context_string(context_data, "github.workflow_sha")
+        .or_else(|| context_string(context_data, "github.sha"))?;
     let repository = context_string(context_data, "job.workflow_repository")
         .or_else(|| context_string(context_data, "github.repository"))
         .or_else(|| {
@@ -8874,28 +8393,7 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 /// repository token and admits every root (local and remote), recursing nested
 /// local and remote closures. Replaces the former flat + local-only preflight
 /// split; planning consumes the returned graph and never re-resolves identity.
-async fn admit_job_closure(
-    job: &AgentJobRequestMessage,
-    context_data: &[(String, Value)],
-    stored: &StoredRunnerConfig,
-) -> Result<crate::admission::AdmissionGraph> {
-    let permit = action_admission_permits()
-        .try_acquire_owned()
-        .context("action admission blocking worker is busy")?;
-    let job = job.clone();
-    let context_data = context_data.to_vec();
-    let stored = stored.clone();
-    let admission = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        admit_job_closure_sync(&job, &context_data, &stored)
-    });
-    tokio::time::timeout(ACTION_ADMISSION_TIMEOUT, admission)
-        .await
-        .context("action admission exceeded its deadline")?
-        .context("action admission blocking worker failed")?
-}
-
-fn admit_job_closure_sync(
+fn admit_job_closure(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
@@ -9152,10 +8650,10 @@ fn secret_context_names(variable_name: &str) -> Vec<String> {
         return vec!["GITHUB_TOKEN".to_string()];
     }
     for prefix in ["secrets.", "secret."] {
-        if let Some(name) = variable_name.strip_prefix(prefix)
-            && !name.is_empty()
-        {
-            return vec![name.to_string()];
+        if let Some(name) = variable_name.strip_prefix(prefix) {
+            if !name.is_empty() {
+                return vec![name.to_string()];
+            }
         }
     }
     if variable_name.contains('.') {
@@ -9691,16 +9189,17 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
         .variables
         .get("system.github.token.permissions")
         .and_then(|v| v.value.as_deref());
-    if let Some(json_str) = perm_json
-        && let Ok(serde_json::Value::Object(perms)) =
+    if let Some(json_str) = perm_json {
+        if let Ok(serde_json::Value::Object(perms)) =
             serde_json::from_str::<serde_json::Value>(json_str)
-    {
-        lines.push("##[group]GITHUB_TOKEN Permissions".to_string());
-        for (scope, level) in &perms {
-            let display = level.as_str().unwrap_or("read");
-            lines.push(format!("  {scope}: {display}"));
+        {
+            lines.push("##[group]GITHUB_TOKEN Permissions".to_string());
+            for (scope, level) in &perms {
+                let display = level.as_str().unwrap_or("read");
+                lines.push(format!("  {scope}: {display}"));
+            }
+            lines.push("##[endgroup]".to_string());
         }
-        lines.push("##[endgroup]".to_string());
     }
     lines.push("Secret source: Actions".to_string());
 
@@ -9826,10 +9325,10 @@ fn checkout_step_lines(plan: &CheckoutPlan, exit_code: i32, trace: &[String]) ->
     if let Some(ref ver) = plan.version {
         lines.push(format!("Setting up ref '{ver}'"));
     }
-    if let Some(depth) = plan.fetch_depth
-        && depth > 0
-    {
-        lines.push(format!("Fetch depth: {depth}"));
+    if let Some(depth) = plan.fetch_depth {
+        if depth > 0 {
+            lines.push(format!("Fetch depth: {depth}"));
+        }
     }
     lines.push(format!("Repository path: {}", plan.destination.display()));
     // The actual `[command]git …` trace, matching the GitHub-hosted runner's
@@ -9950,53 +9449,32 @@ fn iso8601_with_blob_precision(rfc3339: &str) -> String {
     }
 }
 
-/// Build the Results Service Twirp client for a job's SystemVssConnection, if
-/// the job message carries a usable ResultsServiceUrl and access token.
-fn results_client_for_job(
-    job: &AgentJobRequestMessage,
-) -> Option<crate::protocol::TwirpResultsClient> {
-    let endpoint = job.system_connection()?;
-    let token = system_connection_access_token(endpoint)?;
-    crate::protocol::TwirpResultsClient::from_endpoint_data(&endpoint.data, &token)
-        .and_then(|r| r.ok())
-}
-
 /// Upload the combined job log to Results Service so GitHub's native job-log
 /// download endpoint has the same backing blob the official runner publishes.
 async fn upload_results_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
     if step_logs.is_empty() {
         return;
     }
-    let Some(client) = results_client_for_job(job) else {
+    let Some(endpoint) = job.system_connection() else {
         return;
     };
-    match upload_results_job_log_with_client(&client, job, step_logs).await {
-        Ok(()) => println!("Uploaded Results Service job log."),
-        Err(error) => tracing::warn!(
-            job_id = %job.job_id,
-            blob_kind = "job-log",
-            error = %format!("{error:#}"),
-            "best-effort Results Service job-log upload failed"
-        ),
-    }
-}
+    let Some(token) = system_connection_access_token(endpoint) else {
+        return;
+    };
+    let Some(client) =
+        crate::protocol::TwirpResultsClient::from_endpoint_data(&endpoint.data, &token)
+            .and_then(|r| r.ok())
+    else {
+        return;
+    };
 
-/// Upload the combined job log through an explicit Results Service client.
-/// Split from `upload_results_job_log` so unit tests drive a loopback server.
-async fn upload_results_job_log_with_client(
-    client: &crate::protocol::TwirpResultsClient,
-    job: &AgentJobRequestMessage,
-    step_logs: &[StepLog],
-) -> Result<()> {
-    if step_logs.is_empty() {
-        return Ok(());
-    }
     let content = build_combined_job_log(job, step_logs);
     let line_count = content.lines().count() as i64;
     if line_count == 0 {
-        return Ok(());
+        return;
     }
-    client
+
+    match client
         .upload_job_log(
             &job.plan.plan_id,
             &job.job_id,
@@ -10004,62 +9482,10 @@ async fn upload_results_job_log_with_client(
             line_count,
         )
         .await
-}
-
-/// Upload one step's log blob through an explicit Results Service client, for
-/// the pre-execution failure path that bypasses the live step publisher. Lines
-/// are masked and stamped with the 7-digit timestamp prefix exactly like the
-/// publisher path (docs/log-format-contract.md).
-async fn upload_results_step_log_with_client(
-    client: &crate::protocol::TwirpResultsClient,
-    job: &AgentJobRequestMessage,
-    log: &StepLog,
-) -> Result<()> {
-    let masker = MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks);
-    let lines = mask_log_lines_with(&log.lines, &masker);
-    let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
-    client
-        .upload_step_log(&job.plan.plan_id, &job.job_id, &log.step_id, &timestamped)
-        .await
-}
-
-/// Merge streamed step-log snapshots into one cumulative log per step,
-/// preserving first-seen order. Live chunks (`completed_at` empty) carry only
-/// new lines; a final snapshot (`completed_at` set) is authoritative and
-/// cumulative, so it replaces the accumulated chunks. Steps still running when
-/// the job was canceled have no final snapshot — stamp them so the combined
-/// job log renders their partial output as a finished step.
-fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
-    let mut merged: Vec<StepLog> = Vec::new();
-    let mut index: BTreeMap<String, usize> = BTreeMap::new();
-    for log in streamed {
-        match index.get(&log.step_id) {
-            Some(&slot) => {
-                let target = &mut merged[slot];
-                if log.completed_at.is_empty() {
-                    if target.completed_at.is_empty() {
-                        target.lines.extend(log.lines);
-                        target.masks.extend(log.masks);
-                        target.annotations.extend(log.annotations);
-                        target.telemetry.extend(log.telemetry);
-                    }
-                } else {
-                    *target = log;
-                }
-            }
-            None => {
-                index.insert(log.step_id.clone(), merged.len());
-                merged.push(log);
-            }
-        }
+    {
+        Ok(()) => println!("Uploaded Results Service job log."),
+        Err(e) => eprintln!("Best-effort Results Service job log upload failed: {e:#}"),
     }
-    let now = unix_now_iso8601();
-    for log in &mut merged {
-        if log.completed_at.is_empty() {
-            log.completed_at = now.clone();
-        }
-    }
-    merged
 }
 
 /// Upload the combined job log as a `job-log.txt` artifact (best-effort). This
@@ -10113,10 +9539,10 @@ async fn complete_run_service_job(
     publish_completion_timeline_logs: bool,
     journal_dir: &Path,
 ) -> Result<()> {
-    if publish_completion_timeline_logs
-        && let Err(error) = publish_timeline_logs(job, &step_logs).await
-    {
-        eprintln!("Best-effort timeline log upload failed: {error:#}");
+    if publish_completion_timeline_logs {
+        if let Err(error) = publish_timeline_logs(job, &step_logs).await {
+            eprintln!("Best-effort timeline log upload failed: {error:#}");
+        }
     }
     // Best-effort: publish the whole job log to the same Results Service job-log
     // blob used by official runners, then keep a `job-log.txt` artifact fallback.
@@ -10249,9 +9675,9 @@ async fn send_guarded_run_service_complete(
         &job_id,
         generation,
         &payload,
-        |payload| async move {
+        async {
             client
-                .complete_job_payload(run_service_url, payload)
+                .complete_job(run_service_url, completion)
                 .await
                 .context("complete run-service job")
         },
@@ -10640,57 +10066,31 @@ async fn complete_acquired_job_outcome(
         if let Err(error) = publish_timeline_step_log(job, &log).await {
             eprintln!("Best-effort Velnor rejection step log upload failed: {error:#}");
         }
-        // Persist the Results Service blobs too: without them GitHub's native
-        // job-log endpoint answers BlobNotFound for every cleanly failed job,
-        // hiding the rejection reason (homebrew-tablerock run 33344851591,
-        // velnor-actions run 33355064641). Best-effort — completion must not
-        // be blocked by a log upload.
-        if let Some(client) = results_client_for_job(job) {
-            if let Err(error) = upload_results_step_log_with_client(&client, job, &log).await {
-                tracing::warn!(
-                    job_id = %job.job_id,
-                    blob_kind = "step-log",
-                    step_id = %log.step_id,
-                    error = %format!("{error:#}"),
-                    "best-effort Results Service step-log upload failed"
-                );
-            }
-            if let Err(error) =
-                upload_results_job_log_with_client(&client, job, std::slice::from_ref(&log)).await
-            {
-                tracing::warn!(
-                    job_id = %job.job_id,
-                    blob_kind = "job-log",
-                    error = %format!("{error:#}"),
-                    "best-effort Results Service job-log upload failed"
-                );
-            }
-        }
     }
     // Plan 066 terminal transition for a job that never reached execution:
     // rejections and pre-execution cancellations must still reach a terminal
     // store row (pre-terminal fail-close edges).
-    if let Some(job) = job
-        && let Some(sink) = crate::ops::global()
-    {
-        let run_id = crate::github_adapter::job_variable(job, "github.run_id")
-            .and_then(|raw| raw.parse::<u64>().ok());
-        let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
-            .and_then(|raw| raw.parse::<u32>().ok());
-        if run_id.is_some() && attempt.is_some() {
-            let uid = job.job_id.clone();
-            let reason = match conclusion {
-                crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
-                _ => velnor_model::EventReason::JobRejected,
-            };
-            sink.transition(
-                &uid,
-                &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
-                reason,
-                Some(masked_reason.clone()),
-                None,
-                None,
-            );
+    if let Some(job) = job {
+        if let Some(sink) = crate::ops::global() {
+            let run_id = crate::github_adapter::job_variable(job, "github.run_id")
+                .and_then(|raw| raw.parse::<u64>().ok());
+            let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
+                .and_then(|raw| raw.parse::<u32>().ok());
+            if run_id.is_some() && attempt.is_some() {
+                let uid = job.job_id.clone();
+                let reason = match conclusion {
+                    crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
+                    _ => velnor_model::EventReason::JobRejected,
+                };
+                sink.transition(
+                    &uid,
+                    &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
+                    reason,
+                    Some(masked_reason.clone()),
+                    None,
+                    None,
+                );
+            }
         }
     }
     let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
@@ -11461,10 +10861,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
 
     println!(
         "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy, {stale_busy} offline+busy) for prefix '{}'",
-        args.url,
-        args.slots,
-        mine.len(),
-        args.name
+        args.url, args.slots, mine.len(), args.name
     );
     println!(
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
@@ -11516,16 +10913,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
                 runner.status.as_deref(),
                 runner.busy,
             ),
-            None => match load_in_flight_job(&slot_dir) {
-                Ok(record) => record.is_some(),
-                Err(error) => {
-                    eprintln!(
-                        "doctor: refusing to recover unreadable in-flight marker {}: {error:#}",
-                        in_flight_job_path(&slot_dir).display()
-                    );
-                    false
-                }
-            },
+            None => load_in_flight_job(&slot_dir).ok().flatten().is_some(),
         };
         if !should_complete {
             continue;
@@ -11800,143 +11188,6 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn workflow_source_context_requires_exact_workflow_sha() {
-        let context = vec![(
-            "github".to_string(),
-            serde_json::json!({
-                "repository": "acme/repo",
-                "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                "event": {"workflow": ".github/workflows/ci.yml"}
-            }),
-        )];
-        assert!(workflow_source_context(&context).is_none());
-
-        let mut context_with_workflow_sha = context;
-        context_with_workflow_sha[0].1["workflow_sha"] =
-            serde_json::json!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-        assert_eq!(
-            workflow_source_context(&context_with_workflow_sha)
-                .expect("exact workflow SHA should admit source lookup")
-                .sha,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-        );
-    }
-
-    #[test]
-    fn empty_network_sweep_removes_only_owned_containerless_networks() {
-        // id → (daemon-id label, container count) or Err to simulate inspect
-        // failure; records `network rm` calls.
-        struct Fake {
-            state: std::collections::BTreeMap<String, Result<(String, usize), ()>>,
-            removed: Vec<Vec<String>>,
-        }
-        impl Fake {
-            fn docker(&mut self, args: &[&str]) -> Option<std::process::Output> {
-                use std::os::unix::process::ExitStatusExt;
-                let ok = || std::process::Output {
-                    status: std::process::ExitStatus::from_raw(0),
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                };
-                match args.get(1).copied().unwrap_or_default() {
-                    "ls" => {
-                        let mut out = ok();
-                        out.stdout = self
-                            .state
-                            .keys()
-                            .map(|id| format!("{id}\n"))
-                            .collect::<String>()
-                            .into_bytes();
-                        Some(out)
-                    }
-                    "inspect" => {
-                        let id = args.last().copied().unwrap_or_default();
-                        match self.state.get(id)? {
-                            Ok((daemon, containers)) => {
-                                let mut out = ok();
-                                out.stdout = format!("{daemon}\t{containers}\n").into_bytes();
-                                Some(out)
-                            }
-                            Err(()) => None,
-                        }
-                    }
-                    "rm" => {
-                        assert_eq!(args.first(), Some(&"network"));
-                        self.removed
-                            .push(args[2..].iter().map(|arg| (*arg).to_string()).collect());
-                        Some(ok())
-                    }
-                    _ => None,
-                }
-            }
-        }
-        let mut fake = Fake {
-            state: [
-                ("own-empty".to_string(), Ok(("daemon-a".to_string(), 0))),
-                ("own-busy".to_string(), Ok(("daemon-a".to_string(), 2))),
-                ("other-empty".to_string(), Ok(("daemon-b".to_string(), 0))),
-                (
-                    "slot-empty".to_string(),
-                    Ok(("daemon-a/slot-1".to_string(), 0)),
-                ),
-                ("inspect-fails".to_string(), Err(())),
-            ]
-            .into_iter()
-            .collect(),
-            removed: Vec::new(),
-        };
-        let removed = prune_empty_velnor_networks_with("daemon-a", |args| fake.docker(args));
-        assert_eq!(removed, 2);
-        assert_eq!(
-            fake.removed,
-            vec![vec!["own-empty".to_string(), "slot-empty".to_string()]]
-        );
-    }
-
-    #[test]
-    fn empty_network_sweep_is_noop_without_owned_containerless_networks() {
-        let removed = prune_empty_velnor_networks_with("daemon-a", |_| None);
-        assert_eq!(removed, 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn in_flight_marker_symlink_fails_closed() {
-        let dir = unique_temp_dir("in-flight-marker-symlink");
-        fs::create_dir_all(&dir).unwrap();
-        std::os::unix::fs::symlink("missing-record.json", in_flight_job_path(&dir)).unwrap();
-
-        let error = recorded_in_flight_job_exists(&dir).unwrap_err();
-        assert!(error.to_string().contains("must not be a symlink"));
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn recorded_completion_payload_is_checksum_and_identity_bound() {
-        let dir = unique_temp_dir("recorded-completion-payload");
-        fs::create_dir_all(&dir).unwrap();
-        let record = InFlightJobRecord {
-            plan_id: "plan-1".to_owned(),
-            job_id: "job-1".to_owned(),
-            run_service_url: "https://example.test/_apis/v1/AgentPools/1".to_owned(),
-            billing_owner_id: None,
-        };
-        let payload = br#"{"planId":"plan-1","jobId":"job-1","conclusion":"succeeded","outputs":{"answer":{"value":"kept","isSecret":false}}}"#.to_vec();
-        let checksum = velnor_control::journal::payload_checksum(&payload);
-        crate::node::cleanup::write_outbox(&dir, &record.job_id, 1, &payload).unwrap();
-
-        let loaded =
-            load_recorded_completion_payload(&dir, &record, Generation(1), &checksum).unwrap();
-        assert_eq!(loaded, payload);
-
-        let error =
-            load_recorded_completion_payload(&dir, &record, Generation(1), "wrong").unwrap_err();
-        assert!(error.to_string().contains("checksum mismatch"));
-        fs::remove_dir_all(dir).unwrap();
-    }
 
     #[test]
     fn gha_cache_requires_canonical_storage() {
@@ -13137,36 +12388,6 @@ jobs:
     }
 
     #[test]
-    fn docker_network_inspect_format_uses_go_template_tab_escape() {
-        assert_eq!(
-            DOCKER_NETWORK_INSPECT_FORMAT,
-            r#"{{ index .Labels "velnor.daemon-id" }}{{ "\t" }}{{ len .Containers }}"#
-        );
-    }
-
-    #[test]
-    fn stale_network_prunable_removes_owned_and_unlabeled_endpointless() {
-        // This daemon's own label (or a direct slot child) is stale at startup.
-        assert!(stale_network_prunable("/daemon/work", 3, "/daemon/work"));
-        assert!(stale_network_prunable(
-            "/daemon/work/slot-2",
-            1,
-            "/daemon/work"
-        ));
-        // Unlabeled guest-plan leak with no endpoints is reclaimed as a backstop.
-        assert!(stale_network_prunable("", 0, "/daemon/work"));
-        // Unlabeled but still connected: left alone.
-        assert!(!stale_network_prunable("", 2, "/daemon/work"));
-        // A foreign daemon's labeled network is never touched, even endpoint-less.
-        assert!(!stale_network_prunable("/other/work", 0, "/daemon/work"));
-        assert!(!stale_network_prunable(
-            "/other/work/slot-1",
-            0,
-            "/daemon/work"
-        ));
-    }
-
-    #[test]
     fn doctor_host_docker_reclaim_skips_socket_when_microvm_or_unselected() {
         for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
             doctor_host_docker_reclaim(backend, |_| {
@@ -13628,7 +12849,6 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn daemon_successor_cleanup_surfaces_directory_removal_failure() {
         use wiremock::{
@@ -13679,6 +12899,24 @@ jobs:
         assert!(!detail.contains("cleaned failed slot"));
 
         assert!(daemon_slot_cleanup_degradation(1, 7, true, true).is_none());
+    }
+
+    #[test]
+    fn daemon_slot_boundary_sequences_are_monotonic_and_typed() {
+        assert_eq!(
+            daemon_slot_transition_sequence(1, SlotPhase::Teardown),
+            Some(1)
+        );
+        assert_eq!(
+            daemon_slot_transition_sequence(1, SlotPhase::Recycling),
+            Some(2)
+        );
+        assert_eq!(daemon_slot_transition_sequence(1, SlotPhase::Idle), Some(3));
+        assert_eq!(
+            daemon_slot_transition_sequence(2, SlotPhase::Teardown),
+            Some(4)
+        );
+        assert_eq!(daemon_slot_transition_sequence(1, SlotPhase::Running), None);
     }
 
     #[test]
@@ -14636,7 +13874,6 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -14679,9 +13916,8 @@ jobs:
         fs::remove_dir_all(config_dir).unwrap();
     }
 
-    #[cfg(feature = "test-support")]
     #[tokio::test]
-    async fn successful_runner_delete_preserves_identity_when_stale_completion_fails() {
+    async fn successful_runner_delete_surfaces_in_flight_cleanup_failure() {
         use wiremock::{
             matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
@@ -14697,38 +13933,21 @@ jobs:
             .mount(&server)
             .await;
 
-        let config_dir = unique_temp_dir("runner-delete-stale-completion-failure");
-        fs::create_dir_all(&config_dir).unwrap();
-        config::save(&config_dir, &stored_config()).unwrap();
-        let job = minimal_job_with_variables(serde_json::json!({}));
-        let context = RunServiceJobContext {
-            client: RunServiceClient::new("token").unwrap(),
-            run_service_url: format!("{}/run-service", server.uri()),
-            billing_owner_id: None,
-            journal_dir: config_dir.clone(),
-            journal_state: RunServiceJobJournalState::Acquired,
-        };
-        persist_in_flight_job(&config_dir, &context, &job).unwrap();
+        let config_dir = unique_temp_dir("runner-delete-cleanup-failure");
+        fs::create_dir_all(config_dir.join("in-flight-job.json")).unwrap();
         let scope = GitHubScope::parse(&format!("{}/test", server.uri())).unwrap();
 
         let error = delete_runner_keeping_busy_identity(&scope, "token", 123, Some(&config_dir))
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains(
-            "complete recorded in-flight job after remote runner deletion of runner id 123"
-        ));
         assert!(error
-            .chain()
-            .any(|cause| cause.to_string().contains("missing credentials")));
-        assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
-        assert!(config::load(&config_dir).is_ok());
-        assert!(in_flight_job_path(&config_dir).exists());
+            .to_string()
+            .contains("clear in-flight job after remote runner deletion"));
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
 
-    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn busy_runner_delete_surfaces_leftover_completion_failure() {
         use wiremock::{
@@ -14779,7 +13998,6 @@ jobs:
         fs::remove_dir_all(config_dir).unwrap();
     }
 
-    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn busy_runner_delete_surfaces_runner_config_load_failure() {
         use wiremock::{
@@ -14816,7 +14034,6 @@ jobs:
         fs::remove_dir_all(config_dir).unwrap();
     }
 
-    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn journal_acceptance_failure_preserves_retry_record_after_failed_completion() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -15369,231 +14586,6 @@ jobs:
     }
 
     #[test]
-    fn durable_slot_request_key_tracks_live_jit_agent_identity() {
-        let config_dir = unique_temp_dir("durable-slot-request-key");
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".to_owned()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-42-generation-7-recycling")
-        );
-
-        stored.settings.agent_id = Some(43);
-        config::save(&config_dir, &stored).unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-43-generation-7-recycling")
-        );
-
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
-    fn durable_slot_request_key_rejects_invalid_identity_but_keeps_gap_identity() {
-        let config_dir = unique_temp_dir("durable-slot-request-key-invalid");
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".to_owned()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-
-        assert!(lifecycle.request_key(SlotPhase::Teardown).is_some());
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-        assert_eq!(
-            lifecycle.request_key(SlotPhase::Recycling).as_deref(),
-            Some("jit-agent-42-generation-7-recycling")
-        );
-
-        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
-        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
-
-        config::save(&config_dir, &stored).unwrap();
-        stored.settings.agent_id = None;
-        config::save(&config_dir, &stored).unwrap();
-        assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
-
-        fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
-    fn configless_request_key_reports_request_ledger_read_failure() {
-        let root = unique_temp_dir("configless-request-ledger-read-failure");
-        fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
-
-        let connection = rusqlite::Connection::open(root.join("state.db")).unwrap();
-        connection
-            .execute_batch("DROP TABLE slot_transition_requests;")
-            .unwrap();
-        let lifecycle = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            root.join("config"),
-        )
-        .unwrap();
-
-        assert!(lifecycle
-            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
-            .is_none());
-        assert!(sink.degraded());
-        assert!(sink
-            .forensic_failures()
-            .iter()
-            .any(|line| line.contains("store.slot.transition.lookup")));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn fresh_process_configless_recycling_to_idle_recovers_durable_key() {
-        let root = unique_temp_dir("fresh-process-slot-recovery");
-        let config_dir = root.join("config");
-        fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-
-        let restarted = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        let recycling_key = restarted
-            .request_key_with_sink(Some(&sink), SlotPhase::Recycling)
-            .expect("durable predecessor recovers recycling key");
-        assert_eq!(recycling_key, "jit-agent-42-generation-7-recycling");
-        assert!(sink.transition_slot(
-            &restarted.slot_id,
-            restarted.slot_index,
-            restarted.generation,
-            &recycling_key,
-            SlotPhase::Recycling,
-            None,
-        ));
-
-        let idle_key = restarted
-            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-            .expect("durable recycling intent recovers idle key during configless gap");
-        assert_eq!(idle_key, "jit-agent-42-generation-7-idle");
-        assert!(sink.transition_slot(
-            &restarted.slot_id,
-            restarted.slot_index,
-            restarted.generation,
-            &idle_key,
-            SlotPhase::Idle,
-            None,
-        ));
-        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
-        assert_eq!(
-            reopened
-                .slot("test-instance", &restarted.slot_id)
-                .unwrap()
-                .unwrap()
-                .phase,
-            SlotPhase::Idle
-        );
-
-        fs::write(config_dir.join("runner.json"), b"{not-json").unwrap();
-        let invalid = DurableSlotLifecycle::new(
-            restarted.slot_id.clone(),
-            1,
-            restarted.generation,
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert!(invalid
-            .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-            .is_none());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn fresh_process_configless_rejects_skipping_recycling() {
-        let root = unique_temp_dir("fresh-process-slot-recovery-negative");
-        let config_dir = root.join("config");
-        fs::create_dir_all(&root).unwrap();
-        let sink =
-            crate::ops::OpsSink::open(root.join("state.db"), "test-instance".into()).unwrap();
-        let mut stored = stored_config();
-        stored.settings.agent_id = Some(42);
-        config::save(&config_dir, &stored).unwrap();
-
-        assert!(sink.transition_slot(
-            &SlotId("slot-1".into()),
-            0,
-            Generation(7),
-            "jit-agent-42-generation-7-teardown",
-            SlotPhase::Teardown,
-            None,
-        ));
-        fs::remove_file(config_dir.join("runner.json")).unwrap();
-
-        let restarted = DurableSlotLifecycle::new(
-            SlotId("slot-1".into()),
-            1,
-            Generation(7),
-            config_dir.clone(),
-        )
-        .unwrap();
-        assert!(
-            restarted
-                .request_key_with_sink(Some(&sink), SlotPhase::Idle)
-                .is_none(),
-            "configless recovery must not synthesize an illegal Teardown -> Idle edge"
-        );
-        let reopened = velnor_control::store::Store::open(root.join("state.db")).unwrap();
-        assert_eq!(
-            reopened
-                .slot("test-instance", &restarted.slot_id)
-                .unwrap()
-                .unwrap()
-                .phase,
-            SlotPhase::Teardown
-        );
-        assert_eq!(reopened.event_count("test-instance", "slot-1").unwrap(), 1);
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn recognizes_matching_job_cancellation_message() {
         let message = TaskAgentMessage {
             message_id: 7,
@@ -15670,7 +14662,6 @@ jobs:
         assert_eq!(action, V2MessageAction::None);
     }
 
-    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn transient_acquire_failure_keeps_broker_session_alive() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -16439,7 +15430,7 @@ runs:
             let size = stream.read(&mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..size]);
             assert!(request.contains(
-                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeef"
             ));
             let body =
                 "name: local\nruns:\n  using: composite\n  steps:\n    - uses: acme/unknown@v1\n";
@@ -16471,10 +15462,7 @@ runs:
         .unwrap();
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
-                "repository": "acme/repo",
-                "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-            }),
+            serde_json::json!({ "repository": "acme/repo", "workflow_sha": "deadbeef" }),
         )];
         let source =
             crate::admission::ContentsApiMetadataSource::new_for_test("token", api).unwrap();
@@ -16964,18 +15952,18 @@ runs:
         match value {
             serde_yaml::Value::Mapping(mapping) => {
                 for (key, value) in mapping {
-                    if key == "uses"
-                        && let Some(reference) = target_repository_uses(value)
-                    {
-                        references.insert(
-                            format!(
-                                "{}@{}:{}",
-                                reference.repository,
-                                reference.git_ref,
-                                reference.source_path.as_deref().unwrap_or("")
-                            ),
-                            reference,
-                        );
+                    if key == "uses" {
+                        if let Some(reference) = target_repository_uses(value) {
+                            references.insert(
+                                format!(
+                                    "{}@{}:{}",
+                                    reference.repository,
+                                    reference.git_ref,
+                                    reference.source_path.as_deref().unwrap_or("")
+                                ),
+                                reference,
+                            );
+                        }
                     }
                     collect_repository_uses(value, references);
                 }
@@ -17416,42 +16404,6 @@ runs:
     }
 
     #[test]
-    fn step_log_result_reports_success_for_continue_on_error_failure() {
-        // actions/runner parity (ExecutionContext.ApplyContinueOnError): a failed
-        // step with continue-on-error keeps outcome=failure internally but its
-        // reported timeline/Results-Service conclusion is success.
-        // Regression: jackin-project/jackin Hygiene run 33319391723.
-        use crate::executor::StepLog;
-        use crate::protocol::TaskResult;
-
-        let failed_ignored = StepLog {
-            step_id: "miri-step".to_string(),
-            display_name: "miri crate".to_string(),
-            order: 9,
-            started_at: "2026-08-30T16:43:00Z".to_string(),
-            completed_at: "2026-08-30T17:24:12Z".to_string(),
-            lines: vec!["error: test failed".to_string()],
-            masks: vec![],
-            annotations: vec![],
-            telemetry: vec![],
-            exit_code: 101,
-            skipped: false,
-            failure_ignored: true,
-            error_count: 1,
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        };
-        assert_eq!(step_log_result(&failed_ignored), TaskResult::Succeeded);
-
-        let failed_plain = StepLog {
-            failure_ignored: false,
-            ..failed_ignored.clone()
-        };
-        assert_eq!(step_log_result(&failed_plain), TaskResult::Failed);
-    }
-
-    #[test]
     fn run_service_step_result_uses_per_step_completed_at_not_job_finish() {
         // RunServiceStepResult.completed_at must come from StepLog.completed_at (the
         // actual step finish time), NOT from a single job-level completion_time.
@@ -17741,8 +16693,6 @@ runs:
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         }
     }
 
@@ -17807,7 +16757,8 @@ runs:
     }
 
     #[cfg(unix)]
-    fn abandoned_precreated_environment_cleanup_takes_lease_impl() {
+    #[test]
+    fn abandoned_precreated_environment_cleanup_takes_lease() {
         // An unclaimed pre-created environment is cleaned up by Drop; the
         // pre-create thread's guard must be handed to that cleanup so the
         // proxy outlives the container removal (and is gone afterwards).
@@ -17817,6 +16768,7 @@ runs:
         // `docker rm --force` hangs for DEFAULT_STEP_TIMEOUT (6h). Point
         // docker CLI at a missing socket so cleanup fails fast as the
         // comment below assumed.
+        std::env::set_var("DOCKER_HOST", "unix:///tmp/velnor-test-no-docker.sock");
         let root = std::env::temp_dir().join(format!("velnor-lease-drop-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let (socket_dir, listen) = short_lease_socket("drop");
@@ -17845,30 +16797,6 @@ runs:
         );
         fs::remove_dir_all(&socket_dir).ok();
         fs::remove_dir_all(&root).ok();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn abandoned_precreated_environment_cleanup_takes_lease() {
-        let test_binary = std::env::current_exe().expect("test binary path");
-        let status = Command::new(test_binary)
-            .args([
-                "--exact",
-                "runner::tests::abandoned_precreated_environment_cleanup_takes_lease_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("DOCKER_HOST", "unix:///tmp/velnor-test-no-docker.sock")
-            .status()
-            .expect("spawn isolated cleanup test");
-        assert!(status.success(), "isolated cleanup test failed: {status}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "launched by abandoned_precreated_environment_cleanup_takes_lease"]
-    fn abandoned_precreated_environment_cleanup_takes_lease_child() {
-        abandoned_precreated_environment_cleanup_takes_lease_impl();
     }
 
     #[test]
@@ -18123,245 +17051,5 @@ runs:
             timeout_minutes: None,
         };
         reject_unguestable_steps(&[ExecutableStep::Checkout(plan)]).unwrap();
-    }
-
-    fn partial_step_log(step_id: &str, lines: &[&str], completed_at: &str) -> StepLog {
-        StepLog {
-            step_id: step_id.to_string(),
-            display_name: step_id.to_string(),
-            order: 1,
-            started_at: "2026-08-31T00:00:00.0000000Z".to_string(),
-            completed_at: completed_at.to_string(),
-            lines: lines.iter().map(|line| (*line).to_string()).collect(),
-            masks: Vec::new(),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: 0,
-            skipped: false,
-            failure_ignored: false,
-            error_count: 0,
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        }
-    }
-
-    #[test]
-    fn merged_partial_step_logs_fold_chunks_and_stamp_unfinished_steps() {
-        let streamed = vec![
-            partial_step_log("build", &["compiling a"], ""),
-            partial_step_log("build", &["compiling b"], ""),
-            partial_step_log("checkout", &["cloned"], "2026-08-31T00:00:01.0000000Z"),
-            // A late live chunk for a step whose final snapshot already
-            // landed must not duplicate its lines.
-            partial_step_log("checkout", &["cloned"], ""),
-        ];
-        let merged = merged_partial_step_logs(streamed);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].step_id, "build");
-        assert_eq!(merged[0].lines, vec!["compiling a", "compiling b"]);
-        assert!(
-            !merged[0].completed_at.is_empty(),
-            "unfinished step must be stamped at cancellation"
-        );
-        assert_eq!(merged[1].step_id, "checkout");
-        assert_eq!(merged[1].lines, vec!["cloned"]);
-        assert_eq!(merged[1].completed_at, "2026-08-31T00:00:01.0000000Z");
-    }
-
-    #[cfg(feature = "test-support")]
-    fn results_job(results_url: &str) -> crate::job_message::AgentJobRequestMessage {
-        serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan-1" },
-            "timeline": { "id": "timeline-1" },
-            "jobId": "job-1",
-            "jobDisplayName": "Log persistence",
-            "requestId": 1,
-            "resources": {
-                "endpoints": [{
-                    "name": "SystemVssConnection",
-                    "url": results_url,
-                    "authorization": { "parameters": { "AccessToken": "token" } },
-                    "data": { "ResultsServiceUrl": results_url }
-                }]
-            }
-        }))
-        .unwrap()
-    }
-
-    #[cfg(feature = "test-support")]
-    async fn mount_results_job_log_endpoint(
-        server: &wiremock::MockServer,
-        put_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
-    ) {
-        use wiremock::{matchers::method, Mock, ResponseTemplate};
-
-        let signed_url = format!("{}/blob/job-log", server.uri());
-        Mock::given(method("POST"))
-            .and(wiremock::matchers::path(
-                "/twirp/results.services.receiver.Receiver/GetJobLogsSignedBlobURL",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "logs_url": signed_url,
-            })))
-            .mount(server)
-            .await;
-        Mock::given(method("PUT"))
-            .and(wiremock::matchers::path("/blob/job-log"))
-            .respond_with(move |request: &wiremock::Request| {
-                put_bodies
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(request.body.clone());
-                ResponseTemplate::new(201)
-            })
-            .mount(server)
-            .await;
-        Mock::given(method("POST"))
-            .and(wiremock::matchers::path(
-                "/twirp/results.services.receiver.Receiver/CreateJobLogsMetadata",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-            })))
-            .mount(server)
-            .await;
-    }
-
-    #[cfg(feature = "test-support")]
-    #[tokio::test]
-    async fn failed_job_uploads_job_log_with_partial_content() {
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
-        let server = wiremock::MockServer::start().await;
-        let put_bodies = Arc::new(Mutex::new(Vec::new()));
-        mount_results_job_log_endpoint(&server, Arc::clone(&put_bodies)).await;
-
-        let job = results_job(&server.uri());
-        let client = crate::protocol::TwirpResultsClient::new(server.uri(), "token").unwrap();
-        let step_logs = vec![partial_step_log(
-            "velnor-pre-execution-pre_execution",
-            &[
-                "##[error]Velnor rejected this job before workflow execution.",
-                "phase: pre_execution",
-            ],
-            "2026-08-31T00:00:01.0000000Z",
-        )];
-        upload_results_job_log_with_client(&client, &job, &step_logs)
-            .await
-            .unwrap();
-
-        let bodies = put_bodies
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert_eq!(bodies.len(), 1, "job-log blob must be PUT exactly once");
-        let body = String::from_utf8(bodies[0].clone()).unwrap();
-        assert!(body.contains("##[error]Velnor rejected this job"), "{body}");
-        assert!(body.contains("phase: pre_execution"), "{body}");
-        server.verify().await;
-    }
-
-    #[cfg(feature = "test-support")]
-    #[tokio::test]
-    async fn canceled_job_uploads_merged_partial_step_logs() {
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
-        let server = wiremock::MockServer::start().await;
-        let put_bodies = Arc::new(Mutex::new(Vec::new()));
-        mount_results_job_log_endpoint(&server, Arc::clone(&put_bodies)).await;
-
-        let job = results_job(&server.uri());
-        let client = crate::protocol::TwirpResultsClient::new(server.uri(), "token").unwrap();
-        let step_logs = merged_partial_step_logs(vec![
-            partial_step_log("build", &["compiling a"], ""),
-            partial_step_log("build", &["compiling b"], ""),
-        ]);
-        upload_results_job_log_with_client(&client, &job, &step_logs)
-            .await
-            .unwrap();
-
-        let bodies = put_bodies
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        assert_eq!(bodies.len(), 1);
-        let body = String::from_utf8(bodies[0].clone()).unwrap();
-        assert!(body.contains("compiling a"), "{body}");
-        assert!(body.contains("compiling b"), "{body}");
-        server.verify().await;
-    }
-
-    #[cfg(feature = "test-support")]
-    #[tokio::test]
-    async fn failed_job_log_upload_warns_and_does_not_panic() {
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        #[derive(Clone, Default)]
-        struct WarnCapture(Arc<Mutex<Vec<String>>>);
-        struct FieldVisitor {
-            text: String,
-        }
-        impl tracing::field::Visit for FieldVisitor {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                use std::fmt::Write as _;
-                let _ = write!(self.text, "{}={:?} ", field.name(), value);
-            }
-        }
-        impl<S> tracing_subscriber::Layer<S> for WarnCapture
-        where
-            S: tracing::Subscriber,
-        {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() == tracing::Level::WARN {
-                    let mut visitor = FieldVisitor {
-                        text: String::new(),
-                    };
-                    event.record(&mut visitor);
-                    self.0
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .push(visitor.text);
-                }
-            }
-        }
-
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .respond_with(wiremock::ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
-
-        let capture = WarnCapture::default();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
-        let _guard = tracing::subscriber::set_default(subscriber);
-
-        let job = results_job(&server.uri());
-        let step_logs = vec![partial_step_log(
-            "build",
-            &["partial output"],
-            "2026-08-31T00:00:01.0000000Z",
-        )];
-        // Best-effort: the upload fails against the 500 endpoint, but the
-        // wrapper must surface a daemon-visible warn and never panic.
-        upload_results_job_log(&job, &step_logs).await;
-
-        let warns = capture
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(
-            warns
-                .iter()
-                .any(|text| text.contains("blob_kind=\"job-log\"") && text.contains("job-1")),
-            "expected a job-log upload warning, got: {warns:?}"
-        );
     }
 }

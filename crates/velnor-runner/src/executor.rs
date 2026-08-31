@@ -29,12 +29,16 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc::UnboundedSender;
+use velnor_action_model::{
+    canonical_json_bytes, ActionKey, ActionTiming, Digest as ActionDigest, ExecutionPolicy,
+    PlatformIdentity, ProducerLease, Provenance, TrustClass,
+};
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -62,6 +66,8 @@ const MAX_CACHE_LOOKUP_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_ARTIFACT_MATERIALIZE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_TEST_END_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_COMPILE_TELEMETRY_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_COMPILER_CACHE_INPUT_FILES: usize = 100_000;
+const MAX_COMPILER_CACHE_INPUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PREPARED_ARTIFACT_SHA256_PREFIX: &str = "sha256:";
 const CACHE_GLOB_MAX_MATCHES: usize = 100_000;
 const CACHE_GLOB_MAX_VISITED_ENTRIES: usize = 1_000_000;
@@ -134,6 +140,39 @@ fn compile_command_kind(script: &str) -> Option<&'static str> {
         .next()
 }
 
+fn cacheable_compile_command_kind(script: &str) -> Option<&'static str> {
+    let mut lines = script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let line = lines.next()?;
+    if lines.next().is_some()
+        || line.contains([
+            ';', '|', '&', '\\', '>', '<', '$', '`', '(', ')', '*', '?', '{', '}', '!',
+        ])
+    {
+        return None;
+    }
+    let mut tokens = line.split_whitespace().peekable();
+    while let Some(token) = tokens.peek().copied() {
+        if token == "sudo" {
+            return None;
+        }
+        if token == "env" || token.contains('=') {
+            if token.starts_with("CARGO_TARGET_DIR=") {
+                return None;
+            }
+            tokens.next();
+        } else {
+            break;
+        }
+    }
+    match (tokens.next()?, tokens.next()?) {
+        ("cargo", "build" | "check" | "clippy" | "rustc") => Some("cargo"),
+        _ => None,
+    }
+}
+
 /// Return a stable linker label only when a shell segment starts with an
 /// explicit command whose successful completion includes linking. Do not
 /// infer a link boundary from test or check commands.
@@ -159,6 +198,653 @@ fn link_command_kind(script: &str) -> Option<&'static str> {
             }
         })
         .next()
+}
+
+#[derive(Debug, Serialize)]
+struct CompilerTreeEntry {
+    kind: &'static str,
+    digest: ActionDigest,
+    mode: u32,
+}
+
+pub(crate) fn compiler_cache_trust_class(trust_scope: &str) -> TrustClass {
+    match trust_scope.trim().to_ascii_lowercase().as_str() {
+        "release" => TrustClass::Release,
+        "trusted" => TrustClass::Trusted,
+        _ => TrustClass::Untrusted,
+    }
+}
+
+fn immutable_container_image_digest(image: &str) -> Result<ActionDigest> {
+    let Some((_, digest)) = image.rsplit_once('@') else {
+        bail!("compiler-cache requires an immutable container image digest: {image}");
+    };
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        bail!("compiler-cache requires a sha256 container image digest: {image}");
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("compiler-cache image digest is not a valid sha256: {image}");
+    }
+    Ok(ActionDigest::from_bytes(image.as_bytes()))
+}
+
+fn compiler_cache_action_key(
+    container: &JobContainerSpec,
+    plan: &ScriptStepPlan,
+    compiler: &str,
+    env: &[(String, String)],
+    trust_scope: &str,
+    timeout: Duration,
+) -> Result<ActionKey> {
+    let script = fs::read_to_string(&plan.script_host_path).with_context(|| {
+        format!(
+            "read compiler-cache script {}",
+            plan.script_host_path.display()
+        )
+    })?;
+    let command_digest = ActionDigest::from_bytes(&canonical_json_bytes(&serde_json::json!({
+        "compiler": compiler,
+        "script": script,
+        "shell": format!("{:?}", plan.shell),
+        "working_directory": plan.working_directory_container,
+    }))?);
+    let input_root = digest_workspace_tree(&container.workspace_host, true)?;
+    let image = container.image.trim();
+    let image_digest = immutable_container_image_digest(image)?;
+    let execution_options = container
+        .options
+        .iter()
+        .chain(container.resource_options.iter())
+        .collect::<Vec<_>>();
+    let network = container.network.trim() != "none";
+    let privileged = execution_options
+        .iter()
+        .any(|option| matches!(option.as_str(), "--privileged" | "--privileged=true"));
+    let toolchain_digest = ActionDigest::from_bytes(&canonical_json_bytes(&serde_json::json!({
+        "image": image,
+        "compiler": compiler,
+        "backend": format!("{:?}", container.compiler_cache_backend),
+        "execution_options": execution_options,
+    }))?);
+    let environment_digest =
+        ActionDigest::from_bytes(&canonical_json_bytes(&compiler_cache_environment(env))?);
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    Ok(ActionKey {
+        command_digest,
+        input_root,
+        image_digest,
+        toolchain_digest,
+        platform: compiler_cache_platform(container)?,
+        environment_digest,
+        dependency_outputs: Vec::new(),
+        execution_policy: ExecutionPolicy {
+            trust_class: compiler_cache_trust_class(trust_scope),
+            network,
+            privileged,
+            timeout_ms,
+            adoptable: false,
+        },
+    })
+}
+
+fn compiler_cache_environment(env: &[(String, String)]) -> Vec<(String, String)> {
+    // These paths are recreated for each step and are consumed by the
+    // runner's workflow-command protocol, not by the compiler. Keeping them
+    // out of the action identity preserves cross-job reuse without dropping
+    // any user-controlled compiler flags or toolchain variables.
+    const WORKFLOW_COMMAND_ENV: [&str; 6] = [
+        "GITHUB_ENV",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_STATE",
+        "GITHUB_STEP_SUMMARY",
+    ];
+    let mut canonical = BTreeMap::new();
+    for (name, value) in env {
+        if !WORKFLOW_COMMAND_ENV.contains(&name.as_str()) {
+            canonical.insert(name.clone(), value.clone());
+        }
+    }
+    canonical.into_iter().collect()
+}
+
+fn compiler_cache_platform(container: &JobContainerSpec) -> Result<PlatformIdentity> {
+    let options = container
+        .options
+        .iter()
+        .chain(container.resource_options.iter());
+    let mut requested: Option<String> = None;
+    let mut options = options.peekable();
+    while let Some(option) = options.next() {
+        if let Some(value) = option.strip_prefix("--platform=") {
+            requested = Some(value.to_string());
+        } else if option == "--platform" {
+            requested = Some(
+                options
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("compiler-cache platform value is missing"))?
+                    .to_string(),
+            );
+        }
+    }
+    let platform = requested.unwrap_or_else(|| format!("linux/{}", std::env::consts::ARCH));
+    let (os, arch) = platform
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("compiler-cache platform must be OS/architecture"))?;
+    if os.is_empty() || arch.is_empty() || arch.contains('/') {
+        bail!("compiler-cache platform must be OS/architecture");
+    }
+    Ok(PlatformIdentity::new(os, arch, None))
+}
+
+fn compiler_cache_output_root(
+    container: &JobContainerSpec,
+    plan: &ScriptStepPlan,
+    compiler: &str,
+    env: &[(String, String)],
+) -> Option<PathBuf> {
+    if compiler != "cargo" {
+        // Go may write an arbitrary `-o` path or mutate the working tree. Do
+        // not publish until its output-root contract is explicit.
+        return None;
+    }
+    let script = fs::read_to_string(&plan.script_host_path).ok()?;
+    if script.contains("--target-dir")
+        || script.contains("--manifest-path")
+        || script.contains("CARGO_TARGET_DIR=")
+    {
+        // The executor cannot prove the output directory for these forms
+        // without a shell-aware Cargo argument parser. Refuse publication
+        // rather than fingerprinting an unrelated target tree.
+        return None;
+    }
+    let working_directory = host_workspace_path(container, &plan.working_directory_container)?;
+    let target = env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "CARGO_TARGET_DIR")
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            if !Path::new(value).is_absolute()
+                && value
+                    .split('/')
+                    .any(|component| component.is_empty() || component == "." || component == "..")
+            {
+                return None;
+            }
+            if value == "/__w" || value.starts_with("/__w/") {
+                host_workspace_path(container, value)
+            } else if Path::new(value).is_absolute() {
+                None
+            } else {
+                Some(working_directory.join(value))
+            }
+        });
+    let target = target.unwrap_or_else(|| working_directory.join("target"));
+    if !target.starts_with(&container.workspace_host)
+        || target == container.workspace_host
+        || has_symlink_ancestor(&container.workspace_host, &target)
+    {
+        return None;
+    }
+    Some(target)
+}
+
+fn has_symlink_ancestor(root: &Path, candidate: &Path) -> bool {
+    let Ok(relative) = candidate.strip_prefix(root) else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    if fs::symlink_metadata(&current)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(true)
+    {
+        return true;
+    }
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return true;
+        };
+        current.push(name);
+        if fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn host_workspace_path(container: &JobContainerSpec, container_path: &str) -> Option<PathBuf> {
+    let relative = if container_path == "/__w" {
+        ""
+    } else {
+        container_path.strip_prefix("/__w/")?
+    };
+    if relative
+        .split('/')
+        .any(|component| component.is_empty() || component == "..")
+    {
+        return None;
+    }
+    Some(if relative.is_empty() {
+        container.workspace_host.clone()
+    } else {
+        container.workspace_host.join(relative)
+    })
+}
+
+fn digest_workspace_tree(root: &Path, exclude_generated: bool) -> Result<ActionDigest> {
+    let mut entries = BTreeMap::new();
+    let mut budget = CompilerInputBudget::default();
+    #[cfg(unix)]
+    {
+        let root_dir = open_workspace_directory(root)?;
+        if !root_dir.metadata()?.is_dir() {
+            bail!(
+                "compiler-cache input root is not a regular directory: {}",
+                root.display()
+            );
+        }
+        collect_workspace_digest_entries_secure(
+            root,
+            root,
+            &root_dir,
+            exclude_generated,
+            &mut entries,
+            &mut budget,
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        if !root.is_dir() || fs::symlink_metadata(root)?.file_type().is_symlink() {
+            bail!(
+                "compiler-cache input root is not a regular directory: {}",
+                root.display()
+            );
+        }
+        collect_workspace_digest_entries(root, root, exclude_generated, &mut entries, &mut budget)?;
+    }
+    Ok(ActionDigest::from_bytes(&canonical_json_bytes(&entries)?))
+}
+
+#[cfg(unix)]
+fn workspace_directory_flags() -> rustix::fs::OFlags {
+    rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+}
+
+#[cfg(unix)]
+fn open_workspace_directory(root: &Path) -> Result<fs::File> {
+    let base = if root.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut current = fs::File::from(
+        rustix::fs::open(base, workspace_directory_flags(), rustix::fs::Mode::empty())
+            .map_err(std::io::Error::from)
+            .with_context(|| format!("open compiler-cache input base {}", base.display()))?,
+    );
+    for component in root.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                current = fs::File::from(
+                    rustix::fs::openat(
+                        &current,
+                        name,
+                        workspace_directory_flags(),
+                        rustix::fs::Mode::empty(),
+                    )
+                    .map_err(std::io::Error::from)
+                    .with_context(|| {
+                        format!("open compiler-cache input directory {}", root.display())
+                    })?,
+                );
+            }
+            std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
+                bail!("compiler-cache input root contains a non-normal path component")
+            }
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn collect_workspace_digest_entries_secure(
+    root: &Path,
+    current: &Path,
+    current_dir: &fs::File,
+    exclude_generated: bool,
+    entries: &mut BTreeMap<String, CompilerTreeEntry>,
+    budget: &mut CompilerInputBudget,
+) -> Result<()> {
+    let mut children = fs::read_dir(current)
+        .with_context(|| format!("read compiler-cache digest root {}", current.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.file_name());
+    let directory_flags = workspace_directory_flags();
+    let file_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+        | rustix::fs::OFlags::NONBLOCK;
+    for entry in children {
+        let name = entry.file_name();
+        let path = current.join(&name);
+        let relative = path
+            .strip_prefix(root)
+            .with_context(|| format!("strip compiler-cache digest path {}", path.display()))?;
+        if exclude_generated
+            && relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(name) if name == ".git" || name == "target"
+                )
+            })
+        {
+            continue;
+        }
+        let relative_key = relative.to_string_lossy().replace('\\', "/");
+        match rustix::fs::openat(
+            current_dir,
+            &name,
+            directory_flags,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(child_dir) => {
+                let child_dir: fs::File = child_dir.into();
+                collect_workspace_digest_entries_secure(
+                    root,
+                    &path,
+                    &child_dir,
+                    exclude_generated,
+                    entries,
+                    budget,
+                )?;
+            }
+            Err(error) if error == rustix::io::Errno::NOTDIR => {
+                let mut file: fs::File =
+                    rustix::fs::openat(current_dir, &name, file_flags, rustix::fs::Mode::empty())
+                        .map_err(std::io::Error::from)
+                        .with_context(|| format!("open compiler-cache input {}", path.display()))?
+                        .into();
+                let metadata = file.metadata()?;
+                if !metadata.is_file() {
+                    bail!("unsupported compiler-cache digest entry {}", path.display());
+                }
+                if metadata.len() > MAX_COMPILER_CACHE_INPUT_BYTES {
+                    bail!(
+                        "compiler-cache input file exceeds {MAX_COMPILER_CACHE_INPUT_BYTES} bytes: {}",
+                        path.display()
+                    );
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                budget.account(&path, bytes.len() as u64)?;
+                entries.insert(
+                    relative_key,
+                    CompilerTreeEntry {
+                        kind: "file",
+                        digest: ActionDigest::from_bytes(&bytes),
+                        mode: metadata.permissions().mode() & 0o777,
+                    },
+                );
+            }
+            Err(error) if error == rustix::io::Errno::LOOP => {
+                bail!(
+                    "compiler-cache input symlink is not admitted: {}",
+                    path.display()
+                )
+            }
+            Err(error) => {
+                return Err(std::io::Error::from(error))
+                    .with_context(|| format!("open compiler-cache input {}", path.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn collect_workspace_digest_entries(
+    root: &Path,
+    current: &Path,
+    exclude_generated: bool,
+    entries: &mut BTreeMap<String, CompilerTreeEntry>,
+    budget: &mut CompilerInputBudget,
+) -> Result<()> {
+    let mut children = fs::read_dir(current)
+        .with_context(|| format!("read compiler-cache digest root {}", current.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    children.sort_by_key(|entry| entry.path());
+    for entry in children {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .with_context(|| format!("strip compiler-cache digest path {}", path.display()))?;
+        let relative_key = relative.to_string_lossy().replace('\\', "/");
+        let file_type = fs::symlink_metadata(&path)?.file_type();
+        if file_type.is_dir() {
+            if exclude_generated
+                && relative
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::Normal(name) if name == ".git" || name == "target"))
+            {
+                continue;
+            }
+            collect_workspace_digest_entries(root, &path, exclude_generated, entries, budget)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            if file_type.is_symlink() {
+                bail!(
+                    "compiler-cache input symlink is not admitted: {}",
+                    path.display()
+                );
+            }
+            bail!("unsupported compiler-cache digest entry {}", path.display());
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.len() > MAX_COMPILER_CACHE_INPUT_BYTES {
+            bail!(
+                "compiler-cache input file exceeds {MAX_COMPILER_CACHE_INPUT_BYTES} bytes: {}",
+                path.display()
+            );
+        }
+        let bytes = fs::read(&path)?;
+        budget.account(&path, bytes.len() as u64)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        #[cfg(unix)]
+        let mode = metadata.permissions().mode() & 0o777;
+        #[cfg(not(unix))]
+        let mode = 0o644;
+        entries.insert(
+            relative_key,
+            CompilerTreeEntry {
+                kind: "file",
+                digest: ActionDigest::from_bytes(&bytes),
+                mode,
+            },
+        );
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct CompilerInputBudget {
+    files: usize,
+    bytes: u64,
+}
+
+impl CompilerInputBudget {
+    fn account(&mut self, path: &Path, bytes: u64) -> Result<()> {
+        self.files = self
+            .files
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("compiler-cache input file count overflow"))?;
+        if self.files > MAX_COMPILER_CACHE_INPUT_FILES {
+            bail!(
+                "compiler-cache input exceeds {MAX_COMPILER_CACHE_INPUT_FILES} files at {}",
+                path.display()
+            );
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("compiler-cache input byte count overflow"))?;
+        if self.bytes > MAX_COMPILER_CACHE_INPUT_BYTES {
+            bail!(
+                "compiler-cache input exceeds {MAX_COMPILER_CACHE_INPUT_BYTES} bytes at {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+struct CompilerCacheLease {
+    service: Arc<velnor_cache_service::ProductionCompilerCache>,
+    lease: Option<ProducerLease>,
+    heartbeat_control: Arc<(Mutex<bool>, Condvar)>,
+    heartbeat_error: Arc<Mutex<Option<String>>>,
+    heartbeat: Option<thread::JoinHandle<()>>,
+}
+
+impl CompilerCacheLease {
+    fn begin(
+        service: Arc<velnor_cache_service::ProductionCompilerCache>,
+        key: &ActionKey,
+    ) -> Result<Self> {
+        let lease = service.begin_sync(key)?;
+        let heartbeat_control = Arc::new((Mutex::new(false), Condvar::new()));
+        let heartbeat_error = Arc::new(Mutex::new(None));
+        let heartbeat_service = Arc::clone(&service);
+        let heartbeat_control_thread = Arc::clone(&heartbeat_control);
+        let heartbeat_error_thread = Arc::clone(&heartbeat_error);
+        let mut heartbeat_lease = lease.clone();
+        let heartbeat_every = Duration::from_millis(heartbeat_lease.heartbeat_every.max(1));
+        let heartbeat = match thread::Builder::new()
+            .name("velnor-compiler-cache-heartbeat".into())
+            .spawn(move || loop {
+                let (stop, wake) = &*heartbeat_control_thread;
+                let guard = match stop.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => break,
+                };
+                let (guard, _) =
+                    match wake.wait_timeout_while(guard, heartbeat_every, |stop| !*stop) {
+                        Ok(result) => result,
+                        Err(_) => break,
+                    };
+                if *guard {
+                    break;
+                }
+                drop(guard);
+                if let Err(error) = heartbeat_service.renew_sync(&mut heartbeat_lease) {
+                    if let Ok(mut slot) = heartbeat_error_thread.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                    break;
+                }
+            }) {
+            Ok(heartbeat) => heartbeat,
+            Err(error) => {
+                if let Err(cleanup_error) = service.abandon_sync(&lease) {
+                    eprintln!(
+                        "forensics.lifecycle: compiler cache heartbeat spawn cleanup failed: {cleanup_error}"
+                    );
+                }
+                return Err(error).context("spawn compiler-cache lease heartbeat");
+            }
+        };
+        Ok(Self {
+            service,
+            lease: Some(lease),
+            heartbeat_control,
+            heartbeat_error,
+            heartbeat: Some(heartbeat),
+        })
+    }
+
+    fn stop_heartbeat(&mut self) -> Result<()> {
+        if let Ok(mut stop) = self.heartbeat_control.0.lock() {
+            *stop = true;
+            self.heartbeat_control.1.notify_all();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat
+                .join()
+                .map_err(|panic| anyhow::anyhow!("compiler-cache heartbeat panicked: {panic:?}"))?;
+        }
+        if let Some(error) = self
+            .heartbeat_error
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            bail!("compiler-cache lease heartbeat failed: {error}");
+        }
+        Ok(())
+    }
+
+    fn abandon(mut self) -> Result<()> {
+        let heartbeat = self.stop_heartbeat();
+        let abandon = if let Some(lease) = self.lease.take() {
+            self.service
+                .abandon_sync(&lease)
+                .map_err(anyhow::Error::from)
+        } else {
+            Ok(())
+        };
+        match (heartbeat, abandon) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(heartbeat), Ok(())) => Err(heartbeat),
+            (Ok(()), Err(abandon)) => Err(abandon),
+            (Err(heartbeat), Err(abandon)) => Err(anyhow::anyhow!(
+                "compiler-cache heartbeat failed: {heartbeat:#}; lease abandonment failed: {abandon:#}"
+            )),
+        }
+    }
+
+    fn publish(mut self, result: velnor_cache_service::CompilerResult) -> Result<()> {
+        let heartbeat = self.stop_heartbeat();
+        let Some(lease) = self.lease.take() else {
+            return heartbeat.and(Ok(()));
+        };
+        if let Err(error) = heartbeat {
+            if let Err(cleanup_error) = self.service.abandon_sync(&lease) {
+                eprintln!(
+                    "forensics.lifecycle: compiler cache heartbeat cleanup failed: {cleanup_error}"
+                );
+            }
+            return Err(error);
+        }
+        let outcome = self.service.publish_sync(lease, result);
+        outcome.map_err(anyhow::Error::from)
+    }
+}
+
+impl Drop for CompilerCacheLease {
+    fn drop(&mut self) {
+        if let Ok(mut stop) = self.heartbeat_control.0.lock() {
+            *stop = true;
+            self.heartbeat_control.1.notify_all();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            let _ = heartbeat.join();
+        }
+        if let Some(lease) = self.lease.take() {
+            if let Err(error) = self.service.abandon_sync(&lease) {
+                eprintln!("forensics.lifecycle: compiler cache lease abandon failed: {error}");
+            }
+        }
+    }
 }
 
 fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
@@ -324,46 +1010,6 @@ pub fn render_context_expressions(value: &str, context_data: &[(String, Value)])
     JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
 }
 
-pub(crate) fn render_context_expressions_bounded(
-    value: &str,
-    context_data: &[(String, Value)],
-) -> String {
-    if !expression_within_budget(value) {
-        return value.to_string();
-    }
-    render_context_expressions(value, context_data)
-}
-
-fn expression_within_budget(value: &str) -> bool {
-    const MAX_BYTES: usize = 64 * 1024;
-    const MAX_DEPTH: usize = 64;
-    const MAX_OPERATORS: usize = 1024;
-    if value.len() > MAX_BYTES {
-        return false;
-    }
-    let mut depth = 0usize;
-    let mut operators = 0usize;
-    for byte in value.bytes() {
-        match byte {
-            b'(' => {
-                depth = depth.saturating_add(1);
-                if depth > MAX_DEPTH {
-                    return false;
-                }
-            }
-            b')' => depth = depth.saturating_sub(1),
-            b'&' | b'|' | b'=' | b'!' => {
-                operators = operators.saturating_add(1);
-                if operators > MAX_OPERATORS {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    true
-}
-
 pub fn render_expressions_with_context(
     value: &str,
     base_env: &[(String, String)],
@@ -466,18 +1112,18 @@ impl CommandRunner for ProcessCommandRunner {
         } else {
             None
         };
-        if let Some(claim) = rm_claim.as_ref()
-            && claim.ids.is_empty()
-        {
-            return Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            });
+        if let Some(claim) = rm_claim.as_ref() {
+            if claim.ids.is_empty() {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
         }
         let claimed_args = rm_claim
             .as_ref()
-            .map(|claim| crate::docker_lease::container_rm_args_with_claimed_ids(args, &claim.ids));
+            .map(|claim| crate::docker_lease::force_remove_container_args(&claim.ids));
         let args = claimed_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
         command
@@ -1250,11 +1896,8 @@ pub(crate) struct DockerJobEngine<R> {
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
     docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
-    /// Armed when the job network is created, defused once terminal cleanup
-    /// removed it. Drop then removes the network, so no executor exit path can
-    /// leak a `velnor-net-*` network (address-pool exhaustion class).
-    job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
+    compiler_cache: Option<Arc<velnor_cache_service::ProductionCompilerCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1283,8 +1926,8 @@ where
             live_step: None,
             job_environment_started: false,
             docker_lease: None,
-            job_network_guard: None,
             lifecycle_telemetry: None,
+            compiler_cache: None,
         }
     }
 
@@ -1339,6 +1982,14 @@ where
         admission: crate::ops::JobAdmission,
     ) -> Self {
         self.lifecycle_telemetry = Some(LifecycleTelemetry { sink, admission });
+        self
+    }
+
+    pub(crate) fn with_compiler_cache(
+        mut self,
+        service: Arc<velnor_cache_service::ProductionCompilerCache>,
+    ) -> Self {
+        self.compiler_cache = Some(service);
         self
     }
 
@@ -1757,114 +2408,74 @@ where
                 timeout_minutes,
                 ..
             } = step
-                && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
-                && step_state.evaluate_post_condition(invocation.pre_condition.as_deref())
             {
-                if invocation.post_container_path.is_some() {
-                    post_actions.push(PostJavaScriptAction {
-                        step_id: step_id.clone(),
-                        display_name: display_name.clone(),
-                        invocation: invocation.clone(),
-                        condition: invocation.post_condition.clone(),
-                        continue_on_error: *continue_on_error,
-                        timeout_minutes: *timeout_minutes,
-                        umbrella_display: composite_frame
-                            .as_ref()
-                            .map(|frame| frame.display_name.clone()),
-                    });
-                    post_registered = true;
+                if let Some(pre_container_path) = invocation.pre_container_path.as_deref() {
+                    if step_state.evaluate_post_condition(invocation.pre_condition.as_deref()) {
+                        if invocation.post_container_path.is_some() {
+                            post_actions.push(PostJavaScriptAction {
+                                step_id: step_id.clone(),
+                                display_name: display_name.clone(),
+                                invocation: invocation.clone(),
+                                condition: invocation.post_condition.clone(),
+                                continue_on_error: *continue_on_error,
+                                timeout_minutes: *timeout_minutes,
+                                umbrella_display: composite_frame
+                                    .as_ref()
+                                    .map(|frame| frame.display_name.clone()),
+                            });
+                            post_registered = true;
+                        }
+                        let pre_step_id = uuid::Uuid::new_v4().to_string();
+                        let pre_started_at = if composite_frame.is_none() {
+                            self.emit_step_started(
+                                pre_step_id.clone(),
+                                &display_name,
+                                &mut timeline_order,
+                            )
+                        } else {
+                            unix_now_rfc3339()
+                        };
+                        let mut result = self.execute_javascript_action_in_started_container(
+                            container,
+                            step_id,
+                            invocation,
+                            pre_container_path,
+                            &step_state.action_state_env(step_id),
+                            temp_host,
+                            &step_state,
+                            effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
+                        )?;
+                        let failed = result.exit_code != 0;
+                        if failed && *continue_on_error {
+                            result.failure_ignored = true;
+                        }
+                        if let Some(frame) = composite_frame.as_mut() {
+                            frame.append_inner(
+                                &display_name,
+                                &step_log_prelude(step, &step_state),
+                                &result,
+                            );
+                        } else {
+                            let log = step_log_with_name(
+                                &pre_step_id,
+                                &display_name,
+                                timeline_order,
+                                &pre_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &step_log_prelude(step, &step_state),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                        }
+                        state.apply(step_id, &result);
+                        executed_physical_actions += 1;
+                        results.push(result);
+                        if failed {
+                            continue;
+                        }
+                    }
                 }
-                let pre_step_id = uuid::Uuid::new_v4().to_string();
-                let pre_started_at = if composite_frame.is_none() {
-                    self.emit_step_started(pre_step_id.clone(), &display_name, &mut timeline_order)
-                } else {
-                    unix_now_rfc3339()
-                };
-                let mut result = self.execute_javascript_action_in_started_container(
-                    container,
-                    step_id,
-                    invocation,
-                    pre_container_path,
-                    &step_state.action_state_env(step_id),
-                    temp_host,
-                    &step_state,
-                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                )?;
-                let failed = result.exit_code != 0;
-                if failed && *continue_on_error {
-                    result.failure_ignored = true;
-                }
-                if let Some(frame) = composite_frame.as_mut() {
-                    frame.append_inner(
-                        &display_name,
-                        &step_log_prelude(step, &step_state),
-                        &result,
-                    );
-                } else {
-                    let log = step_log_with_name(
-                        &pre_step_id,
-                        &display_name,
-                        timeline_order,
-                        &pre_started_at,
-                        &unix_now_rfc3339(),
-                        &result,
-                        &step_log_prelude(step, &step_state),
-                    );
-                    self.emit_step_log(&log);
-                    step_logs.push(log);
-                }
-                state.apply(step_id, &result);
-                executed_physical_actions += 1;
-                results.push(result);
-                if failed {
-                    continue;
-                }
-            }
-            // Queue post actions before main execution. Registration is part of
-            // the action lifecycle, not a consequence of a successful main
-            // result: the Err arm below must still be able to run cleanup when
-            // continue-on-error converts an execution error into a step result.
-            if !post_registered
-                && let ExecutableStep::JavaScript {
-                    invocation,
-                    continue_on_error,
-                    timeout_minutes,
-                    ..
-                } = step
-                && invocation.post_container_path.is_some()
-            {
-                post_actions.push(PostJavaScriptAction {
-                    step_id: step_context_id.clone(),
-                    display_name: display_name.clone(),
-                    invocation: invocation.clone(),
-                    condition: invocation.post_condition.clone(),
-                    continue_on_error: *continue_on_error,
-                    timeout_minutes: *timeout_minutes,
-                    umbrella_display: composite_frame
-                        .as_ref()
-                        .map(|frame| frame.display_name.clone()),
-                });
-            }
-            if let ExecutableStep::Native {
-                invocation,
-                continue_on_error,
-                timeout_minutes,
-                ..
-            } = step
-                && let Some(condition) =
-                    native_post_condition(invocation.adapter, invocation.cache_kind)
-            {
-                native_post_actions.push(PostNativeAction {
-                    step_id: step_context_id.clone(),
-                    display_name: display_name.clone(),
-                    invocation: invocation.clone(),
-                    condition: Some(condition.to_string()),
-                    continue_on_error: *continue_on_error,
-                    timeout_minutes: *timeout_minutes,
-                    umbrella_display: composite_frame
-                        .as_ref()
-                        .map(|frame| frame.display_name.clone()),
-                });
             }
             let step_state = state.with_step_action(&step_context_id);
             let main_started_at = if composite_frame.is_none() && step.reports_timeline_start() {
@@ -1935,13 +2546,80 @@ where
                             &live_masks,
                         );
                     };
-                    let compile_started = match (compiler, self.lifecycle_telemetry.as_ref()) {
-                        (Some(compiler), Some(telemetry)) => {
-                            telemetry.emit_compile_start(compiler);
-                            Some(Instant::now())
+                    let step_timeout =
+                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
+                    let cacheable_compiler = cacheable_compile_command_kind(&step.script);
+                    let compiler_output_root = cacheable_compiler.and_then(|compiler| {
+                        compiler_cache_output_root(container, &plan, compiler, &env)
+                    });
+                    let mut compiler_cache_lease = None;
+                    // A mutable tag cannot identify the compiler toolchain.
+                    // Keep the normal Docker execution path for it; only an
+                    // immutable image can enter the durable result cache.
+                    let immutable_image =
+                        immutable_container_image_digest(container.image.trim()).is_ok();
+                    if immutable_image {
+                        if let (Some(compiler), Some(output_root), Some(service)) = (
+                            cacheable_compiler,
+                            compiler_output_root,
+                            self.compiler_cache.as_ref(),
+                        ) {
+                            match compiler_cache_action_key(
+                                container,
+                                &plan,
+                                compiler,
+                                &env,
+                                &self.trust_scope,
+                                step_timeout,
+                            ) {
+                                Ok(key) => match service.lookup_sync(&key) {
+                                    Ok(Some(hit)) => {
+                                        if let Err(error) = service
+                                            .materialize_output_tree(&hit.output_root, &output_root)
+                                        {
+                                            eprintln!(
+                                                "forensics.lifecycle: compiler-cache hit rejected; running compiler: {error}"
+                                            );
+                                        }
+                                        // Restoring a warm target tree is only a
+                                        // seed. Cargo still runs so build scripts
+                                        // and proc macros retain normal effects.
+                                    }
+                                    Ok(None) => match CompilerCacheLease::begin(
+                                        Arc::clone(service),
+                                        &key,
+                                    ) {
+                                        Ok(lease) => {
+                                            compiler_cache_lease = Some((lease, output_root, key));
+                                        }
+                                        Err(error) => eprintln!(
+                                            "forensics.lifecycle: compiler-cache lease admission refused; running compiler: {error:#}"
+                                        ),
+                                    },
+                                    Err(error) => eprintln!(
+                                        "forensics.lifecycle: compiler-cache lookup refused; running compiler: {error}"
+                                    ),
+                                },
+                                Err(error) => eprintln!(
+                                    "forensics.lifecycle: compiler-cache key admission refused; running compiler: {error:#}"
+                                ),
+                            }
                         }
-                        _ => None,
-                    };
+                    }
+                    let compile_started_at_ms = compiler.map(|_| {
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX)
+                    });
+                    let compile_started = compiler.map(|compiler| {
+                        if let Some(telemetry) = self.lifecycle_telemetry.as_ref() {
+                            telemetry.emit_compile_start(compiler);
+                        }
+                        Instant::now()
+                    });
                     let link_started = match (linker, self.lifecycle_telemetry.as_ref()) {
                         (Some(_), Some(_)) => Some(Instant::now()),
                         _ => None,
@@ -1950,9 +2628,56 @@ where
                         "docker",
                         exec_args.args(),
                         exec_args.process_env(),
-                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
+                        step_timeout,
                         &mut on_output,
                     )?;
+                    if let Some((lease, output_root, key)) = compiler_cache_lease.take() {
+                        let cache_result = if step_result.code == 0 {
+                            match lease.service.store_output_tree(&output_root) {
+                                Ok(output_root) => lease.publish(velnor_cache_service::CompilerResult {
+                                    action_key: key.clone(),
+                                    output_root,
+                                    stdout_digest: ActionDigest::from_bytes(
+                                        step_result.stdout.as_bytes(),
+                                    ),
+                                    stderr_digest: ActionDigest::from_bytes(
+                                        step_result.stderr.as_bytes(),
+                                    ),
+                                    exit_code: step_result.code,
+                                    provenance: Provenance {
+                                        builder: container.daemon_id.clone(),
+                                        source_digest: key.input_root.clone(),
+                                        metadata: BTreeMap::from([(
+                                            "compiler".to_string(),
+                                            compiler.unwrap_or("unknown").to_string(),
+                                        )]),
+                                    },
+                                    timing: ActionTiming {
+                                        started_at_ms: compile_started_at_ms.unwrap_or_default(),
+                                        duration_ms: u64::try_from(
+                                            compile_started
+                                                .map(|started| started.elapsed().as_millis())
+                                                .unwrap_or_default(),
+                                        )
+                                        .unwrap_or(u64::MAX),
+                                        cpu_ms: None,
+                                    },
+                                }),
+                                Err(error) => lease.abandon().map_err(|abandon| {
+                                    anyhow::anyhow!(
+                                        "store compiler output failed: {error:#}; abandon failed: {abandon:#}"
+                                    )
+                                }),
+                            }
+                        } else {
+                            lease.abandon()
+                        };
+                        if let Err(error) = cache_result {
+                            eprintln!(
+                                "forensics.lifecycle: compiler-cache publication failed; preserving compiler result: {error:#}"
+                            );
+                        }
+                    }
                     if let (Some(compiler), Some(compile_started), Some(telemetry)) =
                         (compiler, compile_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -2050,6 +2775,50 @@ where
             match result {
                 Ok(mut result) => {
                     let failed = result.exit_code != 0;
+                    if let ExecutableStep::JavaScript {
+                        invocation,
+                        continue_on_error,
+                        timeout_minutes,
+                        ..
+                    } = step
+                    {
+                        if invocation.post_container_path.is_some() && !post_registered {
+                            post_actions.push(PostJavaScriptAction {
+                                step_id: step_context_id.clone(),
+                                display_name: display_name.clone(),
+                                invocation: invocation.clone(),
+                                condition: invocation.post_condition.clone(),
+                                continue_on_error: *continue_on_error,
+                                timeout_minutes: *timeout_minutes,
+                                umbrella_display: composite_frame
+                                    .as_ref()
+                                    .map(|frame| frame.display_name.clone()),
+                            });
+                        }
+                    }
+                    if let ExecutableStep::Native {
+                        invocation,
+                        continue_on_error,
+                        timeout_minutes,
+                        ..
+                    } = step
+                    {
+                        if let Some(condition) =
+                            native_post_condition(invocation.adapter, invocation.cache_kind)
+                        {
+                            native_post_actions.push(PostNativeAction {
+                                step_id: step_context_id.clone(),
+                                display_name: display_name.clone(),
+                                invocation: invocation.clone(),
+                                condition: Some(condition.to_string()),
+                                continue_on_error: *continue_on_error,
+                                timeout_minutes: *timeout_minutes,
+                                umbrella_display: composite_frame
+                                    .as_ref()
+                                    .map(|frame| frame.display_name.clone()),
+                            });
+                        }
+                    }
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
                     }
@@ -2086,54 +2855,8 @@ where
                     results.push(result);
                 }
                 Err(error) => {
-                    // actions/runner parity (RunStepAsync catch + ApplyContinueOnError):
-                    // a step that fails by throwing still honors
-                    // continue-on-error — outcome stays failure, the reported
-                    // conclusion is success, and the job runs remaining steps.
-                    if step.continue_on_error() {
-                        eprintln!(
-                            "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
-                        );
-                        let result = StepExecutionResult {
-                            exit_code: 1,
-                            state: StepCommandState::default(),
-                            skipped: false,
-                            failure_ignored: true,
-                            stdout: String::new(),
-                            stderr: format!("{error:#}"),
-                        };
-                        if let Some(frame) = composite_frame.as_mut() {
-                            if step.reports_timeline_start() {
-                                frame.append_inner(
-                                    &display_name,
-                                    &step_log_prelude(step, &step_state),
-                                    &result,
-                                );
-                            } else {
-                                frame.absorb(&result);
-                            }
-                        } else if step.reports_timeline_start() {
-                            let log = step_log_with_name(
-                                &step_backend_id,
-                                &display_name,
-                                timeline_order,
-                                &main_started_at,
-                                &unix_now_rfc3339(),
-                                &result,
-                                &step_log_prelude(step, &step_state),
-                            );
-                            self.emit_step_log(&log);
-                            step_logs.push(log);
-                        }
-                        state.apply(&step_context_id, &result);
-                        if step.reports_timeline_start() {
-                            executed_physical_actions += 1;
-                        }
-                        results.push(result);
-                    } else {
-                        step_error = Some(error);
-                        break;
-                    }
+                    step_error = Some(error);
+                    break;
                 }
             }
             self.live_step = None;
@@ -2321,15 +3044,16 @@ where
         if target_materialized
             && step_error.is_none()
             && persistent_target_results_publishable(&results)
-            && let Err(error) = publish_persistent_target(
+        {
+            if let Err(error) = publish_persistent_target(
                 container,
                 state.env.get("GITHUB_SHA").map(String::as_str),
-            )
-        {
-            eprintln!(
-                "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
-                container.name
-            );
+            ) {
+                eprintln!(
+                    "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
+                    container.name
+                );
+            }
         }
         if let Some(error) = step_error {
             return Err(error);
@@ -3643,23 +4367,8 @@ where
         Ok(files)
     }
 
-    /// Disarm the job-network guard after terminal cleanup removed the
-    /// network; a failed cleanup keeps it armed so its drop retries removal.
-    fn defuse_job_network_guard(&mut self) {
-        if let Some(guard) = self.job_network_guard.take() {
-            guard.defuse();
-        }
-    }
-
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard()?;
-        // Service containers hold endpoints on the job network. Remove them
-        // BEFORE reclaiming job-owned resources: reclaim includes the network,
-        // and `docker network rm` fails while an endpoint is still attached.
-        // The old order (reclaim first) failed the network removal on every
-        // service job and orphaned the network once the services went away —
-        // the `velnor-net-*` address-pool exhaustion leak.
-        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Job container is gone; abort in-flight Engine HTTP (BuildKit start)
         // before reclaim. `docker rm` of Created BuildKit waits forever on
@@ -3667,17 +4376,13 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
+        let service_result = self.cleanup_services_unlocked(container);
 
-        let result = (|| {
-            container_result?;
-            owned_result?;
-            buildkit_result?;
-            service_result
-        })();
-        if result.is_ok() {
-            self.defuse_job_network_guard();
-        }
-        result
+        container_result?;
+        owned_result?;
+        buildkit_result?;
+        service_result?;
+        Ok(())
     }
 
     /// Remove the job-owned containers, services, network, and lease without
@@ -3693,25 +4398,18 @@ where
     }
 
     fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
-        // Services first: their endpoints block the network removal inside
-        // reclaim (see `cleanup`).
-        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Abort in-flight Engine HTTP before the deferred BuildKit worker
         // runs. Dropping the lease at the end used to leave ContainerStart
         // held, so the worker's `docker rm` of Created BuildKit hung.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
+        let service_result = self.cleanup_services_unlocked(container);
 
-        let result = (|| {
-            container_result?;
-            owned_result?;
-            service_result
-        })();
-        if result.is_ok() {
-            self.defuse_job_network_guard();
-        }
-        result
+        container_result?;
+        owned_result?;
+        service_result?;
+        Ok(())
     }
 
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -3737,15 +4435,10 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
-        let result = (|| {
-            container_result?;
-            owned_result?;
-            buildkit_result
-        })();
-        if result.is_ok() {
-            self.defuse_job_network_guard();
-        }
-        result
+        container_result?;
+        owned_result?;
+        buildkit_result?;
+        Ok(())
     }
 
     pub(crate) fn cleanup_job_and_network_without_buildkit(
@@ -3763,14 +4456,9 @@ where
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let result = (|| {
-            container_result?;
-            owned_result
-        })();
-        if result.is_ok() {
-            self.defuse_job_network_guard();
-        }
-        result
+        container_result?;
+        owned_result?;
+        Ok(())
     }
 
     fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
@@ -3876,8 +4564,6 @@ where
                 container.temp_host.display()
             )
         })?;
-        // Resolve the same trust-scoped runtime used for mounts and env so
-        // Plan 066's shared cache root is initialized without crossing scopes.
         let cache_runtime = container.compiler_cache_runtime();
         if let Some(cache_host) = cache_runtime.host_path() {
             fs::create_dir_all(cache_host).with_context(|| {
@@ -3915,23 +4601,9 @@ where
         // calls. Readiness polling below can take up to 30s and does not
         // mutate Docker state; keeping the permit across it serializes other
         // slots behind a non-mutating wait.
-        // Retrying this function reuses the same network name: retire any
-        // guard from a previous attempt BEFORE creating, so its drop can never
-        // remove the freshly created network.
-        if let Some(previous) = self.job_network_guard.take() {
-            drop(previous);
-        }
         self.with_docker_lifecycle(|executor| {
             executor.run_docker(&container.create_network_args())
         })?;
-        // Own the network from creation to terminal cleanup. Dropping the
-        // executor on any error path now removes it instead of leaking it.
-        // Defuse only after cleanup reclaimed it; Docker refuses to remove a
-        // network with active endpoints, so a late guard fire cannot break a
-        // live job.
-        self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
-            container.network.clone(),
-        ));
         for service in &container.services {
             self.with_docker_lifecycle(|executor| executor.run_docker(&service.start_args()))?;
             self.wait_for_service(service)?;
@@ -4067,39 +4739,15 @@ where
         let Ok(_lifecycle) = docker_lifecycle_guard() else {
             return;
         };
-        // Drop the lease before stale cleanup so an in-flight Engine request
-        // cannot keep dockerd's container lock held while retry cleanup runs.
-        // Unlike terminal cleanup, startup retry must not broad-reclaim a
-        // container that is still live or whose state is unknown.
-        self.abort_docker_lease();
-        for service in container.services.iter().rev() {
-            self.run_docker_cleanup(&crate::docker_lease::remove_one_container_args(
-                &service.name,
-            ))
+        self.run_docker_remove_container(&container.remove_container_args())
             .ok();
+        self.abort_docker_lease();
+        self.reclaim_job_owned_docker(&container.name).ok();
+        self.cleanup_job_buildkit_unlocked(container).ok();
+        for service in container.services.iter().rev() {
+            self.run_docker_remove_container(&service.remove_args())
+                .ok();
         }
-        if self.reclaim_stale_job_owned_docker(&container.name).is_ok() {
-            // The stale reclaim can legitimately skip the network (its
-            // liveness gate only guards containers). Remove it explicitly:
-            // the job container is absent or stopped here, so no endpoint can
-            // block the removal. A "not found" is success — already gone.
-            let removed =
-                match self.run_docker_cleanup(&crate::docker_lease::force_remove_network_args(
-                    std::slice::from_ref(&container.network),
-                )) {
-                    Ok(_) => true,
-                    Err(error) => error.to_string().contains("not found"),
-                };
-            if removed {
-                self.defuse_job_network_guard();
-            }
-        }
-    }
-
-    fn reclaim_stale_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
-        crate::docker_lease::reclaim_stale_job_owned(job_id, |args| {
-            self.run_docker_cleanup(args).map(|result| result.stdout)
-        })
     }
 
     fn abort_docker_lease(&mut self) {
@@ -4319,9 +4967,10 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
         if matches!(
             name.as_str(),
             "GITHUB_OUTPUT" | "GITHUB_ENV" | "GITHUB_PATH" | "GITHUB_STATE" | "GITHUB_STEP_SUMMARY"
-        ) && let Some(file_name) = value.strip_prefix("/__t/")
-        {
-            *value = format!("/github/file_commands/{file_name}");
+        ) {
+            if let Some(file_name) = value.strip_prefix("/__t/") {
+                *value = format!("/github/file_commands/{file_name}");
+            }
         }
     }
 }
@@ -4921,10 +5570,10 @@ fn native_cache_restore_main(
     let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
     let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version, &path)?;
-    if let Some(matched_key) = &matched_key
-        && !lookup_only
-    {
-        restore_cache_paths(&action_state, matched_key, &path, &version)?;
+    if let Some(matched_key) = &matched_key {
+        if !lookup_only {
+            restore_cache_paths(&action_state, matched_key, &path, &version)?;
+        }
     }
     let restore_ms = t0.elapsed().as_millis();
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
@@ -5551,16 +6200,17 @@ fn cache_glob_source_overlaps_persistent_exact(
         if has_glob_pattern(declared) || !velnor_persistent_cache_path(state, declared) {
             continue;
         }
-        if state.persistent_workspace_target
-            && let Some(target_relative) = workspace_target_relative(declared)
-            && (relative == target_relative || relative.starts_with(&target_relative))
-        {
-            return true;
+        if state.persistent_workspace_target {
+            if let Some(target_relative) = workspace_target_relative(declared) {
+                if relative == target_relative || relative.starts_with(&target_relative) {
+                    return true;
+                }
+            }
         }
-        if let Some(persistent_path) = resolve_cache_path(state, declared)
-            && (source == persistent_path || source.starts_with(&persistent_path))
-        {
-            return true;
+        if let Some(persistent_path) = resolve_cache_path(state, declared) {
+            if source == persistent_path || source.starts_with(&persistent_path) {
+                return true;
+            }
         }
     }
     false
@@ -6731,56 +7381,59 @@ fn native_upload_artifact(
     // jobs (like compare/aggregate jobs) can download the artifact via
     // `actions/download-artifact`. Without this, only same-host Velnor jobs can
     // access local artifacts.
-    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN")
-        && let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token)
-    {
-        // Pass artifact-store paths directly. The Results Service upload
-        // streams each source file and never materializes the artifact in RAM.
-        let zip_files =
-            artifact_upload_sources(&name, &artifact_dir, RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS)?
-                .into_iter()
-                .map(|source| crate::protocol::ArtifactUploadFile {
-                    archive_path: source.file_name,
-                    source: crate::protocol::ArtifactUploadSource::Relative {
-                        root: source.root,
-                        relative: source.relative,
-                    },
-                    source_path: source.path,
-                })
-                .collect::<Vec<_>>();
-        if !zip_files.is_empty() {
-            match crate::protocol::upload_artifact_files_blocking(
-                &results_url,
-                runtime_token,
-                &plan_id,
-                &job_id,
+    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN") {
+        if let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token) {
+            // Pass artifact-store paths directly. The Results Service upload
+            // streams each source file and never materializes the artifact in RAM.
+            let zip_files = artifact_upload_sources(
                 &name,
-                zip_files,
-                crate::protocol::ArtifactUploadOptions {
-                    store_uncompressed,
-                    retention_days,
-                    overwrite,
+                &artifact_dir,
+                RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
+            )?
+            .into_iter()
+            .map(|source| crate::protocol::ArtifactUploadFile {
+                archive_path: source.file_name,
+                source: crate::protocol::ArtifactUploadSource::Relative {
+                    root: source.root,
+                    relative: source.relative,
                 },
-            ) {
-                Ok(finalized) => {
-                    artifact_id = finalized.id;
-                    digest = finalized.digest;
-                }
-                Err(e) => {
-                    let message =
-                        format!("Results Service artifact upload failed for '{name}': {e:#}\n");
-                    eprintln!("{message}");
-                    return Ok(StepExecutionResult {
-                        exit_code: 1,
-                        state: StepCommandState::default(),
-                        skipped: false,
-                        failure_ignored: false,
-                        stdout: format!(
-                            "Saved local artifact '{name}' with {} path(s)\n",
-                            uploaded_count
-                        ),
-                        stderr: message,
-                    });
+                source_path: source.path,
+            })
+            .collect::<Vec<_>>();
+            if !zip_files.is_empty() {
+                match crate::protocol::upload_artifact_files_blocking(
+                    &results_url,
+                    runtime_token,
+                    &plan_id,
+                    &job_id,
+                    &name,
+                    zip_files,
+                    crate::protocol::ArtifactUploadOptions {
+                        store_uncompressed,
+                        retention_days,
+                        overwrite,
+                    },
+                ) {
+                    Ok(finalized) => {
+                        artifact_id = finalized.id;
+                        digest = finalized.digest;
+                    }
+                    Err(e) => {
+                        let message =
+                            format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                        eprintln!("{message}");
+                        return Ok(StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: format!(
+                                "Saved local artifact '{name}' with {} path(s)\n",
+                                uploaded_count
+                            ),
+                            stderr: message,
+                        });
+                    }
                 }
             }
         }
@@ -7415,13 +8068,13 @@ fn append_pages_archive_dir<W: Write>(
         };
         match opened {
             crate::fs_copy::NoFollowSource::Directory(directory) => {
-                if let Some(canonical) = &canonical
-                    && !active_directories.insert(canonical.clone())
-                {
-                    bail!(
-                        "Pages artifact directory contains a symlink cycle at {}",
-                        child.display()
-                    );
+                if let Some(canonical) = &canonical {
+                    if !active_directories.insert(canonical.clone()) {
+                        bail!(
+                            "Pages artifact directory contains a symlink cycle at {}",
+                            child.display()
+                        );
+                    }
                 }
                 record_pages_archive_entry(bounds, &child_relative, 0)?;
                 append_pages_directory_header(builder, &child_relative)?;
@@ -8714,12 +9367,13 @@ fn preflight_prepared_artifact_zip<R: Read + std::io::Seek>(
         for ancestor in ordered_entries[index].relative.ancestors().skip(1) {
             if let Ok(ancestor_index) =
                 ordered_entries.binary_search_by(|entry| entry.relative.as_path().cmp(ancestor))
-                && !ordered_entries[ancestor_index].is_directory
             {
-                bail!(
-                    "prepared CI artifact archive has a file ancestor conflict at {}",
-                    ancestor.display()
-                );
+                if !ordered_entries[ancestor_index].is_directory {
+                    bail!(
+                        "prepared CI artifact archive has a file ancestor conflict at {}",
+                        ancestor.display()
+                    );
+                }
             }
         }
     }
@@ -8859,13 +9513,14 @@ fn repository_artifact_matches_trusted_producer(
     if event.starts_with("pull_request") {
         return false;
     }
-    if let Some(branch) = current_ref.strip_prefix("refs/heads/")
-        && workflow_run
+    if let Some(branch) = current_ref.strip_prefix("refs/heads/") {
+        if workflow_run
             .get("head_branch")
             .and_then(serde_json::Value::as_str)
             != Some(branch)
-    {
-        return false;
+        {
+            return false;
+        }
     }
     true
 }
@@ -8933,9 +9588,8 @@ fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
 fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
     action
         .inputs
-        .iter()
-        .find(|(input_name, _)| input_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value)
+        .get(name)
+        .or_else(|| action.inputs.get(&name.to_ascii_lowercase()))
         .map(|value| state.resolve_expressions(value))
         .unwrap_or_default()
 }
@@ -9451,10 +10105,10 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     if path.is_empty() || artifact_path_has_parent_component(path) {
         return None;
     }
-    if (path == "target" || path == "/__w/target" || path == "/github/workspace/target")
-        && let Some(base) = &state.cargo_target_host
-    {
-        return Some(base.clone());
+    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
+        if let Some(base) = &state.cargo_target_host {
+            return Some(base.clone());
+        }
     }
     for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
@@ -10934,9 +11588,6 @@ impl JobExecutionState {
     }
 
     pub(crate) fn resolve_expressions(&self, value: &str) -> String {
-        if !expression_within_budget(value) {
-            return value.to_string();
-        }
         let mut rendered = String::with_capacity(value.len());
         let mut rest = value;
         while let Some(start) = rest.find("${{") {
@@ -11066,23 +11717,27 @@ impl JobExecutionState {
     fn resolve_format_expression(&self, expression: &str) -> Option<String> {
         let inner = expression.strip_prefix("format(")?.strip_suffix(')')?;
         let parts = crate::script_step::split_format_args_pub(inner);
-        const MAX_FORMAT_ARGS: usize = 64;
-        const MAX_FORMAT_TEMPLATE_BYTES: usize = 64 * 1024;
-        if parts.is_empty() || parts.len().saturating_sub(1) > MAX_FORMAT_ARGS {
+        if parts.is_empty() {
             return None;
         }
         let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-        if template.len() > MAX_FORMAT_TEMPLATE_BYTES {
-            return None;
+        let placeholder_open = "\x00LBRACE\x00";
+        let placeholder_close = "\x00RBRACE\x00";
+        let mut result = template
+            .replace("''", "'")
+            .replace("{{", placeholder_open)
+            .replace("}}", placeholder_close);
+        for (i, arg) in parts[1..].iter().enumerate() {
+            // Use full state resolver so runtime values (step outputs, etc.) work.
+            let resolved = self
+                .resolve_expression_value(arg.trim())
+                .unwrap_or_default();
+            result = result.replace(&format!("{{{i}}}"), &resolved);
         }
-        let args = parts[1..]
-            .iter()
-            .map(|arg| {
-                self.resolve_expression_value(arg.trim())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
-        render_format_template(template.replace("''", "'").as_str(), &args)
+        result = result
+            .replace(placeholder_open, "{")
+            .replace(placeholder_close, "}");
+        Some(result)
     }
 
     fn resolve_context_expression(&self, expression: &str) -> Option<String> {
@@ -11194,9 +11849,6 @@ impl JobExecutionState {
     }
 
     fn evaluate_condition_expr(&self, expression: &str) -> bool {
-        if !expression_within_budget(expression) {
-            return false;
-        }
         let expression = expression.trim();
         if expression == "always()" {
             return true;
@@ -11318,56 +11970,12 @@ impl JobExecutionState {
     fn resolve_context_data_value(&self, expression: &str) -> Option<&Value> {
         let mut segments = expression.trim().split('.');
         let root = segments.next()?;
-        let (root_name, mut value) = self.context_data.iter().find(|(name, _)| {
-            *name == root
-                || root.eq_ignore_ascii_case("inputs") && name.eq_ignore_ascii_case("inputs")
-        })?;
-        let input_context = root_name.eq_ignore_ascii_case("inputs");
+        let mut value = self.context_data.get(root)?;
         for segment in segments {
-            value = if input_context {
-                value
-                    .as_object()?
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(segment))
-                    .map(|(_, value)| value)?
-            } else {
-                value.get(segment)?
-            };
+            value = value.get(segment)?;
         }
         Some(value)
     }
-}
-
-fn render_format_template(template: &str, args: &[String]) -> Option<String> {
-    const MAX_FORMAT_OUTPUT_BYTES: usize = 256 * 1024;
-    let mut result = String::with_capacity(template.len());
-    let mut cursor = 0usize;
-    while cursor < template.len() {
-        let byte = template.as_bytes()[cursor];
-        if byte == b'{' {
-            if template.as_bytes().get(cursor + 1) == Some(&b'{') {
-                result.push('{');
-                cursor += 2;
-                continue;
-            }
-            let end = template[cursor + 1..].find('}')? + cursor + 1;
-            let index = template[cursor + 1..end].parse::<usize>().ok()?;
-            let replacement = args.get(index)?;
-            result.push_str(replacement);
-            cursor = end + 1;
-        } else if byte == b'}' && template.as_bytes().get(cursor + 1) == Some(&b'}') {
-            result.push('}');
-            cursor += 2;
-        } else {
-            let character = template[cursor..].chars().next()?;
-            result.push(character);
-            cursor += character.len_utf8();
-        }
-        if result.len() > MAX_FORMAT_OUTPUT_BYTES {
-            return None;
-        }
-    }
-    Some(result)
 }
 
 /// Return true only when a step condition is provably false from immutable
@@ -12112,26 +12720,15 @@ fn hash_file_search_roots(workspace: &Path, patterns: &[String]) -> Vec<PathBuf>
         })
         .collect::<Vec<_>>();
 
-    let candidate_set = candidates.iter().cloned().collect::<BTreeSet<_>>();
-    let mut selected = BTreeSet::new();
     candidates
-        .into_iter()
-        .filter(|candidate| {
-            if selected.contains(candidate) {
-                return false;
-            }
-            let mut ancestor = candidate.clone();
-            while ancestor != workspace {
-                if !ancestor.pop() {
-                    break;
-                }
-                if candidate_set.contains(&ancestor) {
-                    return false;
-                }
-            }
-            selected.insert(candidate.clone());
-            true
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            !candidates.iter().enumerate().any(|(other_index, other)| {
+                index != &other_index && candidate != &other && candidate.starts_with(other)
+            })
         })
+        .map(|(_, candidate)| candidate.clone())
         .collect()
 }
 
@@ -12403,34 +13000,6 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_input_lookup_is_case_insensitive() {
-        let action = NativeActionInvocation {
-            git_ref: "cache-action".to_owned(),
-            adapter: NativeActionAdapter::Cache,
-            cache_kind: Some(CacheActionKind::Root),
-            source_path: None,
-            inputs: crate::action::canonicalize_input_map(
-                &[("Lookup-Only".to_owned(), "true".to_owned())]
-                    .into_iter()
-                    .collect(),
-            )
-            .unwrap(),
-            env: Vec::new(),
-        };
-        assert_eq!(
-            native_input(&action, &JobExecutionState::default(), "lookup-only"),
-            "true"
-        );
-    }
-
-    #[test]
-    fn over_budget_expression_is_not_evaluated() {
-        let state = JobExecutionState::default();
-        let expression = format!("${{{{ {} }}}}", "github.sha ".repeat(7000));
-        assert_eq!(state.resolve_expressions(&expression), expression);
-    }
 
     #[cfg(unix)]
     #[test]
@@ -13039,6 +13608,18 @@ mod tests {
         }
     }
 
+    struct DelayedRecordingRunner {
+        inner: RecordingRunner,
+        delay: Duration,
+    }
+
+    impl CommandRunner for DelayedRecordingRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            thread::sleep(self.delay);
+            self.inner.run(program, args)
+        }
+    }
+
     #[derive(Default)]
     struct BuildkitCleanupRunner {
         calls: Vec<Vec<String>>,
@@ -13175,75 +13756,6 @@ mod tests {
             Ok(CommandResult {
                 code: 0,
                 stdout,
-                stderr: String::new(),
-            })
-        }
-    }
-
-    #[derive(Default)]
-    /// Step command execution fails by throwing (Err), not by exit code —
-    /// the actions/runner exception path. `fail_execs` bounds how many
-    /// `docker exec` invocations fail so later steps still run.
-    struct ErroringExecRunner {
-        calls: Vec<(String, Vec<String>)>,
-        fail_execs: usize,
-    }
-
-    impl CommandRunner for ErroringExecRunner {
-        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
-            if is_seed_probe(args) {
-                return Ok(CommandResult {
-                    code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
-            self.calls.push((program.to_string(), args.to_vec()));
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-
-        fn run_streaming_timeout_with_env(
-            &mut self,
-            program: &str,
-            args: &[String],
-            _env: &[(String, String)],
-            _timeout: Duration,
-            _on_output: &mut dyn FnMut(CommandStream, &str),
-        ) -> Result<CommandResult> {
-            self.calls.push((program.to_string(), args.to_vec()));
-            if args.first().is_some_and(|arg| arg == "exec") && self.fail_execs > 0 {
-                self.fail_execs -= 1;
-                anyhow::bail!("docker daemon connection lost");
-            }
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-    }
-
-    struct MainActionErrorRunner {
-        calls: Vec<(String, Vec<String>)>,
-        failure_marker: String,
-    }
-
-    impl CommandRunner for MainActionErrorRunner {
-        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
-            self.calls.push((program.to_string(), args.to_vec()));
-            if args
-                .last()
-                .is_some_and(|arg| arg.contains(&self.failure_marker))
-            {
-                bail!("main action execution failed");
-            }
-            Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
                 stderr: String::new(),
             })
         }
@@ -13873,8 +14385,6 @@ esac
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         }
     }
 
@@ -14428,6 +14938,282 @@ esac
         assert_eq!(link_command_kind("go build ./..."), Some("go"));
         assert_eq!(link_command_kind("cargo check -p private"), None);
         assert_eq!(link_command_kind("echo cargo build"), None);
+    }
+
+    #[test]
+    fn compiler_cache_admission_requires_one_structured_compile_invocation() {
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build -p private"),
+            Some("cargo")
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("env RUSTFLAGS=-Dwarnings cargo check"),
+            Some("cargo")
+        );
+        assert_eq!(cacheable_compile_command_kind("echo cargo build"), None);
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build && echo done"),
+            None
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build > build.log"),
+            None
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build $(cat flags)"),
+            None
+        );
+        assert_eq!(
+            cacheable_compile_command_kind("cargo build `cat flags`"),
+            None
+        );
+        assert_eq!(cacheable_compile_command_kind("cd repo\ncargo build"), None);
+        assert_eq!(
+            cacheable_compile_command_kind("CARGO_TARGET_DIR=out cargo build"),
+            None
+        );
+    }
+
+    #[test]
+    fn compiler_cache_environment_is_canonical_and_excludes_workflow_paths() {
+        assert_eq!(
+            compiler_cache_environment(&[
+                ("RUSTFLAGS".into(), "old".into()),
+                ("GITHUB_OUTPUT".into(), "/tmp/output".into()),
+                ("RUSTFLAGS".into(), "new".into()),
+                ("CARGO_HOME".into(), "/cargo".into()),
+            ]),
+            vec![
+                ("CARGO_HOME".into(), "/cargo".into()),
+                ("RUSTFLAGS".into(), "new".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn compiler_cache_rejects_mutable_container_images() {
+        assert!(immutable_container_image_digest("ubuntu:latest").is_err());
+        assert!(immutable_container_image_digest(
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_cache_input_digest_rejects_symlinked_files() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("outside"), b"outside").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("input")).unwrap();
+
+        let error = digest_workspace_tree(&root, true).unwrap_err();
+
+        assert!(error.to_string().contains("compiler-cache input"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_compile_boundary_publishes_only_after_output_digest() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.image =
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        let target = job.workspace_host.join("repo/target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(
+            job.workspace_host.join("repo/Cargo.toml"),
+            "[package]\nname='demo'\n",
+        )
+        .unwrap();
+        fs::write(target.join("debug/demo"), b"compiled").unwrap();
+
+        let mut config = velnor_cache_service::CompilerCacheConfig::new(
+            temp.join("compiler-cache"),
+            "test-worker",
+        );
+        config.policy = velnor_cache_service::CompilerCachePolicy::Sccache;
+        config.trust_class = TrustClass::Trusted;
+        config.lease_duration_ms = 500;
+        config.heartbeat_every_ms = 100;
+        let service = Arc::new(
+            velnor_cache_service::CompilerCacheService::open_production(
+                config,
+                velnor_cache_service::WrapperDeclaration::default(),
+            )
+            .unwrap(),
+        );
+        let mut executor = DockerJobEngine::new(DelayedRecordingRunner {
+            inner: RecordingRunner::default(),
+            delay: Duration::from_millis(250),
+        })
+        .with_trust_scope("trusted")
+        .with_compiler_cache(Arc::clone(&service));
+        let step = ScriptStep {
+            id: "compile".into(),
+            display_name: "Compile".into(),
+            script: "cargo build".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let result = executor.execute_step(&job, &step, &temp).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let metadata =
+            rusqlite::Connection::open(service.storage_root().join("metadata.sqlite")).unwrap();
+        let entries: i64 = metadata
+            .query_row("SELECT COUNT(*) FROM compiler_cache_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(entries, 1);
+        let journal =
+            rusqlite::Connection::open(service.storage_root().join("journal.sqlite")).unwrap();
+        let released: i64 = journal
+            .query_row(
+                "SELECT COUNT(*) FROM producer_leases WHERE state = 'released'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(released, 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cargo_compile_boundary_restores_verified_hit_before_running_command() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.image =
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        let target = job.workspace_host.join("repo/target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(
+            job.workspace_host.join("repo/Cargo.toml"),
+            "[package]\nname='demo'\n",
+        )
+        .unwrap();
+        fs::write(target.join("debug/demo"), b"compiled").unwrap();
+
+        let mut config = velnor_cache_service::CompilerCacheConfig::new(
+            temp.join("compiler-cache"),
+            "test-worker",
+        );
+        config.policy = velnor_cache_service::CompilerCachePolicy::Sccache;
+        config.trust_class = TrustClass::Trusted;
+        let service = Arc::new(
+            velnor_cache_service::CompilerCacheService::open_production(
+                config,
+                velnor_cache_service::WrapperDeclaration::default(),
+            )
+            .unwrap(),
+        );
+        let step = ScriptStep {
+            id: "compile".into(),
+            display_name: "Compile".into(),
+            script: "cargo build".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let first = DockerJobEngine::new(RecordingRunner::default())
+            .with_trust_scope("trusted")
+            .with_compiler_cache(Arc::clone(&service))
+            .execute_step(&job, &step, &temp)
+            .unwrap();
+        assert_eq!(first.exit_code, 0);
+        fs::remove_dir_all(&target).unwrap();
+
+        let mut second = DockerJobEngine::new(RecordingRunner {
+            codes: vec![0, 0, 0],
+            ..RecordingRunner::default()
+        })
+        .with_trust_scope("trusted")
+        .with_compiler_cache(Arc::clone(&service));
+        let second_result = second.execute_step(&job, &step, &temp).unwrap();
+
+        assert_eq!(second_result.exit_code, 0);
+        assert!(second
+            .runner()
+            .calls
+            .iter()
+            .any(|(program, args)| program == "docker"
+                && args.first().is_some_and(|arg| arg == "exec")));
+        assert_eq!(fs::read(target.join("debug/demo")).unwrap(), b"compiled");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cargo_compile_failure_abandons_cache_lease_without_publication() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.image =
+            "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        let target = job.workspace_host.join("repo/target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(target.join("debug/demo"), b"partial").unwrap();
+
+        let mut config = velnor_cache_service::CompilerCacheConfig::new(
+            temp.join("compiler-cache"),
+            "test-worker",
+        );
+        config.policy = velnor_cache_service::CompilerCachePolicy::Sccache;
+        config.trust_class = TrustClass::Trusted;
+        let service = Arc::new(
+            velnor_cache_service::CompilerCacheService::open_production(
+                config,
+                velnor_cache_service::WrapperDeclaration::default(),
+            )
+            .unwrap(),
+        );
+        let mut executor = DockerJobEngine::new(RecordingRunner {
+            codes: vec![0, 0, 17],
+            ..RecordingRunner::default()
+        })
+        .with_trust_scope("trusted")
+        .with_compiler_cache(Arc::clone(&service));
+        let step = ScriptStep {
+            id: "compile".into(),
+            display_name: "Compile".into(),
+            script: "cargo build".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let result = executor.execute_step(&job, &step, &temp).unwrap();
+
+        assert_eq!(result.exit_code, 17);
+        let metadata =
+            rusqlite::Connection::open(service.storage_root().join("metadata.sqlite")).unwrap();
+        let entries: i64 = metadata
+            .query_row("SELECT COUNT(*) FROM compiler_cache_entries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(entries, 0);
+        let journal =
+            rusqlite::Connection::open(service.storage_root().join("journal.sqlite")).unwrap();
+        let abandoned: i64 = journal
+            .query_row(
+                "SELECT COUNT(*) FROM producer_leases WHERE state = 'abandoned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(abandoned, 1);
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -17225,7 +18011,6 @@ type=sha,format=long,prefix=,enable=true"
         assert_eq!(outputs["base_path"], "/example");
     }
 
-    #[cfg(feature = "test-support")]
     #[test]
     fn configure_pages_fetches_site_and_exports_environment() {
         use std::net::TcpListener;
@@ -17282,7 +18067,6 @@ type=sha,format=long,prefix=,enable=true"
         );
     }
 
-    #[cfg(feature = "test-support")]
     #[test]
     fn deploy_pages_runs_artifact_oidc_create_and_status_loop() {
         use std::net::TcpListener;
@@ -17902,82 +18686,6 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .unwrap();
     }
 
-    #[derive(Default)]
-    struct StaleServiceCleanupRunner {
-        calls: Vec<Vec<String>>,
-    }
-
-    impl CommandRunner for StaleServiceCleanupRunner {
-        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
-            self.calls.push(args.to_vec());
-            let running_service_refusal =
-                args.len() == 2 && args[0] == "rm" && args[1] == "running-service";
-            Ok(CommandResult {
-                code: i32::from(running_service_refusal),
-                stdout: String::new(),
-                stderr: if running_service_refusal {
-                    "cannot remove a running container".into()
-                } else {
-                    String::new()
-                },
-            })
-        }
-    }
-
-    #[test]
-    fn stale_cleanup_removes_stopped_services_without_force_escalation() {
-        let temp = temp_dir();
-        let mut spec = container(&temp);
-        spec.services.push(ServiceContainerSpec {
-            name: "stopped-service".into(),
-            image: "postgres:16".into(),
-            network_alias: "stopped".into(),
-            network: "net".into(),
-            env: Vec::new(),
-            ports: Vec::new(),
-            options: Vec::new(),
-        });
-        spec.services.push(ServiceContainerSpec {
-            name: "running-service".into(),
-            image: "redis:7".into(),
-            network_alias: "running".into(),
-            network: "net".into(),
-            env: Vec::new(),
-            ports: Vec::new(),
-            options: Vec::new(),
-        });
-        let mut executor = DockerJobEngine::new(StaleServiceCleanupRunner::default());
-
-        executor.cleanup_stale(&spec);
-
-        let calls = &executor.runner().calls;
-        assert_eq!(calls[0], vec!["rm", "running-service"]);
-        assert_eq!(calls[1], vec!["rm", "stopped-service"]);
-        assert!(calls[..2]
-            .iter()
-            .all(|args| !args.iter().any(|arg| arg == "--force")));
-        assert_eq!(
-            calls[2],
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[3],
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[4],
-            crate::docker_lease::list_owned_networks_args("job")
-        );
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|args| args.first().is_some_and(|arg| arg == "rm"))
-                .count(),
-            2
-        );
-        fs::remove_dir_all(temp).ok();
-    }
-
     #[test]
     fn retries_start_after_removing_stale_job_resources() {
         let temp = temp_dir();
@@ -17997,7 +18705,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let results = executor
@@ -18007,28 +18715,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results.len(), 1);
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_eq!(
-            calls[1].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[2].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[3].1,
-            crate::docker_lease::list_owned_networks_args("job")
-        );
-        assert_eq!(
-            calls[4].1,
-            crate::docker_lease::list_owned_volumes_args("job")
-        );
-        // Retry cleanup removes the job network before the retry recreates it.
-        assert_eq!(
-            calls[5].1,
-            crate::docker_lease::force_remove_network_args(&["net".to_string()])
-        );
-        assert_eq!(calls[6].1, expected_network_create_args());
+        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
+        assert_eq!(calls[7].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -18040,7 +18728,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -18050,48 +18738,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert!(error.to_string().contains("docker run"));
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_eq!(
-            calls[1].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[2].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[3].1,
-            crate::docker_lease::list_owned_networks_args("job")
-        );
-        assert_eq!(
-            calls[4].1,
-            crate::docker_lease::list_owned_volumes_args("job")
-        );
-        assert_eq!(
-            calls[5].1,
-            crate::docker_lease::force_remove_network_args(&["net".to_string()])
-        );
-        assert_eq!(calls[6].1, expected_network_create_args());
-        assert_eq!(calls[7].1[0], "run");
-        assert_eq!(
-            calls[8].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[9].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
-        );
-        assert_eq!(
-            calls[10].1,
-            crate::docker_lease::list_owned_networks_args("job")
-        );
-        assert_eq!(
-            calls[11].1,
-            crate::docker_lease::list_owned_volumes_args("job")
-        );
-        assert_eq!(
-            calls[12].1,
-            crate::docker_lease::force_remove_network_args(&["net".to_string()])
-        );
+        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
+        assert_eq!(calls[7].1, expected_network_create_args());
+        assert_eq!(calls[8].1[0], "run");
+        assert_cleanup_reclaims_job_docker(calls, 9, &temp);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -20325,236 +20975,6 @@ fi"#
             })
             .count();
         assert_eq!(exec_count, 2);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    // actions/runner parity (RunStepAsync catch + ExecutionContext.ApplyContinueOnError):
-    // a step that fails by THROWING (not exit code) with continue-on-error: true
-    // keeps outcome=failure for `steps.<id>.outcome`, reports conclusion=success,
-    // and the job runs the remaining steps and finishes green.
-    // Regression: jackin-project/jackin Hygiene run 33319391723 ("miri jackin-config").
-    #[test]
-    fn script_step_execution_error_honors_continue_on_error() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![
-            ExecutableStep::Script(ScriptStep {
-                id: "miri".into(),
-                display_name: "miri crate".into(),
-                script: "cargo +nightly miri test".into(),
-                shell: Shell::Bash,
-                working_directory_container: "/__w/repo".into(),
-                env: Vec::new(),
-                condition: None,
-                continue_on_error: true,
-                timeout_minutes: None,
-            }),
-            ExecutableStep::Script(ScriptStep {
-                id: "summary".into(),
-                display_name: "summary".into(),
-                script: "echo summary".into(),
-                shell: Shell::Sh,
-                working_directory_container: "/__w/repo".into(),
-                env: Vec::new(),
-                condition: Some("success()".into()),
-                continue_on_error: false,
-                timeout_minutes: None,
-            }),
-            ExecutableStep::Script(ScriptStep {
-                id: "outcome-probe".into(),
-                display_name: "probe".into(),
-                script: "echo probe".into(),
-                shell: Shell::Sh,
-                working_directory_container: "/__w/repo".into(),
-                env: Vec::new(),
-                condition: Some("steps.miri.outcome == 'failure'".into()),
-                continue_on_error: false,
-                timeout_minutes: None,
-            }),
-        ];
-        let mut executor = DockerJobEngine::new(ErroringExecRunner {
-            calls: Vec::new(),
-            fail_execs: 1,
-        });
-
-        let summary = executor
-            .execute_ordered_steps_with_completion(
-                &container(&temp),
-                &steps,
-                &[],
-                &[],
-                None,
-                None,
-                &temp,
-            )
-            .expect("continue-on-error step error must not fail the job");
-
-        assert_eq!(summary.step_results.len(), 3);
-        // outcome stays failure internally...
-        assert_eq!(summary.step_results[0].exit_code, 1);
-        assert!(!summary.step_results[0].skipped);
-        // ...while the reported conclusion is success (failure_ignored).
-        assert!(summary.step_results[0].failure_ignored);
-        // The job continues: success() is true (conclusion-based)...
-        assert_eq!(summary.step_results[1].exit_code, 0);
-        assert!(!summary.step_results[1].skipped);
-        // ...and steps.miri.outcome still reports failure.
-        assert_eq!(summary.step_results[2].exit_code, 0);
-        assert!(!summary.step_results[2].skipped);
-        // The step record carries the error text but maps to success.
-        let log = &summary.step_logs[0];
-        assert_eq!(log.display_name, "miri crate");
-        assert!(log.failure_ignored);
-        assert!(log
-            .lines
-            .iter()
-            .any(|line| line.contains("docker daemon connection lost")));
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn script_step_execution_error_without_continue_on_error_fails_job() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::Script(ScriptStep {
-            id: "miri".into(),
-            display_name: "miri crate".into(),
-            script: "cargo +nightly miri test".into(),
-            shell: Shell::Bash,
-            working_directory_container: "/__w/repo".into(),
-            env: Vec::new(),
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        })];
-        let mut executor = DockerJobEngine::new(ErroringExecRunner {
-            calls: Vec::new(),
-            fail_execs: 1,
-        });
-
-        let error = executor
-            .execute_ordered_steps_with_completion(
-                &container(&temp),
-                &steps,
-                &[],
-                &[],
-                None,
-                None,
-                &temp,
-            )
-            .expect_err("step execution error without continue-on-error must fail the job");
-        assert!(format!("{error:#}").contains("docker daemon connection lost"));
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn javascript_post_action_is_registered_before_main_execution_error() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::JavaScript {
-            step_id: "action".into(),
-            display_name: "action".into(),
-            invocation: JavaScriptActionInvocation {
-                node: "node20".into(),
-                pre_container_path: None,
-                pre_condition: None,
-                main_container_path: "/__a/_actions/acme_action/v1/main.js".into(),
-                post_container_path: Some("/__a/_actions/acme_action/v1/post.js".into()),
-                post_condition: Some("always()".into()),
-                action_container_path: "/__a/_actions/acme_action/v1".into(),
-                inputs: BTreeMap::new(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: true,
-            timeout_minutes: None,
-        }];
-        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
-            calls: Vec::new(),
-            failure_marker: "/__a/_actions/acme_action/v1/main.js".into(),
-        });
-
-        let summary = executor
-            .execute_ordered_steps_with_completion(
-                &container(&temp),
-                &steps,
-                &[],
-                &[],
-                None,
-                None,
-                &temp,
-            )
-            .expect("continue-on-error must preserve the JavaScript post action");
-
-        assert_eq!(summary.step_results.len(), 2);
-        assert_eq!(summary.step_results[0].exit_code, 1);
-        assert!(summary.step_results[0].failure_ignored);
-        assert_eq!(summary.step_results[1].exit_code, 0);
-        let node_calls = executor
-            .runner()
-            .calls
-            .iter()
-            .filter(|(_, args)| {
-                args.first().is_some_and(|arg| arg == "run")
-                    && args.contains(&"node:20-bookworm".into())
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(node_calls.len(), 2);
-        assert!(node_calls[0].1.ends_with(&[
-            "node:20-bookworm".into(),
-            "/__a/_actions/acme_action/v1/main.js".into()
-        ]));
-        assert!(node_calls[1].1.ends_with(&[
-            "node:20-bookworm".into(),
-            "/__a/_actions/acme_action/v1/post.js".into()
-        ]));
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn native_post_action_is_registered_before_main_execution_error() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::Native {
-            step_id: "sccache".into(),
-            display_name: "sccache".into(),
-            invocation: NativeActionInvocation {
-                git_ref: "v1".into(),
-                adapter: NativeActionAdapter::Sccache,
-                cache_kind: None,
-                source_path: None,
-                inputs: BTreeMap::new(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: true,
-            timeout_minutes: None,
-        }];
-        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
-            calls: Vec::new(),
-            failure_marker: "sccache --start-server".into(),
-        });
-
-        let summary = executor
-            .execute_ordered_steps_with_completion(
-                &container(&temp),
-                &steps,
-                &[],
-                &[],
-                None,
-                None,
-                &temp,
-            )
-            .expect("continue-on-error must preserve the native post action");
-
-        assert_eq!(summary.step_results.len(), 2);
-        assert_eq!(summary.step_results[0].exit_code, 1);
-        assert!(summary.step_results[0].failure_ignored);
-        assert_eq!(summary.step_results[1].exit_code, 0);
-        assert!(executor.runner().calls.iter().any(|(_, args)| {
-            args.last()
-                .is_some_and(|arg| arg.contains("sccache --stop-server"))
-        }));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -24944,10 +25364,10 @@ bitcoin-processor-app.push=true")
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key == name
-                        && let Some(value) = value.as_str()
-                    {
-                        strings.push(value);
+                    if key == name {
+                        if let Some(value) = value.as_str() {
+                            strings.push(value);
+                        }
                     }
                     collect_yaml_key_strings(value, name, strings);
                 }

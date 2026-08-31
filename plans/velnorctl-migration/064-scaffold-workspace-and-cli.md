@@ -136,13 +136,12 @@ conclusion changes.
    `21db3a590b2ea302cd4691b4c13646a5027fab81`, ran
    `rtk cargo metadata --no-deps --format-version 1 --locked` and
    `rtk cargo nextest run -p velnor-client --test dependency_boundaries
-   --locked`: that historical tree resolved exactly eleven packages and 6/6
-   boundary tests passed. The current main-equivalent package set is twelve:
-   `velnor-model`, `velnor-action-model`, `velnor-cas`,
-   `velnor-action-journal`, `velnor-cache-service`, `velnor-control`,
-   `velnor-client`, `velnor-render`, `velnorctl`, `velnor-runner`,
-   `velnor-tools`, and `unit-collector`; the suite asserts that set, acyclicity,
-   and the intentional `velnor-control` direct workspace dependencies.
+   --locked`: exactly eleven packages resolved and 6/6 boundary tests passed.
+   The current package set is `velnor-model`, `velnor-action-model`,
+   `velnor-cas`, `velnor-action-journal`, `velnor-control`, `velnor-client`,
+   `velnor-render`, `velnorctl`, `velnor-runner`, `velnor-tools`, and
+   `unit-collector`; the suite asserts that set, acyclicity, and the intentional
+   `velnor-control` direct workspace dependencies.
 2. **Seams with zero successful commands**: `lib.rs` legacy/unimplemented
    rejection tests plus `cli_smoke` subprocess assertions (`--help`=0,
    bare=2, `cache` du=3, `version`=2). Live binary smoke table verified
@@ -191,10 +190,9 @@ Provenance notes:
 
 ### Current dependency-boundary reconciliation 2026-08-30
 
-- The current workspace resolves twelve packages, including
-  `velnor-cache-service`. The dependency-boundary leaf asserts that set,
-  acyclicity, and the exact direct workspace dependency set of
-  `velnor-control`: `velnor-action-journal` and `velnor-model`.
+- The current workspace resolves eleven packages. The dependency-boundary leaf
+  asserts that set, acyclicity, and the exact direct workspace dependency set
+  of `velnor-control`: `velnor-action-journal` and `velnor-model`.
 - `velnor-control -> velnor-action-journal` is intentional ownership for
   physical-action lifecycle journaling. The control journal remains the fleet
   state journal described in `docs/action-foundations.md`; the edge is not

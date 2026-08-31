@@ -117,8 +117,6 @@ mod tests {
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release,
         }
     }
 
@@ -204,23 +202,6 @@ mod tests {
         let guest = validated.to_guest("job", 1);
         assert_eq!(guest.steps[0].script, "cargo check");
         assert_eq!(guest.workspace, "/__w");
-        assert_eq!(guest.compiler_cache, validated.compiler_cache);
-        assert_eq!(
-            guest.compiler_cache.backend,
-            velnor_model::guest_plan::GuestCompilerCacheBackend::Sccache
-        );
-        assert_eq!(
-            guest.compiler_cache.trust_class,
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
-        );
-        assert_eq!(
-            guest.compiler_cache.protocol_version,
-            velnor_model::guest_plan::GuestCompilerCacheDescriptor::PROTOCOL_VERSION
-        );
-        assert_eq!(
-            guest.compiler_cache.transport_namespace,
-            velnor_model::guest_plan::GuestCompilerCacheDescriptor::TRANSPORT_NAMESPACE
-        );
         assert!(!guest
             .encode()
             .unwrap()

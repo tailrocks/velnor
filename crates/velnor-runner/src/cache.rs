@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
 
 use crate::{
     args::{CacheArgs, CacheCommand, CacheGcArgs},
@@ -164,7 +163,7 @@ fn run_gc(
         Err(error) => return Err(error).context("read active cache-scope leases"),
     };
 
-    let listing = cache_listing(work_root, false)?;
+    let listing = cache_listing(work_root)?;
     let max_age = args
         .max_age_days
         .checked_mul(DAY.as_secs())
@@ -202,6 +201,7 @@ fn run_gc(
     let log_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.log_root)
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
+    reclaim_compiler_cache_cas(work_root)?;
     for candidate in candidates {
         let result = remove_candidate(&candidate);
         let outcome = if result.is_ok() { "deleted" } else { "failed" };
@@ -238,6 +238,48 @@ fn run_gc(
             );
         }
         Err(error) => eprintln!("leftover-after-Velnor reclaim failed: {error:#}"),
+    }
+    Ok(())
+}
+
+fn reclaim_compiler_cache_cas(work_root: &Path) -> Result<()> {
+    use velnor_action_model::TrustClass;
+    use velnor_cache_service::{
+        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
+    };
+
+    let base = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.cache_root)
+        .unwrap_or_else(|| crate::container::daemon_shared_root(work_root.to_path_buf()));
+    for (trust_name, trust_class) in [
+        ("untrusted", TrustClass::Untrusted),
+        ("trusted", TrustClass::Trusted),
+        ("release", TrustClass::Release),
+    ] {
+        for (backend_name, policy) in [
+            ("sccache", CompilerCachePolicy::Sccache),
+            ("kache", CompilerCachePolicy::Kache),
+        ] {
+            let namespace = base.join(trust_name).join("compiler").join(backend_name);
+            if !namespace.join("metadata.sqlite").is_file() {
+                continue;
+            }
+            let mut config = CompilerCacheConfig::new(base.clone(), "cache-gc");
+            config.policy = policy;
+            config.trust_class = trust_class;
+            let service =
+                CompilerCacheService::open_production(config, WrapperDeclaration::default())
+                    .with_context(|| {
+                        format!("open compiler-cache GC namespace {}", namespace.display())
+                    })?;
+            let report = service
+                .gc_sync()
+                .with_context(|| format!("reconcile compiler-cache CAS {}", namespace.display()))?;
+            println!(
+                "compiler_cache_gc\t{}\t{}\t{}",
+                trust_name, backend_name, report.deleted_objects
+            );
+        }
     }
     Ok(())
 }
@@ -331,7 +373,6 @@ struct StoreRoot {
     scope_depth: usize,
     candidate_depth: usize,
     gc_managed: bool,
-    emergency_managed: bool,
 }
 
 fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
@@ -344,7 +385,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
     let targets_legacy = is_legacy_store(&targets);
     let actions_cache = crate::storage::cache_class_path(work_root, "caches", "_velnor_caches");
     let actions_cache_legacy = is_legacy_store(&actions_cache);
-    let mut stores = vec![
+    vec![
         StoreRoot {
             kind: CacheStore::Cargo,
             path: cargo.join("registry"),
@@ -352,7 +393,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 0,
             candidate_depth: 0,
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Cargo,
@@ -361,7 +401,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 0,
             candidate_depth: 0,
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Cargo,
@@ -370,7 +409,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if cargo_bin_legacy { 2 } else { 1 },
             candidate_depth: if cargo_bin_legacy { 2 } else { 1 },
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Mise,
@@ -379,7 +417,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 0,
             candidate_depth: 0,
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Mise,
@@ -388,7 +425,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if mise_legacy { 2 } else { 1 },
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
-            emergency_managed: true,
         },
         // Plan 008: persistent per-version mise binaries, same trust/repository
         // boundary and mise budget as installs.
@@ -399,7 +435,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if mise_legacy { 2 } else { 1 },
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Mise,
@@ -408,7 +443,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if mise_legacy { 2 } else { 1 },
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Targets,
@@ -417,7 +451,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if targets_legacy { 4 } else { 3 },
             candidate_depth: if targets_legacy { 4 } else { 3 },
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::ActionsCache,
@@ -426,7 +459,6 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: if actions_cache_legacy { 2 } else { 1 },
             candidate_depth: if actions_cache_legacy { 3 } else { 2 },
             gc_managed: true,
-            emergency_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Artifacts,
@@ -435,36 +467,22 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             scope_depth: 1,
             candidate_depth: 1,
             gc_managed: true,
-            emergency_managed: true,
         },
-    ];
-    for trust_class in [
-        GuestCompilerCacheTrustClass::Untrusted,
-        GuestCompilerCacheTrustClass::Trusted,
-        GuestCompilerCacheTrustClass::Release,
-    ] {
-        for (kind, path) in [
-            (
-                CacheStore::Sccache,
-                crate::container::sccache_host(work_root, trust_class),
+        StoreRoot {
+            kind: CacheStore::Sccache,
+            path: crate::container::compiler_cache_host(
+                work_root,
+                velnor_cache_service::CompilerCacheBackend::Sccache,
+                crate::container::normalize_compiler_cache_trust_scope(
+                    &crate::github_adapter::cargo_target_trust_scope(),
+                ),
             ),
-            (
-                CacheStore::Kache,
-                crate::container::kache_host(work_root, trust_class),
-            ),
-        ] {
-            stores.push(StoreRoot {
-                kind,
-                path,
-                scope_prefix: Vec::new(),
-                scope_depth: 1,
-                candidate_depth: 1,
-                gc_managed: false,
-                emergency_managed: true,
-            });
-        }
-    }
-    stores
+            scope_prefix: Vec::new(),
+            scope_depth: 1,
+            candidate_depth: 1,
+            gc_managed: false,
+        },
+    ]
 }
 
 fn is_legacy_store(path: &Path) -> bool {
@@ -508,15 +526,12 @@ fn collect_scoped_sizes(
     Ok(total)
 }
 
-fn cache_listing(work_root: &Path, emergency: bool) -> Result<Vec<CacheEntry>> {
+fn cache_listing(work_root: &Path) -> Result<Vec<CacheEntry>> {
     let mut entries = Vec::new();
-    for store in store_roots(work_root).into_iter().filter(|store| {
-        if emergency {
-            store.emergency_managed
-        } else {
-            store.gc_managed
-        }
-    }) {
+    for store in store_roots(work_root)
+        .into_iter()
+        .filter(|store| store.gc_managed)
+    {
         collect_candidates(&store, &store.path, 0, &mut entries)?;
     }
     Ok(entries)
@@ -540,55 +555,7 @@ pub fn reclaim(
         &layout.log_root,
         target_bytes,
         in_use_scopes,
-        false,
     )
-}
-
-/// Reclaim cache storage across all discovered daemon work roots.
-///
-/// Disk pressure is best effort: one unavailable root must not prevent the
-/// remaining roots from being reclaimed or make the caller fail open. Each
-/// root retains the lease and filesystem coordination enforced by
-/// [`reclaim_work_root`].
-pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
-    let roots = crate::leftover_disk::discover_daemon_work_roots();
-    let layout = crate::storage::StorageLayout::resolve();
-    let mut report = ReclaimReport::default();
-
-    for work_root in roots {
-        let (run_root, log_root) = layout
-            .as_ref()
-            .map(|layout| (layout.run_root.clone(), layout.log_root.clone()))
-            .unwrap_or_else(|| {
-                (
-                    work_root.join("_velnor_runtime"),
-                    work_root.join("_velnor_logs"),
-                )
-            });
-        let remaining = target_bytes.saturating_sub(report.freed_bytes);
-        if remaining == 0 {
-            break;
-        }
-        match reclaim_work_root(
-            &work_root,
-            &run_root,
-            &log_root,
-            remaining,
-            &BTreeSet::new(),
-            true,
-        ) {
-            Ok(root_report) => {
-                report.freed_bytes = report.freed_bytes.saturating_add(root_report.freed_bytes);
-                report.deleted.extend(root_report.deleted);
-                report.failures.extend(root_report.failures);
-            }
-            Err(error) => report
-                .failures
-                .push(format!("{}: {error:#}", work_root.display())),
-        }
-    }
-
-    report
 }
 
 pub(crate) fn reclaim_work_root(
@@ -597,7 +564,6 @@ pub(crate) fn reclaim_work_root(
     log_root: &Path,
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
-    emergency: bool,
 ) -> Result<ReclaimReport> {
     let _lock = match GcLeaderLock::acquire(run_root) {
         Ok(lock) => lock,
@@ -610,12 +576,13 @@ pub(crate) fn reclaim_work_root(
     // Publish/snapshot leases under one filesystem-wide coordinator. A daemon
     // starting a job cannot race between this snapshot and candidate deletion.
     let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+    reclaim_compiler_cache_cas(work_root)?;
     let mut protected = in_use_scopes.clone();
     protected.extend(crate::capacity::active_scopes(
         run_root,
         Duration::from_secs(24 * 3600),
     )?);
-    let mut entries = cache_listing(work_root, emergency)?;
+    let mut entries = cache_listing(work_root)?;
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: 0,
@@ -715,7 +682,7 @@ fn reclaim_priority(store: CacheStore) -> u8 {
         CacheStore::Targets => 2,
         CacheStore::Cargo => 3,
         CacheStore::Mise => 4,
-        CacheStore::Sccache | CacheStore::Kache => 5,
+        CacheStore::Sccache => 5,
     }
 }
 
@@ -843,7 +810,6 @@ pub(crate) enum CacheStore {
     ActionsCache,
     Artifacts,
     Sccache,
-    Kache,
 }
 
 impl fmt::Display for CacheStore {
@@ -855,7 +821,6 @@ impl fmt::Display for CacheStore {
             Self::ActionsCache => "actions-cache",
             Self::Artifacts => "artifacts",
             Self::Sccache => "sccache",
-            Self::Kache => "kache",
         })
     }
 }
@@ -1272,53 +1237,12 @@ mod tests {
             &root.join("log"),
             16,
             &BTreeSet::from(["actions-cache/trusted/active".into()]),
-            false,
         )
         .unwrap();
         assert_eq!(report.deleted.len(), 1);
         assert!(active.exists());
         assert_eq!(first.exists() as u8 + second.exists() as u8, 1);
         assert!(root.join("log/gc-history.jsonl").exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn disk_pressure_reclaimer_reclaims_discovered_work_root() {
-        let root = std::env::temp_dir().join(format!(
-            "velnor-disk-pressure-reclaim-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let work = root.join("lib/velnor-test/work");
-        let cache = root.join("cache/velnor/v1/trusted/caches/idle/key");
-        let compiler_cache = work.join("_velnor_sccache/trusted/idle/key");
-        fs::create_dir_all(&work).unwrap();
-        fs::create_dir_all(&cache).unwrap();
-        fs::create_dir_all(&compiler_cache).unwrap();
-        fs::write(cache.join("payload"), vec![0; 16]).unwrap();
-        fs::write(compiler_cache.join("payload"), vec![0; 16]).unwrap();
-
-        let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
-        // SAFETY: this synchronous test owns the process environment value
-        // while exercising the discovery path and restores it below.
-        unsafe { std::env::set_var("VELNOR_STORAGE_ROOT", &root) };
-        let report = reclaim_for_disk_pressure(32);
-        match previous {
-            Some(value) => unsafe {
-                // SAFETY: restore the value owned by this synchronous test.
-                std::env::set_var("VELNOR_STORAGE_ROOT", value)
-            },
-            None => unsafe {
-                // SAFETY: restore the value owned by this synchronous test.
-                std::env::remove_var("VELNOR_STORAGE_ROOT")
-            },
-        }
-
-        assert_eq!(report.freed_bytes, 32);
-        assert_eq!(
-            report.deleted,
-            vec![cache, compiler_cache.parent().unwrap().to_path_buf()]
-        );
-        assert!(report.failures.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1348,7 +1272,6 @@ mod tests {
                 scope_depth: 0,
                 candidate_depth: 0,
                 gc_managed: true,
-                emergency_managed: true,
             },
             StoreRoot {
                 kind: CacheStore::Cargo,
@@ -1357,7 +1280,6 @@ mod tests {
                 scope_depth: 1,
                 candidate_depth: 1,
                 gc_managed: true,
-                emergency_managed: true,
             },
             StoreRoot {
                 kind: CacheStore::Cargo,
@@ -1366,7 +1288,6 @@ mod tests {
                 scope_depth: 2,
                 candidate_depth: 2,
                 gc_managed: true,
-                emergency_managed: true,
             },
         ];
         let mut entries = Vec::new();

@@ -36,6 +36,7 @@ pub fn github_job_container_spec(
     daemon_id: String,
     trust_scope: &str,
 ) -> Result<JobContainerSpec, CacheAdmissionError> {
+    let trust_scope = crate::container::normalize_compiler_cache_trust_scope(trust_scope);
     // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
@@ -48,7 +49,8 @@ pub fn github_job_container_spec(
             )
         })
         .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
-    let compiler_cache_declaration = crate::manifest::compiler_cache_declaration(job);
+    let mut env = backend_advertising_env(job_container_env(job), paths.execution_backend);
+    env.push(("VELNOR_TRUST_SCOPE".into(), trust_scope.into()));
     Ok(JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -60,7 +62,7 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
-        env: backend_advertising_env(job_container_env(job), paths.execution_backend),
+        env,
         resource_options,
         options: job_container_options(job),
         services: service_containers(job),
@@ -72,19 +74,103 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        compiler_cache_backend: match paths.execution_backend {
-            velnor_model::ExecutionBackendKind::Docker => {
-                crate::manifest::compiler_cache_backend(job)?
+        compiler_cache_backend: github_compiler_cache_backend(job, paths.execution_backend)?,
+    })
+}
+
+fn github_compiler_cache_backend(
+    job: &AgentJobRequestMessage,
+    execution_backend: velnor_model::ExecutionBackendKind,
+) -> Result<velnor_cache_service::CompilerCacheBackend, CacheAdmissionError> {
+    if matches!(
+        execution_backend,
+        velnor_model::ExecutionBackendKind::MicroVm
+    ) {
+        let declaration = crate::manifest::compiler_cache_declaration(job);
+        if declaration.sccache && declaration.kache {
+            return Err(CacheAdmissionError::ConflictingWrappers);
+        }
+        reject_microvm_compiler_cache_environment(job)?;
+        if declaration.sccache || declaration.kache {
+            let declared = if declaration.sccache {
+                velnor_cache_service::CompilerCacheBackend::Sccache
+            } else {
+                velnor_cache_service::CompilerCacheBackend::Kache
+            };
+            return Err(CacheAdmissionError::MicroVmTransportUnavailable { declared });
+        }
+        return Ok(velnor_cache_service::CompilerCacheBackend::Off);
+    }
+    crate::manifest::compiler_cache_backend(job)
+}
+
+fn reject_microvm_compiler_cache_environment(
+    job: &AgentJobRequestMessage,
+) -> Result<(), CacheAdmissionError> {
+    let mut names = crate::runtime_env::job_environment_variables(job)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    names.extend(job_container_env(job).into_iter().map(|(name, _)| name));
+    names.extend(job.variables.keys().cloned());
+    for step in job.steps.iter().filter(|step| step.enabled) {
+        if let Some(environment) = &step.environment {
+            collect_environment_names(environment, &mut names);
+        }
+    }
+    if let Some(name) = names.into_iter().find(|name| is_compiler_cache_env(name)) {
+        return Err(CacheAdmissionError::MicroVmEnvironmentUnsupported { name });
+    }
+    Ok(())
+}
+
+fn is_compiler_cache_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase().replace('-', "_");
+    upper == "RUSTC_WRAPPER"
+        || upper == "SCCACHE_DIR"
+        || upper.starts_with("SCCACHE_")
+        || upper == "KACHE_CACHE_DIR"
+        || upper.starts_with("KACHE_")
+}
+
+fn collect_environment_names(value: &Value, names: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(name) = object
+                .get("name")
+                .or_else(|| object.get("Name"))
+                .or_else(|| object.get("Key"))
+                .or_else(|| object.get("key"))
+                .and_then(environment_name)
+            {
+                names.push(name.to_string());
+            } else {
+                names.extend(
+                    object
+                        .keys()
+                        .filter(|key| !matches!(key.as_str(), "type" | "Type" | "map" | "Map"))
+                        .cloned(),
+                );
             }
-            velnor_model::ExecutionBackendKind::MicroVm => {
-                if compiler_cache_declaration.sccache || compiler_cache_declaration.kache {
-                    crate::manifest::compiler_cache_backend(job)?
-                } else {
-                    velnor_cache_service::CompilerCacheBackend::Off
-                }
+            for nested in object.get("map").or_else(|| object.get("Map")).into_iter() {
+                collect_environment_names(nested, names);
             }
-        },
-        compiler_cache_trust_class: compiler_cache_trust_class(trust_scope),
+        }
+        Value::Array(values) => {
+            for nested in values {
+                collect_environment_names(nested, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn environment_name(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_object()
+            .and_then(|object| object.get("lit").or_else(|| object.get("Lit")))
+            .and_then(Value::as_str)
     })
 }
 
@@ -139,18 +225,6 @@ fn cargo_target_trust_scope_from(value: Option<&str>) -> String {
 
 pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
     cargo_target_trust_scope_from(Some(trust_scope)).eq_ignore_ascii_case("trusted")
-}
-
-pub(crate) fn compiler_cache_trust_class(
-    trust_scope: &str,
-) -> velnor_model::guest_plan::GuestCompilerCacheTrustClass {
-    if trust_scope.trim().eq_ignore_ascii_case("trusted") {
-        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
-    } else if trust_scope.trim().eq_ignore_ascii_case("release") {
-        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
-    } else {
-        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
-    }
 }
 
 pub fn github_normalized_job_plan(
@@ -950,8 +1024,6 @@ mod tests {
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         };
         let plan = github_normalized_job_plan(
             &job,
@@ -1062,22 +1134,6 @@ mod tests {
     }
 
     #[test]
-    fn compiler_cache_trust_class_mapping_is_explicit_and_fail_closed() {
-        assert_eq!(
-            compiler_cache_trust_class("trusted"),
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
-        );
-        assert_eq!(
-            compiler_cache_trust_class(" release "),
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
-        );
-        assert_eq!(
-            compiler_cache_trust_class("public-forks"),
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
-        );
-    }
-
-    #[test]
     fn non_trusted_scope_disables_host_docker_socket() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -1112,6 +1168,10 @@ mod tests {
             spec.compiler_cache_backend,
             velnor_cache_service::CompilerCacheBackend::Kache
         );
+        let args = spec.start_args();
+        assert!(args.iter().any(|arg| arg.contains("/var/cache/kache")));
+        assert!(args.contains(&"RUSTC_WRAPPER=kache".into()));
+        assert!(!args.contains(&"RUSTC_WRAPPER=sccache".into()));
     }
 
     #[test]
@@ -1148,33 +1208,77 @@ mod tests {
             spec.compiler_cache_backend,
             velnor_cache_service::CompilerCacheBackend::Off
         );
-        assert!(spec
-            .compiler_cache_runtime()
-            .environment()
-            .variables
-            .is_empty());
+        let args = spec.start_args();
+        assert!(!args
+            .iter()
+            .any(|arg| { arg.contains("/var/cache/sccache") || arg.contains("/var/cache/kache") }));
+        assert!(!args.iter().any(|arg| {
+            arg.starts_with("RUSTC_WRAPPER=")
+                || arg.starts_with("SCCACHE_")
+                || arg.starts_with("KACHE_")
+        }));
     }
 
     #[test]
-    fn microvm_backend_preserves_explicit_compiler_cache_wrapper() {
+    fn microvm_backend_rejects_raw_compiler_cache_environment() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
             "timeline": { "id": "timeline" },
             "jobId": "job",
-            "jobDisplayName": "Trusted with sccache",
+            "jobDisplayName": "Trusted",
+            "requestId": 1,
+            "environmentVariables": [{ "name": "RUSTC_WRAPPER", "value": "sccache" }]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            github_compiler_cache_backend(
+                &job,
+                velnor_model::ExecutionBackendKind::MicroVm
+            ),
+            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported { name })
+                if name == "RUSTC_WRAPPER"
+        ));
+    }
+
+    #[test]
+    fn microvm_backend_rejects_mixed_compiler_cache_wrappers() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Trusted",
+            "requestId": 1,
+            "steps": [
+                { "reference": { "name": "mozilla-actions/sccache-action" } },
+                { "reference": { "name": "kunobi-ninja/kache-action" } }
+            ]
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            github_compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::ConflictingWrappers)
+        ));
+    }
+
+    #[test]
+    fn microvm_backend_rejects_explicit_sccache_without_guest_transport() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Trusted",
             "requestId": 1,
             "steps": [{
-                "type": "Action",
-                "reference": {
-                    "type": "Repository",
-                    "name": "mozilla-actions/sccache-action",
-                    "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
-                }
+                "reference": { "name": "mozilla-actions/sccache-action" }
             }]
         }))
         .unwrap();
-        let spec = github_job_container_spec(
+        let result = github_job_container_spec(
             &job,
             GitHubJobContainerPaths {
                 workspace_host: "/tmp/workspace".into(),
@@ -1190,13 +1294,54 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
-        )
-        .unwrap();
-
-        assert_eq!(
-            spec.compiler_cache_backend,
-            velnor_cache_service::CompilerCacheBackend::Sccache
         );
+
+        assert!(matches!(
+            result,
+            Err(CacheAdmissionError::MicroVmTransportUnavailable {
+                declared: velnor_cache_service::CompilerCacheBackend::Sccache
+            })
+        ));
+    }
+
+    #[test]
+    fn microvm_backend_rejects_explicit_kache_without_guest_transport() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Trusted",
+            "requestId": 1,
+            "steps": [{
+                "reference": { "name": "kunobi-ninja/kache-action" }
+            }]
+        }))
+        .unwrap();
+        let result = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "trusted",
+        );
+
+        assert!(matches!(
+            result,
+            Err(CacheAdmissionError::MicroVmTransportUnavailable {
+                declared: velnor_cache_service::CompilerCacheBackend::Kache
+            })
+        ));
     }
 
     #[test]

@@ -8,7 +8,6 @@ use std::{
 };
 
 use velnor_cache_service::{CompilerCacheBackend, CompilerCacheRuntime};
-use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -50,25 +49,33 @@ pub struct JobContainerSpec {
     pub cargo_target_host: Option<PathBuf>,
     /// Exactly one compiler-cache store is exposed to a job.
     pub compiler_cache_backend: CompilerCacheBackend,
-    /// Trust namespace admitted for compiler-cache entries. The selected
-    /// namespace remains below the daemon-shared Plan 066 cache root, so slots
-    /// share warm entries without crossing trust boundaries.
-    pub compiler_cache_trust_class: GuestCompilerCacheTrustClass,
 }
 
 impl JobContainerSpec {
     pub(crate) fn compiler_cache_runtime(&self) -> CompilerCacheRuntime {
+        let trust_scope = self.compiler_cache_trust_scope();
         match self.compiler_cache_backend {
             CompilerCacheBackend::Sccache => CompilerCacheRuntime::new(
                 CompilerCacheBackend::Sccache,
-                sccache_host(&self.temp_host, self.compiler_cache_trust_class),
+                compiler_cache_host(&self.temp_host, CompilerCacheBackend::Sccache, &trust_scope),
             ),
             CompilerCacheBackend::Kache => CompilerCacheRuntime::new(
                 CompilerCacheBackend::Kache,
-                kache_host(&self.temp_host, self.compiler_cache_trust_class),
+                compiler_cache_host(&self.temp_host, CompilerCacheBackend::Kache, &trust_scope),
             ),
             CompilerCacheBackend::Off => CompilerCacheRuntime::off(),
         }
+    }
+
+    fn compiler_cache_trust_scope(&self) -> String {
+        let configured = self
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "VELNOR_TRUST_SCOPE")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| "trusted");
+        normalize_compiler_cache_trust_scope(configured).to_string()
     }
 
     fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
@@ -1030,29 +1037,53 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
-pub(crate) fn sccache_host(temp_host: &Path, trust_class: GuestCompilerCacheTrustClass) -> PathBuf {
-    crate::storage::cache_class_path_for_trust(
+pub(crate) fn sccache_host(temp_host: &Path) -> PathBuf {
+    crate::storage::cache_class_path(
         &daemon_store_root(temp_host),
-        compiler_cache_trust_namespace(trust_class),
         "compiler/sccache",
         "_velnor_sccache",
     )
 }
 
-pub(crate) fn kache_host(temp_host: &Path, trust_class: GuestCompilerCacheTrustClass) -> PathBuf {
-    crate::storage::cache_class_path_for_trust(
+pub(crate) fn kache_host(temp_host: &Path) -> PathBuf {
+    crate::storage::cache_class_path(
         &daemon_store_root(temp_host),
-        compiler_cache_trust_namespace(trust_class),
         "compiler/kache",
         "_velnor_kache",
     )
 }
 
-fn compiler_cache_trust_namespace(trust_class: GuestCompilerCacheTrustClass) -> &'static str {
-    match trust_class {
-        GuestCompilerCacheTrustClass::Untrusted => "untrusted",
-        GuestCompilerCacheTrustClass::Trusted => "trusted",
-        GuestCompilerCacheTrustClass::Release => "release",
+pub(crate) fn compiler_cache_host(
+    temp_host: &Path,
+    backend: CompilerCacheBackend,
+    trust_scope: &str,
+) -> PathBuf {
+    let backend = match backend {
+        CompilerCacheBackend::Sccache => "sccache",
+        CompilerCacheBackend::Kache => "kache",
+        CompilerCacheBackend::Off => return temp_host.to_path_buf(),
+    };
+    if let Some(layout) = crate::storage::StorageLayout::resolve() {
+        return layout
+            .cache_root
+            .join(normalize_compiler_cache_trust_scope(trust_scope))
+            .join("compiler")
+            .join(backend)
+            .join("wrapper");
+    }
+    daemon_store_root(temp_host)
+        .join(format!("_velnor_{backend}"))
+        .join(normalize_compiler_cache_trust_scope(trust_scope))
+        .join("compiler")
+        .join(backend)
+        .join("wrapper")
+}
+
+pub(crate) fn normalize_compiler_cache_trust_scope(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "release" => "release",
+        "trusted" => "trusted",
+        _ => "untrusted",
     }
 }
 
@@ -1183,7 +1214,7 @@ pub(crate) fn playwright_browser_store_host(temp_host: &Path, repository: &str) 
 
 /// Resolve the daemon-shared store root from a job temp dir
 /// (`…/work/slot-N/<job>/temp` → `…/work`).
-fn daemon_store_root(temp_host: &Path) -> PathBuf {
+pub(crate) fn daemon_store_root(temp_host: &Path) -> PathBuf {
     let per_slot_root = if temp_host.file_name().is_some_and(|name| name == "temp") {
         if let Some(job_dir) = temp_host.parent() {
             if job_dir.file_name().is_some_and(|name| name == "tmp") {
@@ -1300,7 +1331,6 @@ mod tests {
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
             compiler_cache_backend: CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class: GuestCompilerCacheTrustClass::Trusted,
         }
     }
 
@@ -1370,32 +1400,13 @@ mod tests {
     fn compiler_cache_stores_have_distinct_canonical_classes() {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
         assert_eq!(
-            sccache_host(temp, GuestCompilerCacheTrustClass::Trusted),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
+            sccache_host(temp),
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache")
         );
         assert_eq!(
-            kache_host(temp, GuestCompilerCacheTrustClass::Trusted),
-            PathBuf::from("/var/lib/velnor/work/_velnor_kache/trusted")
+            kache_host(temp),
+            PathBuf::from("/var/lib/velnor/work/_velnor_kache")
         );
-    }
-
-    #[test]
-    fn compiler_cache_hosts_use_each_typed_trust_namespace() {
-        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
-        for (trust_class, namespace) in [
-            (GuestCompilerCacheTrustClass::Untrusted, "untrusted"),
-            (GuestCompilerCacheTrustClass::Trusted, "trusted"),
-            (GuestCompilerCacheTrustClass::Release, "release"),
-        ] {
-            assert_eq!(
-                sccache_host(temp, trust_class),
-                PathBuf::from(format!("/var/lib/velnor/work/_velnor_sccache/{namespace}"))
-            );
-            assert_eq!(
-                kache_host(temp, trust_class),
-                PathBuf::from(format!("/var/lib/velnor/work/_velnor_kache/{namespace}"))
-            );
-        }
     }
 
     #[test]
@@ -1497,18 +1508,12 @@ mod tests {
     fn sccache_host_is_shared_across_daemon_slots() {
         // slot-N work roots collapse to one daemon-level sccache dir.
         assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-3/job-9/temp"),
-                GuestCompilerCacheTrustClass::Trusted,
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
+            sccache_host(Path::new("/var/lib/velnor/work/slot-3/job-9/temp")),
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache")
         );
         assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-7/job-1/temp"),
-                GuestCompilerCacheTrustClass::Trusted,
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
+            sccache_host(Path::new("/var/lib/velnor/work/slot-7/job-1/temp")),
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache")
         );
     }
 
@@ -1526,7 +1531,9 @@ mod tests {
         );
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache".into()
+        ));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(
             &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
@@ -1649,7 +1656,10 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
-        assert!(args.contains(&"/daemon/work/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/daemon/work/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache"
+                .into()
+        ));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
@@ -1917,7 +1927,9 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache".into()
+        ));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
@@ -2060,7 +2072,9 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_sccache/trusted/compiler/sccache/wrapper:/var/cache/sccache".into()
+        ));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));

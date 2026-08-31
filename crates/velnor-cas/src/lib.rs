@@ -176,6 +176,9 @@ pub trait BudgetCallback {
 
     /// Release a reservation when publication fails.
     fn release(&self, bytes: u64);
+
+    /// Convert a successful reservation into committed usage.
+    fn commit(&self, _bytes: u64) {}
 }
 
 /// CAS operation failure.
@@ -450,7 +453,7 @@ impl CasStore {
         }
         bucket.sync_all()?;
         if let Some(reservation) = &mut reservation {
-            reservation.committed = true;
+            reservation.commit();
         }
         Ok((digest.clone(), self.object_accounting(&digest, false)))
     }
@@ -515,7 +518,7 @@ impl CasStore {
         }
         sync_directory(parent)?;
         if let Some(reservation) = &mut reservation {
-            reservation.committed = true;
+            reservation.commit();
         }
         Ok((digest.clone(), self.object_accounting(&digest, false)))
     }
@@ -565,6 +568,113 @@ impl CasStore {
         self.put_with_accounting(&canonical_json_bytes(&canonical_manifest)?)
     }
 
+    /// Store a tree manifest while applying a bounded-store reservation.
+    pub fn put_tree_with_budget(
+        &self,
+        manifest: &TreeManifest,
+        budget: &dyn BudgetCallback,
+    ) -> Result<Digest, CasError> {
+        manifest.validate()?;
+        let mut canonical_manifest = manifest.clone();
+        canonical_manifest
+            .entries
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        self.put_with_budget(&canonical_json_bytes(&canonical_manifest)?, budget)
+    }
+
+    /// Read and fully integrity-check a tree manifest and all referenced
+    /// objects without materializing files into a caller-owned directory.
+    pub fn validate_tree(&self, root_digest: &Digest) -> Result<TreeManifest, CasError> {
+        let manifest: TreeManifest = serde_json::from_slice(&self.get(root_digest)?)?;
+        manifest.validate()?;
+        for entry in &manifest.entries {
+            self.get(&entry.digest)?;
+        }
+        Ok(manifest)
+    }
+
+    /// List all durable object digests currently present in this CAS.
+    pub fn list_digests(&self) -> Result<Vec<Digest>, CasError> {
+        let mut digests = Vec::new();
+        for bucket in fs::read_dir(&self.root)? {
+            let bucket = bucket?;
+            let bucket_path = bucket.path();
+            let bucket_metadata = fs::symlink_metadata(&bucket_path)?;
+            if bucket_metadata.file_type().is_symlink() {
+                return Err(CasError::UnsafePath(format!(
+                    "CAS bucket is a symlink: {}",
+                    bucket_path.display()
+                )));
+            }
+            if !bucket_metadata.is_dir() {
+                continue;
+            }
+            let Some(bucket_name) = bucket.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if bucket_name.len() != 2
+                || !bucket_name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                continue;
+            }
+            for object in fs::read_dir(&bucket_path)? {
+                let object = object?;
+                let object_path = object.path();
+                let object_metadata = fs::symlink_metadata(&object_path)?;
+                if object_metadata.file_type().is_symlink() {
+                    return Err(CasError::UnsafePath(format!(
+                        "CAS object is a symlink: {}",
+                        object_path.display()
+                    )));
+                }
+                if !object_metadata.is_file() {
+                    continue;
+                }
+                let Some(object_name) = object.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let Ok(digest) = Digest::parse(format!("{bucket_name}{object_name}")) else {
+                    continue;
+                };
+                digests.push(digest);
+            }
+        }
+        digests.sort();
+        Ok(digests)
+    }
+
+    /// Remove one unreferenced object from this CAS.
+    pub fn remove(&self, digest: &Digest) -> Result<bool, CasError> {
+        #[cfg(unix)]
+        {
+            let bucket = match self.open_bucket(digest, false) {
+                Ok(bucket) => bucket,
+                Err(CasError::Absent { .. }) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            let object_name = &digest.as_str()[2..];
+            match rustix::fs::unlinkat(&bucket, object_name, rustix::fs::AtFlags::empty()) {
+                Ok(()) => {
+                    bucket.sync_all()?;
+                    Ok(true)
+                }
+                Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+                Err(error) => Err(io::Error::from(error).into()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.checked_object_path(digest)?;
+            match fs::remove_file(path) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.into()),
+            }
+        }
+    }
+
     /// Materialize only the selected file classes from a tree manifest.
     pub fn materialize_subset(
         &self,
@@ -584,8 +694,7 @@ impl CasStore {
         selector: SubsetSelector,
         destination: &Path,
     ) -> Result<MaterializationReport, CasError> {
-        let manifest: TreeManifest = serde_json::from_slice(&self.get(root_digest)?)?;
-        manifest.validate()?;
+        let manifest = self.validate_tree(root_digest)?;
         let mut materialized = Vec::new();
         let mut methods = std::collections::BTreeMap::new();
         #[cfg(unix)]
@@ -757,6 +866,13 @@ struct BudgetReservation<'a> {
     committed: bool,
 }
 
+impl BudgetReservation<'_> {
+    fn commit(&mut self) {
+        self.callback.commit(self.bytes);
+        self.committed = true;
+    }
+}
+
 impl Drop for BudgetReservation<'_> {
     fn drop(&mut self) {
         if !self.committed {
@@ -840,7 +956,6 @@ fn directory_flags() -> rustix::fs::OFlags {
 
 #[cfg(unix)]
 fn open_directory_child(parent: &File, name: &OsStr) -> io::Result<File> {
-    eprintln!("parent {:?}, name {:?}", parent.metadata(), name);
     let descriptor = rustix::fs::openat(parent, name, directory_flags(), rustix::fs::Mode::empty())
         .map_err(io::Error::from)?;
     Ok(descriptor.into())
@@ -898,6 +1013,7 @@ fn canonical_creation_path(path: &Path) -> io::Result<PathBuf> {
 
 #[cfg(unix)]
 fn open_secure_directory(path: &Path) -> io::Result<File> {
+    let path = secure_path(path);
     let mut current = if path.is_absolute() {
         let descriptor =
             rustix::fs::open(Path::new("/"), directory_flags(), rustix::fs::Mode::empty())
@@ -909,8 +1025,6 @@ fn open_secure_directory(path: &Path) -> io::Result<File> {
                 .map_err(io::Error::from)?;
         File::from(descriptor)
     };
-    eprintln!("base {:?}", current.metadata());
-
     for component in path.components() {
         match component {
             Component::RootDir | Component::CurDir => {}
@@ -926,6 +1040,20 @@ fn open_secure_directory(path: &Path) -> io::Result<File> {
         }
     }
     Ok(current)
+}
+
+#[cfg(unix)]
+fn secure_path(path: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(relative) = path.strip_prefix("/tmp") {
+            return Path::new("/private/tmp").join(relative);
+        }
+        if let Ok(relative) = path.strip_prefix("/var") {
+            return Path::new("/private/var").join(relative);
+        }
+    }
+    path.to_path_buf()
 }
 
 #[cfg(unix)]
@@ -945,8 +1073,7 @@ fn secure_destination_target(
     let (name, parents) = components
         .split_last()
         .ok_or_else(|| CasError::InvalidManifest("materialization path is empty".into()))?;
-    let secure_destination = canonical_creation_path(destination)?;
-    let mut parent = open_secure_directory(&secure_destination)?;
+    let mut parent = open_secure_directory(destination)?;
     for component in parents {
         parent = open_or_create_directory(&parent, component)?;
     }
@@ -1444,6 +1571,50 @@ mod tests {
         let digest = Digest::from_bytes(b"missing");
         let error = store.get(&digest).unwrap_err();
         assert_eq!(error.miss_reason(), Some(MissReason::KeyAbsent));
+    }
+
+    #[test]
+    fn list_and_remove_only_address_digest_named_objects() {
+        let (_temp, store) = store();
+        let kept = store.put(b"kept").unwrap();
+        let removed = store.put(b"removed").unwrap();
+        fs::write(store.root().join("not-an-object"), b"ignored").unwrap();
+
+        let listed = store.list_digests().unwrap();
+        assert!(listed.contains(&kept));
+        assert!(listed.contains(&removed));
+        assert!(store.remove(&removed).unwrap());
+        assert!(!store.remove(&removed).unwrap());
+        assert_eq!(store.get(&kept).unwrap(), b"kept");
+        assert!(matches!(store.get(&removed), Err(CasError::Absent { .. })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_rejects_symlinked_destination_ancestor() {
+        let (temp, store) = store();
+        let digest = store.put(b"safe").unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("nested")).unwrap();
+        let manifest = store
+            .put_tree(&TreeManifest {
+                entries: vec![TreeEntry {
+                    path: "nested/file".into(),
+                    digest,
+                    class: FileClass::Runtime,
+                    mode: 0o644,
+                }],
+            })
+            .unwrap();
+
+        let error = store
+            .materialize_subset(&manifest, SubsetSelector::RuntimeFiles, &root)
+            .unwrap_err();
+        assert!(matches!(error, CasError::Io(_) | CasError::UnsafePath(_)));
+        assert!(!outside.join("file").exists());
     }
 
     #[test]

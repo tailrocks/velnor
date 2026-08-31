@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 17;
+pub const LATEST_SCHEMA_VERSION: u32 = 16;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -483,26 +483,6 @@ const SCHEMA_V16_NORMALIZE_LEGACY_SLOTS: &str = "
 UPDATE slots SET phase = 'idle' WHERE phase = 'ready';
 ";
 
-/// Persist allocator request identity and the exact allocation returned for it.
-/// The tuple key makes a retry lookup durable across worker restarts and keeps
-/// the allocated sequence, token, correlation, and detail bound to its intent.
-const SCHEMA_V17: &str = "
-CREATE TABLE IF NOT EXISTS slot_transition_requests (
-    instance_slug TEXT NOT NULL,
-    slot_id TEXT NOT NULL,
-    request_key TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation >= 1),
-    target TEXT NOT NULL,
-    job_name TEXT,
-    message TEXT,
-    allocated_sequence INTEGER NOT NULL CHECK (allocated_sequence >= 1),
-    allocated_token TEXT NOT NULL,
-    allocated_correlation_id TEXT NOT NULL,
-    allocated_detail TEXT NOT NULL,
-    PRIMARY KEY (instance_slug, slot_id, request_key)
-);
-";
-
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -614,11 +594,6 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "typed-fenced-slot-lifecycle",
         sql: SCHEMA_V16,
     },
-    Migration {
-        version: 17,
-        name: "durable-slot-transition-requests",
-        sql: SCHEMA_V17,
-    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -658,22 +633,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
         [],
         |row| row.get(0),
     )?;
-    if version > LATEST_SCHEMA_VERSION {
-        return Err(StoreError::new(
-            ExitClass::Operation,
-            "store.schema.unsupported",
-        )
-        .with_remediation(format!(
-            "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
-        )));
-    }
-    if version >= LATEST_SCHEMA_VERSION && !v17_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v16_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 17 is recorded but its durable slot-transition request ledger or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 16 is recorded but its exact lifecycle-event identity, storage-reservation accounting, or fenced slot-lifecycle schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -871,11 +837,10 @@ pub(crate) fn apply_pending(
         if migration.version == 16 {
             transaction.execute_batch(SCHEMA_V16_NORMALIZE_LEGACY_SLOTS)?;
         }
-        if migration.version == 17
-            || ((migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
-                && !slot_column_exists
-                && !retention_generation_exists
-                && !slot_lifecycle_columns.iter().all(|exists| *exists))
+        if (migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
+            && !slot_column_exists
+            && !retention_generation_exists
+            && !slot_lifecycle_columns.iter().all(|exists| *exists)
         {
             let sql = if lifecycle_columns_exist {
                 SCHEMA_V6_REPLAY
@@ -935,15 +900,6 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v16 fenced slot lifecycle columns did not converge transactionally; the schema version remains unchanged",
-            ));
-        }
-        if migration.version == 17 && !v17_schema_complete(&transaction)? {
-            return Err(StoreError::new(
-                ExitClass::Operation,
-                "store.schema.incomplete",
-            )
-            .with_remediation(
-                "v17 durable slot-transition request identity and allocation columns did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1218,70 +1174,6 @@ fn v16_schema_complete(conn: &Connection) -> StoreResult<bool> {
     Ok(true)
 }
 
-fn v17_schema_complete(conn: &Connection) -> StoreResult<bool> {
-    if !v16_schema_complete(conn)? {
-        return Ok(false);
-    }
-    let columns: Vec<(String, String, bool, Option<String>, i64)> = conn
-        .prepare(
-            "SELECT name, type, \"notnull\", dflt_value, pk
-             FROM pragma_table_info('slot_transition_requests')
-             ORDER BY cid",
-        )?
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let required = [
-        ("instance_slug", "TEXT", true, None, 1),
-        ("slot_id", "TEXT", true, None, 2),
-        ("request_key", "TEXT", true, None, 3),
-        ("generation", "INTEGER", true, None, 0),
-        ("target", "TEXT", true, None, 0),
-        ("job_name", "TEXT", false, None, 0),
-        ("message", "TEXT", false, None, 0),
-        ("allocated_sequence", "INTEGER", true, None, 0),
-        ("allocated_token", "TEXT", true, None, 0),
-        ("allocated_correlation_id", "TEXT", true, None, 0),
-        ("allocated_detail", "TEXT", true, None, 0),
-    ];
-    if columns.len() != required.len()
-        || !columns.iter().zip(required).all(
-            |(
-                (name, declared_type, not_null, default, primary_key),
-                (expected_name, expected_type, expected_not_null, expected_default, expected_pk),
-            )| {
-                name == expected_name
-                    && declared_type.eq_ignore_ascii_case(expected_type)
-                    && *not_null == expected_not_null
-                    && default.as_deref() == expected_default
-                    && *primary_key == expected_pk
-            },
-        )
-    {
-        return Ok(false);
-    }
-    Ok(
-        table_sql_contains(conn, "slot_transition_requests", "CHECK (generation >= 1)")?
-            && table_sql_contains(
-                conn,
-                "slot_transition_requests",
-                "CHECK (allocated_sequence >= 1)",
-            )?
-            && table_sql_contains(
-                conn,
-                "slot_transition_requests",
-                "PRIMARY KEY (instance_slug, slot_id, request_key)",
-            )?,
-    )
-}
-
 fn slot_column_definition_matches(
     conn: &Connection,
     column: &str,
@@ -1435,81 +1327,6 @@ mod tests {
     }
 
     #[test]
-    fn future_schema_version_fails_closed_before_migration_lock_acquisition() {
-        let current = TempDb::new("current-schema");
-        let store = Store::open(&current.path).expect("current schema opens");
-        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-        drop(store);
-        let reopened = Store::open(&current.path).expect("existing current schema opens");
-        assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-        drop(reopened);
-
-        let temp = TempDb::new("future-schema");
-        let store = Store::open(&temp.path).expect("future-schema fixture opens");
-        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-        drop(store);
-
-        let future_version = LATEST_SCHEMA_VERSION + 1;
-        let conn = Connection::open(&temp.path).expect("open current database");
-        conn.execute(
-            "UPDATE schema_version SET version = ?1 WHERE singleton = 0",
-            [future_version],
-        )
-        .unwrap();
-        let sentinel = (
-            "sentinel-owner",
-            "1970-01-01T00:00:00Z",
-            "1970-01-01T00:00:00Z",
-        );
-        conn.execute(
-            "UPDATE migration_lock
-             SET owner = ?1, acquired_at = ?2, heartbeat_at = ?3
-             WHERE singleton = 0",
-            rusqlite::params![sentinel.0, sentinel.1, sentinel.2],
-        )
-        .unwrap();
-
-        let current_error = current_version(&conn).expect_err("future schema must fail closed");
-        assert_eq!(current_error.envelope.class, ExitClass::Operation.as_str());
-        assert_eq!(current_error.envelope.reason, "store.schema.unsupported");
-        let remediation = current_error
-            .envelope
-            .remediation
-            .expect("version guidance");
-        assert!(
-            remediation.contains(&future_version.to_string()),
-            "{remediation}"
-        );
-        assert!(
-            remediation.contains(&LATEST_SCHEMA_VERSION.to_string()),
-            "{remediation}"
-        );
-        drop(conn);
-
-        let open_error = Store::open(&temp.path).expect_err("future schema must block opening");
-        assert_eq!(open_error.envelope.class, ExitClass::Operation.as_str());
-        assert_eq!(open_error.envelope.reason, "store.schema.unsupported");
-
-        let conn = Connection::open(&temp.path).expect("reopen future-version database");
-        let lock: (Option<String>, Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT owner, acquired_at, heartbeat_at
-                 FROM migration_lock WHERE singleton = 0",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            lock,
-            (
-                Some(sentinel.0.to_owned()),
-                Some(sentinel.1.to_owned()),
-                Some(sentinel.2.to_owned()),
-            )
-        );
-    }
-
-    #[test]
     fn partial_v12_identity_fails_closed_before_version_bump() {
         let temp = TempDb::new("partial-v12");
         let mut conn = Connection::open(&temp.path).expect("open database");
@@ -1566,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn populated_v15_slots_upgrade_to_readable_v17_rows() {
+    fn populated_v15_slots_upgrade_to_readable_v16_rows() {
         let temp = TempDb::new("populated-v16");
         let mut conn = Connection::open(&temp.path).expect("open database");
         conn.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -1593,7 +1410,7 @@ mod tests {
         acquire_lock(&conn, "populated-v16-test", Duration::from_secs(1)).unwrap();
         assert_eq!(
             apply_pending(&mut conn, "populated-v16-test", None).unwrap(),
-            LATEST_SCHEMA_VERSION
+            16
         );
         release_lock(&conn, "populated-v16-test").unwrap();
         drop(conn);

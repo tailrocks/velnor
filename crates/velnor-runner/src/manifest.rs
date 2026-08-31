@@ -20,8 +20,6 @@ use velnor_cache_service::{
 // Approved composites introduced v8; the native GitHub App token adapter is v9;
 // Kache v0.14.2 admission is v10.
 pub const MANIFEST_VERSION: u32 = 10;
-const MAX_MANIFEST_STEPS: usize = 4096;
-const MAX_MANIFEST_INPUTS: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -711,10 +709,6 @@ pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
         path: ".github/workflows/package-signer.yml",
         allowed_refs: &[
             allowed(
-                "2d045521be342284cd567b7058a0e635dc74b37c",
-                "fleet 2026.8.33 hosted package signer",
-            ),
-            allowed(
                 "c222e52030fee9ea6eae573a5769770be01d8438",
                 "fleet 2026.8.32 hosted package signer",
             ),
@@ -1048,9 +1042,14 @@ fn subpath_violation(
     capability: &ActionCapability,
 ) -> Option<CapabilityViolation> {
     let subpath = source_path
-        .map(str::trim)
+        .map(|value| value.trim().trim_matches('/'))
         .filter(|value| !value.is_empty())?;
-    if is_unsafe_subpath(subpath) || !capability.allowed_subpaths.contains(&subpath) {
+    if is_unsafe_subpath(subpath)
+        || !capability
+            .allowed_subpaths
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(subpath))
+    {
         let mut accepted = vec!["<root>".to_string()];
         accepted.extend(capability.allowed_subpaths.iter().map(|s| s.to_string()));
         return Some(violation(
@@ -1140,24 +1139,6 @@ pub fn violations_with_context(
     job: &AgentJobRequestMessage,
     context_data: &[(String, serde_json::Value)],
 ) -> Vec<CapabilityViolation> {
-    violations_with_context_limited(job, context_data, None)
-}
-
-fn violations_with_context_limited(
-    job: &AgentJobRequestMessage,
-    context_data: &[(String, serde_json::Value)],
-    limit: Option<usize>,
-) -> Vec<CapabilityViolation> {
-    if job.steps.len() > MAX_MANIFEST_STEPS {
-        return vec![violation(
-            "job preflight",
-            "workflow",
-            "<job>",
-            "steps",
-            "too many",
-            vec![format!("at most {MAX_MANIFEST_STEPS} steps")],
-        )];
-    }
     let mut violations = Vec::new();
     for (index, step) in job
         .steps
@@ -1205,9 +1186,6 @@ fn violations_with_context_limited(
             violations.push(violation(
                 &step_name, repository, action_ref, "uses", repository, accepted,
             ));
-            if limit.is_some_and(|limit| violations.len() >= limit) {
-                return violations;
-            }
             continue;
         };
         if !capability
@@ -1227,9 +1205,6 @@ fn violations_with_context_limited(
                     .map(|item| format!("{} ({})", item.value, item.release))
                     .collect(),
             ));
-            if limit.is_some_and(|limit| violations.len() >= limit) {
-                return violations;
-            }
         }
         if let Some(error) = subpath_violation(
             &step_name,
@@ -1239,9 +1214,6 @@ fn violations_with_context_limited(
             capability,
         ) {
             violations.push(error);
-            if limit.is_some_and(|limit| violations.len() >= limit) {
-                return violations;
-            }
         }
         let inputs = match string_inputs(step) {
             Ok(inputs) => inputs
@@ -1249,7 +1221,7 @@ fn violations_with_context_limited(
                 .map(|(name, value)| {
                     (
                         name,
-                        crate::executor::render_context_expressions_bounded(&value, context_data),
+                        crate::executor::render_context_expressions(&value, context_data),
                     )
                 })
                 .collect(),
@@ -1262,9 +1234,6 @@ fn violations_with_context_limited(
                     &error.to_string(),
                     Vec::new(),
                 ));
-                if limit.is_some_and(|limit| violations.len() >= limit) {
-                    return violations;
-                }
                 continue;
             }
         };
@@ -1276,9 +1245,6 @@ fn violations_with_context_limited(
             capability.inputs,
             &inputs,
         );
-        if limit.is_some_and(|limit| violations.len() >= limit) {
-            return violations;
-        }
     }
     validate_compiler_cache_topology(job, &mut violations);
     validate_attestation_permissions(job, &mut violations);
@@ -1501,17 +1467,6 @@ fn validate_inputs(
     rules: &[InputRule],
     inputs: &BTreeMap<String, String>,
 ) {
-    if inputs.len() > MAX_MANIFEST_INPUTS {
-        violations.push(violation(
-            step,
-            repository,
-            action_ref,
-            "inputs",
-            "too many",
-            vec![format!("at most {MAX_MANIFEST_INPUTS} inputs")],
-        ));
-        return;
-    }
     for (name, value) in inputs {
         match rules
             .iter()
@@ -1561,17 +1516,17 @@ fn validate_inputs(
         }
     }
     for rule in rules {
-        if let InputRule::RequiredLiteral(name, allowed) = rule
-            && !inputs.keys().any(|input| input.eq_ignore_ascii_case(name))
-        {
-            violations.push(violation(
-                step,
-                repository,
-                action_ref,
-                &format!("with.{name}"),
-                "absent",
-                allowed.iter().map(|value| (*value).to_string()).collect(),
-            ));
+        if let InputRule::RequiredLiteral(name, allowed) = rule {
+            if !inputs.keys().any(|input| input.eq_ignore_ascii_case(name)) {
+                violations.push(violation(
+                    step,
+                    repository,
+                    action_ref,
+                    &format!("with.{name}"),
+                    "absent",
+                    allowed.iter().map(|value| (*value).to_string()).collect(),
+                ));
+            }
         }
     }
 }
@@ -1599,7 +1554,7 @@ pub fn validate_job_with_context(
     job: &AgentJobRequestMessage,
     context_data: &[(String, serde_json::Value)],
 ) -> Result<()> {
-    if let Some(violation) = violations_with_context_limited(job, context_data, Some(1))
+    if let Some(violation) = violations_with_context(job, context_data)
         .into_iter()
         .next()
     {
@@ -1900,92 +1855,6 @@ mod tests {
     }
 
     #[test]
-    fn release_signers_use_validated_tag_ref_not_raw_commit() {
-        let workflow_text = include_str!("../../../.github/workflows/release.yml");
-        let workflow: serde_yaml::Value =
-            serde_yaml::from_str(workflow_text).expect("release workflow must parse");
-        assert!(workflow_text.contains("EXPECTED_TAG_REF"));
-        assert!(workflow_text.contains("git ls-remote --exit-code origin"));
-        assert!(workflow_text.contains("$2 == expected \"^{}\""));
-        assert!(workflow_text.contains("\"$remote_tag_commit\" = \"$EXPECTED_TAG_COMMIT\""));
-        assert!(workflow_text.contains("tags_here"));
-        assert!(workflow_text.contains("refs\\/tags\\/v[0-9]"));
-        assert!(workflow_text.contains("[ \"$tags_here\" = \"1\" ]"));
-        assert!(workflow_text
-            .contains("[ \"$default_branch_commit\" = \"$EXPECTED_DEFAULT_BRANCH_COMMIT\" ]"));
-        assert!(
-            workflow_text.contains("[ \"$default_branch_commit\" = \"$EXPECTED_RELEASE_COMMIT\" ]")
-        );
-        assert!(workflow_text.contains("[ \"$default_branch_commit\" = \"$EXPECTED_TAG_COMMIT\" ]"));
-        assert!(
-            workflow_text.contains("case \"$TAG\" in\n            v[0-9]*)"),
-            "identity gate must reject tags outside v[0-9]*"
-        );
-        assert!(
-            workflow_text.contains("tag_ref: ${{ steps.gate.outputs.tag_ref }}"),
-            "release_gate outputs must expose the gate's verified canonical tag ref"
-        );
-        assert!(
-            workflow_text.contains("tag_ref=\"refs/tags/$TAG\""),
-            "identity gate must construct the canonical tag ref"
-        );
-        assert!(
-            workflow_text.contains("git show-ref --verify --quiet \"$tag_ref\""),
-            "identity gate must verify the requested tag ref exists"
-        );
-        assert!(
-            workflow_text.contains("git rev-list -n 1 \"$tag_ref\""),
-            "identity gate must peel the canonical tag ref"
-        );
-        assert!(
-            workflow_text.contains("[ \"$default_branch_commit\" = \"$tag_commit\" ] || {"),
-            "identity gate must require the tag to equal the current default-branch tip"
-        );
-        assert!(
-            workflow_text.contains(
-                "tags_here=\"$(git tag --points-at \"$tag_commit\" | grep -c '^v' || true)\""
-            ) && workflow_text.contains("[ \"$tags_here\" = \"1\" ] || {"),
-            "identity gate must require exactly one v* tag at the release commit"
-        );
-        assert!(
-            workflow_text.contains("echo \"tag_ref=$tag_ref\""),
-            "identity gate must output the verified canonical tag ref"
-        );
-        let signer_jobs = [
-            "sign-amd64-tar",
-            "sign-arm64-tar",
-            "sign-amd64-deb",
-            "sign-arm64-deb",
-        ];
-        let expected = "${{ needs.release_gate.outputs.tag_ref }}";
-        let expected_signer =
-            "tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c";
-
-        for job in signer_jobs {
-            assert_eq!(
-                workflow["jobs"][job]["uses"].as_str(),
-                Some(expected_signer),
-                "{job} must use the pinned package-signer workflow"
-            );
-            let source_ref = workflow["jobs"][job]["with"]["source-ref"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{job} must define a string source-ref"));
-            assert_eq!(
-                source_ref, expected,
-                "{job} must use release_gate's validated canonical tag ref"
-            );
-            assert!(
-                source_ref.starts_with("${{ needs.release_gate.outputs."),
-                "{job} source-ref must come from release_gate validation"
-            );
-            assert_ne!(
-                source_ref, "${{ needs.release_gate.outputs.default_branch_commit }}",
-                "{job} must not pass a raw commit SHA to package-signer"
-            );
-        }
-    }
-
-    #[test]
     fn create_github_app_token_admits_current_client_id_input() {
         let capability = ACTIONS
             .iter()
@@ -2009,108 +1878,6 @@ mod tests {
                 "release record must read {architecture} from the manifest nested in the imagetools JSON output"
             );
         }
-    }
-
-    #[test]
-    fn deb_staging_binds_package_runner_to_build_and_binary_sidecar() {
-        let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
-        let steps = workflow["jobs"]["build"]["steps"]
-            .as_sequence()
-            .expect("build job steps");
-        let matching_steps: Vec<_> = steps
-            .iter()
-            .filter(|step| {
-                step.get("name")
-                    .and_then(serde_yaml::Value::as_str)
-                    .is_some_and(|name| name == "Stage .deb with the empty-deb-incident guards")
-            })
-            .collect();
-        assert_eq!(
-            matching_steps.len(),
-            1,
-            "build job must contain exactly one deb staging guard step"
-        );
-        let guard = matching_steps[0]
-            .get("run")
-            .and_then(serde_yaml::Value::as_str)
-            .expect("build job must stage the deb with its guards");
-
-        let shell_lines: Vec<_> = guard
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| line.strip_suffix('\\').map(str::trim_end).unwrap_or(line))
-            .collect();
-        let unique_position = |expected: &str| {
-            let mut matches = shell_lines
-                .iter()
-                .enumerate()
-                .filter_map(|(index, line)| (*line == expected).then_some(index));
-            let position = matches
-                .next()
-                .unwrap_or_else(|| panic!("deb guard missing exact shell line: {expected}"));
-            assert!(
-                matches.next().is_none(),
-                "deb guard must contain one exact shell line: {expected}"
-            );
-            position
-        };
-
-        unique_position("set -euo pipefail");
-        let manifest = unique_position(r#"dpkg-deb -c "$src" > "$manifest""#);
-        let runner_entry_check = unique_position(
-            r#"awk '$NF == "./usr/bin/velnor-runner" { count++; if (substr($1, 1, 1) != "-") type_ok=0; else if (count == 1) type_ok=1 } END { exit !(count == 1 && type_ok == 1) }' "$manifest""#,
-        );
-        let build_binary =
-            unique_position(r#"build_binary="target/${{ matrix.target }}/release/velnor-runner""#);
-        let recorded_binary_sha = unique_position(
-            r#"recorded_binary_sha="$(tr -d '\n' < "velnor-runner-${{ matrix.arch }}.bin.sha256")""#,
-        );
-        let build_binary_sha = unique_position(
-            r#"build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')""#,
-        );
-        let streaming_verification = unique_position(
-            r#"packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')""#,
-        );
-        let sidecar_check = unique_position(
-            r#"[ "$build_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::runner binary sidecar does not match target build" >&2; exit 1; }"#,
-        );
-        let package_build_check = unique_position(
-            r#"[ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }"#,
-        );
-        let package_sidecar_check = unique_position(
-            r#"[ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }"#,
-        );
-        assert!(
-            !shell_lines
-                .iter()
-                .any(|line| line.contains("dpkg-deb --extract")),
-            "deb guard must not fully extract the package"
-        );
-        assert!(
-            !shell_lines.iter().any(|line| line.contains("package_root")),
-            "deb guard must not create a package root"
-        );
-        assert!(
-            !shell_lines.iter().any(|line| line.contains("trap ")),
-            "deb guard must not install an extraction cleanup trap"
-        );
-
-        let copy = unique_position(r#"cp "$src" "$dst""#);
-        assert!(
-            manifest < runner_entry_check
-                && build_binary < recorded_binary_sha
-                && recorded_binary_sha < build_binary_sha
-                && build_binary_sha < sidecar_check
-                && sidecar_check < streaming_verification
-                && runner_entry_check < streaming_verification
-                && streaming_verification < package_build_check
-                && package_build_check < package_sidecar_check
-                && package_sidecar_check < copy,
-            "all package provenance checks must precede copying the package"
-        );
     }
 
     #[test]
