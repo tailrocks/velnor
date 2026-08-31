@@ -768,7 +768,7 @@ async fn reconcile_once(
 
     spawn_ready_waiters(args, journal, jobs)?;
     reap(jobs);
-    reclaim_orphaned_jobs(args, journal)?;
+    reclaim_orphaned_jobs(args, journal, remote_deadline).await?;
 
     for row in journal.pending_outbox()? {
         preserve_outbox(
@@ -1375,7 +1375,11 @@ fn spawn_ready_waiters(
 /// Return slots occupied by job workers that died without a terminal
 /// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
 /// slot stays `Assigned` forever and advertised capacity never recovers.
-fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow::Result<()> {
+async fn reclaim_orphaned_jobs(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    remote_deadline: tokio::time::Instant,
+) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
     for job in &state.jobs {
         if !matches!(
@@ -1397,6 +1401,44 @@ fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow
         let worker_live = job_worker_live || waiter_live;
         if worker_live {
             continue;
+        }
+        let (config_base, slot_count) = match load_exec_config(&args.state_dir) {
+            Ok(exec) => (
+                exec.config_dir
+                    .clone()
+                    .unwrap_or_else(|| args.state_dir.clone()),
+                exec.slots.max(1),
+            ),
+            Err(error) => {
+                return Err(error).context("load daemon execution config for orphan recovery")
+            }
+        };
+        let slot_index = slot_index_from_id(&job.slot_id);
+        let slot_dir = crate::runner::daemon_slot_config_dir(&config_base, slot_index, slot_count);
+        if let Some(stored) = load_local_runner_config(&slot_dir)? {
+            let cleanup = tokio::time::timeout(
+                remaining_remote_budget(remote_deadline),
+                crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
+            )
+            .await
+            .context("complete recorded in-flight job during orphan recovery")??;
+            if cleanup {
+                eprintln!(
+                    "Recovered stale in-flight job {} before restoring slot {}",
+                    job.job_id.0, job.slot_id.0
+                );
+            }
+            if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
+                return Err(anyhow::anyhow!(
+                    "in-flight marker remained after recovering job {}",
+                    job.job_id.0
+                ));
+            }
+        } else if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
+            return Err(anyhow::anyhow!(
+                "runner credentials missing while recovering in-flight job {}",
+                job.job_id.0
+            ));
         }
         let lost = journal.apply(Event::JobWorkerLost {
             job_id: job.job_id.clone(),
@@ -2196,8 +2238,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn live_waiter_marker_is_not_hidden_by_stale_job_marker() {
+    #[tokio::test]
+    async fn live_waiter_marker_is_not_hidden_by_stale_job_marker() {
         let dir = std::env::temp_dir().join(format!(
             "velnor-orphan-reclaim-{}-{}",
             std::process::id(),
@@ -2290,7 +2332,13 @@ mod tests {
             once: true,
             spawn_slots: false,
         };
-        reclaim_orphaned_jobs(&args, &mut journal).unwrap();
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
 
         let state = journal.load_state().unwrap();
         let job = state
