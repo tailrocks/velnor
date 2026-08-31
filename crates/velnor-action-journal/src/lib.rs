@@ -15,6 +15,7 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use velnor_action_model::{
     canonical_json_bytes, ActionKey, ActionState, ActionTiming, Clock, Digest, LogicalInstant,
@@ -27,7 +28,7 @@ use velnor_model::{
 
 pub mod supersession;
 
-pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
 
 /// Production clock for durable lease deadlines.
 ///
@@ -258,7 +259,7 @@ impl ActionJournal {
                 })?;
             }
         }
-        let connection = Connection::open(&path)?;
+        let mut connection = Connection::open(&path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -310,10 +311,24 @@ impl ActionJournal {
                  revoked_at_ms INTEGER NOT NULL
              );
              INSERT OR IGNORE INTO action_journal_meta(key, value)
-                 VALUES ('schema_version', '2');
+                 VALUES ('schema_version', '3');
              UPDATE action_journal_meta SET value = '2'
                  WHERE key = 'schema_version' AND value = '1';",
         )?;
+        let schema_version: u32 = connection
+            .query_row(
+                "SELECT value FROM action_journal_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?
+            .parse()
+            .map_err(|_| JournalError::InvalidState("schema version is not numeric".into()))?;
+        if schema_version == 2 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            migrate_v2_to_v3(&transaction)?;
+            transaction.commit()?;
+        }
         Ok(Self { path, connection })
     }
 
@@ -406,6 +421,413 @@ impl ActionJournal {
             .parse()
             .map_err(|_| JournalError::InvalidState("schema version is not numeric".into()))
     }
+}
+
+#[derive(Debug)]
+struct EventMigration {
+    sequence: i64,
+    old_digest: String,
+    new_digest: String,
+    record_json: String,
+    checksum: String,
+}
+
+#[derive(Debug)]
+struct LeaseMigration {
+    old_digest: String,
+    new_digest: String,
+    action_key_json: String,
+}
+
+#[derive(Debug, Default)]
+struct DigestRemap {
+    old_to_new: BTreeMap<String, String>,
+    canonical_key_json_by_new: BTreeMap<String, String>,
+}
+
+fn migrate_v2_to_v3(transaction: &Transaction<'_>) -> Result<(), JournalError> {
+    let event_rows = {
+        let mut statement = transaction.prepare(
+            "SELECT sequence, action_key_digest, state, record_json, checksum
+             FROM action_events ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut remap = DigestRemap::default();
+    let mut event_migrations = Vec::with_capacity(event_rows.len());
+    for (sequence, old_digest, state, record_json, checksum) in event_rows {
+        if checksum_for_raw(&old_digest, &state, &record_json) != checksum {
+            return Err(JournalError::ChecksumMismatch { sequence });
+        }
+        let raw_record: Value = serde_json::from_str(&record_json)?;
+        let record: ActionRecord = serde_json::from_value(raw_record.clone())?;
+        validate_record(&record)?;
+        if state != state_name(record.state) {
+            return Err(JournalError::StateMismatch { sequence });
+        }
+        let raw_action_key = raw_record.get("action_key").ok_or_else(|| {
+            JournalError::InvalidState(format!(
+                "schema 3 migration event {sequence} has no action_key"
+            ))
+        })?;
+        let stored_digest = stored_action_key_digest(raw_action_key, &record.action_key)?;
+        if stored_digest.as_str() != old_digest {
+            return Err(JournalError::KeyMismatch { sequence });
+        }
+        let new_digest = record.action_key_digest()?.to_string();
+        let canonical_record_json = canonical_json_string(&record)?;
+        remap.add(
+            old_digest.clone(),
+            new_digest.clone(),
+            canonical_json_string(&record.action_key)?,
+        )?;
+        event_migrations.push(EventMigration {
+            sequence,
+            old_digest,
+            new_digest: new_digest.clone(),
+            checksum: checksum_for_raw(&new_digest, &state, &canonical_record_json),
+            record_json: canonical_record_json,
+        });
+    }
+
+    let lease_rows = {
+        let mut statement = transaction.prepare(
+            "SELECT action_key_digest, action_key_json FROM producer_leases
+             ORDER BY action_key_digest ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut lease_migrations = Vec::with_capacity(lease_rows.len());
+    for (old_digest, action_key_json) in lease_rows {
+        let raw_action_key: Value = serde_json::from_str(&action_key_json)?;
+        let action_key: ActionKey = serde_json::from_value(raw_action_key.clone())?;
+        let stored_digest = stored_action_key_digest(&raw_action_key, &action_key)?;
+        if stored_digest.as_str() != old_digest {
+            return Err(JournalError::InvalidState(format!(
+                "schema 3 migration lease action key digest mismatch for {old_digest}"
+            )));
+        }
+        let new_digest = action_key.digest()?.to_string();
+        let canonical_key_json = canonical_json_string(&action_key)?;
+        remap.add(
+            old_digest.clone(),
+            new_digest.clone(),
+            canonical_key_json.clone(),
+        )?;
+        lease_migrations.push(LeaseMigration {
+            old_digest,
+            new_digest,
+            action_key_json: canonical_key_json,
+        });
+    }
+
+    let consumers = {
+        let mut statement = transaction.prepare(
+            "SELECT action_key_digest, run_id FROM action_consumers
+             ORDER BY action_key_digest, run_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let retention = {
+        let mut statement = transaction.prepare(
+            "SELECT action_key_digest, retained_until_ms FROM action_retention
+             ORDER BY action_key_digest",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let termination_claims = {
+        let mut statement = transaction.prepare(
+            "SELECT action_key_digest, reason, claimed_at_ms, completed
+             FROM action_termination_claims ORDER BY action_key_digest",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let trust_revocations = {
+        let mut statement = transaction.prepare(
+            "SELECT action_key_digest, reason, revoked_at_ms
+             FROM action_trust_revocations ORDER BY action_key_digest",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut lease_targets = BTreeSet::new();
+    for lease in &lease_migrations {
+        ensure_unique_target(
+            &mut lease_targets,
+            "producer_leases",
+            &lease.new_digest,
+            &lease.new_digest,
+        )?;
+    }
+    let mut consumer_targets = BTreeSet::new();
+    for (old_digest, run_id) in &consumers {
+        let new_digest = remap.required("action_consumers", old_digest)?;
+        ensure_unique_target(
+            &mut consumer_targets,
+            "action_consumers",
+            &(new_digest.clone(), run_id.clone()),
+            format!("{new_digest}:{run_id}"),
+        )?;
+    }
+    let mut retention_targets = BTreeSet::new();
+    for (old_digest, _) in &retention {
+        let new_digest = remap.required("action_retention", old_digest)?;
+        ensure_unique_target(
+            &mut retention_targets,
+            "action_retention",
+            &new_digest,
+            &new_digest,
+        )?;
+    }
+    let mut termination_targets = BTreeSet::new();
+    for (old_digest, _, _, _) in &termination_claims {
+        let new_digest = remap.required("action_termination_claims", old_digest)?;
+        ensure_unique_target(
+            &mut termination_targets,
+            "action_termination_claims",
+            &new_digest,
+            &new_digest,
+        )?;
+    }
+    let mut trust_targets = BTreeSet::new();
+    for (old_digest, _, _) in &trust_revocations {
+        let new_digest = remap.required("action_trust_revocations", old_digest)?;
+        ensure_unique_target(
+            &mut trust_targets,
+            "action_trust_revocations",
+            &new_digest,
+            &new_digest,
+        )?;
+    }
+
+    for event in &event_migrations {
+        let changed = transaction.execute(
+            "UPDATE action_events
+             SET action_key_digest = ?1, record_json = ?2, checksum = ?3
+             WHERE sequence = ?4 AND action_key_digest = ?5",
+            params![
+                event.new_digest,
+                event.record_json,
+                event.checksum,
+                event.sequence,
+                event.old_digest,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::InvalidState(format!(
+                "schema 3 migration could not update action event {}",
+                event.sequence
+            )));
+        }
+    }
+
+    const STAGING_PREFIX: &str = "__velnor_schema3_migration__:";
+    transaction.execute(
+        "UPDATE producer_leases SET action_key_digest = ?1 || action_key_digest",
+        [STAGING_PREFIX],
+    )?;
+    transaction.execute(
+        "UPDATE action_consumers SET action_key_digest = ?1 || action_key_digest",
+        [STAGING_PREFIX],
+    )?;
+    transaction.execute(
+        "UPDATE action_retention SET action_key_digest = ?1 || action_key_digest",
+        [STAGING_PREFIX],
+    )?;
+    transaction.execute(
+        "UPDATE action_termination_claims SET action_key_digest = ?1 || action_key_digest",
+        [STAGING_PREFIX],
+    )?;
+    transaction.execute(
+        "UPDATE action_trust_revocations SET action_key_digest = ?1 || action_key_digest",
+        [STAGING_PREFIX],
+    )?;
+    for lease in &lease_migrations {
+        let changed = transaction.execute(
+            "UPDATE producer_leases
+             SET action_key_digest = ?1, action_key_json = ?2
+             WHERE action_key_digest = ?3",
+            params![
+                lease.new_digest,
+                lease.action_key_json,
+                format!("{STAGING_PREFIX}{}", lease.old_digest)
+            ],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::InvalidState(format!(
+                "schema 3 migration could not update lease {}",
+                lease.old_digest
+            )));
+        }
+    }
+    for (old_digest, run_id) in &consumers {
+        let new_digest = remap.required("action_consumers", old_digest)?;
+        let changed = transaction.execute(
+            "UPDATE action_consumers SET action_key_digest = ?1
+             WHERE action_key_digest = ?2 AND run_id = ?3",
+            params![new_digest, format!("{STAGING_PREFIX}{old_digest}"), run_id,],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::InvalidState(
+                "schema 3 migration could not update consumer row".into(),
+            ));
+        }
+    }
+    for (old_digest, _) in &retention {
+        let new_digest = remap.required("action_retention", old_digest)?;
+        let changed = transaction.execute(
+            "UPDATE action_retention SET action_key_digest = ?1
+             WHERE action_key_digest = ?2",
+            params![new_digest, format!("{STAGING_PREFIX}{old_digest}")],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::InvalidState(
+                "schema 3 migration could not update retention row".into(),
+            ));
+        }
+    }
+    for (old_digest, _, _, _) in &termination_claims {
+        let new_digest = remap.required("action_termination_claims", old_digest)?;
+        let changed = transaction.execute(
+            "UPDATE action_termination_claims SET action_key_digest = ?1
+             WHERE action_key_digest = ?2",
+            params![new_digest, format!("{STAGING_PREFIX}{old_digest}")],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::InvalidState(
+                "schema 3 migration could not update termination claim row".into(),
+            ));
+        }
+    }
+    for (old_digest, _, _) in &trust_revocations {
+        let new_digest = remap.required("action_trust_revocations", old_digest)?;
+        let changed = transaction.execute(
+            "UPDATE action_trust_revocations SET action_key_digest = ?1
+             WHERE action_key_digest = ?2",
+            params![new_digest, format!("{STAGING_PREFIX}{old_digest}")],
+        )?;
+        if changed != 1 {
+            return Err(JournalError::InvalidState(
+                "schema 3 migration could not update trust revocation row".into(),
+            ));
+        }
+    }
+
+    let changed = transaction.execute(
+        "UPDATE action_journal_meta SET value = '3'
+         WHERE key = 'schema_version' AND value = '2'",
+        [],
+    )?;
+    if changed != 1 {
+        return Err(JournalError::InvalidState(
+            "schema 3 migration could not update schema version".into(),
+        ));
+    }
+    Ok(())
+}
+
+impl DigestRemap {
+    fn add(
+        &mut self,
+        old_digest: String,
+        new_digest: String,
+        canonical_key_json: String,
+    ) -> Result<(), JournalError> {
+        if let Some(existing) = self.old_to_new.get(&old_digest) {
+            if existing != &new_digest {
+                return Err(JournalError::InvalidState(format!(
+                    "schema 3 migration maps digest {old_digest} to multiple action keys"
+                )));
+            }
+        }
+        if let Some(existing) = self.canonical_key_json_by_new.get(&new_digest) {
+            if existing != &canonical_key_json {
+                return Err(JournalError::InvalidState(format!(
+                    "schema 3 migration digest collision at {new_digest}"
+                )));
+            }
+        }
+        self.old_to_new.insert(old_digest, new_digest.clone());
+        self.canonical_key_json_by_new
+            .insert(new_digest, canonical_key_json);
+        Ok(())
+    }
+
+    fn required(&self, table: &str, old_digest: &str) -> Result<String, JournalError> {
+        self.old_to_new.get(old_digest).cloned().ok_or_else(|| {
+            JournalError::InvalidState(format!(
+                "schema 3 migration found unmappable digest-only row in {table}: {old_digest}"
+            ))
+        })
+    }
+}
+
+fn ensure_unique_target<T: Clone + Ord, D: std::fmt::Display>(
+    targets: &mut BTreeSet<T>,
+    table: &str,
+    target: &T,
+    target_label: D,
+) -> Result<(), JournalError> {
+    if !targets.insert(target.to_owned()) {
+        return Err(JournalError::InvalidState(format!(
+            "schema 3 migration digest collision in {table} at {target_label}"
+        )));
+    }
+    Ok(())
+}
+
+fn stored_action_key_digest(
+    raw_action_key: &Value,
+    action_key: &ActionKey,
+) -> Result<Digest, JournalError> {
+    if raw_action_key
+        .get("execution_policy")
+        .and_then(|policy| policy.get("adoptable"))
+        .is_none()
+    {
+        Ok(Digest::from_bytes(&canonical_json_bytes(raw_action_key)?))
+    } else {
+        Ok(action_key.digest()?)
+    }
+}
+
+fn canonical_json_string<T: Serialize>(value: &T) -> Result<String, JournalError> {
+    String::from_utf8(canonical_json_bytes(value)?).map_err(|error| {
+        JournalError::InvalidState(format!("canonical JSON is not UTF-8: {error}"))
+    })
 }
 
 /// Durable lease coordinator backed by an [`ActionJournal`].
@@ -1275,6 +1697,20 @@ mod tests {
         record(seed, ActionState::Planned).action_key
     }
 
+    fn legacy_record_row(record: &ActionRecord) -> (Digest, String, String, String) {
+        let mut raw_record = serde_json::to_value(record).unwrap();
+        raw_record["action_key"]["execution_policy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adoptable");
+        let raw_action_key = raw_record["action_key"].clone();
+        let action_key_json = canonical_json_string(&raw_action_key).unwrap();
+        let old_digest = Digest::from_bytes(action_key_json.as_bytes());
+        let record_json = canonical_json_string(&raw_record).unwrap();
+        let checksum = checksum_for(&old_digest, state_name(record.state), &record_json);
+        (old_digest, action_key_json, record_json, checksum)
+    }
+
     #[test]
     fn acquire_contention_has_one_atomic_winner() {
         let temp = TempDir::new().unwrap();
@@ -1442,22 +1878,220 @@ mod tests {
     }
 
     #[test]
-    fn schema_upgrade_preserves_existing_journal() {
+    fn schema_upgrade_migrates_legacy_action_and_lease_digests() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("schema.sqlite");
         let mut journal = ActionJournal::open(&path).unwrap();
-        journal.append(&record(48, ActionState::Complete)).unwrap();
+        let mut current = record(60, ActionState::Complete);
+        current.action_key.execution_policy.adoptable = false;
+        journal.append(&current).unwrap();
+
+        let legacy = record(61, ActionState::Complete);
+        let (old_digest, old_key_json, old_record_json, old_checksum) = legacy_record_row(&legacy);
         journal
             .connection
             .execute(
-                "UPDATE action_journal_meta SET value = '1' WHERE key = 'schema_version'",
+                "INSERT INTO action_events(
+                     action_key_digest, state, record_json, checksum
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    old_digest.to_string(),
+                    state_name(legacy.state),
+                    old_record_json,
+                    old_checksum,
+                ],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO producer_leases(
+                     action_key_digest, action_key_json, generation, owner,
+                     expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
+                 ) VALUES (?1, ?2, 7, 'legacy-worker', 1000, 25, 100, 'active')",
+                params![old_digest.to_string(), old_key_json],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_consumers(action_key_digest, run_id)
+                 VALUES (?1, 'legacy-run')",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 1234)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_termination_claims(
+                     action_key_digest, reason, claimed_at_ms, completed
+                 ) VALUES (?1, 'legacy-reason', 123, 0)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_trust_revocations(
+                     action_key_digest, reason, revoked_at_ms
+                 ) VALUES (?1, 'legacy-revocation', 456)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "UPDATE action_journal_meta SET value = '2' WHERE key = 'schema_version'",
                 [],
             )
             .unwrap();
         drop(journal);
         let upgraded = ActionJournal::open(&path).unwrap();
         assert_eq!(upgraded.schema_version().unwrap(), JOURNAL_SCHEMA_VERSION);
-        assert_eq!(upgraded.entries().unwrap().len(), 1);
+        let entries = upgraded.entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.record.action_key == legacy.action_key
+                && entry.record.action_key.execution_policy.adoptable
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.record.action_key == current.action_key
+                && !entry.record.action_key.execution_policy.adoptable
+        }));
+
+        let new_digest = legacy.action_key.digest().unwrap();
+        let stored_lease_key_json: String = upgraded
+            .connection
+            .query_row(
+                "SELECT action_key_json FROM producer_leases WHERE action_key_digest = ?1",
+                [new_digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_lease_key: ActionKey = serde_json::from_str(&stored_lease_key_json).unwrap();
+        assert_eq!(stored_lease_key, legacy.action_key);
+        assert_eq!(stored_lease_key.digest().unwrap(), new_digest);
+
+        for table in [
+            "action_consumers",
+            "action_retention",
+            "action_termination_claims",
+            "action_trust_revocations",
+        ] {
+            let count: i64 = upgraded
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE action_key_digest = ?1"),
+                    [new_digest.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} was not remapped");
+        }
+
+        let manager = LeaseManager::open(&path, TestClock::default()).unwrap();
+        assert_eq!(
+            manager.lease_status(&legacy.action_key).unwrap(),
+            Some(LeaseStatus::Active)
+        );
+        assert_eq!(manager.live_consumer_count(&legacy.action_key).unwrap(), 1);
+    }
+
+    #[test]
+    fn schema_upgrade_bad_checksum_rolls_back() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("schema-rollback.sqlite");
+        let journal = ActionJournal::open(&path).unwrap();
+        let valid = record(62, ActionState::Running);
+        let invalid = record(63, ActionState::Complete);
+        let (valid_digest, valid_key_json, valid_record_json, valid_checksum) =
+            legacy_record_row(&valid);
+        let (invalid_digest, _, invalid_record_json, _) = legacy_record_row(&invalid);
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_events(
+                     action_key_digest, state, record_json, checksum
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    valid_digest.to_string(),
+                    state_name(valid.state),
+                    valid_record_json,
+                    valid_checksum,
+                ],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_events(
+                     action_key_digest, state, record_json, checksum
+                 ) VALUES (?1, ?2, ?3, 'bad-checksum')",
+                params![
+                    invalid_digest.to_string(),
+                    state_name(invalid.state),
+                    invalid_record_json,
+                ],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO producer_leases(
+                     action_key_digest, action_key_json, generation, owner,
+                     expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
+                 ) VALUES (?1, ?2, 1, 'legacy-worker', 1000, 25, 100, 'active')",
+                params![valid_digest.to_string(), valid_key_json],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "UPDATE action_journal_meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(journal);
+
+        assert!(matches!(
+            ActionJournal::open(&path),
+            Err(JournalError::ChecksumMismatch { sequence: 2 })
+        ));
+
+        let connection = Connection::open(&path).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM action_journal_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+        let stored_event: (String, String, String) = connection
+            .query_row(
+                "SELECT action_key_digest, record_json, checksum
+                 FROM action_events WHERE sequence = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_event.0, valid_digest.to_string());
+        assert_eq!(stored_event.1, valid_record_json);
+        assert_eq!(stored_event.2, valid_checksum);
+        let stored_lease_digest: String = connection
+            .query_row("SELECT action_key_digest FROM producer_leases", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_lease_digest, valid_digest.to_string());
     }
 
     #[cfg(unix)]

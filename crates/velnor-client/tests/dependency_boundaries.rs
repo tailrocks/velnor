@@ -1,10 +1,13 @@
-//! Plan 064 dependency-boundary tests.
+//! Workspace dependency-boundary tests.
 //!
 //! Asserted from `cargo metadata` so the law holds no matter how manifests
 //! evolve: `velnor-client` meets the daemon only through versioned model DTOs,
-//! the foundation crates form an acyclic graph, and no shared crate depends on
-//! Clap or Axum. The Axum transport adapter is owned by the CLI composition
-//! crate; it never enters the model, service, client, or renderer crates.
+//! `velnor-control` consumes the journal and shared model directly, the action
+//! journal stays limited to foundational model crates, the cache service stays
+//! bounded by the journal, action model, and CAS, the workspace graph is
+//! acyclic, and no shared crate depends on Clap or Axum. The Axum transport
+//! adapter is owned by the CLI composition crate; it never enters the model,
+//! service, client, or renderer crates.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -12,11 +15,12 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 11] = [
+const WORKSPACE_PACKAGES: [&str; 12] = [
     "velnor-model",
     "velnor-action-model",
     "velnor-cas",
     "velnor-action-journal",
+    "velnor-cache-service",
     "velnor-control",
     "velnor-client",
     "velnor-render",
@@ -117,7 +121,7 @@ fn transitive_closure(metadata: &Value, root: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn workspace_has_exactly_the_eleven_expected_packages() {
+fn workspace_has_exactly_the_twelve_expected_packages() {
     let metadata = cargo_metadata();
     let mut names: Vec<String> = metadata["packages"]
         .as_array()
@@ -140,7 +144,14 @@ fn velnor_client_depends_only_on_velnor_model() {
         client.iter().any(|d| d == "velnor-model"),
         "client depends on the shared model"
     );
-    for forbidden in ["velnor-control", "velnor-runner", "axum", "clap"] {
+    for forbidden in [
+        "velnor-action-journal",
+        "velnor-cache-service",
+        "velnor-control",
+        "velnor-runner",
+        "axum",
+        "clap",
+    ] {
         assert!(
             !client.iter().any(|d| d == forbidden),
             "velnor-client must never depend on {forbidden}"
@@ -162,6 +173,10 @@ fn velnor_client_transitively_never_reaches_daemon_internals() {
     let metadata = cargo_metadata_resolved();
     let closure = transitive_closure(&metadata, "velnor-client");
     for forbidden in [
+        "velnor-action-model",
+        "velnor-cas",
+        "velnor-action-journal",
+        "velnor-cache-service",
         "velnor-control",
         "velnor-runner",
         "velnorctl",
@@ -176,7 +191,7 @@ fn velnor_client_transitively_never_reaches_daemon_internals() {
 }
 
 #[test]
-fn crate_dependency_direction_matches_plan_064() {
+fn crate_dependency_direction_matches_approved_graph() {
     let graph = dependency_graph(&cargo_metadata());
     let members_only = |deps: &[String]| -> Vec<String> {
         deps.iter()
@@ -189,7 +204,34 @@ fn crate_dependency_direction_matches_plan_064() {
         members_only(&graph["velnor-model"]).is_empty(),
         "model is the root"
     );
-    assert_eq!(members_only(&graph["velnor-control"]), vec!["velnor-model"]);
+    assert_eq!(
+        members_only(&graph["velnor-control"])
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "velnor-action-journal".to_owned(),
+            "velnor-model".to_owned(),
+        ]),
+        "control directly consumes the action journal and shared model"
+    );
+    assert_eq!(
+        members_only(&graph["velnor-action-journal"])
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["velnor-action-model".to_owned(), "velnor-model".to_owned(),]),
+        "action journal is constrained to foundational model crates"
+    );
+    assert_eq!(
+        members_only(&graph["velnor-cache-service"])
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "velnor-action-journal".to_owned(),
+            "velnor-action-model".to_owned(),
+            "velnor-cas".to_owned(),
+        ]),
+        "cache service is constrained to foundational storage crates"
+    );
     assert_eq!(members_only(&graph["velnor-render"]), vec!["velnor-model"]);
     let ctl = members_only(&graph["velnorctl"]);
     for required in [
@@ -234,6 +276,10 @@ fn shared_crates_never_depend_on_clap_or_axum() {
     let graph = dependency_graph(&cargo_metadata());
     for shared in [
         "velnor-model",
+        "velnor-action-model",
+        "velnor-cas",
+        "velnor-action-journal",
+        "velnor-cache-service",
         "velnor-control",
         "velnor-client",
         "velnor-render",
@@ -248,7 +294,7 @@ fn shared_crates_never_depend_on_clap_or_axum() {
 }
 
 #[test]
-fn new_crate_dependency_graph_is_acyclic() {
+fn workspace_dependency_graph_is_acyclic() {
     let graph = dependency_graph(&cargo_metadata());
     #[derive(Clone, Copy, PartialEq)]
     enum Mark {
