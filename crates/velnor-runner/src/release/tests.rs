@@ -232,6 +232,27 @@ fn debian_package_declares_flock_provider() {
 }
 
 #[test]
+fn debian_package_ships_boot_persistent_transaction_lock_path() {
+    // /run is tmpfs: without a tmpfiles.d entry the preinst/postinst lock gates
+    // fail closed after every reboot until an operator recreates the path.
+    let assets = include_str!("../../Cargo.toml");
+    assert!(
+        assets.contains(
+            "[\"debian/velnor-runner.tmpfiles\", \"usr/lib/tmpfiles.d/velnor-runner.conf\", \"644\"]"
+        ),
+        "cargo-deb assets must ship the tmpfiles.d entry"
+    );
+    let tmpfiles = include_str!("../../debian/velnor-runner.tmpfiles");
+    assert!(tmpfiles.contains("d /run/velnor 0750 root root - -"));
+    assert!(tmpfiles.contains("f /run/velnor/package-transaction.lock 0640 root root - -"));
+    let postinst = include_str!("../../debian/postinst");
+    assert!(
+        postinst.contains("systemd-tmpfiles --create /usr/lib/tmpfiles.d/velnor-runner.conf"),
+        "postinst must recreate the lock path immediately, not only at boot"
+    );
+}
+
+#[test]
 fn activate_hashes_the_shipped_daemon_binary() {
     let src = include_str!("../release.rs");
     assert!(

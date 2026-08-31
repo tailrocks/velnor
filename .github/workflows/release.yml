@@ -625,6 +625,7 @@ jobs:
           grep -q "lib/systemd/system/velnor-fleet-policy-audit.service" "$manifest" || { echo "::error::deb missing fleet-policy audit service" >&2; exit 1; }
           grep -q "lib/systemd/system/velnor-fleet-policy-audit.timer" "$manifest" || { echo "::error::deb missing fleet-policy audit timer" >&2; exit 1; }
           grep -q "usr/share/velnor/fleet/release-refs.toml" "$manifest" || { echo "::error::deb missing authoritative fleet release-ref ledger" >&2; exit 1; }
+          grep -q "usr/lib/tmpfiles.d/velnor-runner.conf" "$manifest" || { echo "::error::deb missing tmpfiles.d transaction-lock path entry" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/firecracker" "$manifest" || { echo "::error::deb missing firecracker" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/jailer" "$manifest" || { echo "::error::deb missing jailer" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/velnor-guest-agent" "$manifest" || { echo "::error::deb missing packaged guest-agent" >&2; exit 1; }
