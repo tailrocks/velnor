@@ -45,6 +45,10 @@ fn jobs_slice_cpu_quota_is_host_scaled_and_fail_closed() {
     assert!(postrm.contains("--property=LoadState --value velnor-jobs.slice"));
     assert!(postrm.contains("--property=ActiveState --value velnor-jobs.slice"));
     assert!(!postrm.contains("inactive|failed"));
+    assert!(postrm.contains("require_package_transaction_lock"));
+    assert!(postrm.contains("systemctl stop \"$unit\""));
+    assert!(postrm.find("systemctl stop").unwrap() < postrm.find("rm -f").unwrap());
+    assert!(postrm.contains("not provably inactive; keeping CPU quota"));
     assert!(postrm.find("systemctl show").unwrap() < postrm.find("rm -f").unwrap());
     assert!(postrm.contains("systemctl daemon-reload"));
 }

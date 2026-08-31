@@ -3,70 +3,96 @@ set -e
 
 JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
 JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
+PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
+
+fail() {
+  echo "velnor-runner postrm: $1" >&2
+  exit 1
+}
+
+require_package_transaction_lock() {
+  # The deployment wrapper takes an exclusive lock on the path with --no-fork,
+  # so dpkg and this maintainer script remain inside one package transaction.
+  # Never remove the host quota without proving that outer lock is held.
+  lock_inode=$(stat -c '%i' "$PACKAGE_TRANSACTION_LOCK" 2>/dev/null || true)
+  [ -n "$lock_inode" ] \
+    || fail "cannot stat $PACKAGE_TRANSACTION_LOCK; keeping CPU quota"
+  lock_owner=$(awk -v inode="$lock_inode" '
+    $2 == "FLOCK" {
+      split($6, device_inode, ":")
+      if (device_inode[3] == inode) {
+        if ($4 != "WRITE") exit 2
+        print $5
+        exit
+      }
+    }' /proc/locks 2>/dev/null) || lock_owner=
+  case "$lock_owner" in
+    ''|*[!0-9]*) fail "no exclusive lock owner for $PACKAGE_TRANSACTION_LOCK; keeping CPU quota" ;;
+  esac
+  current_pid=$$
+  while [ "$current_pid" -gt 1 ]; do
+    [ "$current_pid" = "$lock_owner" ] && return 0
+    parent_pid=$(awk '$1 == "PPid:" { print $2; exit }' \
+      "/proc/$current_pid/status" 2>/dev/null || true)
+    case "$parent_pid" in
+      ''|*[!0-9]*) break ;;
+    esac
+    [ "$parent_pid" = "$current_pid" ] && break
+    current_pid=$parent_pid
+  done
+  fail "exclusive lock owner is not an apt-wrapper ancestor; keeping CPU quota"
+}
+
+verify_jobs_slice_inactive() {
+  load_state=$(systemctl show --property=LoadState --value velnor-jobs.slice 2>/dev/null) \
+    || return 1
+  case "$load_state" in
+    not-found)
+      return 0
+      ;;
+    loaded)
+      active_state=$(systemctl show --property=ActiveState --value velnor-jobs.slice 2>/dev/null) \
+        || return 1
+      if systemctl is-active --quiet velnor-jobs.slice; then
+        return 1
+      fi
+      [ "$active_state" = inactive ]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
 case "$1" in
   remove|purge)
+    require_package_transaction_lock
     if [ -d /run/systemd/system ]; then
-      load_state=$(systemctl show --property=LoadState --value velnor-jobs.slice 2>/dev/null) || {
-        echo "velnor-runner postrm: cannot verify velnor-jobs.slice state; keeping CPU quota" >&2
-        exit 1
-      }
-      case "$load_state" in
-        not-found)
-          ;;
-        loaded)
-          active_state=$(systemctl show --property=ActiveState --value velnor-jobs.slice 2>/dev/null) || {
-            echo "velnor-runner postrm: cannot verify velnor-jobs.slice activity; keeping CPU quota" >&2
-            exit 1
-          }
-          if systemctl is-active --quiet velnor-jobs.slice; then
-            echo "velnor-runner postrm: refusing to remove the CPU quota while velnor-jobs.slice is active" >&2
-            exit 1
-          fi
-          case "$active_state" in
-            inactive)
-              ;;
-            *)
-              echo "velnor-runner postrm: refusing to remove the CPU quota while velnor-jobs.slice is $active_state" >&2
-              exit 1
-              ;;
-          esac
-          ;;
-        *)
-          echo "velnor-runner postrm: unexpected velnor-jobs.slice load state '$load_state'; keeping CPU quota" >&2
-          exit 1
-          ;;
-      esac
-    fi
-    if [ -d /run/systemd/system ]; then
-      doctor_units=$(systemctl list-unit-files --no-legend --plain 'velnor-doctor*.timer' 'velnor-doctor*.service' 2>/dev/null) || {
-        echo "velnor-runner postrm: cannot enumerate doctor units; keeping CPU quota" >&2
-        exit 1
-      }
-      for unit in $(printf '%s\n' "$doctor_units" | awk '{print $1}'); do
-        systemctl disable "$unit" || {
-          echo "velnor-runner postrm: cannot disable $unit; keeping CPU quota" >&2
-          exit 1
-        }
-        systemctl reset-failed "$unit" || {
-          echo "velnor-runner postrm: cannot reset $unit; keeping CPU quota" >&2
-          exit 1
-        }
+      all_units=$(systemctl list-unit-files --no-legend --plain \
+        'velnor*.service' 'velnor*.timer' 2>/dev/null) \
+        || fail "cannot enumerate Velnor units; keeping CPU quota"
+      for unit in $(printf '%s\n' "$all_units" | awk '{print $1}'); do
+        systemctl disable "$unit" \
+          || fail "cannot disable $unit; keeping CPU quota"
+        systemctl reset-failed "$unit" \
+          || fail "cannot reset $unit; keeping CPU quota"
       done
-      daemon_units=$(systemctl list-unit-files --no-legend --plain 'velnor-daemon.service' 'velnor-daemon@*.service' 2>/dev/null) || {
-        echo "velnor-runner postrm: cannot enumerate daemon units; keeping CPU quota" >&2
-        exit 1
-      }
-      for unit in $(printf '%s\n' "$daemon_units" | awk '{print $1}'); do
-        systemctl disable "$unit" || {
-          echo "velnor-runner postrm: cannot disable $unit; keeping CPU quota" >&2
-          exit 1
-        }
-        systemctl reset-failed "$unit" || {
-          echo "velnor-runner postrm: cannot reset $unit; keeping CPU quota" >&2
-          exit 1
-        }
+
+      # Disable first, then synchronously stop every loaded Velnor service and
+      # timer instance. This closes the start-after-check race before the final
+      # slice proof below.
+      runtime_units=$(systemctl list-units --type=service --type=timer --all \
+        --no-legend --plain 'velnor*.service' 'velnor*.timer' 2>/dev/null) \
+        || fail "cannot enumerate loaded Velnor units; keeping CPU quota"
+      for unit in $(printf '%s\n' "$runtime_units" | awk '{print $1}'); do
+        systemctl stop "$unit" \
+          || fail "cannot stop $unit; keeping CPU quota"
       done
+
+      # This is intentionally immediately before rm: a stale pre-stop check
+      # permits a job started in the gap to run outside its aggregate cap.
+      verify_jobs_slice_inactive \
+        || fail "velnor-jobs.slice is not provably inactive; keeping CPU quota"
     fi
     rm -f "$JOBS_SLICE_DROPIN"
     rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
