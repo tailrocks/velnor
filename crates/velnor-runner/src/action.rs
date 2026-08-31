@@ -2,7 +2,7 @@
 
 use crate::{
     checkout::fetch_git_ref,
-    executor::{render_context_expressions, CommandRunner},
+    executor::CommandRunner,
     job_message::{ActionReferenceType, ActionStep},
     script_step::{step_environment, value_truthy, ScriptStep},
 };
@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -162,8 +163,8 @@ pub fn cache_action_kind(source_path: Option<&str>) -> Result<CacheActionKind> {
         .filter(|value| !value.is_empty())
     {
         None => Ok(CacheActionKind::Root),
-        Some(path) if path.eq_ignore_ascii_case("restore") => Ok(CacheActionKind::Restore),
-        Some(path) if path.eq_ignore_ascii_case("save") => Ok(CacheActionKind::Save),
+        Some("restore") => Ok(CacheActionKind::Restore),
+        Some("save") => Ok(CacheActionKind::Save),
         Some(other) => bail!(
             "unsupported actions/cache subpath '{other}': only the root action, 'restore', and 'save' are recognized"
         ),
@@ -292,7 +293,74 @@ pub struct CompositeActionOutputs {
 }
 
 pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
+    if !metadata_document_within_budget(contents) {
+        bail!("action metadata nesting exceeds the admission parser budget");
+    }
     serde_yaml::from_str(contents).context("parse action metadata")
+}
+
+const MAX_METADATA_PARSE_NESTING: usize = 64;
+const MAX_LOCAL_ACTION_METADATA_BYTES: u64 = 1024 * 1024;
+const MAX_ACTION_INPUTS: usize = 256;
+const MAX_ACTION_INPUT_NAME_BYTES: usize = 256;
+const MAX_ACTION_INPUT_VALUE_BYTES: usize = 64 * 1024;
+const MAX_ACTION_INPUT_BYTES: usize = 256 * 1024;
+
+fn metadata_document_within_budget(contents: &str) -> bool {
+    let mut flow_depth = 0usize;
+    let mut block_scalar_indent = None;
+    for line in contents.lines() {
+        let indentation = line
+            .bytes()
+            .take_while(|byte| *byte == b' ' || *byte == b'\t')
+            .count();
+        if indentation > MAX_METADATA_PARSE_NESTING * 2 {
+            return false;
+        }
+        if block_scalar_indent.is_some_and(|base| indentation > base) {
+            continue;
+        }
+        block_scalar_indent = None;
+        let mut single_quoted = false;
+        let mut double_quoted = false;
+        let mut escaped = false;
+        for byte in line.bytes() {
+            if double_quoted {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    double_quoted = false;
+                }
+                continue;
+            }
+            if single_quoted {
+                if byte == b'\'' {
+                    single_quoted = false;
+                }
+                continue;
+            }
+            match byte {
+                b'#' => break,
+                b'\'' => single_quoted = true,
+                b'"' => double_quoted = true,
+                b'[' | b'{' => {
+                    flow_depth = flow_depth.saturating_add(1);
+                    if flow_depth > MAX_METADATA_PARSE_NESTING {
+                        return false;
+                    }
+                }
+                b']' | b'}' => flow_depth = flow_depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        let trimmed = line.trim_end();
+        if trimmed.ends_with('|') || trimmed.ends_with('>') {
+            block_scalar_indent = Some(indentation);
+        }
+    }
+    true
 }
 
 fn deserialize_optional_string_scalar<'de, D>(
@@ -498,10 +566,7 @@ pub struct ResolvedAction {
 
 pub fn resolve_action(plan: &RepositoryActionPlan) -> Result<ResolvedAction> {
     let metadata_path = action_metadata_path(&plan.action_dir)?;
-    let metadata = parse_action_metadata(
-        &fs::read_to_string(&metadata_path)
-            .with_context(|| format!("read {}", metadata_path.display()))?,
-    )?;
+    let metadata = parse_action_metadata(&read_bounded_file(&metadata_path)?)?;
     let runtime = metadata.runtime()?;
     Ok(ResolvedAction {
         plan: plan.clone(),
@@ -513,10 +578,28 @@ pub fn resolve_action(plan: &RepositoryActionPlan) -> Result<ResolvedAction> {
 
 pub fn resolve_local_action(plan: &LocalActionPlan) -> Result<ActionMetadata> {
     let metadata_path = action_metadata_path(&plan.action_dir)?;
-    parse_action_metadata(
-        &fs::read_to_string(&metadata_path)
-            .with_context(|| format!("read {}", metadata_path.display()))?,
-    )
+    parse_action_metadata(&read_bounded_file(&metadata_path)?)
+}
+
+fn read_bounded_file(path: &Path) -> Result<String> {
+    let file = fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let length = file.metadata()?.len();
+    if length > MAX_LOCAL_ACTION_METADATA_BYTES {
+        bail!(
+            "action metadata {} exceeds {MAX_LOCAL_ACTION_METADATA_BYTES} bytes",
+            path.display()
+        );
+    }
+    let mut bytes = Vec::with_capacity(length as usize);
+    file.take(MAX_LOCAL_ACTION_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_LOCAL_ACTION_METADATA_BYTES {
+        bail!(
+            "action metadata {} exceeds {MAX_LOCAL_ACTION_METADATA_BYTES} bytes",
+            path.display()
+        );
+    }
+    String::from_utf8(bytes).context("action metadata is not UTF-8")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -598,7 +681,7 @@ impl ResolvedAction {
             ),
             ("GITHUB_ACTION_REF".to_string(), self.plan.git_ref.clone()),
         ];
-        let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
+        let inputs = effective_inputs(&self.metadata, &self.plan.inputs)?;
         env.extend(
             self.plan
                 .env
@@ -629,7 +712,7 @@ impl ResolvedAction {
             bail!("action '{}' is not a Docker action", self.plan.repository)
         };
         let action_container_path = container_path(actions_host, &self.plan.action_dir)?;
-        let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
+        let inputs = effective_inputs(&self.metadata, &self.plan.inputs)?;
         let mut env = vec![
             ("GITHUB_ACTION".to_string(), self.plan.step_id.clone()),
             (
@@ -741,7 +824,7 @@ pub fn native_invocation_from_plan(
         adapter,
         cache_kind,
         source_path: plan.source_path.clone(),
-        inputs: plan.inputs.clone(),
+        inputs: canonicalize_input_map(&plan.inputs)?,
         env: plan.env.clone(),
     }))
 }
@@ -816,7 +899,7 @@ fn composite_action_invocations_with_path(
     if depth > MAX_LOCAL_COMPOSITE_DEPTH {
         bail!("nested local composite depth exceeds {MAX_LOCAL_COMPOSITE_DEPTH}")
     }
-    let action_inputs = effective_inputs(metadata, inputs);
+    let action_inputs = effective_inputs(metadata, inputs)?;
     let mut invocations = Vec::new();
     let mut step_ids = BTreeMap::new();
     for (index, step) in metadata.runs.steps.iter().enumerate() {
@@ -831,10 +914,7 @@ fn composite_action_invocations_with_path(
                     bail!("nested local composite cycle at '{}'", nested_dir.display())
                 }
                 let metadata_path = action_metadata_path(&nested_dir)?;
-                let nested_metadata = parse_action_metadata(
-                    &fs::read_to_string(&metadata_path)
-                        .with_context(|| format!("read {}", metadata_path.display()))?,
-                )?;
+                let nested_metadata = parse_action_metadata(&read_bounded_file(&metadata_path)?)?;
                 if nested_metadata.runtime()? != ActionRuntime::Composite {
                     bail!("nested local action '{uses}' is not a composite action")
                 }
@@ -1216,23 +1296,70 @@ fn string_input_map(value: Option<&serde_json::Value>) -> Result<BTreeMap<String
             {
                 return string_input_map(object.get("map").or_else(|| object.get("Map")));
             }
-            Ok(object
+            let mut result = BTreeMap::new();
+            let mut total_bytes = 0usize;
+            for (name, value) in object
                 .iter()
                 .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
-                .map(|(name, value)| (name.clone(), input_value(value)))
-                .collect())
+            {
+                insert_bounded_input(
+                    &mut result,
+                    &mut total_bytes,
+                    name,
+                    input_value_bounded(value)?,
+                )?;
+            }
+            Ok(result)
         }
         serde_json::Value::Array(items) => {
             let mut result = BTreeMap::new();
+            let mut total_bytes = 0usize;
             for item in items {
                 if let Some((name, value)) = input_pair(item) {
-                    result.insert(name.to_string(), input_value(value));
+                    insert_bounded_input(
+                        &mut result,
+                        &mut total_bytes,
+                        name,
+                        input_value_bounded(value)?,
+                    )?;
                 }
             }
             Ok(result)
         }
         _ => Ok(BTreeMap::new()),
     }
+}
+
+fn insert_bounded_input(
+    result: &mut BTreeMap<String, String>,
+    total_bytes: &mut usize,
+    name: &str,
+    value: String,
+) -> Result<()> {
+    if result.len() >= MAX_ACTION_INPUTS {
+        bail!("action input count exceeds {MAX_ACTION_INPUTS}");
+    }
+    if name.len() > MAX_ACTION_INPUT_NAME_BYTES {
+        bail!("action input name exceeds {MAX_ACTION_INPUT_NAME_BYTES} bytes");
+    }
+    if value.len() > MAX_ACTION_INPUT_VALUE_BYTES {
+        bail!("action input value exceeds {MAX_ACTION_INPUT_VALUE_BYTES} bytes");
+    }
+    *total_bytes = total_bytes
+        .saturating_add(name.len())
+        .saturating_add(value.len());
+    if *total_bytes > MAX_ACTION_INPUT_BYTES {
+        bail!("action inputs exceed {MAX_ACTION_INPUT_BYTES} bytes");
+    }
+    let canonical_name = name.to_ascii_lowercase();
+    if result
+        .keys()
+        .any(|existing| existing.eq_ignore_ascii_case(&canonical_name))
+    {
+        bail!("action input names differ only by ASCII case");
+    }
+    result.insert(name.to_string(), value);
+    Ok(())
 }
 
 fn input_pair(value: &serde_json::Value) -> Option<(&str, &serde_json::Value)> {
@@ -1279,6 +1406,49 @@ fn input_value(value: &serde_json::Value) -> String {
     }
 }
 
+fn input_value_bounded(value: &serde_json::Value) -> Result<String> {
+    let mut current = value;
+    for _ in 0..MAX_METADATA_PARSE_NESTING {
+        match current {
+            serde_json::Value::String(value) => {
+                if value.len() > MAX_ACTION_INPUT_VALUE_BYTES {
+                    bail!("action input value exceeds {MAX_ACTION_INPUT_VALUE_BYTES} bytes");
+                }
+                return Ok(value.clone());
+            }
+            serde_json::Value::Null => return Ok(String::new()),
+            serde_json::Value::Bool(value) => return Ok(value.to_string()),
+            serde_json::Value::Number(value) => return Ok(value.to_string()),
+            serde_json::Value::Object(object) => {
+                if let Some(value) = object
+                    .get("value")
+                    .or_else(|| object.get("Value"))
+                    .or_else(|| object.get("lit"))
+                    .or_else(|| object.get("Lit"))
+                {
+                    current = value;
+                    continue;
+                }
+                if let Some(expr) = object
+                    .get("expr")
+                    .or_else(|| object.get("Expr"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if expr.len() > MAX_ACTION_INPUT_VALUE_BYTES.saturating_sub(7) {
+                        bail!(
+                            "action input expression exceeds {MAX_ACTION_INPUT_VALUE_BYTES} bytes"
+                        );
+                    }
+                    return Ok(format!("${{{{{expr}}}}}"));
+                }
+                return Ok(String::new());
+            }
+            serde_json::Value::Array(_) => return Ok(String::new()),
+        }
+    }
+    bail!("action input value nesting exceeds {MAX_METADATA_PARSE_NESTING} levels")
+}
+
 fn input_value_as_str(value: &serde_json::Value) -> Option<&str> {
     match value {
         serde_json::Value::String(value) => Some(value),
@@ -1302,7 +1472,7 @@ fn render_inputs(
             let rendered = if contains_step_output_expression(value) {
                 value.clone()
             } else {
-                render_context_expressions(value, context_data)
+                crate::executor::render_context_expressions_bounded(value, context_data)
             };
             (name.clone(), rendered)
         })
@@ -1324,12 +1494,7 @@ fn render_composite_value(
     let mut rendered = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(start) = rest.find("${{") {
-        rendered.push_str(&replace_composite_bare_tokens(
-            &rest[..start],
-            inputs,
-            action_path,
-            workspace_container,
-        ));
+        rendered.push_str(&rest[..start]);
         let after_start = &rest[start + 3..];
         let Some(end) = after_start.find("}}") else {
             rendered.push_str(&rest[start..]);
@@ -1344,12 +1509,7 @@ fn render_composite_value(
         ));
         rest = &after_start[end + 2..];
     }
-    rendered.push_str(&replace_composite_bare_tokens(
-        rest,
-        inputs,
-        action_path,
-        workspace_container,
-    ));
+    rendered.push_str(rest);
     rendered
 }
 
@@ -1359,49 +1519,123 @@ fn render_composite_expression(
     action_path: &str,
     workspace_container: &str,
 ) -> String {
-    if expression == "github.action_path" {
+    if expression.eq_ignore_ascii_case("github.action_path") {
         return action_path.to_string();
     }
-    if expression == "github.workspace" {
+    if expression.eq_ignore_ascii_case("github.workspace") {
         return workspace_container.to_string();
     }
-    if let Some(name) = expression.strip_prefix("inputs.")
-        && let Some(value) = inputs.get(name)
+    if expression.len() >= "inputs.".len()
+        && expression[.."inputs.".len()].eq_ignore_ascii_case("inputs.")
+        && let Some(name) = expression.get("inputs.".len()..)
+        && let Some(value) = input_value_case_insensitive(inputs, name)
     {
         return value.clone();
     }
 
-    let mut rendered = expression
-        .replace("github.action_path", &expression_single_quote(action_path))
-        .replace(
-            "github.workspace",
-            &expression_single_quote(workspace_container),
-        );
-    for (name, value) in inputs_by_descending_name_len(inputs) {
-        rendered = rendered.replace(&format!("inputs.{name}"), &expression_single_quote(value));
-    }
+    let rendered =
+        replace_composite_expression_tokens(expression, inputs, action_path, workspace_container);
     format!("${{{{ {rendered} }}}}")
 }
 
-fn replace_composite_bare_tokens(
-    value: &str,
+fn replace_composite_expression_tokens(
+    expression: &str,
     inputs: &BTreeMap<String, String>,
     action_path: &str,
     workspace_container: &str,
 ) -> String {
-    let mut rendered = value
-        .replace("github.action_path", action_path)
-        .replace("github.workspace", workspace_container);
-    for (name, value) in inputs_by_descending_name_len(inputs) {
-        rendered = rendered.replace(&format!("inputs.{name}"), value);
+    let mut rendered = String::with_capacity(expression.len());
+    let mut cursor = 0usize;
+    let mut quote = None;
+    while cursor < expression.len() {
+        let byte = expression.as_bytes()[cursor];
+        if let Some(quote_char) = quote {
+            let character = expression[cursor..].chars().next().unwrap_or_default();
+            rendered.push(character);
+            cursor += character.len_utf8();
+            if character == quote_char as char {
+                quote = None;
+            }
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            rendered.push(byte as char);
+            cursor += 1;
+            continue;
+        }
+
+        let at_boundary = cursor == 0
+            || !expression.as_bytes()[cursor - 1].is_ascii_alphanumeric()
+                && expression.as_bytes()[cursor - 1] != b'_'
+                && expression.as_bytes()[cursor - 1] != b'-';
+        if at_boundary
+            && let Some((length, replacement)) = composite_expression_token_at(
+                &expression[cursor..],
+                inputs,
+                action_path,
+                workspace_container,
+            )
+        {
+            rendered.push_str(&replacement);
+            cursor += length;
+            continue;
+        }
+        let ch = expression[cursor..].chars().next().unwrap_or_default();
+        rendered.push(ch);
+        cursor += ch.len_utf8();
     }
     rendered
 }
 
-fn inputs_by_descending_name_len(inputs: &BTreeMap<String, String>) -> Vec<(&String, &String)> {
-    let mut pairs = inputs.iter().collect::<Vec<_>>();
-    pairs.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
-    pairs
+fn composite_expression_token_at(
+    value: &str,
+    inputs: &BTreeMap<String, String>,
+    action_path: &str,
+    workspace_container: &str,
+) -> Option<(usize, String)> {
+    if ascii_starts_with_case_insensitive(value, "inputs.") {
+        let name_end = value["inputs.".len()..]
+            .bytes()
+            .position(|byte| !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-')
+            .map_or(value.len(), |offset| offset + "inputs.".len());
+        if name_end > "inputs.".len()
+            && let Some(input) =
+                input_value_case_insensitive(inputs, &value["inputs.".len()..name_end])
+            && token_boundary_after(value, name_end)
+        {
+            return Some((name_end, expression_single_quote(input)));
+        }
+    }
+    for (token, replacement) in [
+        ("github.action_path", expression_single_quote(action_path)),
+        (
+            "github.workspace",
+            expression_single_quote(workspace_container),
+        ),
+    ] {
+        if ascii_starts_with_case_insensitive(value, token)
+            && token_boundary_after(value, token.len())
+        {
+            return Some((token.len(), replacement));
+        }
+    }
+    None
+}
+
+fn ascii_starts_with_case_insensitive(value: &str, prefix: &str) -> bool {
+    value.len() >= prefix.len()
+        && value.as_bytes()[..prefix.len()]
+            .iter()
+            .zip(prefix.as_bytes())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
+fn token_boundary_after(value: &str, length: usize) -> bool {
+    value
+        .as_bytes()
+        .get(length)
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_' && *byte != b'-')
 }
 
 fn render_composite_scoped_value(
@@ -1464,22 +1698,46 @@ fn composite_step_id(prefix: &str, id: Option<&str>, index: usize) -> String {
         .unwrap_or_else(|| format!("{prefix}-{}", index + 1))
 }
 
+pub fn canonicalize_input_map(
+    inputs: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut canonical = BTreeMap::new();
+    for (name, value) in inputs {
+        let canonical_name = name.to_ascii_lowercase();
+        if canonical
+            .insert(canonical_name.clone(), value.clone())
+            .is_some()
+        {
+            bail!("action input names differ only by ASCII case: {canonical_name}");
+        }
+    }
+    Ok(canonical)
+}
+
 fn effective_inputs(
     metadata: &ActionMetadata,
     provided: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut inputs = metadata
-        .inputs
-        .iter()
-        .filter_map(|(name, input)| {
-            input
-                .default_value
-                .as_ref()
-                .map(|value| (name.clone(), value.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    inputs.extend(provided.clone());
-    inputs
+) -> Result<BTreeMap<String, String>> {
+    let mut inputs = BTreeMap::new();
+    let mut declared_names = BTreeSet::new();
+    for (name, input) in &metadata.inputs {
+        let canonical_name = name.to_ascii_lowercase();
+        if !declared_names.insert(canonical_name.clone()) {
+            bail!("metadata input names differ only by ASCII case: {canonical_name}");
+        }
+        if let Some(value) = &input.default_value {
+            inputs.insert(canonical_name, value.clone());
+        }
+    }
+    inputs.extend(canonicalize_input_map(provided)?);
+    Ok(inputs)
+}
+
+fn input_value_case_insensitive<'a>(
+    inputs: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Option<&'a String> {
+    inputs.get(&name.to_ascii_lowercase())
 }
 
 fn workspace_path(workspace_container: &str, path: &str) -> String {
@@ -1606,6 +1864,29 @@ runs:
     }
 
     #[test]
+    fn metadata_parser_rejects_excessive_nesting_before_yaml_parse() {
+        let nested = format!("{}true{}", "[".repeat(65), "]".repeat(65));
+        assert!(parse_action_metadata(&nested).is_err());
+    }
+
+    #[test]
+    fn metadata_parser_ignores_quoted_and_block_scalar_delimiters() {
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "{ this is shell text }"
+        echo '[ still shell text ]'
+"#,
+        )
+        .unwrap();
+        assert_eq!(metadata.runs.steps.len(), 1);
+    }
+
+    #[test]
     fn parses_composite_action_metadata() {
         let metadata = parse_action_metadata(
             r#"
@@ -1631,6 +1912,68 @@ runs:
         assert_eq!(metadata.runs.steps[0].env["COUNT"], "7");
         assert_eq!(metadata.runs.steps[1].with["cleanup"], "false");
         assert_eq!(metadata.runs.steps[1].with["retries"], "3");
+    }
+
+    #[test]
+    fn composite_inputs_are_canonicalized_for_case_insensitive_rendering() {
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  lookup-only:
+    default: false
+runs:
+  using: composite
+  steps:
+    - run: echo ${{ inputs.LOOKUP-ONLY }}
+      shell: bash
+"#,
+        )
+        .unwrap();
+        let provided = [("LOOKUP-ONLY".to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
+        let inputs = effective_inputs(&metadata, &provided).unwrap();
+        assert_eq!(inputs.get("lookup-only").map(String::as_str), Some("true"));
+        assert_eq!(
+            render_composite_value("${{ inputs.LOOKUP-ONLY }}", &inputs, "/__a", "/__w"),
+            "true"
+        );
+    }
+
+    #[test]
+    fn canonical_input_map_rejects_case_collisions() {
+        let inputs = [
+            ("lookup-only".to_string(), "true".to_string()),
+            ("LOOKUP-ONLY".to_string(), "false".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert!(canonicalize_input_map(&inputs).is_err());
+    }
+
+    #[test]
+    fn cache_subpaths_are_case_sensitive() {
+        assert_eq!(
+            cache_action_kind(Some("restore")).unwrap(),
+            CacheActionKind::Restore
+        );
+        assert!(cache_action_kind(Some("Restore")).is_err());
+    }
+
+    #[test]
+    fn composite_replacement_preserves_shell_literals_and_quoted_strings() {
+        let inputs = [("name".to_string(), "velnor".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            render_composite_value(
+                "echo inputs.name; echo ${{ format('inputs.name', inputs.name) }}",
+                &inputs,
+                "/__a",
+                "/__w"
+            ),
+            "echo inputs.name; echo ${{ format('inputs.name', 'velnor') }}"
+        );
     }
 
     #[test]
