@@ -1895,6 +1895,14 @@ where
                 order: live_order,
                 started_at: live_started_at.clone(),
             });
+            // Hoisted out of the execution closure so the continue-on-error
+            // Err arm can salvage what the step streamed before throwing:
+            // actions/runner applies output commands incrementally as lines
+            // stream, so command-file writes and live masks persist even when
+            // the step itself fails by exception (mask loss would be
+            // security-relevant).
+            let mut script_plan: Option<ScriptStepPlan> = None;
+            let mut streamed_masks: Vec<String> = Vec::new();
             let result = (|| match step {
                 ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
                     unreachable!("composite boundary steps are handled before execution")
@@ -1910,6 +1918,7 @@ where
                     let linker = link_command_kind(&step.script);
                     let plan =
                         ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
+                    let plan = script_plan.insert(plan);
                     let mut env = step_state.step_env(&[]);
                     env.extend(step.env.iter().cloned());
                     env.extend(plan.env.iter().cloned());
@@ -1922,9 +1931,8 @@ where
                         &secret_masks,
                     )?;
                     let live_sender = self.step_log_sender.clone();
-                    let mut live_masks = Vec::new();
                     let mut on_output = |_: CommandStream, line: &str| {
-                        live_masks.extend(parse_workflow_commands(line).masks);
+                        streamed_masks.extend(parse_workflow_commands(line).masks);
                         emit_live_step_log(
                             &live_sender,
                             &live_step_id,
@@ -1932,7 +1940,7 @@ where
                             live_order,
                             &live_started_at,
                             line,
-                            &live_masks,
+                            &streamed_masks,
                         );
                     };
                     let compile_started = match (compiler, self.lifecycle_telemetry.as_ref()) {
@@ -2094,9 +2102,14 @@ where
                         eprintln!(
                             "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
                         );
+                        let mut salvaged_state = script_plan
+                            .as_ref()
+                            .and_then(|plan| plan.collect_state().ok())
+                            .unwrap_or_default();
+                        salvaged_state.masks.extend(streamed_masks.iter().cloned());
                         let result = StepExecutionResult {
                             exit_code: 1,
-                            state: StepCommandState::default(),
+                            state: salvaged_state,
                             skipped: false,
                             failure_ignored: true,
                             stdout: String::new(),
@@ -13227,6 +13240,57 @@ mod tests {
         }
     }
 
+    /// Fails the scripted step's `docker exec` by throwing AFTER the step
+    /// already streamed a mask line and wrote its command files — the
+    /// actions/runner case where output commands apply incrementally as
+    /// lines stream and therefore persist through the exception.
+    struct StreamingErrorExecRunner {
+        calls: Vec<(String, Vec<String>)>,
+        temp: PathBuf,
+    }
+
+    impl CommandRunner for StreamingErrorExecRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.first().is_some_and(|arg| arg == "exec")
+                && has_container_env_path(args, "GITHUB_OUTPUT", "masked_output")
+            {
+                on_output(CommandStream::Stdout, "::add-mask::hunter2");
+                fs::write(self.temp.join("masked_output"), "answer=42\n")?;
+                fs::write(self.temp.join("masked_env"), "TOKEN=staged\n")?;
+                anyhow::bail!("docker daemon connection lost");
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     struct MainActionErrorRunner {
         calls: Vec<(String, Vec<String>)>,
         failure_marker: String,
@@ -20444,6 +20508,68 @@ fi"#
             )
             .expect_err("step execution error without continue-on-error must fail the job");
         assert!(format!("{error:#}").contains("docker daemon connection lost"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    // actions/runner parity: output commands apply incrementally as lines
+    // stream, so masks, outputs, and env written before the step throws
+    // survive continue-on-error conversion (dropping a streamed mask would
+    // be security-relevant).
+    #[test]
+    fn script_step_execution_error_salvages_streamed_commands() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "masked".into(),
+                display_name: "masked".into(),
+                script: "emit commands then die".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: true,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "after".into(),
+                display_name: "after".into(),
+                script: "echo after".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+        let mut executor = DockerJobEngine::new(StreamingErrorExecRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .expect("continue-on-error step error must not fail the job");
+
+        assert_eq!(summary.step_results.len(), 2);
+        let failed = &summary.step_results[0];
+        assert_eq!(failed.exit_code, 1);
+        assert!(failed.failure_ignored);
+        // The streamed mask and the command-file writes survived the error.
+        assert!(failed.state.masks.contains(&"hunter2".to_string()));
+        assert_eq!(failed.state.outputs.get("answer"), Some(&"42".to_string()));
+        assert_eq!(failed.state.env.get("TOKEN"), Some(&"staged".to_string()));
+        // The job continues with the remaining steps.
+        assert_eq!(summary.step_results[1].exit_code, 0);
         fs::remove_dir_all(temp).unwrap();
     }
 
