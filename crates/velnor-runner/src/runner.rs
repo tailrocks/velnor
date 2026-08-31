@@ -9675,9 +9675,9 @@ async fn send_guarded_run_service_complete(
         &job_id,
         generation,
         &payload,
-        async {
+        |durable_payload| async move {
             client
-                .complete_job(run_service_url, completion)
+                .complete_job_payload(run_service_url, durable_payload)
                 .await
                 .context("complete run-service job")
         },

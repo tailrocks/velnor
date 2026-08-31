@@ -1010,6 +1010,46 @@ pub fn render_context_expressions(value: &str, context_data: &[(String, Value)])
     JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
 }
 
+pub(crate) fn render_context_expressions_bounded(
+    value: &str,
+    context_data: &[(String, Value)],
+) -> String {
+    if !expression_within_budget(value) {
+        return value.to_string();
+    }
+    render_context_expressions(value, context_data)
+}
+
+fn expression_within_budget(value: &str) -> bool {
+    const MAX_BYTES: usize = 64 * 1024;
+    const MAX_DEPTH: usize = 64;
+    const MAX_OPERATORS: usize = 1024;
+    if value.len() > MAX_BYTES {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut operators = 0usize;
+    for byte in value.bytes() {
+        match byte {
+            b'(' => {
+                depth = depth.saturating_add(1);
+                if depth > MAX_DEPTH {
+                    return false;
+                }
+            }
+            b')' => depth = depth.saturating_sub(1),
+            b'&' | b'|' | b'=' | b'!' => {
+                operators = operators.saturating_add(1);
+                if operators > MAX_OPERATORS {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 pub fn render_expressions_with_context(
     value: &str,
     base_env: &[(String, String)],

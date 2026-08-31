@@ -244,7 +244,14 @@ impl ValidatedPlan {
             cache_digest: None,
             compiler_cache: guest_compiler_cache_descriptor(
                 plan.execution.job_container.compiler_cache_backend,
-                plan.execution.job_container.compiler_cache_trust_class,
+                plan.execution
+                    .job_container
+                    .env
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == "VELNOR_TRUST_SCOPE")
+                    .map(|(_, value)| guest_compiler_cache_trust_class(value))
+                    .unwrap_or(GuestCompilerCacheTrustClass::Trusted),
             ),
             command_files: vec![
                 "GITHUB_OUTPUT".into(),
@@ -348,6 +355,14 @@ fn guest_compiler_cache_descriptor(
         trust_class,
         GuestCompilerCacheDescriptor::TRANSPORT_NAMESPACE,
     )
+}
+
+fn guest_compiler_cache_trust_class(value: &str) -> GuestCompilerCacheTrustClass {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "release" => GuestCompilerCacheTrustClass::Release,
+        "untrusted" => GuestCompilerCacheTrustClass::Untrusted,
+        _ => GuestCompilerCacheTrustClass::Trusted,
+    }
 }
 
 /// Whole-plan timeout: the sum of each step's effective timeout. A job can
