@@ -101,8 +101,17 @@ cat "$digest_output"
 [tasks.check]
 depends = ["fmt", "actionlint", "deny", "fleet-generate", "lint", "test"]
 
+# Plan 008 tool install gate: only the committed lockfile may satisfy tools.
+[tasks.install]
+run = "mise install --locked"
+
+# Real compile leaf: every crate, every target profile, from the committed
+# Cargo.lock. `check` alone skips codegen and link errors.
+[tasks.build]
+run = "cargo build --workspace --all-targets --locked"
+
 [tasks.ci]
-depends = ["actionlint", "deny", "fleet-generate"]
-# The generated CI workflow owns separate test, lint, and format gates. Keep
-# this task build-only so those gates are not executed twice on every run.
-run = "cargo check --workspace --all-targets --locked"
+depends = ["install", "build", "test", "lint", "fmt", "actionlint", "deny", "fleet-generate"]
+# Depends-only aggregate: every gate is its own task, so the local contract
+# matches the generated CI workflow exactly (same commands, same order
+# freedom) and nothing runs twice.
