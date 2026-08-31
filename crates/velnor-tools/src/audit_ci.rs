@@ -944,15 +944,8 @@ fn audit_repo_profile(
     expected_generated_class: Option<GeneratedCallerClass>,
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    findings.extend(audit_test_runner_surfaces(root)?);
-    findings.extend(audit_legacy_runner_group_surfaces(root)?);
+    findings.extend(audit_repository_surfaces(root)?);
     findings.extend(audit_fleet_policy_surface(root)?);
-    let mise_path = root.join("mise.toml");
-    if mise_path.is_file() {
-        let text = fs::read_to_string(&mise_path)
-            .with_context(|| format!("read {}", mise_path.display()))?;
-        audit_prebuilt_tool_surface("mise.toml", &text, &mut findings);
-    }
     if !root.join(".github/AGENTS.md").is_file() {
         findings.push(Finding::error(
             "uniform-agents",
@@ -1154,70 +1147,134 @@ fn fleet_policy_findings(
     findings
 }
 
-fn audit_test_runner_surfaces(root: &Path) -> Result<Vec<Finding>> {
-    let mut files = Vec::new();
-    collect_test_runner_files(root, root, &mut files)?;
-    files.sort();
+#[derive(Debug, Clone)]
+struct TrackedSurfaceEntry {
+    relative: PathBuf,
+    mode: u32,
+}
+
+#[derive(Debug, Clone)]
+struct GitTreeEntry {
+    relative: PathBuf,
+    mode: u32,
+    object: String,
+}
+
+const GIT_SYMLINK_MODE: u32 = 0o120000;
+
+fn audit_repository_surfaces(root: &Path) -> Result<Vec<Finding>> {
+    let mut entries = collect_repository_surface_entries(root)?;
+    entries.sort_by(|left, right| left.relative.cmp(&right.relative));
+
     let mut findings = Vec::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        for (index, line) in text.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if path.extension().is_some_and(|extension| extension == "rs")
-                && !trimmed.starts_with("///")
-                && !trimmed.starts_with("//!")
-            {
-                continue;
-            }
-            if is_cargo_test_instruction(line) {
+    for entry in entries {
+        let relative = entry.relative.to_string_lossy().replace('\\', "/");
+        let is_test_runner = is_test_runner_surface(&entry.relative, entry.mode);
+        let is_legacy = is_repository_surface(&entry.relative, entry.mode);
+        let text = read_tracked_surface(root, &entry)?;
+
+        if is_test_runner {
+            audit_test_runner_text(&relative, &entry.relative, &text, &mut findings);
+        }
+        if is_legacy {
+            if relative == LEGACY_RUNNER_GROUP_DOCTOR {
                 findings.push(Finding::error(
-                    "test-runner",
+                    "legacy-runner-group-surface",
                     &relative,
-                    format!("line {}", index + 1),
-                    "use cargo nextest run; cargo test is forbidden by the estate test-runner contract",
+                    "$",
+                    "active legacy runner-group doctor path is forbidden; use the reviewed velnor-tools fleet-policy flow",
                 ));
             }
+            if relative == "mise.toml" {
+                audit_prebuilt_tool_surface(&relative, &text, &mut findings);
+            }
+            audit_legacy_runner_group_text(&relative, &text, &mut findings);
         }
     }
     Ok(findings)
 }
 
-fn audit_legacy_runner_group_surfaces(root: &Path) -> Result<Vec<Finding>> {
-    let mut files = Vec::new();
-    collect_repository_surface_files(root, root, &mut files)?;
-    files.sort();
-
-    let mut findings = Vec::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-
-        if relative == LEGACY_RUNNER_GROUP_DOCTOR {
+fn audit_test_runner_text(
+    file: &str,
+    relative: &Path,
+    text: &str,
+    findings: &mut Vec<Finding>,
+) {
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if relative.extension().is_some_and(|extension| extension == "rs")
+            && !trimmed.starts_with("///")
+            && !trimmed.starts_with("//!")
+        {
+            continue;
+        }
+        if is_cargo_test_instruction(line) {
             findings.push(Finding::error(
-                "legacy-runner-group-surface",
-                &relative,
-                "$",
-                "active legacy runner-group doctor path is forbidden; use the reviewed velnor-tools fleet-policy flow",
+                "test-runner",
+                file,
+                format!("line {}", index + 1),
+                "use cargo nextest run; cargo test is forbidden by the estate test-runner contract",
             ));
         }
-        audit_legacy_runner_group_text(&relative, &text, &mut findings);
     }
-    Ok(findings)
 }
 
-fn collect_repository_surface_files(
+fn collect_repository_surface_entries(root: &Path) -> Result<Vec<TrackedSurfaceEntry>> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--stage", "-z"])
+        .output()
+        .with_context(|| format!("list tracked audit surfaces under {}", root.display()))?;
+    let entries = if output.status.success() {
+        parse_git_index_entries(&output.stdout)?
+    } else if cfg!(test)
+        && String::from_utf8_lossy(&output.stderr).contains("not a git repository")
+    {
+        let mut entries = Vec::new();
+        collect_filesystem_surface_entries(root, root, &mut entries)?;
+        entries
+    } else {
+        bail!(
+            "list tracked audit surfaces under {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    };
+    Ok(entries
+        .into_iter()
+        .filter(|entry| {
+            is_test_runner_surface(&entry.relative, entry.mode)
+                || is_repository_surface(&entry.relative, entry.mode)
+        })
+        .collect())
+}
+
+fn parse_git_index_entries(bytes: &[u8]) -> Result<Vec<TrackedSurfaceEntry>> {
+    let mut entries = Vec::new();
+    for record in bytes.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+        let (header, raw_path) = record
+            .split_once(&b'\t')
+            .context("git ls-files returned a tracked entry without a path")?;
+        let mut fields = header.split(|byte| *byte == b' ');
+        let mode = parse_git_mode(fields.next().context("tracked entry is missing its mode")?)?;
+        let _object = fields.next().context("tracked entry is missing its object")?;
+        let stage = fields.next().context("tracked entry is missing its stage")?;
+        if stage != b"0" {
+            bail!("tracked audit surface has unresolved merge stage");
+        }
+        let raw_path = std::str::from_utf8(raw_path).context("tracked path is not UTF-8")?;
+        entries.push(TrackedSurfaceEntry {
+            relative: safe_relative_path(raw_path)?,
+            mode,
+        });
+    }
+    Ok(entries)
+}
+
+fn collect_filesystem_surface_entries(
     root: &Path,
     directory: &Path,
-    files: &mut Vec<PathBuf>,
+    entries: &mut Vec<TrackedSurfaceEntry>,
 ) -> Result<()> {
     for entry in fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))? {
         let entry = entry.with_context(|| format!("read entry under {}", directory.display()))?;
@@ -1225,16 +1282,65 @@ fn collect_repository_surface_files(
         let file_type = entry
             .file_type()
             .with_context(|| format!("read file type for {}", path.display()))?;
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_owned();
         if file_type.is_dir() {
-            let relative = path.strip_prefix(root).unwrap_or(&path);
-            if !is_repository_surface_excluded_directory(relative) {
-                collect_repository_surface_files(root, &path, files)?;
+            if !is_repository_surface_excluded_directory(&relative) {
+                collect_filesystem_surface_entries(root, &path, entries)?;
             }
-        } else if file_type.is_file() && is_repository_surface(&path) {
-            files.push(path);
+        } else if file_type.is_file() || file_type.is_symlink() {
+            let mode = if file_type.is_symlink() {
+                GIT_SYMLINK_MODE
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    fs::metadata(&path)?.permissions().mode()
+                }
+                #[cfg(not(unix))]
+                {
+                    0
+                }
+            };
+            entries.push(TrackedSurfaceEntry { relative, mode });
         }
     }
     Ok(())
+}
+
+fn read_tracked_surface(root: &Path, entry: &TrackedSurfaceEntry) -> Result<String> {
+    let path = root.join(&entry.relative);
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect tracked audit surface {}", path.display()))?;
+    let is_symlink = entry.mode == GIT_SYMLINK_MODE || metadata.file_type().is_symlink();
+    if entry.mode == GIT_SYMLINK_MODE && !metadata.file_type().is_symlink() {
+        bail!("tracked symlink {} is not materialized as a symlink", entry.relative.display());
+    }
+    let read_path = if is_symlink {
+        let root = root
+            .canonicalize()
+            .with_context(|| format!("canonicalize audit root {}", root.display()))?;
+        let target = path
+            .canonicalize()
+            .with_context(|| format!("resolve tracked symlink {}", entry.relative.display()))?;
+        if !target.starts_with(&root) {
+            bail!(
+                "tracked symlink {} resolves outside audit root to {}",
+                entry.relative.display(),
+                target.display()
+            );
+        }
+        if !target.is_file() {
+            bail!(
+                "tracked symlink {} resolves to non-file {}",
+                entry.relative.display(),
+                target.display()
+            );
+        }
+        target
+    } else {
+        path
+    };
+    fs::read_to_string(&read_path).with_context(|| format!("read {}", entry.relative.display()))
 }
 
 fn is_repository_surface_excluded_directory(path: &Path) -> bool {
@@ -1246,7 +1352,10 @@ fn is_repository_surface_excluded_directory(path: &Path) -> bool {
     })
 }
 
-fn is_repository_surface(path: &Path) -> bool {
+fn is_repository_surface(path: &Path, mode: u32) -> bool {
+    if mode == GIT_SYMLINK_MODE || mode & 0o111 != 0 {
+        return true;
+    }
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1294,17 +1403,48 @@ fn is_repository_surface(path: &Path) -> bool {
 }
 
 fn audit_legacy_runner_group_text(file: &str, text: &str, findings: &mut Vec<Finding>) {
-    let lines = text.lines().collect::<Vec<_>>();
-    let file_marked_historical = lines
-        .iter()
-        .take(8)
-        .any(|line| markdown_heading_level(line).is_none() && is_explicit_historical_marker(line));
     let mut historical_section_level = None;
-    let mut in_fence = false;
-    let mut historical_fence = false;
+    let mut fence = None;
     let mut historical_fence_pending = false;
+    let mut logical_command = None;
 
-    for (index, line) in lines.iter().enumerate() {
+    for (index, line) in text.lines().enumerate() {
+        let line_number = index + 1;
+        if let Some(current) = fence {
+            if markdown_fence_closes(line, current) {
+                flush_logical_command(file, &mut logical_command, findings);
+                fence = None;
+                continue;
+            }
+            let explicit = is_explicit_historical_marker(line);
+            let active = !current.historical && !explicit;
+            append_logical_command(
+                file,
+                &mut logical_command,
+                line,
+                line_number,
+                active,
+                findings,
+            );
+            if explicit {
+                if let Some(current) = fence.as_mut() {
+                    current.historical = true;
+                }
+            }
+            continue;
+        }
+
+        if let Some((marker, length)) = markdown_fence_opener(line) {
+            flush_logical_command(file, &mut logical_command, findings);
+            fence = Some(MarkdownFence {
+                marker,
+                length,
+                historical: historical_section_level.is_some() || historical_fence_pending,
+            });
+            historical_fence_pending = false;
+            continue;
+        }
+
         let heading_level = markdown_heading_level(line);
         if let Some(level) = heading_level {
             if is_historical_section_marker(line) {
@@ -1313,111 +1453,316 @@ fn audit_legacy_runner_group_text(file: &str, text: &str, findings: &mut Vec<Fin
                 historical_section_level = None;
             }
         }
+        let explicit = is_explicit_historical_marker(line);
+        if !explicit && !line.trim().is_empty() {
+            historical_fence_pending = false;
+        }
+        let active = historical_section_level.is_none() && !explicit;
+        append_logical_command(
+            file,
+            &mut logical_command,
+            line,
+            line_number,
+            active,
+            findings,
+        );
+        if explicit {
+            historical_fence_pending = true;
+        }
+    }
+    flush_logical_command(file, &mut logical_command, findings);
+}
 
-        if is_markdown_fence(line) {
-            if in_fence {
-                in_fence = false;
-                historical_fence = false;
-            } else {
-                in_fence = true;
-                historical_fence = file_marked_historical
-                    || historical_section_level.is_some()
-                    || historical_fence_pending;
-                historical_fence_pending = false;
+#[derive(Debug, Clone, Copy)]
+struct MarkdownFence {
+    marker: u8,
+    length: usize,
+    historical: bool,
+}
+
+#[derive(Debug)]
+struct LogicalShellCommand {
+    start_line: usize,
+    text: String,
+    saw_active_line: bool,
+}
+
+fn append_logical_command(
+    file: &str,
+    logical_command: &mut Option<LogicalShellCommand>,
+    line: &str,
+    line_number: usize,
+    active: bool,
+    findings: &mut Vec<Finding>,
+) {
+    let continued = has_shell_line_continuation(line);
+    if let Some(command) = logical_command.as_mut() {
+        command.text.push('\n');
+        command.text.push_str(line);
+        command.saw_active_line |= active;
+        if !continued {
+            flush_logical_command(file, logical_command, findings);
+        }
+    } else if continued {
+        *logical_command = Some(LogicalShellCommand {
+            start_line: line_number,
+            text: line.to_owned(),
+            saw_active_line: active,
+        });
+    } else if active {
+        audit_logical_shell_command(file, line_number, line, findings);
+    }
+}
+
+fn flush_logical_command(
+    file: &str,
+    logical_command: &mut Option<LogicalShellCommand>,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(command) = logical_command.take() else {
+        return;
+    };
+    if command.saw_active_line {
+        audit_logical_shell_command(file, command.start_line, &command.text, findings);
+    }
+}
+
+fn has_shell_line_continuation(line: &str) -> bool {
+    let trimmed = line.trim_end_matches([' ', '\t']);
+    let backslashes = trimmed
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count();
+    backslashes % 2 == 1
+}
+
+fn audit_logical_shell_command(
+    file: &str,
+    line_number: usize,
+    command: &str,
+    findings: &mut Vec<Finding>,
+) {
+    if let Some(method) = direct_runner_group_mutation(command) {
+        findings.push(Finding::error(
+            "legacy-runner-group-surface",
+            file,
+            format!("line {line_number}"),
+            format!(
+                "active direct runner-group REST mutation ({method}) is forbidden; use the reviewed velnor-tools fleet-policy flow"
+            ),
+        ));
+    }
+}
+
+fn direct_runner_group_mutation(command: &str) -> Option<&'static str> {
+    let tokens = shell_tokens(command);
+    for index in 0..tokens.len() {
+        let client = tokens[index];
+        if client.eq_ignore_ascii_case("gh")
+            && tokens
+                .get(index + 1)
+                .is_some_and(|token| token.eq_ignore_ascii_case("api"))
+        {
+            if let Some(method) = runner_group_api_mutation(&tokens[index + 2..], command, false) {
+                return Some(method);
             }
+        }
+        if client.eq_ignore_ascii_case("curl") {
+            if let Some(method) = runner_group_api_mutation(&tokens[index + 1..], command, true) {
+                return Some(method);
+            }
+        }
+    }
+    None
+}
+
+fn runner_group_api_mutation(
+    tokens: &[&str],
+    command: &str,
+    curl: bool,
+) -> Option<&'static str> {
+    let has_runner_group_target = contains_ascii_case_insensitive(command, "runner-groups")
+        || contains_ascii_case_insensitive(command, "runner_group");
+    let has_explicit_path = tokens.iter().any(|token| token.contains('/'));
+    let target_is_ambiguous = !has_runner_group_target && !has_explicit_path;
+    if !has_runner_group_target && !target_is_ambiguous {
+        return None;
+    }
+
+    let mut explicit_method = None;
+    let mut body = false;
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        let lower = token.to_ascii_lowercase();
+        let method_flag = if curl {
+            matches!(lower.as_str(), "-x" | "--request")
+        } else {
+            matches!(lower.as_str(), "-x" | "--request" | "--method")
+        };
+        if method_flag {
+            explicit_method = Some(
+                tokens
+                    .get(index + 1)
+                    .map(|method| method.to_ascii_uppercase())
+                    .unwrap_or_default(),
+            );
+            index += 2;
             continue;
         }
-
-        let historical = file_marked_historical
-            || historical_section_level.is_some()
-            || historical_fence
-            || is_explicit_historical_marker(line);
-        if !historical {
-            let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
-            if line.contains("runner_group_doctor.sh") {
-                findings.push(Finding::error(
-                    "legacy-runner-group-surface",
-                    file,
-                    format!("line {}", index + 1),
-                    format!(
-                        "active reference to {LEGACY_RUNNER_GROUP_DOCTOR} is forbidden; remove the legacy runner-group doctor"
-                    ),
-                ));
-            }
-            if normalized.contains(LEGACY_RUNNER_GROUP_PUT) {
-                findings.push(Finding::error(
-                    "legacy-runner-group-surface",
-                    file,
-                    format!("line {}", index + 1),
-                    "active direct runner-group PUT remediation is forbidden; use the reviewed velnor-tools fleet-policy flow",
-                ));
-            }
+        let short_method = if curl {
+            lower.strip_prefix("-x").filter(|value| !value.is_empty())
+        } else {
+            lower
+                .strip_prefix("-x")
+                .or_else(|| lower.strip_prefix("--method"))
+                .or_else(|| lower.strip_prefix("--request"))
+                .filter(|value| !value.is_empty())
+        };
+        if let Some(method) = short_method {
+            explicit_method = Some(method.to_ascii_uppercase());
+            index += 1;
+            continue;
         }
-
-        if is_explicit_historical_marker(line) {
-            if in_fence {
-                historical_fence = true;
-            } else {
-                historical_fence_pending = true;
-            }
+        if curl && matches!(lower.as_str(), "-g" | "--get" | "--head") {
+            explicit_method = Some("GET".to_string());
+        } else if is_body_option(&lower, curl) {
+            body = true;
         }
+        index += 1;
+    }
+
+    match explicit_method {
+        Some(method) if method == "GET" || method == "HEAD" => None,
+        Some(method) if matches!(method.as_str(), "POST" | "PATCH" | "PUT" | "DELETE") => {
+            Some(match method.as_str() {
+                "POST" => "POST",
+                "PATCH" => "PATCH",
+                "PUT" => "PUT",
+                "DELETE" => "DELETE",
+                _ => unreachable!(),
+            })
+        }
+        Some(_) => Some("unknown"),
+        None if body => Some("POST (implicit body)"),
+        None => None,
+    }
+}
+
+fn shell_tokens(command: &str) -> Vec<&str> {
+    command
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '\'' | '"' | '`' | '$' | '(' | ')' | ';' | '|' | '&' | '<' | '>' | '=' | ','
+                )
+        })
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn is_body_option(token: &str, curl: bool) -> bool {
+    if curl {
+        matches!(
+            token,
+            "-d"
+                | "--data"
+                | "--data-raw"
+                | "--data-binary"
+                | "--data-urlencode"
+                | "-f"
+                | "--form"
+                | "--form-string"
+                | "--json"
+                | "-t"
+                | "--upload-file"
+        ) || (token.starts_with("-d") && token.len() > 2)
+            || (token.starts_with("-f") && token.len() > 2)
+            || (token.starts_with("-t") && token.len() > 2)
+    } else {
+        matches!(token, "-f" | "-F" | "--field" | "--raw-field" | "--input")
+            || token.starts_with("--field")
+            || token.starts_with("--raw-field")
+            || token.starts_with("--input")
     }
 }
 
 fn markdown_heading_level(line: &str) -> Option<usize> {
-    let trimmed = line.trim_start();
+    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+    if spaces > 3 {
+        return None;
+    }
+    let trimmed = &line[spaces..];
     let level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
     if !(1..=6).contains(&level) {
         return None;
     }
-    (trimmed.as_bytes().get(level) == Some(&b' ')).then_some(level)
+    (trimmed.as_bytes().get(level).is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+        || trimmed.as_bytes().get(level).is_none())
+        .then_some(level)
 }
 
-fn is_markdown_fence(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+fn markdown_fence_opener(line: &str) -> Option<(u8, usize)> {
+    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+    if spaces > 3 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let marker = *bytes.get(spaces)?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let length = bytes[spaces..]
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    if length < 3 {
+        return None;
+    }
+    if marker == b'`' && bytes[spaces + length..].contains(&b'`') {
+        return None;
+    }
+    Some((marker, length))
+}
+
+fn markdown_fence_closes(line: &str, fence: MarkdownFence) -> bool {
+    let Some((marker, length)) = markdown_fence_opener(line) else {
+        return false;
+    };
+    marker == fence.marker
+        && length >= fence.length
+        && line[ line.bytes().take_while(|byte| *byte == b' ').count() + length..]
+            .bytes()
+            .all(|byte| byte == b' ' || byte == b'\t')
 }
 
 fn is_historical_section_marker(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    lower.contains("historical")
-        || lower.contains("superseded")
-        || lower.contains("non-executable")
-        || lower.contains("non executable")
+    contains_ascii_case_insensitive(line, "historical")
+        || contains_ascii_case_insensitive(line, "superseded")
+        || contains_ascii_case_insensitive(line, "non-executable")
+        || contains_ascii_case_insensitive(line, "non executable")
 }
 
 fn is_explicit_historical_marker(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    lower.contains("non-executable")
-        || lower.contains("non executable")
-        || lower.contains("do not run")
-        || lower.contains("historical evidence")
-        || lower.contains("superseded")
-        || lower.contains("not current")
-        || lower.contains("not a remedy")
+    contains_ascii_case_insensitive(line, "non-executable")
+        || contains_ascii_case_insensitive(line, "non executable")
+        || contains_ascii_case_insensitive(line, "do not run")
+        || contains_ascii_case_insensitive(line, "historical evidence")
+        || contains_ascii_case_insensitive(line, "superseded")
+        || contains_ascii_case_insensitive(line, "not current")
+        || contains_ascii_case_insensitive(line, "not a remedy")
 }
 
-fn collect_test_runner_files(
-    root: &Path,
-    directory: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<()> {
-    for entry in fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))? {
-        let entry = entry.with_context(|| format!("read entry under {}", directory.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("read file type for {}", path.display()))?;
-        if file_type.is_dir() {
-            let relative = path.strip_prefix(root).unwrap_or(&path);
-            if !is_historical_or_generated_directory(relative) {
-                collect_test_runner_files(root, &path, files)?;
-            }
-        } else if file_type.is_file() && is_test_runner_surface(&path) {
-            files.push(path);
-        }
-    }
-    Ok(())
+fn contains_ascii_case_insensitive(text: &str, needle: &str) -> bool {
+    text.as_bytes().windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle.as_bytes())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
 }
 
 fn is_historical_or_generated_directory(path: &Path) -> bool {
