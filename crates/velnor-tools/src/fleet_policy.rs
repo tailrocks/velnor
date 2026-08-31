@@ -1403,11 +1403,7 @@ unsafe fn clear_errno() {
         target_os = "netbsd"
     ))]
     {
-        // SAFETY: libc exposes the current thread's errno slot through this
-        // function, so the returned pointer is valid for this assignment.
-        unsafe {
-            *libc::__error() = 0;
-        }
+        *libc::__error() = 0;
     }
     #[cfg(not(any(
         target_os = "macos",
@@ -1419,11 +1415,7 @@ unsafe fn clear_errno() {
         target_os = "netbsd"
     )))]
     {
-        // SAFETY: libc exposes the current thread's errno slot through this
-        // function, so the returned pointer is valid for this assignment.
-        unsafe {
-            *libc::__errno_location() = 0;
-        }
+        *libc::__errno_location() = 0;
     }
 }
 
