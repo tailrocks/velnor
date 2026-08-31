@@ -54,6 +54,7 @@ const REFS_HEADS_PREFIX: &str = "refs/heads/";
 const REFS_TAGS_PREFIX: &str = "refs/tags/";
 const FULL_SHA_LEN: usize = 40;
 const WILDCARDS: [char; 2] = ['*', '?'];
+const MAX_POLICY_FILE_BYTES: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Policy model
@@ -1003,6 +1004,13 @@ fn plan_policy_actions<T: AsRef<[u8]>>(
     let mut ledger_orgs = BTreeSet::new();
     for policy in policies {
         let bytes = format!("{}\n", policy.canonical_json()?);
+        if bytes.len() > MAX_POLICY_FILE_BYTES {
+            bail!(
+                "generated fleet policy for '{}' exceeds the {} MiB file limit",
+                policy.organization,
+                MAX_POLICY_FILE_BYTES / (1024 * 1024)
+            );
+        }
         let action = if existing
             .get(&policy.organization)
             .is_some_and(|on_disk| on_disk.as_ref() == bytes.as_bytes())
@@ -1499,6 +1507,13 @@ fn write_policy_file_at(
     expected: PolicyFileExpectation,
     expected_bytes: Option<&[u8]>,
 ) -> Result<()> {
+    if bytes.len() > MAX_POLICY_FILE_BYTES {
+        bail!(
+            "generated fleet policy '{}' exceeds the {} MiB file limit",
+            file_name,
+            MAX_POLICY_FILE_BYTES / (1024 * 1024)
+        );
+    }
     let file_name_c = CString::new(file_name)
         .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
 
@@ -1601,9 +1616,12 @@ fn write_policy_file_at(
                 });
             }
         }
+        // Keep the cleanup guard bound to the inode opened above. If this
+        // lookup fails, leave the temporary pathname in place rather than
+        // risking removal of an entry we cannot identify.
+        let temporary_identity = policy_file_identity_from_fd(temp_file.as_raw_fd())?;
         let mut renamed = false;
         let result = (|| -> io::Result<()> {
-            let temporary_identity = policy_file_identity_from_fd(temp_file.as_raw_fd())?;
             temp_file.write_all(bytes)?;
             temp_file.sync_all()?;
             rename_policy_file_at(
@@ -1619,8 +1637,12 @@ fn write_policy_file_at(
             Ok(())
         })();
         if !renamed {
-            unsafe {
-                libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
+            let still_owned = policy_file_identity_at(directory.file.as_raw_fd(), &temp_name_c)
+                .is_ok_and(|actual| actual == Some(temporary_identity));
+            if still_owned {
+                unsafe {
+                    libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
+                }
             }
         }
         return result.with_context(|| {
@@ -1804,8 +1826,7 @@ fn read_existing_policy_files(
                 )
             })?;
         ensure_scanned_file_identity(directory, name, identity, opened_identity)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        let bytes = read_policy_file_bytes(&mut file)
             .with_context(|| format!("reading {}/{}", directory.path.display(), name))?;
         let current_identity = policy_file_identity_at(directory.file.as_raw_fd(), &name_c)
             .with_context(|| format!("rechecking {}/{}", directory.path.display(), name))?;
@@ -1819,6 +1840,23 @@ fn read_existing_policy_files(
         existing.insert(stem.to_owned(), ExistingPolicyFile { bytes, identity });
     }
     Ok(existing)
+}
+
+#[cfg(unix)]
+fn read_policy_file_bytes(file: &mut File) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take((MAX_POLICY_FILE_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_POLICY_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "fleet policy file exceeds the {} MiB file limit",
+                MAX_POLICY_FILE_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(unix)]
@@ -1938,8 +1976,7 @@ fn revalidate_policy_file_contents(
             file_name
         );
     }
-    let mut actual_bytes = Vec::new();
-    file.read_to_end(&mut actual_bytes).with_context(|| {
+    let actual_bytes = read_policy_file_bytes(&mut file).with_context(|| {
         format!(
             "reading fleet policy {}/{} before {operation}",
             directory.path.display(),
@@ -3252,6 +3289,28 @@ mod tests {
         assert_eq!(
             fs::read(&path).expect("changed policy remains"),
             b"changed\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_rejects_oversized_existing_policy_before_mutation() {
+        let dir = PolicyDir::new("oversized-policy");
+        let file_name = "ghost-org-desired-policy.json";
+        let path = dir.path.join(file_name);
+        let oversized = vec![b'x'; MAX_POLICY_FILE_BYTES + 1];
+        fs::write(&path, &oversized).expect("seed oversized policy");
+
+        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let error = read_existing_policy_files(&directory)
+            .expect_err("oversized policy must abort generation scan");
+        assert!(
+            format!("{error:#}").contains("1 MiB file limit"),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("oversized policy remains"),
+            oversized
         );
     }
 
