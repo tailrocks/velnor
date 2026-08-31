@@ -675,8 +675,7 @@ fn root_mmdebstrap_prefix(runner: &mut dyn CommandRunner) -> (Vec<String>, bool)
 
 #[cfg(unix)]
 fn unix_euid() -> u32 {
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    unsafe { libc::geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 #[cfg(not(unix))]
@@ -686,8 +685,7 @@ fn unix_euid() -> u32 {
 
 #[cfg(unix)]
 fn unix_uid() -> u32 {
-    // SAFETY: getuid takes no arguments and cannot fail.
-    unsafe { libc::getuid() }
+    rustix::process::getuid().as_raw()
 }
 
 #[cfg(not(unix))]
@@ -697,8 +695,7 @@ fn unix_uid() -> u32 {
 
 #[cfg(unix)]
 fn unix_gid() -> u32 {
-    // SAFETY: getgid takes no arguments and cannot fail.
-    unsafe { libc::getgid() }
+    rustix::process::getgid().as_raw()
 }
 
 #[cfg(not(unix))]
