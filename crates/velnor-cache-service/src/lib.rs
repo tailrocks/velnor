@@ -100,7 +100,7 @@ pub fn resolve_backend(
     Ok(backend)
 }
 
-/// Exact admission failures for conflicting cache ownership.
+/// Exact cache admission failures.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CacheAdmissionError {
     #[error(
@@ -112,6 +112,14 @@ pub enum CacheAdmissionError {
         policy: CompilerCachePolicy,
         declared: CompilerCacheBackend,
     },
+    #[error(
+        "compiler-cache backend {declared:?} is unsupported for MicroVM: guest transport is not admitted"
+    )]
+    MicroVmTransportUnavailable { declared: CompilerCacheBackend },
+    #[error(
+        "compiler-cache environment '{name}' is unsupported for MicroVM: guest transport is not admitted"
+    )]
+    MicroVmEnvironmentUnsupported { name: String },
 }
 
 /// Service configuration. The root must be a daemon-owned persistent path.
@@ -145,10 +153,12 @@ impl CompilerCacheConfig {
                 "compiler-cache owner must not be empty".into(),
             ));
         }
-        if self.lease_duration_ms == 0 || self.heartbeat_every_ms > self.lease_duration_ms {
+        if self.lease_duration_ms == 0
+            || self.heartbeat_every_ms == 0
+            || self.heartbeat_every_ms >= self.lease_duration_ms
+        {
             return Err(CacheError::InvalidConfig(
-                "compiler-cache lease duration must be positive and heartbeat must not exceed it"
-                    .into(),
+                "compiler-cache lease duration and heartbeat must be positive and heartbeat must be strictly less than lease duration".into(),
             ));
         }
         Ok(())
@@ -169,9 +179,24 @@ pub trait CompilerCache: Send + Sync {
     /// Fence one producer for a cache key.
     async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError>;
 
+    /// Renew one producer lease before its persisted deadline.
+    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError>;
+
+    /// Abandon one producer lease so it cannot publish a result.
+    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError>;
+
     /// Publish one result under its still-valid producer lease.
     async fn publish(&self, lease: ProducerLease, result: CompilerResult)
         -> Result<(), CacheError>;
+}
+
+/// Scoped compiler producer lease.
+///
+/// Call [`Self::renew`] during a long compile. Dropping an unpublished guard
+/// fences the lease, including when the compile future is cancelled or fails.
+pub struct CompilerLeaseGuard<'a, C: Clock> {
+    service: &'a CompilerCacheService<C>,
+    lease: Option<ProducerLease>,
 }
 
 /// Environment owned by the selected backend. Callers must apply this whole
@@ -381,6 +406,78 @@ impl<C: Clock> CompilerCacheService<C> {
             regular_round_trip,
         })
     }
+
+    /// Begin a producer lease with cancellation-safe abandonment.
+    pub async fn begin_guard(
+        &self,
+        key: &CompilerActionKey,
+    ) -> Result<CompilerLeaseGuard<'_, C>, CacheError> {
+        let lease = <Self as CompilerCache>::begin(self, key).await?;
+        Ok(CompilerLeaseGuard {
+            service: self,
+            lease: Some(lease),
+        })
+    }
+
+    fn renew_lease(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.renew(lease)?;
+        Ok(())
+    }
+
+    fn abandon_lease(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.abandon(lease)?;
+        Ok(())
+    }
+}
+
+impl<C: Clock> CompilerLeaseGuard<'_, C> {
+    /// Return the current fencing token for diagnostics or a heartbeat.
+    #[must_use]
+    pub fn lease(&self) -> Option<&ProducerLease> {
+        self.lease.as_ref()
+    }
+
+    /// Extend the durable lease before its heartbeat deadline.
+    pub async fn renew(&mut self) -> Result<(), CacheError> {
+        let lease = self.lease.as_mut().ok_or(CacheError::LeaseConsumed)?;
+        self.service.renew_lease(lease)
+    }
+
+    /// Publish the result and consume the guard only after fencing succeeds.
+    pub async fn publish(&mut self, result: CompilerResult) -> Result<(), CacheError> {
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or(CacheError::LeaseConsumed)?
+            .clone();
+        <CompilerCacheService<C> as CompilerCache>::publish(self.service, lease, result).await?;
+        self.lease.take();
+        Ok(())
+    }
+}
+
+impl<C: Clock> Drop for CompilerLeaseGuard<'_, C> {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        // LeaseManager is synchronous, so Drop cannot await. Keep the
+        // fail-closed fencing attempt here and surface a failure for recovery
+        // telemetry instead of silently leaving the lease to expire.
+        if let Err(error) = self.service.abandon_lease(&lease) {
+            eprintln!("forensics.lifecycle: compiler cache lease abandon on drop failed: {error}");
+        }
+    }
 }
 
 impl CompilerCacheService<velnor_action_journal::TokioClock> {
@@ -470,52 +567,62 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         Ok(lease)
     }
 
+    async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        self.renew_lease(lease)
+    }
+
+    async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        self.abandon_lease(lease)
+    }
+
     async fn publish(
         &self,
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<(), CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(&lease.action)?;
-        if lease.action != result.action_key {
-            return Err(CacheError::LeaseKeyMismatch);
-        }
-        if result.action_key.execution_policy.trust_class
-            != lease.action.execution_policy.trust_class
-        {
-            return Err(CacheError::TrustMismatch);
-        }
-        if result.exit_code != 0 {
-            return Err(CacheError::FailedResult {
-                exit_code: result.exit_code,
-            });
-        }
-        let result_bytes = serde_json::to_vec(&result)?;
-        let result_digest = self.cas.put(&result_bytes)?;
-        let key_digest = lease.action.digest()?.to_string();
-        let key_json = canonical_key_json(&lease.action)?;
-        let trust_json = serde_json::to_string(&lease.action.execution_policy.trust_class)?;
-        let complete = ActionRecord {
-            action_key: lease.action.clone(),
-            state: ActionState::Complete,
-            producer_lease_ref: Some(lease_reference(&lease)),
-            consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::from([(
-                String::from("output_root"),
-                result.output_root.clone(),
-            )]),
-            timing: result.timing,
-            worker_id: Some(lease.owner.clone()),
-            trust_class: lease.action.execution_policy.trust_class,
-        };
+        let lease_for_cleanup = lease.clone();
+        let outcome = async {
+            if self.backend == CompilerCacheBackend::Off {
+                return Err(CacheError::Disabled);
+            }
+            self.ensure_trust_scope(&lease.action)?;
+            if lease.action != result.action_key {
+                return Err(CacheError::LeaseKeyMismatch);
+            }
+            if result.action_key.execution_policy.trust_class
+                != lease.action.execution_policy.trust_class
+            {
+                return Err(CacheError::TrustMismatch);
+            }
+            if result.exit_code != 0 {
+                return Err(CacheError::FailedResult {
+                    exit_code: result.exit_code,
+                });
+            }
+            let result_bytes = serde_json::to_vec(&result)?;
+            let result_digest = self.cas.put(&result_bytes)?;
+            let key_digest = lease.action.digest()?.to_string();
+            let key_json = canonical_key_json(&lease.action)?;
+            let trust_json = serde_json::to_string(&lease.action.execution_policy.trust_class)?;
+            let complete = ActionRecord {
+                action_key: lease.action.clone(),
+                state: ActionState::Complete,
+                producer_lease_ref: Some(lease_reference(&lease)),
+                consumer_run_ids: BTreeSet::new(),
+                output_digests: BTreeMap::from([(
+                    String::from("output_root"),
+                    result.output_root.clone(),
+                )]),
+                timing: result.timing,
+                worker_id: Some(lease.owner.clone()),
+                trust_class: lease.action.execution_policy.trust_class,
+            };
 
-        let mut journal = self.lock_journal()?;
-        let mut metadata = self.lock_metadata()?;
-        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO compiler_cache_entries(
+            let mut journal = self.lock_journal()?;
+            let mut metadata = self.lock_metadata()?;
+            let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute(
+                "INSERT INTO compiler_cache_entries(
                  action_key_digest, action_key_json, result_digest, output_digest,
                  trust_class, schema_version, lease_generation
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -526,21 +633,31 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
                  trust_class = excluded.trust_class,
                  schema_version = excluded.schema_version,
                  lease_generation = excluded.lease_generation",
-            params![
-                key_digest,
-                key_json,
-                result_digest.to_string(),
-                result.output_root.to_string(),
-                trust_json,
-                i64::from(COMPILER_CACHE_SCHEMA_VERSION),
-                i64::try_from(lease.generation)
-                    .map_err(|_| CacheError::InvalidMetadata("lease generation overflow".into()))?,
-            ],
-        )?;
-        transaction.commit()?;
-        drop(metadata);
-        journal.append_action_and_release(&lease, &complete)?;
-        Ok(())
+                params![
+                    key_digest,
+                    key_json,
+                    result_digest.to_string(),
+                    result.output_root.to_string(),
+                    trust_json,
+                    i64::from(COMPILER_CACHE_SCHEMA_VERSION),
+                    i64::try_from(lease.generation).map_err(|_| CacheError::InvalidMetadata(
+                        "lease generation overflow".into()
+                    ))?,
+                ],
+            )?;
+            transaction.commit()?;
+            drop(metadata);
+            journal.append_action_and_release(&lease, &complete)?;
+            Ok(())
+        }
+        .await;
+        if outcome.is_err() {
+            // A failed publication must not strand the producer lease until
+            // its normal expiry. A fenced lease is already safe; cleanup
+            // errors are secondary to the publication error.
+            let _ = self.abandon_lease(&lease_for_cleanup);
+        }
+        outcome
     }
 }
 
@@ -564,6 +681,8 @@ pub enum CacheError {
     Io(#[from] std::io::Error),
     #[error("compiler-cache is disabled")]
     Disabled,
+    #[error("compiler-cache producer lease has already been consumed")]
+    LeaseConsumed,
     #[error("compiler-cache producer lease does not match the published key")]
     LeaseKeyMismatch,
     #[error("compiler-cache entry is corrupt: {0}")]
@@ -715,10 +834,52 @@ impl<C: Clock> CompilerCacheService<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
     use tempfile::TempDir;
     use velnor_action_journal::TokioClock;
-    use velnor_action_model::{ActionTiming, ExecutionPolicy, PlatformIdentity, Provenance};
+    use velnor_action_model::{
+        ActionTiming, Clock, ExecutionPolicy, LogicalInstant, PlatformIdentity, Provenance,
+    };
+
+    #[derive(Clone)]
+    struct TestClock {
+        now: Arc<Mutex<LogicalInstant>>,
+    }
+
+    impl Default for TestClock {
+        fn default() -> Self {
+            Self {
+                now: Arc::new(Mutex::new(LogicalInstant::from_millis(0))),
+            }
+        }
+    }
+
+    impl TestClock {
+        fn advance(&self, millis: u64) {
+            let mut now = self.now.lock().expect("clock lock");
+            *now = (*now).saturating_add(millis);
+        }
+    }
+
+    impl Clock for TestClock {
+        fn now(&self) -> LogicalInstant {
+            *self.now.lock().expect("clock lock")
+        }
+
+        fn sleep_until(
+            &self,
+            _deadline: LogicalInstant,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(std::future::ready(()))
+        }
+
+        fn wake_expiry(&self) {}
+    }
 
     fn key(seed: u8) -> CompilerActionKey {
         let digest = Digest::from_bytes(&[seed]);
@@ -759,6 +920,17 @@ mod tests {
         let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
         config.policy = policy;
         CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service")
+    }
+
+    fn service_with_clock(
+        directory: &TempDir,
+        clock: TestClock,
+    ) -> CompilerCacheService<TestClock> {
+        let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
+        config.policy = CompilerCachePolicy::Kache;
+        config.lease_duration_ms = 30;
+        config.heartbeat_every_ms = 10;
+        CompilerCacheService::open(config, WrapperDeclaration::default(), clock).expect("service")
     }
 
     #[tokio::test]
@@ -838,6 +1010,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_guard_renews_and_abandons_on_drop() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let clock = TestClock::default();
+        let cache = service_with_clock(&directory, clock.clone());
+        let action_key = key(7);
+        let mut guard = cache.begin_guard(&action_key).await.expect("lease guard");
+        assert_eq!(guard.lease().map(|lease| lease.generation), Some(1));
+
+        clock.advance(10);
+        guard.renew().await.expect("renew lease");
+        assert_eq!(
+            guard.lease().map(|lease| lease.expires_at),
+            Some(LogicalInstant::from_millis(40))
+        );
+        drop(guard);
+
+        let journal = cache.lock_journal().expect("journal lock");
+        assert_eq!(
+            journal.lease_status(&action_key).expect("lease status"),
+            Some(velnor_action_journal::LeaseStatus::Abandoned)
+        );
+    }
+
+    #[tokio::test]
     async fn mismatched_publish_never_creates_a_hit() {
         let directory = tempfile::tempdir().expect("tempdir");
         let cache = service(
@@ -872,6 +1068,11 @@ mod tests {
             Err(CacheError::FailedResult { exit_code: 1 })
         ));
         assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+        let journal = cache.lock_journal().expect("journal lock");
+        assert_eq!(
+            journal.lease_status(&action_key).expect("lease status"),
+            Some(velnor_action_journal::LeaseStatus::Abandoned)
+        );
     }
 
     #[tokio::test]
