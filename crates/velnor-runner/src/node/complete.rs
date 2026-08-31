@@ -166,16 +166,14 @@ pub fn infer_slot_id(journal: &Journal, config_dir: &Path) -> Option<SlotId> {
     if state.slots.is_empty() {
         return None;
     }
-    if let Some(name) = config_dir.file_name().and_then(|name| name.to_str()) {
-        if let Some(index) = name.strip_prefix("slot-") {
-            if let Some(slot) = state
-                .slots
-                .iter()
-                .find(|slot| slot.slot_id.0.rsplit('-').next() == Some(index))
-            {
-                return Some(slot.slot_id.clone());
-            }
-        }
+    if let Some(name) = config_dir.file_name().and_then(|name| name.to_str())
+        && let Some(index) = name.strip_prefix("slot-")
+        && let Some(slot) = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id.0.rsplit('-').next() == Some(index))
+    {
+        return Some(slot.slot_id.clone());
     }
     if state.slots.len() == 1 {
         return Some(state.slots[0].slot_id.clone());

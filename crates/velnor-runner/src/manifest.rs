@@ -1516,17 +1516,17 @@ fn validate_inputs(
         }
     }
     for rule in rules {
-        if let InputRule::RequiredLiteral(name, allowed) = rule {
-            if !inputs.keys().any(|input| input.eq_ignore_ascii_case(name)) {
-                violations.push(violation(
-                    step,
-                    repository,
-                    action_ref,
-                    &format!("with.{name}"),
-                    "absent",
-                    allowed.iter().map(|value| (*value).to_string()).collect(),
-                ));
-            }
+        if let InputRule::RequiredLiteral(name, allowed) = rule
+            && !inputs.keys().any(|input| input.eq_ignore_ascii_case(name))
+        {
+            violations.push(violation(
+                step,
+                repository,
+                action_ref,
+                &format!("with.{name}"),
+                "absent",
+                allowed.iter().map(|value| (*value).to_string()).collect(),
+            ));
         }
     }
 }

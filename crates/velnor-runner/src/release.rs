@@ -841,10 +841,10 @@ impl ReleaseStore {
         } else {
             write_atomic(&deployed_path, &deployed_bytes)?;
         }
-        if let Some(current) = self.active_tag()? {
-            if current != *tag {
-                write_atomic_symlink(&self.previous_path(), &current)?;
-            }
+        if let Some(current) = self.active_tag()?
+            && current != *tag
+        {
+            write_atomic_symlink(&self.previous_path(), &current)?;
         }
         write_atomic_symlink(&self.active_path(), tag)?;
         Ok(())
