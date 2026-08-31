@@ -27,6 +27,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL,
     checksum TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS events_generation_kind_id_idx
+    ON events (generation, kind, id DESC);
 CREATE TABLE IF NOT EXISTS slots (
     slot_id TEXT PRIMARY KEY,
     generation INTEGER NOT NULL,
@@ -1114,6 +1117,69 @@ impl Journal {
     /// SQLite or payload decode failures.
     pub fn load_state(&self) -> StoreResult<FleetState> {
         load_state_from_conn(&self.conn)
+    }
+
+    /// Check durable terminal acknowledgement evidence without replaying the
+    /// full event log. The controller uses this bounded, indexed query during
+    /// every reconciliation cycle after local cleanup may have failed.
+    pub fn has_remote_terminal_ack(
+        &self,
+        job_id: &JobId,
+        generation: Generation,
+    ) -> StoreResult<bool> {
+        let mut statement = self.conn.prepare(
+            "SELECT payload, checksum
+             FROM events
+             WHERE generation = ?1
+               AND kind IN ('remote_acked', 'remote_observed_terminal')
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut scanned = 0;
+        for row in rows {
+            scanned += 1;
+            if scanned > MAX_TERMINAL_ACK_SCAN_ROWS {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.terminal_ack.scan.bound",
+                )
+                .with_remediation(
+                    "the terminal acknowledgement history exceeded the bounded recovery scan; preserve the journal and compact it through the retention path",
+                ));
+            }
+            let (payload, checksum) = row?;
+            if sha256_hex(payload.as_bytes()) != checksum {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.checksum.mismatch",
+                )
+                .with_remediation(
+                    "the terminal acknowledgement event failed integrity verification",
+                ));
+            }
+            let event: Event = serde_json::from_str(&payload).map_err(|_| {
+                StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
+                    .with_remediation("the terminal acknowledgement event could not be decoded")
+            })?;
+            if matches!(
+                event,
+                Event::RemoteAcked {
+                    job_id: ref event_job_id,
+                    generation: event_generation,
+                }
+                | Event::RemoteObservedTerminal {
+                    job_id: ref event_job_id,
+                    generation: event_generation,
+                } if event_job_id == job_id && event_generation == generation
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Pending completion outbox rows that still need remote reconciliation.
@@ -3712,7 +3778,7 @@ mod tests {
 
     #[test]
     fn remote_ack_restores_ready() {
-        let (_dir, mut journal) = open_tmp("ack-ready");
+        let (dir, mut journal) = open_tmp("ack-ready");
         prime_ready(&mut journal, "scope-1");
         journal
             .apply(Event::ReadyAttempt {
@@ -3755,6 +3821,17 @@ mod tests {
         assert!(state.jobs.is_empty(), "{:?}", state.jobs);
         assert_eq!(state.slots[0].phase, ActorPhase::Ready);
         assert!(state.slots[0].phase.counts_as_ready());
+        drop(journal);
+
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        assert!(reopened
+            .has_remote_terminal_ack(&job("guid-1"), r#gen())
+            .unwrap());
+        let replayed = reopened.load_state().unwrap();
+        assert!(replayed.outbox.iter().any(|row| {
+            row.job_id == job("guid-1") && row.generation == r#gen() && row.remote_acked
+        }));
+        assert!(reopened.materialized_state().unwrap().outbox.is_empty());
     }
 
     #[test]

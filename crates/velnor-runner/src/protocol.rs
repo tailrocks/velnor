@@ -2072,9 +2072,20 @@ impl RunServiceClient {
         run_service_url: &str,
         completion: RunServiceCompleteJob,
     ) -> Result<()> {
+        let payload = serde_json::to_vec(&completion).context("serialize complete job request")?;
+        self.complete_job_payload(run_service_url, payload).await
+    }
+
+    /// Report a previously serialized job result without changing its JSON.
+    /// Used by crash recovery to preserve the exact durable outbox payload.
+    pub async fn complete_job_payload(
+        &self,
+        run_service_url: &str,
+        payload: Vec<u8>,
+    ) -> Result<()> {
         const MAX_ATTEMPTS: u32 = 6;
         let url = run_service_complete_job_url(run_service_url)?;
-        let body = serde_json::to_string(&completion).context("serialize complete job request")?;
+        let body = String::from_utf8(payload).context("complete job payload is not UTF-8")?;
         let mut attempt: u32 = 1;
         loop {
             let outcome = github_json_request(
