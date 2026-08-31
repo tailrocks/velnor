@@ -173,17 +173,17 @@ fn outbox_name(job_id: &str, generation: u64) -> String {
 
 fn temporary_outbox_name(job_id: &str, generation: u64) -> String {
     let serial = NEXT_OUTBOX_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    format!(
-        ".{job_id}.{generation}.tmp-{}-{serial}",
-        std::process::id()
-    )
+    format!(".{job_id}.{generation}.tmp-{}-{serial}", std::process::id())
 }
 
 fn ensure_outbox_parent(state_dir: &Path) -> anyhow::Result<PathBuf> {
     let parent = state_dir.join("outbox");
     match std::fs::symlink_metadata(&parent) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            anyhow::bail!("completion outbox parent must not be a symlink: {}", parent.display())
+            anyhow::bail!(
+                "completion outbox parent must not be a symlink: {}",
+                parent.display()
+            )
         }
         Ok(metadata) if !metadata.is_dir() => {
             anyhow::bail!(
@@ -199,7 +199,10 @@ fn ensure_outbox_parent(state_dir: &Path) -> anyhow::Result<PathBuf> {
     }
     let metadata = std::fs::symlink_metadata(&parent)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        anyhow::bail!("completion outbox parent is not a real directory: {}", parent.display());
+        anyhow::bail!(
+            "completion outbox parent is not a real directory: {}",
+            parent.display()
+        );
     }
     Ok(parent)
 }
@@ -222,7 +225,10 @@ fn open_outbox_parent(state_dir: &Path) -> anyhow::Result<std::fs::File> {
     .map_err(std::io::Error::from)?;
     let stat = rustix::fs::fstat(&fd).map_err(std::io::Error::from)?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-        anyhow::bail!("completion outbox parent is not a directory: {}", parent.display());
+        anyhow::bail!(
+            "completion outbox parent is not a directory: {}",
+            parent.display()
+        );
     }
     Ok(fd.into())
 }
@@ -233,11 +239,7 @@ fn open_outbox_parent(state_dir: &Path) -> anyhow::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn write_outbox_unix(
-    parent: &std::fs::File,
-    name: &str,
-    payload: &[u8],
-) -> anyhow::Result<()> {
+fn write_outbox_unix(parent: &std::fs::File, name: &str, payload: &[u8]) -> anyhow::Result<()> {
     let temporary = temporary_outbox_name(name.trim_end_matches(|_| false), 0);
     let temporary = temporary.replace(".0.tmp-", ".tmp-");
     let temp_fd = rustix::fs::openat(
@@ -251,8 +253,14 @@ fn write_outbox_unix(
     let result = (|| -> anyhow::Result<()> {
         temp_file.write_all(payload)?;
         temp_file.sync_all()?;
-        rustix::fs::linkat(parent, Path::new(&temporary), parent, Path::new(name), AtFlags::empty())
-            .map_err(std::io::Error::from)?;
+        rustix::fs::linkat(
+            parent,
+            Path::new(&temporary),
+            parent,
+            Path::new(name),
+            AtFlags::empty(),
+        )
+        .map_err(std::io::Error::from)?;
         rustix::fs::unlinkat(parent, Path::new(&temporary), AtFlags::empty())
             .map_err(std::io::Error::from)?;
         rustix::fs::fsync(parent).map_err(std::io::Error::from)?;
@@ -304,7 +312,10 @@ fn read_outbox_unix(
     .map_err(|error| anyhow::anyhow!("read completion outbox {}: {error}", path.display()))?;
     let stat = rustix::fs::fstat(&fd).map_err(std::io::Error::from)?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-        anyhow::bail!("completion outbox is not a regular file: {}", path.display());
+        anyhow::bail!(
+            "completion outbox is not a regular file: {}",
+            path.display()
+        );
     }
     let size = u64::try_from(stat.st_size).map_err(|_| anyhow::anyhow!("negative outbox size"))?;
     if size > MAX_COMPLETION_PAYLOAD_BYTES as u64 {
@@ -328,10 +339,16 @@ fn read_outbox_portable(
     let path = parent.join(name);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            anyhow::bail!("completion outbox must not be a symlink: {}", path.display())
+            anyhow::bail!(
+                "completion outbox must not be a symlink: {}",
+                path.display()
+            )
         }
         Ok(metadata) if !metadata.is_file() => {
-            anyhow::bail!("completion outbox is not a regular file: {}", path.display())
+            anyhow::bail!(
+                "completion outbox is not a regular file: {}",
+                path.display()
+            )
         }
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -339,14 +356,14 @@ fn read_outbox_portable(
         }
         Err(error) => return Err(error.into()),
     };
-    read_bounded(OpenOptions::new().read(true).open(&path)?, metadata.len(), &path)
+    read_bounded(
+        OpenOptions::new().read(true).open(&path)?,
+        metadata.len(),
+        &path,
+    )
 }
 
-fn read_bounded(
-    mut file: std::fs::File,
-    size: u64,
-    path: &Path,
-) -> anyhow::Result<Vec<u8>> {
+fn read_bounded(mut file: std::fs::File, size: u64, path: &Path) -> anyhow::Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(size as usize);
     Read::by_ref(&mut file)
         .take(MAX_COMPLETION_PAYLOAD_BYTES as u64 + 1)
@@ -381,7 +398,10 @@ fn remove_outbox_unix(
     };
     let stat = rustix::fs::fstat(&fd).map_err(std::io::Error::from)?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-        anyhow::bail!("completion outbox is not a regular file: {}", path.display());
+        anyhow::bail!(
+            "completion outbox is not a regular file: {}",
+            path.display()
+        );
     }
     rustix::fs::unlinkat(parent, Path::new(name), AtFlags::empty())
         .map_err(std::io::Error::from)?;
@@ -399,10 +419,16 @@ fn remove_outbox_portable(
     let path = parent.join(name);
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            anyhow::bail!("completion outbox must not be a symlink: {}", path.display())
+            anyhow::bail!(
+                "completion outbox must not be a symlink: {}",
+                path.display()
+            )
         }
         Ok(metadata) if !metadata.is_file() => {
-            anyhow::bail!("completion outbox is not a regular file: {}", path.display())
+            anyhow::bail!(
+                "completion outbox is not a regular file: {}",
+                path.display()
+            )
         }
         Ok(_) => std::fs::remove_file(&path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

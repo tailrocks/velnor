@@ -1137,9 +1137,7 @@ impl Journal {
         )?;
         let rows = statement.query_map(
             params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
-            |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
         let mut scanned = 0;
         for row in rows {

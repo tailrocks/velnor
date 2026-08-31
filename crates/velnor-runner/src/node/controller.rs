@@ -501,7 +501,10 @@ fn process_cpu_usage() -> (u64, u64) {
     }
     // SAFETY: the successful syscall initialized every field we read.
     let usage = unsafe { raw.assume_init() };
-    (timeval_microseconds(&usage.ru_utime), timeval_microseconds(&usage.ru_stime))
+    (
+        timeval_microseconds(&usage.ru_utime),
+        timeval_microseconds(&usage.ru_stime),
+    )
 }
 
 #[cfg(unix)]
@@ -1703,15 +1706,15 @@ fn reconcile_orphaned_outboxes(args: &ControllerArgs, journal: &Journal) -> anyh
             let (job_id, generation) = parse_outbox_name(name)?;
             (job_id, generation, false)
         };
-        let row = state.outbox.iter().find(|row| {
-            row.job_id.0 == job_id && row.generation.0 == generation
-        });
+        let row = state
+            .outbox
+            .iter()
+            .find(|row| row.job_id.0 == job_id && row.generation.0 == generation);
         let keep = if temporary {
             outbox_owner_is_live(&args.state_dir, &job_id, generation)?
         } else {
             row.is_some_and(|row| row.intended && !row.remote_acked)
-                || row.is_none()
-                    && outbox_owner_is_live(&args.state_dir, &job_id, generation)?
+                || row.is_none() && outbox_owner_is_live(&args.state_dir, &job_id, generation)?
         };
         if keep {
             continue;
@@ -1760,9 +1763,8 @@ fn outbox_owner_is_live(state_dir: &Path, job_id: &str, generation: u64) -> anyh
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     }
-    let pid = cleanup::read_owned_pid(state_dir, job_id, generation).ok_or_else(|| {
-        anyhow::anyhow!("ownership marker has no valid pid: {}", path.display())
-    })?;
+    let pid = cleanup::read_owned_pid(state_dir, job_id, generation)
+        .ok_or_else(|| anyhow::anyhow!("ownership marker has no valid pid: {}", path.display()))?;
     Ok(prove::pid_is_alive(pid))
 }
 
@@ -2418,11 +2420,17 @@ mod tests {
             .as_u64()
             .unwrap()
             .saturating_add(metrics["cpu"]["controller"]["system_us"].as_u64().unwrap());
-        assert!(controller_cpu > 0, "aggregate controller CPU must be measured");
-        assert_eq!(metrics["cpu"]["phases"]["child_supervision"], json!({
-            "user_us": 0,
-            "system_us": 0
-        }));
+        assert!(
+            controller_cpu > 0,
+            "aggregate controller CPU must be measured"
+        );
+        assert_eq!(
+            metrics["cpu"]["phases"]["child_supervision"],
+            json!({
+                "user_us": 0,
+                "system_us": 0
+            })
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
