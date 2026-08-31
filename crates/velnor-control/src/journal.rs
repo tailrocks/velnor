@@ -17,6 +17,9 @@ use velnor_model::{
     JobId, ReadyProof, SlotId,
 };
 
+#[cfg(unix)]
+use rustix::fs::{FileType, FlockOperation, Mode, OFlags};
+
 use crate::store::error::{StoreError, StoreResult};
 
 /// Minimum bundled SQLite that includes the WAL-reset fix (3.51.3).
@@ -24,10 +27,15 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 
 /// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
 /// must not apply events (N-1 must not clobber an N writer's log).
-pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 4;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
+const MAX_COMPLETION_PAYLOAD_BYTES: i64 = 16 * 1024 * 1024;
+const SHA256_HEX_BYTES: i64 = 64;
+const JOURNAL_SCHEMA_VERSION_V3: u32 = 3;
+const TERMINAL_ACK_INDEX_NAME: &str = "events_terminal_generation_id_idx";
+const TERMINAL_ACK_INDEX_SQL: &str = "CREATE INDEX events_terminal_generation_id_idx ON events (generation, id DESC) WHERE kind IN ('remote_acked', 'remote_observed_terminal')";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -943,6 +951,84 @@ pub struct Journal {
     path: PathBuf,
 }
 
+#[cfg(unix)]
+struct JournalStateLock {
+    _file: std::fs::File,
+}
+
+#[cfg(not(unix))]
+struct JournalStateLock;
+
+impl JournalStateLock {
+    fn shared(journal_path: &Path) -> StoreResult<Self> {
+        Self::acquire(journal_path, false)
+    }
+
+    fn exclusive(journal_path: &Path) -> StoreResult<Self> {
+        Self::acquire(journal_path, true)
+    }
+
+    fn acquire(journal_path: &Path, exclusive: bool) -> StoreResult<Self> {
+        #[cfg(unix)]
+        {
+            let state_dir = journal_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let fd = rustix::fs::openat(
+                rustix::fs::CWD,
+                state_dir,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| {
+                StoreError::new(velnor_model::ExitClass::Operation, "journal.state.lock")
+                    .with_remediation(format!(
+                        "open journal state directory {} for shared locking: {error}",
+                        state_dir.display()
+                    ))
+            })?;
+            let stat = rustix::fs::fstat(&fd).map_err(|error| {
+                StoreError::new(velnor_model::ExitClass::Operation, "journal.state.lock")
+                    .with_remediation(format!(
+                        "inspect journal state directory {} for shared locking: {error}",
+                        state_dir.display()
+                    ))
+            })?;
+            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.state.lock",
+                )
+                .with_remediation(format!(
+                    "journal state path is not a directory: {}",
+                    state_dir.display()
+                )));
+            }
+            let operation = if exclusive {
+                FlockOperation::LockExclusive
+            } else {
+                FlockOperation::LockShared
+            };
+            rustix::fs::flock(&fd, operation).map_err(|error| {
+                StoreError::new(velnor_model::ExitClass::Operation, "journal.state.lock")
+                    .with_remediation(format!(
+                        "acquire {} journal state lock in {}: {error}",
+                        if exclusive { "exclusive" } else { "shared" },
+                        state_dir.display()
+                    ))
+            })?;
+            Ok(Self { _file: fd.into() })
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = (journal_path, exclusive);
+            Ok(Self)
+        }
+    }
+}
+
 impl Journal {
     /// Open (creating) a journal file. Parent directory must already exist.
     ///
@@ -964,6 +1050,10 @@ impl Journal {
                 path.display()
             )));
         }
+        // Serialize schema inspection, DDL, and migrations with every writer
+        // using this state directory. The lock must be acquired before the
+        // connection can observe a version that another writer is migrating.
+        let _state_lock = JournalStateLock::exclusive(path)?;
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         // A v1 database is still owned by the retired capacity model.  Inspect
@@ -971,8 +1061,11 @@ impl Journal {
         // migration transaction: contaminated evidence must remain byte
         // stable and must never reach `persist_state`.
         let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let stored = u32::try_from(stored).unwrap_or(0);
+        let stored = u32::try_from(stored).map_err(|_| journal_schema_invalid())?;
         let outbox_shape = outbox_schema_shape(&conn)?;
+        if stored == 0 {
+            validate_unversioned_schema(&conn, outbox_shape)?;
+        }
         if stored == 1 {
             return Err(StoreError::new(
                 velnor_model::ExitClass::Conflict,
@@ -985,8 +1078,20 @@ impl Journal {
         if stored > JOURNAL_SCHEMA_VERSION {
             return Err(journal_schema_newer());
         }
+        if stored != 0 {
+            validate_versioned_schema_tables(&conn)?;
+        }
         if stored == 2 && matches!(outbox_shape, OutboxSchema::V3) {
             return Err(outbox_schema_mismatch(stored, outbox_shape));
+        }
+        if stored >= JOURNAL_SCHEMA_VERSION_V3 && matches!(outbox_shape, OutboxSchema::V2) {
+            return Err(outbox_schema_mismatch(stored, outbox_shape));
+        }
+        if stored != 0 || !matches!(outbox_shape, OutboxSchema::Missing) {
+            // Validate immutable event evidence before WAL, schema creation,
+            // or any migration can mutate the database. A corrupt journal
+            // remains byte-stable for forensic recovery.
+            load_state_from_conn(&conn)?;
         }
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         if !wal.eq_ignore_ascii_case("wal") {
@@ -1000,7 +1105,13 @@ impl Journal {
         assert_sqlite_version(&conn)?;
         conn.execute_batch(SCHEMA)?;
         if matches!(outbox_shape, OutboxSchema::V2) {
+            validate_existing_terminal_ack_index(&conn)?;
             migrate_v2_to_v3(&mut conn)?;
+        }
+        if stored < JOURNAL_SCHEMA_VERSION {
+            migrate_v3_to_v4(&mut conn)?;
+        } else {
+            validate_terminal_ack_index(&conn)?;
         }
         let journal = Self {
             conn,
@@ -1009,11 +1120,6 @@ impl Journal {
         // Verify all existing event checksums once. The controller's steady
         // state must not replay an ever-growing log every two seconds.
         journal.load_state()?;
-        if stored == 0 {
-            journal
-                .conn
-                .pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
-        }
         Ok(journal)
     }
 
@@ -1049,6 +1155,19 @@ impl Journal {
             .expect("one event must produce one reduction outcome"))
     }
 
+    /// Persist one event while the caller holds the exclusive state-directory
+    /// lock. This is reserved for recovery transitions that must atomically
+    /// recheck filesystem ownership and record the loss decision.
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn apply_under_exclusive_state_lock(&mut self, event: Event) -> StoreResult<ReduceOutcome> {
+        let mut outcomes = self.apply_many_under_exclusive_state_lock(std::iter::once(event))?;
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
     /// Persist several events atomically after reducing them in order. This
     /// keeps controller-owned heartbeat ingestion to one replay and one
     /// materialization transaction per reconciliation cycle.
@@ -1059,6 +1178,42 @@ impl Journal {
     where
         I: IntoIterator<Item = Event>,
     {
+        // Coordinate durable intent commits with controller outbox deletion.
+        // Publication and deletion use the same state-directory flock, so a
+        // reaper cannot remove a payload between publication and intent.
+        let _state_lock = JournalStateLock::shared(&self.path)?;
+        self.apply_many_locked(events)
+    }
+
+    /// Persist events while the caller holds the exclusive state-directory
+    /// lock. See [`Self::apply_under_exclusive_state_lock`].
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn apply_many_under_exclusive_state_lock<I>(
+        &mut self,
+        events: I,
+    ) -> StoreResult<Vec<ReduceOutcome>>
+    where
+        I: IntoIterator<Item = Event>,
+    {
+        self.apply_many_locked(events)
+    }
+
+    fn apply_many_locked<I>(&mut self, events: I) -> StoreResult<Vec<ReduceOutcome>>
+    where
+        I: IntoIterator<Item = Event>,
+    {
+        let stored: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let stored = u32::try_from(stored).map_err(|_| journal_schema_invalid())?;
+        if stored > JOURNAL_SCHEMA_VERSION {
+            return Err(journal_schema_newer());
+        }
+        if stored < JOURNAL_SCHEMA_VERSION {
+            return Err(journal_schema_stale(stored));
+        }
         // Lock before reading materialized state. Controller, job, guardian,
         // and completion processes can overlap; a snapshot taken before the
         // write lock could otherwise clobber a concurrent committed event.
@@ -1128,19 +1283,21 @@ impl Journal {
         generation: Generation,
     ) -> StoreResult<bool> {
         let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
+            "SELECT kind,
+                    length(CAST(payload AS BLOB)),
+                    length(CAST(checksum AS BLOB)),
+                    checksum,
+                    payload
              FROM events
              WHERE generation = ?1
                AND kind IN ('remote_acked', 'remote_observed_terminal')
              ORDER BY id DESC
              LIMIT ?2",
         )?;
-        let rows = statement.query_map(
-            params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
+        let mut rows =
+            statement.query(params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1])?;
         let mut scanned = 0;
-        for row in rows {
+        while let Some(row) = rows.next()? {
             scanned += 1;
             if scanned > MAX_TERMINAL_ACK_SCAN_ROWS {
                 return Err(StoreError::new(
@@ -1151,7 +1308,38 @@ impl Journal {
                     "the terminal acknowledgement history exceeded the bounded recovery scan; preserve the journal and compact it through the retention path",
                 ));
             }
-            let (payload, checksum) = row?;
+            let kind: String = row.get(0)?;
+            let payload_bytes: i64 = row.get(1)?;
+            if payload_bytes > MAX_COMPLETION_PAYLOAD_BYTES {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.terminal_ack.payload.bound",
+                )
+                .with_remediation(
+                    "the terminal acknowledgement event payload exceeded the bounded recovery allocation; preserve the journal and compact it through the retention path",
+                ));
+            }
+            let checksum_bytes: Option<i64> = row.get(2)?;
+            if checksum_bytes != Some(SHA256_HEX_BYTES) {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.terminal_ack.checksum.bound",
+                )
+                .with_remediation(
+                    "the terminal acknowledgement checksum was not a bounded SHA-256 hex value; preserve the journal before retrying",
+                ));
+            }
+            let checksum: String = row.get(3)?;
+            if !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.checksum.mismatch",
+                )
+                .with_remediation(
+                    "the terminal acknowledgement event failed integrity verification",
+                ));
+            }
+            let payload: String = row.get(4)?;
             if sha256_hex(payload.as_bytes()) != checksum {
                 return Err(StoreError::new(
                     velnor_model::ExitClass::Conflict,
@@ -1161,10 +1349,21 @@ impl Journal {
                     "the terminal acknowledgement event failed integrity verification",
                 ));
             }
-            let event: Event = serde_json::from_str(&payload).map_err(|_| {
+            let event = decode_event_for_replay(&payload)?.ok_or_else(|| {
                 StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
-                    .with_remediation("the terminal acknowledgement event could not be decoded")
+                    .with_remediation(
+                        "the terminal acknowledgement event used an unknown type discriminator",
+                    )
             })?;
+            if event_kind(&event) != kind {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.invalid",
+                )
+                .with_remediation(
+                    "the terminal acknowledgement event kind did not match its payload type",
+                ));
+            }
             if matches!(
                 event,
                 Event::RemoteAcked {
@@ -1180,6 +1379,29 @@ impl Journal {
             }
         }
         Ok(false)
+    }
+
+    /// Check whether a completion intent is durably materialized for this
+    /// generation. A final payload with no intent and no live owner is a
+    /// proven pre-intent orphan and may be reclaimed.
+    pub fn has_pending_completion_intent(
+        &self,
+        job_id: &JobId,
+        generation: Generation,
+    ) -> StoreResult<bool> {
+        let intended: i64 = self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM outbox
+                 WHERE job_id = ?1
+                   AND generation = ?2
+                   AND intended = 1
+                   AND remote_acked = 0
+             )",
+            params![job_id.0, generation.0 as i64],
+            |row| row.get(0),
+        )?;
+        Ok(intended != 0)
     }
 
     /// Pending completion outbox rows that still need remote reconciliation.
@@ -1203,26 +1425,51 @@ fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
         journal_writable: true,
         ..FleetState::default()
     };
-    let mut stmt = conn.prepare("SELECT payload, checksum FROM events ORDER BY id ASC")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for row in rows {
-        let (payload, checksum) = row?;
-        if sha256_hex(payload.as_bytes()) != checksum {
+    let mut stmt = conn.prepare(
+        "SELECT length(CAST(payload AS BLOB)),
+                length(CAST(checksum AS BLOB)),
+                payload,
+                checksum
+         FROM events
+         ORDER BY id ASC",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let payload_bytes: Option<i64> = row.get(0)?;
+        if payload_bytes.is_none_or(|bytes| bytes > MAX_COMPLETION_PAYLOAD_BYTES) {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.payload.bound",
+            )
+            .with_remediation(
+                "the event payload exceeded the bounded recovery allocation; preserve the journal and compact it through the retention path",
+            ));
+        }
+        let checksum_bytes: Option<i64> = row.get(1)?;
+        if checksum_bytes != Some(SHA256_HEX_BYTES) {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.checksum.bound",
+            )
+            .with_remediation(
+                "the event checksum was not a bounded SHA-256 hex value; preserve the journal before retrying",
+            ));
+        }
+        let payload: String = row.get(2)?;
+        let checksum: String = row.get(3)?;
+        if !checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || sha256_hex(payload.as_bytes()) != checksum
+        {
             return Err(StoreError::new(
                 velnor_model::ExitClass::Conflict,
                 "journal.checksum.mismatch",
             )
             .with_remediation("the event log failed integrity verification"));
         }
-        let event: Event = match serde_json::from_str(&payload) {
-            Ok(event) => event,
-            Err(_) => {
-                // Newer writer's unknown envelope: N-1 skips it. Checksum
-                // already matched, so this is not corruption.
-                continue;
-            }
+        let Some(event) = decode_event_for_replay(&payload)? else {
+            // Newer writer's unknown envelope: N-1 skips it. Checksum already
+            // matched, so this is not corruption.
+            continue;
         };
         let outcome = reduce(state, event);
         state = outcome.state;
@@ -1242,11 +1489,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
 
     let mut meta = HashMap::new();
     let mut statement = conn.prepare("SELECT key, value FROM meta")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for row in rows {
-        let (key, value) = row?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let key = bounded_text(row, 0, "meta key")?;
+        let value = bounded_text(row, 1, "meta value")?;
         meta.insert(key, value);
     }
     state.control_live = meta_bool(&meta, "control_live")?;
@@ -1268,33 +1514,18 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
                 session_live, executor_proven, registered, pid, heartbeat_unix
          FROM slots ORDER BY rowid",
     )?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?,
-            row.get::<_, i64>(7)?,
-            row.get::<_, Option<i64>>(8)?,
-            row.get::<_, i64>(9)?,
-        ))
-    })?;
-    for row in rows {
-        let (
-            slot_id,
-            generation,
-            phase,
-            permit_held,
-            routing_valid,
-            session_live,
-            executor_proven,
-            registered,
-            pid,
-            heartbeat_unix,
-        ) = row?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let slot_id = bounded_text(row, 0, "slot id")?;
+        let generation = row.get(1)?;
+        let phase = bounded_text(row, 2, "slot phase")?;
+        let permit_held = row.get(3)?;
+        let routing_valid = row.get(4)?;
+        let session_live = row.get(5)?;
+        let executor_proven = row.get(6)?;
+        let registered = row.get(7)?;
+        let pid: Option<i64> = row.get(8)?;
+        let heartbeat_unix = row.get(9)?;
         state.slots.push(SlotRecord {
             slot_id: SlotId(slot_id),
             generation: Generation(i64_u64(generation, "slot generation")?),
@@ -1316,19 +1547,15 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
         "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix
          FROM jobs ORDER BY rowid",
     )?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, i64>(6)?,
-        ))
-    })?;
-    for row in rows {
-        let (job_id, slot_id, generation, attempt, worker, phase, accepted_unix) = row?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let job_id = bounded_text(row, 0, "job id")?;
+        let slot_id = bounded_text(row, 1, "job slot id")?;
+        let generation = row.get(2)?;
+        let attempt = row.get(3)?;
+        let worker = bounded_text(row, 4, "job worker")?;
+        let phase = bounded_text(row, 5, "job phase")?;
+        let accepted_unix = row.get(6)?;
         state.jobs.push(JobRecord {
             job_id: JobId(job_id),
             slot_id: SlotId(slot_id),
@@ -1345,29 +1572,20 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
                 remote_acked, created_unix
          FROM outbox ORDER BY rowid",
     )?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?,
-            row.get::<_, i64>(7)?,
-        ))
-    })?;
-    for row in rows {
-        let (
-            job_id,
-            slot_id,
-            generation,
-            payload_sha256,
-            intended,
-            send_started,
-            remote_acked,
-            created_unix,
-        ) = row?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let job_id = bounded_text(row, 0, "outbox job id")?;
+        let slot_id = match row.get_ref(1)? {
+            rusqlite::types::ValueRef::Null => None,
+            rusqlite::types::ValueRef::Text(_) => Some(bounded_text(row, 1, "outbox slot id")?),
+            _ => return Err(invalid_materialized("outbox slot id", "non-text")),
+        };
+        let generation = row.get(2)?;
+        let payload_sha256 = bounded_text(row, 3, "outbox payload checksum")?;
+        let intended = row.get(4)?;
+        let send_started = row.get(5)?;
+        let remote_acked = row.get(6)?;
+        let created_unix = row.get(7)?;
         let slot_id = slot_id.ok_or_else(|| outbox_owner_unknown(&job_id, generation))?;
         state.outbox.push(OutboxRecord {
             job_id: JobId(job_id),
@@ -1381,6 +1599,20 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
         });
     }
     Ok(state)
+}
+
+fn bounded_text(row: &rusqlite::Row<'_>, index: usize, field: &str) -> StoreResult<String> {
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Text(bytes)
+            if bytes.len() <= MAX_COMPLETION_PAYLOAD_BYTES as usize =>
+        {
+            String::from_utf8(bytes.to_vec())
+                .map_err(|_| invalid_materialized(field, "invalid UTF-8"))
+        }
+        rusqlite::types::ValueRef::Text(_) => Err(invalid_materialized(field, "oversized")),
+        rusqlite::types::ValueRef::Null => Err(invalid_materialized(field, "NULL")),
+        _ => Err(invalid_materialized(field, "non-text")),
+    }
 }
 
 fn meta_bool(meta: &HashMap<String, String>, key: &str) -> StoreResult<bool> {
@@ -1667,11 +1899,154 @@ fn outbox_schema_invalid(part: &str) -> StoreError {
     ))
 }
 
+fn validate_versioned_schema_tables(conn: &Connection) -> StoreResult<()> {
+    for table in ["events", "slots", "jobs", "outbox", "meta"] {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1
+                 FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
+                [table],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.schema.table.missing",
+            )
+            .with_remediation(format!(
+                "preserve the versioned journal unchanged: required table {table} is missing"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unversioned_schema(conn: &Connection, outbox_shape: OutboxSchema) -> StoreResult<()> {
+    let mut statement = conn.prepare(
+        "SELECT type, name
+         FROM sqlite_master
+         WHERE type IN ('table', 'index', 'trigger', 'view')
+           AND name NOT LIKE 'sqlite_%'",
+    )?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let canonical = objects.iter().all(|(object_type, name)| {
+        (object_type.eq_ignore_ascii_case("table")
+            && matches!(
+                name.to_ascii_lowercase().as_str(),
+                "events" | "slots" | "jobs" | "outbox" | "meta"
+            ))
+            || (object_type.eq_ignore_ascii_case("index")
+                && matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "events_generation_kind_id_idx" | "events_terminal_generation_id_idx"
+                ))
+    });
+    let required_tables = ["events", "slots", "jobs", "outbox", "meta"];
+    let has_required_tables = required_tables.iter().all(|table| {
+        objects.iter().any(|(object_type, name)| {
+            object_type.eq_ignore_ascii_case("table") && name.eq_ignore_ascii_case(table)
+        })
+    });
+    if !canonical
+        || !has_required_tables
+        || !matches!(outbox_shape, OutboxSchema::V2 | OutboxSchema::V3)
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.schema.unversioned",
+        )
+        .with_remediation(
+            "preserve the unversioned journal unchanged: a partially initialized schema requires explicit verified recovery",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_event_for_replay(payload: &str) -> StoreResult<Option<Event>> {
+    let value: serde_json::Value = serde_json::from_str(payload).map_err(|_| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
+            .with_remediation("the event log payload was not valid JSON")
+    })?;
+    let event_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
+                .with_remediation("the event log payload had no string type discriminator")
+        })?;
+    if !is_known_event_type(&event_type) {
+        return Ok(None);
+    }
+    serde_json::from_value(value).map(Some).map_err(|_| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
+            .with_remediation(format!("known event type {event_type} had invalid fields"))
+    })
+}
+
+fn is_known_event_type(value: &str) -> bool {
+    matches!(
+        value,
+        "control_live"
+            | "journal_writable"
+            | "dependency"
+            | "routing"
+            | "desired_capacity"
+            | "permit_reserved"
+            | "executor_proven"
+            | "session_live"
+            | "registration_intended"
+            | "registered"
+            | "registration_lost"
+            | "ready_attempt"
+            | "assigned"
+            | "job_owned"
+            | "job_started"
+            | "completion_intended"
+            | "completion_send_started"
+            | "remote_acked"
+            | "remote_observed_terminal"
+            | "job_worker_lost"
+            | "cleanup_intended"
+            | "slot_heartbeat"
+            | "slot_stale"
+            | "canary_observed"
+            | "package_activated"
+            | "package_retire_intended"
+    )
+}
+
 fn journal_schema_newer() -> StoreError {
     StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.newer")
         .with_remediation(
             "preserve the journal unchanged and reopen it with a binary that supports its PRAGMA user_version",
         )
+}
+
+fn journal_schema_stale(version: u32) -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.stale")
+        .with_remediation(format!(
+            "journal schema version {version} is not writable by this binary; reopen it to complete the verified migration"
+        ))
+}
+
+fn journal_schema_invalid() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.schema.invalid",
+    )
+    .with_remediation(
+        "preserve the journal unchanged: PRAGMA user_version must be a non-negative supported schema marker",
+    )
 }
 
 fn outbox_schema_mismatch(version: u32, shape: OutboxSchema) -> StoreError {
@@ -1739,9 +2114,96 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> StoreResult<()> {
          DROP TABLE outbox;
          ALTER TABLE outbox_v3 RENAME TO outbox;",
     )?;
+    tx.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION_V3)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Add the terminal acknowledgement index without rewriting event evidence.
+fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    ensure_terminal_ack_index(&tx)?;
     tx.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+fn validate_existing_terminal_ack_index(conn: &Connection) -> StoreResult<()> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1
+             FROM sqlite_master
+             WHERE type IN ('index', 'table') AND name = ?1 COLLATE NOCASE",
+            [TERMINAL_ACK_INDEX_NAME],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Ok(());
+    }
+    validate_terminal_ack_index(conn)
+}
+
+fn ensure_terminal_ack_index(conn: &Connection) -> StoreResult<()> {
+    let existing: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT type, sql
+             FROM sqlite_master
+             WHERE name = ?1 COLLATE NOCASE",
+            [TERMINAL_ACK_INDEX_NAME],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((object_type, sql)) = existing else {
+        conn.execute(TERMINAL_ACK_INDEX_SQL, [])?;
+        return Ok(());
+    };
+
+    if !object_type.eq_ignore_ascii_case("index")
+        || sql.as_deref().map(compact_sql) != Some(compact_sql(TERMINAL_ACK_INDEX_SQL))
+    {
+        return Err(terminal_ack_index_invalid());
+    }
+    Ok(())
+}
+
+fn validate_terminal_ack_index(conn: &Connection) -> StoreResult<()> {
+    let existing: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT type, sql
+             FROM sqlite_master
+             WHERE name = ?1 COLLATE NOCASE",
+            [TERMINAL_ACK_INDEX_NAME],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((object_type, sql)) = existing else {
+        return Err(terminal_ack_index_invalid());
+    };
+    if !object_type.eq_ignore_ascii_case("index")
+        || sql.as_deref().map(compact_sql) != Some(compact_sql(TERMINAL_ACK_INDEX_SQL))
+    {
+        return Err(terminal_ack_index_invalid());
+    }
+    Ok(())
+}
+
+fn compact_sql(sql: &str) -> String {
+    sql.trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn terminal_ack_index_invalid() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.terminal_ack.index.invalid",
+    )
+    .with_remediation(
+        "preserve the journal and repair the terminal acknowledgement index definition and predicate before retrying",
+    )
 }
 
 fn outbox_owner_inconsistent(job_id: &str, generation: i64) -> StoreError {
@@ -2212,8 +2674,8 @@ mod tests {
         .unwrap();
         seed.execute(
             "INSERT INTO events (generation, kind, payload, checksum)
-             VALUES (1, 'stale_capacity_fixture', '{}', ?1)",
-            [sha256_hex(b"{}")],
+             VALUES (1, 'stale_capacity_fixture', '{\"type\":\"stale_capacity_fixture\"}', ?1)",
+            [sha256_hex(br#"{"type":"stale_capacity_fixture"}"#)],
         )
         .unwrap();
         seed.execute("PRAGMA user_version = 2", []).unwrap();
@@ -2439,7 +2901,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
         let slot_id_not_null: i64 = conn
             .query_row(
                 "SELECT \"notnull\" FROM pragma_table_info('outbox') WHERE name = 'slot_id'",
@@ -2448,6 +2910,168 @@ mod tests {
             )
             .unwrap();
         assert_eq!(slot_id_not_null, 1);
+    }
+
+    #[test]
+    fn unversioned_partial_journal_is_rejected_without_mutation() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-journal-unversioned-partial-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.unversioned");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v3_terminal_index_migrates_and_reopens_without_rewriting_events() {
+        let (dir, mut journal) = open_tmp("v3-terminal-index-migration");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX events_terminal_generation_id_idx;
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        let before_events: Vec<(String, String)> = conn
+            .prepare("SELECT payload, checksum FROM events ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let migrated = Journal::open(&path).unwrap();
+        assert!(migrated.load_state().unwrap().control_live);
+        drop(migrated);
+
+        let reopened = Journal::open(&path).unwrap();
+        assert!(reopened.load_state().unwrap().control_live);
+        drop(reopened);
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        let after_events: Vec<(String, String)> = conn
+            .prepare("SELECT payload, checksum FROM events ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(after_events, before_events);
+    }
+
+    #[test]
+    fn v3_marker_with_v2_outbox_is_rejected_without_mutation() {
+        let (dir, journal) = open_tmp("v3-marker-v2-outbox");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 3);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn v4_marker_without_terminal_index_is_rejected_without_mutation() {
+        let (dir, journal) = open_tmp("v4-marker-without-terminal-index");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX events_terminal_generation_id_idx;
+             PRAGMA user_version = 4;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.terminal_ack.index.invalid");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn versioned_journal_without_outbox_is_rejected_without_mutation() {
+        let (dir, journal) = open_tmp("versioned-journal-without-outbox");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE outbox;
+             PRAGMA user_version = 4;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.table.missing");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn corrupt_v3_terminal_index_is_rejected_without_byte_mutation() {
+        let (dir, journal) = open_tmp("corrupt-v3-terminal-index");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX events_terminal_generation_id_idx;
+             CREATE INDEX events_terminal_generation_id_idx
+                 ON events (generation, id DESC)
+                 WHERE kind = 'remote_acked';
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        for _ in 0..2 {
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.terminal_ack.index.invalid");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION_V3 as i64);
+        let definition: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'events_terminal_generation_id_idx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(definition.contains("kind = 'remote_acked'"));
     }
 
     #[test]
@@ -3686,6 +4310,53 @@ mod tests {
     }
 
     #[test]
+    fn malformed_known_event_is_rejected_during_replay() {
+        let (dir, mut journal) = open_tmp("malformed-known-event");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        let payload = r#"{"type":"dependency"}"#;
+        conn.execute(
+            "INSERT INTO events (generation, kind, payload, checksum) VALUES (0, 'dependency', ?1, ?2)",
+            params![payload, payload_checksum(payload.as_bytes())],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.invalid");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn terminal_ack_rejects_payload_kind_mismatch() {
+        let (dir, mut journal) = open_tmp("terminal-kind-mismatch");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        let payload = r#"{"type":"control_live"}"#;
+        conn.execute(
+            "INSERT INTO events (generation, kind, payload, checksum) VALUES (?1, 'remote_acked', ?2, ?3)",
+            params![r#gen().0 as i64, payload, payload_checksum(payload.as_bytes())],
+        )
+        .unwrap();
+        drop(conn);
+
+        let journal = Journal::open(&path).unwrap();
+        let error = journal
+            .has_remote_terminal_ack(&job("mismatch"), r#gen())
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.invalid");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn second_live_job_on_assigned_slot_is_rejected() {
         let (_dir, mut journal) = open_tmp("two-jobs");
         prime_ready(&mut journal, "scope-1");
@@ -3832,6 +4503,76 @@ mod tests {
             row.job_id == job("guid-1") && row.generation == r#gen() && row.remote_acked
         }));
         assert!(reopened.materialized_state().unwrap().outbox.is_empty());
+    }
+
+    #[test]
+    fn terminal_ack_scan_uses_partial_index_and_rejects_oversized_payload() {
+        let (_dir, journal) = open_tmp("terminal-ack-index");
+        let plan = journal
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT length(CAST(payload AS BLOB)), payload, checksum
+                 FROM events
+                 WHERE generation = ?1
+                   AND kind IN ('remote_acked', 'remote_observed_terminal')
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .unwrap()
+            .query_map(
+                params![r#gen().0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(plan
+            .iter()
+            .any(|detail| detail.contains("events_terminal_generation_id_idx")));
+        assert!(plan.iter().all(|detail| !detail.contains("TEMP B-TREE")));
+
+        let payload = "x".repeat(MAX_COMPLETION_PAYLOAD_BYTES as usize + 1);
+        let checksum = payload_checksum(payload.as_bytes());
+        journal
+            .conn
+            .execute(
+                "INSERT INTO events (generation, kind, payload, checksum)
+                 VALUES (?1, 'remote_acked', ?2, ?3)",
+                params![r#gen().0 as i64, &payload, checksum],
+            )
+            .unwrap();
+        let error = journal
+            .has_remote_terminal_ack(&job("oversized"), r#gen())
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.terminal_ack.payload.bound");
+    }
+
+    #[test]
+    fn terminal_ack_scan_rejects_oversized_checksum_before_fetching_payload() {
+        let (_dir, journal) = open_tmp("terminal-ack-checksum-bound");
+        let payload = serde_json::to_string(&Event::RemoteAcked {
+            job_id: job("checksum-bound"),
+            generation: r#gen(),
+        })
+        .unwrap();
+        journal
+            .conn
+            .execute(
+                "INSERT INTO events (generation, kind, payload, checksum)
+                 VALUES (?1, 'remote_acked', ?2, ?3)",
+                params![
+                    r#gen().0 as i64,
+                    payload,
+                    "x".repeat(SHA256_HEX_BYTES as usize + 1)
+                ],
+            )
+            .unwrap();
+
+        let error = journal
+            .has_remote_terminal_ack(&job("checksum-bound"), r#gen())
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.terminal_ack.checksum.bound");
     }
 
     #[test]

@@ -11,6 +11,9 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use anyhow::Context;
 use clap::Args;
 use serde_json::json;
@@ -34,6 +37,37 @@ const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 /// Completion-marker and orphan-outbox scans are recovery work, not a steady
 /// state tick. The first cycle runs them immediately; retries are bounded.
 const OUTBOX_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
+const OUTBOX_RECONCILIATION_BATCH_SIZE: usize = 64;
+
+#[derive(Debug)]
+struct OutboxSweep {
+    read_dir: std::fs::ReadDir,
+    identity: OutboxDirectoryIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OutboxDirectoryIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OutboxDirectoryIdentity;
+
+#[cfg(unix)]
+fn outbox_directory_identity(metadata: &std::fs::Metadata) -> OutboxDirectoryIdentity {
+    OutboxDirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+#[cfg(not(unix))]
+fn outbox_directory_identity(_metadata: &std::fs::Metadata) -> OutboxDirectoryIdentity {
+    OutboxDirectoryIdentity
+}
 /// Reserve half of the controller's 30s watchdog budget for local journal,
 /// process, and health work. Every remote operation in one cycle shares this
 /// deadline; one slow API cannot consume the budget of later operations.
@@ -402,6 +436,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut startup_deadlines: HashMap<String, Instant> = HashMap::new();
     let mut last_registration_reconcile = Instant::now() - REGISTRATION_RECONCILE_INTERVAL;
     let mut last_outbox_reconcile = Instant::now() - OUTBOX_RECONCILIATION_INTERVAL;
+    let mut outbox_sweep: Option<OutboxSweep> = None;
     let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
     let mut last_reconcile_duration_ms = 1;
@@ -425,6 +460,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             &mut startup_deadlines,
             &mut last_registration_reconcile,
             &mut last_outbox_reconcile,
+            &mut outbox_sweep,
             &mut pacing,
             &metrics,
         )
@@ -639,6 +675,7 @@ async fn reconcile_once(
     startup_deadlines: &mut HashMap<String, Instant>,
     last_registration_reconcile: &mut Instant,
     last_outbox_reconcile: &mut Instant,
+    outbox_sweep: &mut Option<OutboxSweep>,
     pacing: &mut GithubPacing,
     metrics: &MetricsPublisher,
 ) -> anyhow::Result<LocalCycle> {
@@ -813,7 +850,7 @@ async fn reconcile_once(
     let outbox_reconcile_due = last_outbox_reconcile.elapsed() >= OUTBOX_RECONCILIATION_INTERVAL;
     reclaim_orphaned_jobs(args, journal, remote_deadline, outbox_reconcile_due).await?;
     if outbox_reconcile_due {
-        reconcile_orphaned_outboxes(args, journal)?;
+        reconcile_orphaned_outboxes(args, journal, outbox_sweep)?;
         *last_outbox_reconcile = Instant::now();
     }
 
@@ -1432,34 +1469,31 @@ async fn reclaim_orphaned_jobs(
     scan_persisted_markers: bool,
 ) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
-    let orphan_jobs: Vec<_> = state
-        .jobs
-        .iter()
-        .filter(|job| {
-            matches!(
-                job.phase,
-                ActorPhase::Assigned
-                    | ActorPhase::Starting
-                    | ActorPhase::Running
-                    | ActorPhase::Completing
-            )
-        })
+    let mut orphan_jobs = Vec::new();
+    for job in state.jobs.iter().filter(|job| {
+        matches!(
+            job.phase,
+            ActorPhase::Assigned
+                | ActorPhase::Starting
+                | ActorPhase::Running
+                | ActorPhase::Completing
+        )
+    }) {
         // A ready-slot waiter is spawned before GitHub assigns a job, so its
         // durable ownership marker is keyed by the waiter identity rather
-        // than the later journal job id. Check both markers independently:
-        // a stale job marker must not suppress a live waiter marker.
-        .filter(|job| {
-            let waiter_id = format!("wait-{}", job.slot_id.0);
-            let job_worker_live =
-                cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
-                    .is_some_and(prove::pid_is_alive);
-            let waiter_live =
-                cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0)
-                    .is_some_and(prove::pid_is_alive);
-            !(job_worker_live || waiter_live)
-        })
-        .cloned()
-        .collect();
+        // than the later journal job id. Check both markers independently
+        // while holding the namespace lock; an unsynchronised missing-marker
+        // observation must never classify a concurrently starting worker as
+        // orphaned.
+        let job_worker_live =
+            owner_is_live_with_exclusive_lock(&args.state_dir, &job.job_id.0, job.generation.0)?;
+        let waiter_id = format!("wait-{}", job.slot_id.0);
+        let waiter_live =
+            owner_is_live_with_exclusive_lock(&args.state_dir, &waiter_id, job.generation.0)?;
+        if !(job_worker_live || waiter_live) {
+            orphan_jobs.push(job.clone());
+        }
+    }
 
     if orphan_jobs.is_empty() && !scan_persisted_markers {
         return Ok(());
@@ -1495,6 +1529,13 @@ async fn reclaim_orphaned_jobs(
     };
 
     for job in orphan_jobs {
+        if owner_is_live_with_exclusive_lock(&args.state_dir, &job.job_id.0, job.generation.0)? {
+            continue;
+        }
+        let waiter_id = format!("wait-{}", job.slot_id.0);
+        if owner_is_live_with_exclusive_lock(&args.state_dir, &waiter_id, job.generation.0)? {
+            continue;
+        }
         let slot_dir = recovery_slot_config_dir(&args.state_dir, &exec, &state, &job.slot_id)?;
         let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
         let pending_completion = job.phase == ActorPhase::Completing
@@ -1574,10 +1615,17 @@ async fn reclaim_orphaned_jobs(
                 job.job_id.0
             ));
         }
-        let lost = journal.apply(Event::JobWorkerLost {
+        let ownership_lock = cleanup::lock_outbox(&args.state_dir)?;
+        if outbox_owner_is_live(&args.state_dir, &job.job_id.0, job.generation.0)?
+            || outbox_owner_is_live(&args.state_dir, &waiter_id, job.generation.0)?
+        {
+            continue;
+        }
+        let lost = journal.apply_under_exclusive_state_lock(Event::JobWorkerLost {
             job_id: job.job_id.clone(),
             generation: job.generation,
         })?;
+        drop(ownership_lock);
         if !lost.rejected {
             eprintln!(
                 "Warning: job {} worker lost on {}; slot restored to Ready",
@@ -1658,10 +1706,15 @@ where
 }
 
 /// Reconcile files left by a crash between durable outbox publication and
-/// `CompletionIntended`. A live ownership marker keeps the writer's file from
-/// being deleted during that tiny window; a dead or absent owner makes the
-/// file safe to remove because no journal intent can authorize a send.
-fn reconcile_orphaned_outboxes(args: &ControllerArgs, journal: &Journal) -> anyhow::Result<()> {
+/// `CompletionIntended`. Final payloads are removed only after durable terminal
+/// acknowledgement; a missing or stale materialized row is not deletion proof.
+/// The read directory is retained between calls so a large orphan set cannot
+/// monopolize one controller cycle.
+fn reconcile_orphaned_outboxes(
+    args: &ControllerArgs,
+    journal: &Journal,
+    sweep: &mut Option<OutboxSweep>,
+) -> anyhow::Result<()> {
     let outbox_dir = args.state_dir.join("outbox");
     let metadata = match std::fs::symlink_metadata(&outbox_dir) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1677,20 +1730,49 @@ fn reconcile_orphaned_outboxes(args: &ControllerArgs, journal: &Journal) -> anyh
             ));
         }
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            *sweep = None;
+            return Ok(());
+        }
         Err(error) => return Err(error.into()),
     };
-    let _ = metadata;
-    let state = journal.materialized_state()?;
-    for entry in std::fs::read_dir(&outbox_dir)? {
+    let identity = outbox_directory_identity(&metadata);
+    if sweep
+        .as_ref()
+        .is_some_and(|current| current.identity != identity)
+    {
+        *sweep = None;
+    }
+    if sweep.is_none() {
+        *sweep = Some(OutboxSweep {
+            read_dir: std::fs::read_dir(&outbox_dir)?,
+            identity,
+        });
+    }
+    let mut temporary_names = Vec::new();
+    let mut final_names = Vec::new();
+    let mut exhausted = false;
+    for _ in 0..OUTBOX_RECONCILIATION_BATCH_SIZE {
+        let Some(entry) = sweep
+            .as_mut()
+            .expect("outbox sweep must be open")
+            .read_dir
+            .next()
+        else {
+            exhausted = true;
+            break;
+        };
         let entry = entry?;
-        let path = entry.path();
         let name = entry.file_name();
         let name = name
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("completion outbox filename is not UTF-8"))?;
-        let file_metadata = std::fs::symlink_metadata(&path)?;
-        if file_metadata.file_type().is_symlink() || !file_metadata.is_file() {
+        if name == cleanup::OUTBOX_LOCK_NAME {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() || !file_type.is_file() {
             return Err(anyhow::anyhow!(
                 "completion outbox entry is not a regular file: {}",
                 path.display()
@@ -1706,31 +1788,117 @@ fn reconcile_orphaned_outboxes(args: &ControllerArgs, journal: &Journal) -> anyh
             let (job_id, generation) = parse_outbox_name(name)?;
             (job_id, generation, false)
         };
-        let row = state
-            .outbox
-            .iter()
-            .find(|row| row.job_id.0 == job_id && row.generation.0 == generation);
-        let keep = if temporary {
-            outbox_owner_is_live(&args.state_dir, &job_id, generation)?
-        } else {
-            row.is_some_and(|row| row.intended && !row.remote_acked)
-                || row.is_none() && outbox_owner_is_live(&args.state_dir, &job_id, generation)?
-        };
+        let keep = outbox_should_keep(&args.state_dir, journal, &job_id, generation, temporary)?;
         if keep {
             continue;
         }
         if temporary {
-            std::fs::remove_file(&path)?;
-            #[cfg(unix)]
-            std::fs::OpenOptions::new()
-                .read(true)
-                .open(&outbox_dir)?
-                .sync_all()?;
+            temporary_names.push(name.to_owned());
         } else {
-            cleanup::remove_outbox(&args.state_dir, &job_id, generation)?;
+            final_names.push(name.to_owned());
         }
     }
+    let current_metadata = match std::fs::symlink_metadata(&outbox_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            *sweep = None;
+            return Ok(());
+        }
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            *sweep = None;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let sweep_identity = sweep.as_ref().expect("outbox sweep must be open").identity;
+    if outbox_directory_identity(&current_metadata) != sweep_identity {
+        *sweep = None;
+        return Ok(());
+    }
+    if exhausted {
+        *sweep = None;
+    }
+    if temporary_names.is_empty() && final_names.is_empty() {
+        return Ok(());
+    }
+    let outbox_lock = cleanup::lock_outbox(&args.state_dir)?;
+    let locked_metadata = match std::fs::symlink_metadata(&outbox_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            *sweep = None;
+            return Ok(());
+        }
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            *sweep = None;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if outbox_directory_identity(&locked_metadata) != sweep_identity {
+        *sweep = None;
+        return Ok(());
+    }
+    let temporary_names =
+        reclaimable_outbox_names(&args.state_dir, journal, temporary_names, true)?;
+    if !temporary_names.is_empty() {
+        let names = temporary_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        cleanup::remove_outbox_entries_locked(&outbox_lock, &names)?;
+    }
+    let final_names = reclaimable_outbox_names(&args.state_dir, journal, final_names, false)?;
+    let final_names = final_names.iter().map(String::as_str).collect::<Vec<_>>();
+    if !final_names.is_empty() {
+        cleanup::remove_outbox_entries_locked(&outbox_lock, &final_names)?;
+    }
     Ok(())
+}
+
+fn reclaimable_outbox_names(
+    state_dir: &Path,
+    journal: &Journal,
+    names: Vec<String>,
+    temporary: bool,
+) -> anyhow::Result<Vec<String>> {
+    let mut reclaimable = Vec::new();
+    for name in names {
+        let (job_id, generation) = if temporary {
+            let stem = name
+                .strip_prefix('.')
+                .and_then(|stem| stem.rsplit_once(".tmp-"))
+                .map(|(stem, _)| stem)
+                .ok_or_else(|| anyhow::anyhow!("temporary outbox filename has no nonce: {name}"))?;
+            parse_outbox_name(stem)?
+        } else {
+            parse_outbox_name(&name)?
+        };
+        if !outbox_should_keep(state_dir, journal, &job_id, generation, temporary)? {
+            reclaimable.push(name);
+        }
+    }
+    Ok(reclaimable)
+}
+
+fn outbox_should_keep(
+    state_dir: &Path,
+    journal: &Journal,
+    job_id: &str,
+    generation: u64,
+    temporary: bool,
+) -> anyhow::Result<bool> {
+    if temporary {
+        return outbox_owner_is_live(state_dir, job_id, generation);
+    }
+    // A materialized snapshot can be stale relative to a concurrent
+    // CompletionIntended. Only an indexed terminal-ack event proves that
+    // deleting this final payload cannot lose a replay. A final file without
+    // intent is reclaimable only after its owner is gone.
+    let job_id = JobId(job_id.to_owned());
+    let generation = Generation(generation);
+    Ok(!journal.has_remote_terminal_ack(&job_id, generation)?
+        && (journal.has_pending_completion_intent(&job_id, generation)?
+            || outbox_owner_is_live(state_dir, job_id.0.as_str(), generation.0)?))
 }
 
 fn parse_outbox_name(name: &str) -> anyhow::Result<(String, u64)> {
@@ -1760,12 +1928,59 @@ fn outbox_owner_is_live(state_dir: &Path, job_id: &str, generation: u64) -> anyh
             ));
         }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return outbox_publication_owner_is_live(state_dir, job_id, generation);
+        }
         Err(error) => return Err(error.into()),
     }
     let pid = cleanup::read_owned_pid(state_dir, job_id, generation)
         .ok_or_else(|| anyhow::anyhow!("ownership marker has no valid pid: {}", path.display()))?;
+    if prove::pid_is_alive(pid) {
+        return Ok(true);
+    }
+    outbox_publication_owner_is_live(state_dir, job_id, generation)
+}
+
+fn outbox_publication_owner_is_live(
+    state_dir: &Path,
+    job_id: &str,
+    generation: u64,
+) -> anyhow::Result<bool> {
+    let path = cleanup::outbox_publication_owner_path(state_dir, job_id, generation);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(anyhow::anyhow!(
+                "outbox publication owner must not be a symlink: {}",
+                path.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(anyhow::anyhow!(
+                "outbox publication owner is not a regular file: {}",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    let pid =
+        cleanup::read_outbox_publication_pid(state_dir, job_id, generation).ok_or_else(|| {
+            anyhow::anyhow!(
+                "outbox publication owner has no valid pid: {}",
+                path.display()
+            )
+        })?;
     Ok(prove::pid_is_alive(pid))
+}
+
+fn owner_is_live_with_exclusive_lock(
+    state_dir: &Path,
+    job_id: &str,
+    generation: u64,
+) -> anyhow::Result<bool> {
+    let _lock = cleanup::lock_outbox(state_dir)?;
+    outbox_owner_is_live(state_dir, job_id, generation)
 }
 
 fn recovery_slot_config_dir(
@@ -2662,6 +2877,117 @@ mod tests {
             fenced_slot_recovery_generation(None, &state, &children),
             None
         );
+    }
+
+    #[test]
+    fn orphan_outbox_sweep_is_bounded_and_retains_uncertain_final_payload() {
+        let dir = metrics_test_dir("orphan-outbox-sweep");
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        let outbox = dir.join("outbox");
+        std::fs::create_dir_all(&outbox).unwrap();
+        for index in 0..=OUTBOX_RECONCILIATION_BATCH_SIZE {
+            std::fs::write(
+                outbox.join(format!(".job-{index}.1.tmp-test")),
+                b"temporary",
+            )
+            .unwrap();
+        }
+        cleanup::write_outbox(&dir, "job-final", 1, b"replayable").unwrap();
+        cleanup::write_owned_pid(&dir, "job-final", 1, std::process::id()).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let mut sweep = None;
+
+        reconcile_orphaned_outboxes(&args, &journal, &mut sweep).unwrap();
+        let temporary_count = std::fs::read_dir(&outbox)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                name != cleanup::OUTBOX_LOCK_NAME && name.to_string_lossy().starts_with('.')
+            })
+            .count();
+        assert!(
+            temporary_count > 0,
+            "the sweep must stop at its batch bound"
+        );
+        assert!(cleanup::read_outbox(&dir, "job-final", 1).is_ok());
+
+        reconcile_orphaned_outboxes(&args, &journal, &mut sweep).unwrap();
+        let temporary_count = std::fs::read_dir(&outbox)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                name != cleanup::OUTBOX_LOCK_NAME && name.to_string_lossy().starts_with('.')
+            })
+            .count();
+        assert_eq!(temporary_count, 0, "the next sweep must resume the batch");
+        assert!(cleanup::read_outbox(&dir, "job-final", 1).is_ok());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_outbox_sweep_discards_cursor_when_directory_is_replaced() {
+        let dir = metrics_test_dir("orphan-outbox-replaced");
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        let outbox = dir.join("outbox");
+        std::fs::create_dir_all(&outbox).unwrap();
+        for index in 0..=OUTBOX_RECONCILIATION_BATCH_SIZE {
+            std::fs::write(
+                outbox.join(format!(".job-{index}.1.tmp-test")),
+                b"temporary",
+            )
+            .unwrap();
+        }
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let mut sweep = None;
+
+        reconcile_orphaned_outboxes(&args, &journal, &mut sweep).unwrap();
+        assert!(sweep.is_some(), "the first pass must retain a live cursor");
+
+        let old_outbox = dir.join("outbox-old");
+        std::fs::rename(&outbox, &old_outbox).unwrap();
+        std::fs::create_dir(&outbox).unwrap();
+        reconcile_orphaned_outboxes(&args, &journal, &mut sweep).unwrap();
+
+        assert!(outbox.is_dir());
+        std::fs::remove_dir_all(old_outbox).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn orphan_outbox_sweep_removes_final_payload_without_intent_or_owner() {
+        let dir = metrics_test_dir("orphan-outbox-pre-intent");
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        cleanup::write_outbox(&dir, "job-pre-intent", 1, b"orphan").unwrap();
+        cleanup::remove_owned(&dir, "job-pre-intent", 1).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let mut sweep = None;
+
+        reconcile_orphaned_outboxes(&args, &journal, &mut sweep).unwrap();
+        assert!(!cleanup::outbox_path(&dir, "job-pre-intent", 1).exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
