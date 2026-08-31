@@ -256,13 +256,24 @@ fn packaged_units_have_no_controller_partof_to_workers() {
     assert!(!include_str!("../debian/velnor-guardian.service")
         .lines()
         .any(|line| line.starts_with("EnvironmentFile=") && line.contains("secrets.env")));
-    assert!(include_str!("../debian/velnor-jobs.slice").contains("job-worker slice"));
-    assert!(!include_str!("../debian/velnor-jobs.slice").contains("transitional Docker"));
     let jobs_slice = include_str!("../debian/velnor-jobs.slice");
-    assert!(jobs_slice.contains("CPUQuota=1900%"));
-    assert!(jobs_slice.contains("MemoryHigh=90%"));
-    assert!(jobs_slice.contains("MemoryMax=95%"));
-    assert!(jobs_slice.contains("MemorySwapMax=0"));
+    assert!(jobs_slice.contains("job-worker slice"));
+    assert!(!jobs_slice.contains("transitional Docker"));
+    for directive in ["CPUQuota=1900%", "MemoryHigh=90%", "MemoryMax=95%", "MemorySwapMax=0"] {
+        assert!(
+            jobs_slice.lines().any(|line| line == directive),
+            "velnor-jobs.slice must pin aggregate host budget: {directive}"
+        );
+    }
+    let control_slice = include_str!("../debian/velnor-control.slice");
+    assert!(
+        !control_slice
+            .lines()
+            .any(|line| line.starts_with("CPUQuota=")
+                || line.starts_with("MemoryMax=")
+                || line.starts_with("MemoryHigh=")),
+        "control plane must stay outside the job aggregate cap"
+    );
     let guardian_src = include_str!("../src/node/guardian.rs");
     let code = guardian_src
         .split("#[cfg(test)]")
