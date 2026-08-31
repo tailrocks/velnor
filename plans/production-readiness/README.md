@@ -285,30 +285,34 @@ statuses, open PRs, run IDs, runner registrations, package/backend/health
 state, and all unresolved blockers. Any state change invalidates dependent
 evidence and requires a fresh baseline.
 
-### Current baseline — 2026-08-30T20:35:23Z
+### Current baseline — 2026-08-31T01:29:35Z
 
-- Repository: under the pasted operator decision, `velnor10` is the assigned
-  review branch. HEAD `352c018344e8567d85d324ad1b08cbabaf3d9774`; `origin/main`
-  `a3722521d63ef84dbfeda11da421fb26b952e032`; behind `origin/main` by 3.
-  Worktree is dirty in six Plan-066 files: `migrations.rs`, `store/mod.rs`,
-  `store/records.rs`, `store_integration.rs`, `runner/ops.rs`, and
-  `runner/runner.rs`.
-- Historical/unverified, not current proof: old PR #411; CI run
-  `33129071766`; Guest image run `33129071359`; and old fleet-group/default-ref
-  and Sentry snapshots, including the Sentry snapshot dated
-  `2026-08-27T16:07:53Z`.
-- Plan 066 is `IN PROGRESS` with all six criteria unchecked. Root campaign is
-  4/94 done; Plan 039 is in progress. Plan 079 and the final gates remain
-  incomplete.
-- Dirty-worktree evidence only, not current-HEAD proof: direct
-  `rtk cargo nextest run --locked -p velnor-control --test store_integration`
-  passed `16`; `rtk mise run test-focused -- -p velnor-runner` passed `1224`;
-  fmt, clippy, and diff-check passed. The scoped mise velnor-control test task
-  failed because it injects `velnor-runner/test-support` into velnor-control.
-- Current external state: open PR/checks — `UNKNOWN` (not queried in this pass);
-  live fleet groups/default refs — `UNKNOWN` (not queried in this pass); Sentry
-  package/health — `UNKNOWN` (not queried in this pass); external authorization —
-  `UNKNOWN` (not queried in this pass).
+- Repository: assigned branch `velnor1`, HEAD
+  `f2f03637df1c173d014344f47dae8fd5fdb4f3b2`; `origin/main`
+  `2a6853ae395fd6c2401b48d989b6077c77d534d0`; `origin/velnor1` is the same
+  HEAD. The worktree is clean and its tree equals `origin/main`; branch-only
+  history records the rejected Ajv pin, its safe revert, and the normal main
+  reconciliation merge. No source, fixture, workflow, package, APT, or Sentry
+  mutation is present on this branch.
+- Historical/unverified, not current proof: tag `v0.1.247` peels to
+  `738f18f68472c15e30645d81a7d2d664f29e5cab` and is unsigned; release runs
+  `33344114108` and `33344405790` were cancelled. PR #502 was closed unmerged
+  after its npm-tool approach failed the immutable-bytes/provenance audit; its
+  successful run `33346617510` applies only to that rejected head.
+- Plan 066 is `IN PROGRESS`; root campaign remains 4/94 done; Plan 039 remains
+  in progress; Plan 079 and the final signed-release gates remain incomplete.
+- Current external snapshot: open peer PRs are #498, #499, #500, and #503.
+  PR #500's release-owner run `33347662040` was active at this snapshot; no
+  PR from `velnor1` is open. No runner-registration cleanup or Sentry mutation
+  was performed. Public `velnor-apt` serves signed `Release`, `InRelease`, and
+  `Release.gpg` metadata dated `2026-08-29T17:48:19Z`, but only versions
+  `0.1.242` and `0.1.244`; no current-main package is published.
+- Local release prerequisites remain incomplete: GitHub authentication is
+  available, no local GPG secret key was found, and the configured
+  `ssh sentry` path lacks the pinned host-fingerprint/provenance proof required
+  for deployment. Do not create a tag, publish APT, or touch Sentry from this
+  snapshot.
 - Blockers: current-HEAD fixture proof and independent sign-off for Plan 066,
-  Plan 039 closure and workflow-ref admission, Plan 079 completion, and final
-  signed-APT/independent-audit gates remain unresolved.
+  Plan 039 workflow/ref admission and live reconciliation, Plan 079 completion,
+  release-owner exact-SHA artifact/provenance, and final signed-APT,
+  installation, rollback, recovery, and all-lane evidence remain unresolved.
