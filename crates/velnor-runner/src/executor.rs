@@ -1210,6 +1210,10 @@ pub(crate) struct DockerJobEngine<R> {
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
     docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
+    /// Armed when the job network is created, defused once terminal cleanup
+    /// removed it. Drop then removes the network, so no executor exit path can
+    /// leak a `velnor-net-*` network (address-pool exhaustion class).
+    job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
 }
 
@@ -1239,6 +1243,7 @@ where
             live_step: None,
             job_environment_started: false,
             docker_lease: None,
+            job_network_guard: None,
             lifecycle_telemetry: None,
         }
     }
@@ -3548,8 +3553,23 @@ where
         Ok(files)
     }
 
+    /// Disarm the job-network guard after terminal cleanup removed the
+    /// network; a failed cleanup keeps it armed so its drop retries removal.
+    fn defuse_job_network_guard(&mut self) {
+        if let Some(guard) = self.job_network_guard.take() {
+            guard.defuse();
+        }
+    }
+
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard()?;
+        // Service containers hold endpoints on the job network. Remove them
+        // BEFORE reclaiming job-owned resources: reclaim includes the network,
+        // and `docker network rm` fails while an endpoint is still attached.
+        // The old order (reclaim first) failed the network removal on every
+        // service job and orphaned the network once the services went away —
+        // the `velnor-net-*` address-pool exhaustion leak.
+        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Job container is gone; abort in-flight Engine HTTP (BuildKit start)
         // before reclaim. `docker rm` of Created BuildKit waits forever on
@@ -3557,13 +3577,17 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
-        let service_result = self.cleanup_services_unlocked(container);
 
-        container_result?;
-        owned_result?;
-        buildkit_result?;
-        service_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result?;
+            buildkit_result?;
+            service_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     /// Remove the job-owned containers, services, network, and lease without
@@ -3579,18 +3603,25 @@ where
     }
 
     fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
+        // Services first: their endpoints block the network removal inside
+        // reclaim (see `cleanup`).
+        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Abort in-flight Engine HTTP before the deferred BuildKit worker
         // runs. Dropping the lease at the end used to leave ContainerStart
         // held, so the worker's `docker rm` of Created BuildKit hung.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let service_result = self.cleanup_services_unlocked(container);
 
-        container_result?;
-        owned_result?;
-        service_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result?;
+            service_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -3616,10 +3647,15 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
-        container_result?;
-        owned_result?;
-        buildkit_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result?;
+            buildkit_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     pub(crate) fn cleanup_job_and_network_without_buildkit(
@@ -3637,9 +3673,14 @@ where
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        container_result?;
-        owned_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
@@ -3784,9 +3825,23 @@ where
         // calls. Readiness polling below can take up to 30s and does not
         // mutate Docker state; keeping the permit across it serializes other
         // slots behind a non-mutating wait.
+        // Retrying this function reuses the same network name: retire any
+        // guard from a previous attempt BEFORE creating, so its drop can never
+        // remove the freshly created network.
+        if let Some(previous) = self.job_network_guard.take() {
+            drop(previous);
+        }
         self.with_docker_lifecycle(|executor| {
             executor.run_docker(&container.create_network_args())
         })?;
+        // Own the network from creation to terminal cleanup. Dropping the
+        // executor on any error path now removes it instead of leaking it.
+        // Defuse only after cleanup reclaimed it; Docker refuses to remove a
+        // network with active endpoints, so a late guard fire cannot break a
+        // live job.
+        self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
+            container.network.clone(),
+        ));
         for service in &container.services {
             self.with_docker_lifecycle(|executor| executor.run_docker(&service.start_args()))?;
             self.wait_for_service(service)?;
@@ -3933,7 +3988,22 @@ where
             ))
             .ok();
         }
-        self.reclaim_stale_job_owned_docker(&container.name).ok();
+        if self.reclaim_stale_job_owned_docker(&container.name).is_ok() {
+            // The stale reclaim can legitimately skip the network (its
+            // liveness gate only guards containers). Remove it explicitly:
+            // the job container is absent or stopped here, so no endpoint can
+            // block the removal. A "not found" is success — already gone.
+            let removed =
+                match self.run_docker_cleanup(&crate::docker_lease::force_remove_network_args(
+                    std::slice::from_ref(&container.network),
+                )) {
+                    Ok(_) => true,
+                    Err(error) => error.to_string().contains("not found"),
+                };
+            if removed {
+                self.defuse_job_network_guard();
+            }
+        }
     }
 
     fn reclaim_stale_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
@@ -17682,7 +17752,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let results = executor
@@ -17708,7 +17778,12 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls[4].1,
             crate::docker_lease::list_owned_volumes_args("job")
         );
-        assert_eq!(calls[5].1, expected_network_create_args());
+        // Retry cleanup removes the job network before the retry recreates it.
+        assert_eq!(
+            calls[5].1,
+            crate::docker_lease::force_remove_network_args(&["net".to_string()])
+        );
+        assert_eq!(calls[6].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -17720,7 +17795,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -17746,23 +17821,31 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls[4].1,
             crate::docker_lease::list_owned_volumes_args("job")
         );
-        assert_eq!(calls[5].1, expected_network_create_args());
-        assert_eq!(calls[6].1[0], "run");
         assert_eq!(
-            calls[7].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            calls[5].1,
+            crate::docker_lease::force_remove_network_args(&["net".to_string()])
         );
+        assert_eq!(calls[6].1, expected_network_create_args());
+        assert_eq!(calls[7].1[0], "run");
         assert_eq!(
             calls[8].1,
             crate::docker_lease::list_owned_containers_state_args("job")
         );
         assert_eq!(
             calls[9].1,
-            crate::docker_lease::list_owned_networks_args("job")
+            crate::docker_lease::list_owned_containers_state_args("job")
         );
         assert_eq!(
             calls[10].1,
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls[11].1,
             crate::docker_lease::list_owned_volumes_args("job")
+        );
+        assert_eq!(
+            calls[12].1,
+            crate::docker_lease::force_remove_network_args(&["net".to_string()])
         );
         fs::remove_dir_all(temp).unwrap();
     }

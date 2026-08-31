@@ -3715,6 +3715,117 @@ fn stale_network_prunable(owner: &str, connected_endpoints: usize, daemon_id: &s
     owner.is_empty() && connected_endpoints == 0
 }
 
+/// How often an idle slot sweeps for its daemon's orphaned job networks.
+const EMPTY_JOB_NETWORK_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+/// Bound every Docker CLI invocation of the sweep: a stalled dockerd must
+/// never park an idle slot's broker poll loop indefinitely.
+const EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Remove this daemon's `velnor-net-*` networks that no longer have any
+/// attached container. Reconciliation runs while the daemon serves jobs — not
+/// only at startup like [`prune_stale_velnor_docker_resources`] — because a
+/// daemon that serves jobs for weeks without restarting must not accumulate
+/// leaked networks until Docker's address pool is exhausted and every new job
+/// fails ("all predefined address pools have been fully subnetted"). Startup
+/// pruning self-heals a crash; periodic sweeping self-heals every leak class,
+/// including cleanup failures and resources orphaned by an operator kill.
+///
+/// Removal is safe at any time: a network with active endpoints cannot be
+/// removed (`docker network rm` refuses), so a network backing a live job is
+/// never touched, and the daemon-id label scopes the sweep to THIS daemon so
+/// co-located daemons are untouched. Best-effort — never fails the slot.
+fn prune_empty_velnor_networks(daemon_id: &str) -> usize {
+    prune_empty_velnor_networks_with(daemon_id, |args| {
+        let owned: Vec<String> = args.iter().map(ToString::to_string).collect();
+        // Bounded execution: the sweep runs beside the async broker poll loop,
+        // so an unbounded Docker CLI wait there would also stall message
+        // polling, credential refresh, and drain observation for the slot.
+        crate::docker_lease::run_host_docker_bounded(
+            &owned,
+            crate::docker_lease::docker_cli_timeout(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT),
+        )
+        .ok()
+        .map(|stdout| std::process::Output {
+            status: success_exit_status(),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        })
+    })
+}
+
+/// A successful `std::process::Output` status for results produced by the
+/// bounded Docker runner, which already reports failures via `Err`.
+fn success_exit_status() -> std::process::ExitStatus {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::from_raw(0)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::process::ExitStatusExt::from_raw(0)
+    }
+}
+
+fn prune_empty_velnor_networks_with(
+    daemon_id: &str,
+    mut docker: impl FnMut(&[&str]) -> Option<std::process::Output>,
+) -> usize {
+    let mut stdout_of = |args: &[&str]| -> String {
+        docker(args)
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+            .unwrap_or_default()
+    };
+    let networks = stdout_of(&["network", "ls", "-q", "--filter", "name=velnor-net"])
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .filter(|id| {
+            let state = stdout_of(&[
+                "network",
+                "inspect",
+                "--format",
+                "{{ index .Labels \"velnor.daemon-id\" }}\t{{ len .Containers }}",
+                id,
+            ]);
+            let mut fields = state.trim().splitn(2, '\t');
+            let owner = fields.next().unwrap_or_default().trim();
+            let containers = fields.next().unwrap_or_default().trim();
+            daemon_owns_resource(owner, daemon_id) && containers == "0"
+        })
+        .collect::<Vec<_>>();
+    if networks.is_empty() {
+        return 0;
+    }
+    let mut args = vec!["network".to_string(), "rm".to_string()];
+    args.extend(networks.iter().cloned());
+    let owned = daemon_id.to_string();
+    let removed = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    if removed.is_some_and(|output| output.status.success()) {
+        eprintln!(
+            "Pruned {} empty velnor-net network(s) for daemon {owned}.",
+            networks.len()
+        );
+        networks.len()
+    } else {
+        0
+    }
+}
+
+/// Run the periodic empty-job-network sweep for the daemon this slot serves,
+/// skipping backends that never touch the host Docker socket.
+fn maybe_prune_empty_velnor_networks(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    daemon_id: &str,
+) {
+    if let Some(reason) =
+        velnor_model::ExecutionBackendKind::host_docker_maintenance_skip_reason(backend)
+    {
+        eprintln!("periodic empty job-network sweep skipped: {reason}");
+        return;
+    }
+    prune_empty_velnor_networks(daemon_id);
+}
+
 fn daemon_slot_configure_args(
     args: &DaemonArgs,
     config_base: &Path,
@@ -3972,6 +4083,18 @@ async fn run_v2(
     let mut health = IdleSlotHealth::new(Instant::now());
     health.token_expires_in = token.expires_in;
     let max_idle_age = max_idle_slot_age(args.max_idle_slot_age_seconds);
+    // Periodic reconciliation of orphaned job networks (see
+    // `prune_empty_velnor_networks`): one sweep per interval, on whichever
+    // idle slot notices the deadline first.
+    let mut last_network_sweep = Instant::now();
+    let slot_daemon_id = args
+        .work_dir
+        .as_deref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let slot_backend = crate::execution::load_execution_file(&config_dir, None)
+        .ok()
+        .map(|file| file.backend());
 
     let registry_pat = args
         .pat
@@ -4076,6 +4199,19 @@ async fn run_v2(
                                 }
                         }
                     }
+                }
+
+                if last_network_sweep.elapsed() >= EMPTY_JOB_NETWORK_SWEEP_INTERVAL {
+                    last_network_sweep = Instant::now();
+                    // Offload the blocking Docker sweep from the async poll
+                    // task: a slow sweep must never stop this slot from
+                    // polling messages, refreshing credentials, or observing
+                    // drain.
+                    let sweep_backend = slot_backend;
+                    let sweep_daemon_id = slot_daemon_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        maybe_prune_empty_velnor_networks(sweep_backend, &sweep_daemon_id);
+                    });
                 }
 
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -11303,6 +11439,83 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_network_sweep_removes_only_owned_containerless_networks() {
+        // id → (daemon-id label, container count) or Err to simulate inspect
+        // failure; records `network rm` calls.
+        struct Fake {
+            state: std::collections::BTreeMap<String, Result<(String, usize), ()>>,
+            removed: Vec<Vec<String>>,
+        }
+        impl Fake {
+            fn docker(&mut self, args: &[&str]) -> Option<std::process::Output> {
+                use std::os::unix::process::ExitStatusExt;
+                let ok = || std::process::Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                };
+                match args.get(1).copied().unwrap_or_default() {
+                    "ls" => {
+                        let mut out = ok();
+                        out.stdout = self
+                            .state
+                            .keys()
+                            .map(|id| format!("{id}\n"))
+                            .collect::<String>()
+                            .into_bytes();
+                        Some(out)
+                    }
+                    "inspect" => {
+                        let id = args.last().copied().unwrap_or_default();
+                        match self.state.get(id)? {
+                            Ok((daemon, containers)) => {
+                                let mut out = ok();
+                                out.stdout = format!("{daemon}\t{containers}\n").into_bytes();
+                                Some(out)
+                            }
+                            Err(()) => None,
+                        }
+                    }
+                    "rm" => {
+                        assert_eq!(args.first(), Some(&"network"));
+                        self.removed
+                            .push(args[2..].iter().map(|arg| (*arg).to_string()).collect());
+                        Some(ok())
+                    }
+                    _ => None,
+                }
+            }
+        }
+        let mut fake = Fake {
+            state: [
+                ("own-empty".to_string(), Ok(("daemon-a".to_string(), 0))),
+                ("own-busy".to_string(), Ok(("daemon-a".to_string(), 2))),
+                ("other-empty".to_string(), Ok(("daemon-b".to_string(), 0))),
+                (
+                    "slot-empty".to_string(),
+                    Ok(("daemon-a/slot-1".to_string(), 0)),
+                ),
+                ("inspect-fails".to_string(), Err(())),
+            ]
+            .into_iter()
+            .collect(),
+            removed: Vec::new(),
+        };
+        let removed = prune_empty_velnor_networks_with("daemon-a", |args| fake.docker(args));
+        assert_eq!(removed, 2);
+        assert_eq!(
+            fake.removed,
+            vec![vec!["own-empty".to_string(), "slot-empty".to_string()]]
+        );
+    }
+
+    #[test]
+    fn empty_network_sweep_is_noop_without_owned_containerless_networks() {
+        let removed = prune_empty_velnor_networks_with("daemon-a", |_| None);
+        assert_eq!(removed, 0);
+    }
 
     #[test]
     fn gha_cache_requires_canonical_storage() {

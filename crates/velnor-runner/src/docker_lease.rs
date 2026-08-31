@@ -289,6 +289,58 @@ pub fn force_remove_network_args(ids: &[String]) -> Vec<String> {
     args
 }
 
+/// Drop-guard for a job's `velnor-net-*` network.
+///
+/// The per-job network is created before any container exists and is normally
+/// removed by terminal cleanup (`reclaim_job_owned`). Every path that skips
+/// that cleanup — an early `?` between network creation and the step loop, a
+/// panic unwinding out of the executor, cleanup returning an error after the
+/// network removal itself failed — used to leak the network. Enough leaked
+/// `velnor-net-*` networks exhaust Docker's address pool and then EVERY new
+/// job fails ("all predefined address pools have been fully subnetted"). The
+/// guard makes the executor own the network for its whole lifetime: dropping
+/// it while still armed removes the network. Docker refuses to remove a
+/// network with active endpoints, so a guard that fires while a job container
+/// is still attached cannot break a live job — it fails best-effort and the
+/// periodic empty-network sweep removes it once the job is gone.
+pub struct JobNetworkGuard {
+    network: String,
+    armed: bool,
+}
+
+impl JobNetworkGuard {
+    /// Arm the guard for `network`. Call [`JobNetworkGuard::defuse`] after
+    /// terminal cleanup has removed the network itself.
+    pub fn arm(network: impl Into<String>) -> Self {
+        Self {
+            network: network.into(),
+            armed: true,
+        }
+    }
+
+    /// Mark the network as reclaimed by terminal cleanup; dropping the guard
+    /// then becomes a no-op.
+    pub fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for JobNetworkGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let args = force_remove_network_args(std::slice::from_ref(&self.network));
+        if let Err(error) = run_host_docker(&args) {
+            eprintln!(
+                "Warning: job network drop-guard removal failed for {}: {error:#}",
+                self.network
+            );
+        }
+    }
+}
+
 pub fn force_remove_volume_args(ids: &[String]) -> Vec<String> {
     let mut args = vec!["volume".into(), "rm".into(), "--force".into()];
     args.extend(ids.iter().cloned());
@@ -1122,7 +1174,10 @@ pub fn run_host_docker(args: &[String]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn run_host_docker_bounded(args: &[String], timeout: std::time::Duration) -> Result<String> {
+pub(crate) fn run_host_docker_bounded(
+    args: &[String],
+    timeout: std::time::Duration,
+) -> Result<String> {
     let rm_claim = claim_docker_container_rm(args);
     if let Some(claim) = rm_claim.as_ref()
         && claim.ids.is_empty()
@@ -1648,6 +1703,25 @@ fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<Vec<
 mod tests {
     use super::*;
     use anyhow::anyhow;
+
+    #[test]
+    fn job_network_guard_defused_drop_is_noop() {
+        // No panic, no docker invocation: the guard type runs `docker` only
+        // when armed, so a defused drop must be silent even on a real host.
+        let guard = JobNetworkGuard::arm("velnor-net-defused");
+        guard.defuse();
+    }
+
+    #[test]
+    fn job_network_guard_armed_drop_attempts_forced_removal() {
+        // Armed drop shells out to the host docker CLI (no injectable runner),
+        // so only assert the removable-args contract it relies on: a forced
+        // `network rm` of exactly the guarded network.
+        let args = force_remove_network_args(&["velnor-net-guarded".to_string()]);
+        assert_eq!(args, vec!["network", "rm", "velnor-net-guarded"]);
+        let guard = JobNetworkGuard::arm("velnor-net-guarded");
+        drop(guard);
+    }
 
     fn docker_rm_ids(args: &[String]) -> Vec<&str> {
         if args.first().map(String::as_str) != Some("rm") {
