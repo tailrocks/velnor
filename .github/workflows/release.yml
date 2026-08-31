@@ -1022,7 +1022,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@77d323dcfdb176b332edc24bfc92cb625b3ab4c8 # 2026.8.30
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.tar.gz
@@ -1034,7 +1034,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@77d323dcfdb176b332edc24bfc92cb625b3ab4c8 # 2026.8.30
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.tar.gz
@@ -1046,7 +1046,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@77d323dcfdb176b332edc24bfc92cb625b3ab4c8 # 2026.8.30
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.deb
@@ -1058,7 +1058,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@77d323dcfdb176b332edc24bfc92cb625b3ab4c8 # 2026.8.30
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
