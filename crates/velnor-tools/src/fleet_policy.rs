@@ -1234,10 +1234,14 @@ fn clear_errno() {
         target_os = "netbsd"
     ))]
     {
-        // SAFETY: libc returns the current thread's valid errno slot, which
+        // SAFETY: libc exposes the current thread's errno slot through this
+        // function, so the returned pointer is valid for this assignment.
+        unsafe {
+            // SAFETY: libc returns the current thread's valid errno slot, which
         // this assignment updates without exposing the raw pointer.
         unsafe {
             *libc::__error() = 0;
+        }
         }
     }
     #[cfg(not(any(
@@ -1250,10 +1254,14 @@ fn clear_errno() {
         target_os = "netbsd"
     )))]
     {
-        // SAFETY: libc returns the current thread's valid errno slot, which
+        // SAFETY: libc exposes the current thread's errno slot through this
+        // function, so the returned pointer is valid for this assignment.
+        unsafe {
+            // SAFETY: libc returns the current thread's valid errno slot, which
         // this assignment updates without exposing the raw pointer.
         unsafe {
             *libc::__errno_location() = 0;
+        }
         }
     }
 }
