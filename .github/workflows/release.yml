@@ -398,12 +398,19 @@ jobs:
             -o linux.tar.xz "$url"
           echo "$sha  linux.tar.xz" | sha256sum -c -
 
+      - name: Build guest agent for rootfs
+        run: |
+          set -euo pipefail
+          cargo build -p velnor-runner --bin velnor-guest-agent --locked --release
+          test -x target/release/velnor-guest-agent
+
       - name: Build guest vmlinux and rootfs.ext4
         run: |
           set -euo pipefail
           mkdir -p dist/microvm
           cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
-            build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz
+            build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz \
+            --guest-agent target/release/velnor-guest-agent
           test -s dist/microvm/vmlinux
           test -s dist/microvm/rootfs.ext4
           sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
