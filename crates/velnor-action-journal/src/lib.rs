@@ -15,6 +15,7 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use velnor_action_model::{
     canonical_json_bytes, ActionKey, ActionState, ActionTiming, Clock, Digest, LogicalInstant,
@@ -27,7 +28,7 @@ use velnor_model::{
 
 pub mod supersession;
 
-pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
 
 /// Production clock for durable lease deadlines.
 ///
@@ -258,7 +259,7 @@ impl ActionJournal {
                 })?;
             }
         }
-        let connection = Connection::open(&path)?;
+        let mut connection = Connection::open(&path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -310,10 +311,15 @@ impl ActionJournal {
                  revoked_at_ms INTEGER NOT NULL
              );
              INSERT OR IGNORE INTO action_journal_meta(key, value)
-                 VALUES ('schema_version', '2');
-             UPDATE action_journal_meta SET value = '2'
-                 WHERE key = 'schema_version' AND value = '1';",
+                 VALUES ('schema_version', '3');",
         )?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        migrate_adoptable_action_keys(&transaction)?;
+        transaction.execute(
+            "UPDATE action_journal_meta SET value = ?1 WHERE key = 'schema_version'",
+            [JOURNAL_SCHEMA_VERSION.to_string()],
+        )?;
+        transaction.commit()?;
         Ok(Self { path, connection })
     }
 
@@ -979,6 +985,324 @@ impl<C: Clock> LeaseManager<C> {
     }
 }
 
+struct ActionEventMigration {
+    sequence: i64,
+    old_digest: Digest,
+    new_digest: Digest,
+    state: String,
+    record_json: String,
+    checksum: String,
+}
+
+struct ProducerLeaseMigration {
+    old_digest: Digest,
+    new_digest: Digest,
+    action_key_json: String,
+}
+
+fn migrate_adoptable_action_keys(transaction: &Transaction<'_>) -> Result<(), JournalError> {
+    let schema_version: String = transaction.query_row(
+        "SELECT value FROM action_journal_meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    let schema_version = schema_version
+        .parse::<u32>()
+        .map_err(|_| JournalError::InvalidState("schema version is not numeric".to_owned()))?;
+    if schema_version > JOURNAL_SCHEMA_VERSION {
+        return Err(JournalError::InvalidState(format!(
+            "journal schema version {schema_version} is newer than supported version {JOURNAL_SCHEMA_VERSION}"
+        )));
+    }
+
+    let mut mappings = BTreeMap::new();
+    let mut current_digests = BTreeSet::new();
+    let mut event_migrations = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT sequence, action_key_digest, state, record_json, checksum
+             FROM action_events ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (sequence, action_key_digest, state, record_json, checksum) = row?;
+            let Some(migration) = migrate_action_event_row(
+                sequence,
+                &action_key_digest,
+                &state,
+                &record_json,
+                &checksum,
+            )?
+            else {
+                current_digests.insert(Digest::parse(&action_key_digest)?);
+                continue;
+            };
+            current_digests.insert(migration.new_digest.clone());
+            register_action_key_mapping(
+                &mut mappings,
+                &migration.old_digest,
+                &migration.new_digest,
+            )?;
+            event_migrations.push(migration);
+        }
+    }
+
+    let mut lease_migrations = Vec::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT action_key_digest, action_key_json
+             FROM producer_leases",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (action_key_digest, action_key_json) = row?;
+            let stored_digest = Digest::parse(&action_key_digest)?;
+            let action_key_value: Value = serde_json::from_str(&action_key_json)?;
+            let (old_digest, new_digest, migrated_action_key) =
+                action_key_migration(&action_key_value)?;
+            if stored_digest != old_digest {
+                return Err(JournalError::InvalidState(
+                    "stored producer lease action key digest mismatch".to_owned(),
+                ));
+            }
+            register_action_key_mapping(&mut mappings, &old_digest, &new_digest)?;
+            current_digests.insert(new_digest.clone());
+            if old_digest != new_digest {
+                let action_key_json = String::from_utf8(
+                    canonical_json_bytes(&migrated_action_key).expect("canonical JSON is UTF-8"),
+                )
+                .expect("serde_json emits UTF-8");
+                lease_migrations.push(ProducerLeaseMigration {
+                    old_digest,
+                    new_digest,
+                    action_key_json,
+                });
+            }
+        }
+    }
+
+    if schema_version < JOURNAL_SCHEMA_VERSION || !mappings.is_empty() {
+        validate_action_key_references(transaction, &mappings, &current_digests)?;
+    }
+
+    for migration in event_migrations {
+        transaction.execute(
+            "UPDATE action_events
+             SET action_key_digest = ?1, state = ?2, record_json = ?3, checksum = ?4
+             WHERE sequence = ?5",
+            params![
+                migration.new_digest.to_string(),
+                migration.state,
+                migration.record_json,
+                migration.checksum,
+                migration.sequence,
+            ],
+        )?;
+    }
+    for migration in lease_migrations {
+        transaction.execute(
+            "UPDATE producer_leases
+             SET action_key_digest = ?1, action_key_json = ?2
+             WHERE action_key_digest = ?3",
+            params![
+                migration.new_digest.to_string(),
+                migration.action_key_json,
+                migration.old_digest.to_string(),
+            ],
+        )?;
+    }
+    for (old_digest, new_digest) in mappings {
+        let old_digest = old_digest.to_string();
+        let new_digest = new_digest.to_string();
+        transaction.execute(
+            "UPDATE action_consumers SET action_key_digest = ?1
+             WHERE action_key_digest = ?2",
+            params![new_digest, old_digest],
+        )?;
+        transaction.execute(
+            "UPDATE action_retention SET action_key_digest = ?1
+             WHERE action_key_digest = ?2",
+            params![new_digest, old_digest],
+        )?;
+        transaction.execute(
+            "UPDATE action_termination_claims SET action_key_digest = ?1
+             WHERE action_key_digest = ?2",
+            params![new_digest, old_digest],
+        )?;
+        transaction.execute(
+            "UPDATE action_trust_revocations SET action_key_digest = ?1
+             WHERE action_key_digest = ?2",
+            params![new_digest, old_digest],
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_action_key_references(
+    transaction: &Transaction<'_>,
+    mappings: &BTreeMap<Digest, Digest>,
+    current_digests: &BTreeSet<Digest>,
+) -> Result<(), JournalError> {
+    for table in [
+        "action_consumers",
+        "action_retention",
+        "action_termination_claims",
+        "action_trust_revocations",
+    ] {
+        let mut statement =
+            transaction.prepare(&format!("SELECT action_key_digest FROM {table}"))?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let digest_text = row?;
+            let digest = Digest::parse(&digest_text)?;
+            if mappings.contains_key(&digest) || current_digests.contains(&digest) {
+                continue;
+            }
+            return Err(JournalError::InvalidState(format!(
+                "unmapped action key digest {digest_text} in {table}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn migrate_action_event_row(
+    sequence: i64,
+    action_key_digest: &str,
+    state: &str,
+    record_json: &str,
+    checksum: &str,
+) -> Result<Option<ActionEventMigration>, JournalError> {
+    if checksum_for_raw(action_key_digest, state, record_json) != checksum {
+        return Err(JournalError::ChecksumMismatch { sequence });
+    }
+    let record_value: Value = serde_json::from_str(record_json)?;
+    let action_key_value = record_value
+        .get("action_key")
+        .ok_or_else(|| JournalError::InvalidState("action key is missing from record".into()))?;
+    let stored_digest = Digest::parse(action_key_digest)?;
+    let (old_digest, new_digest, migrated_action_key) = action_key_migration(action_key_value)?;
+    if stored_digest != old_digest {
+        return Err(JournalError::KeyMismatch { sequence });
+    }
+
+    let record_value = if old_digest != new_digest {
+        let mut record_value = record_value;
+        record_value["action_key"] = migrated_action_key;
+        record_value
+    } else {
+        record_value
+    };
+    let record: ActionRecord = serde_json::from_value(record_value)?;
+    validate_record(&record)?;
+    if state != state_name(record.state) {
+        return Err(JournalError::StateMismatch { sequence });
+    }
+    if old_digest == new_digest {
+        return Ok(None);
+    }
+    let record_json =
+        String::from_utf8(canonical_json_bytes(&record).expect("canonical JSON is UTF-8"))
+            .expect("serde_json emits UTF-8");
+    let checksum = checksum_for(&new_digest, state, &record_json);
+    Ok(Some(ActionEventMigration {
+        sequence,
+        old_digest,
+        new_digest,
+        state: state.to_owned(),
+        record_json,
+        checksum,
+    }))
+}
+
+fn action_key_migration(action_key_value: &Value) -> Result<(Digest, Digest, Value), JournalError> {
+    let policy = action_key_value
+        .get("execution_policy")
+        .and_then(Value::as_object)
+        .ok_or_else(|| JournalError::InvalidState("execution policy is malformed".into()))?;
+    let action_key: ActionKey = serde_json::from_value(action_key_value.clone())?;
+    let current_digest = action_key.digest()?;
+    if policy.contains_key("adoptable") {
+        return Ok((
+            current_digest.clone(),
+            current_digest,
+            action_key_value.clone(),
+        ));
+    }
+
+    let mut legacy_action_key = action_key_value.clone();
+    legacy_action_key
+        .get_mut("execution_policy")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| JournalError::InvalidState("execution policy is malformed".into()))?
+        .remove("adoptable");
+    let canonical_legacy_action_key = {
+        let mut value = serde_json::to_value(&action_key)?;
+        value
+            .get_mut("execution_policy")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| JournalError::InvalidState("execution policy is malformed".into()))?
+            .remove("adoptable");
+        value
+    };
+    if canonical_json_bytes(&legacy_action_key)?
+        != canonical_json_bytes(&canonical_legacy_action_key)?
+    {
+        return Err(JournalError::InvalidState(
+            "legacy action key is not canonical".to_owned(),
+        ));
+    }
+    let legacy_digest = Digest::from_bytes(&canonical_json_bytes(&legacy_action_key)?);
+    let mut migrated_action_key = action_key_value.clone();
+    migrated_action_key
+        .get_mut("execution_policy")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| JournalError::InvalidState("execution policy is malformed".into()))?
+        .insert("adoptable".to_owned(), Value::Bool(true));
+    let migrated_action_key: ActionKey = serde_json::from_value(migrated_action_key.clone())?;
+    let new_digest = migrated_action_key.digest()?;
+    Ok((
+        legacy_digest,
+        new_digest,
+        serde_json::to_value(migrated_action_key)?,
+    ))
+}
+
+fn register_action_key_mapping(
+    mappings: &mut BTreeMap<Digest, Digest>,
+    old_digest: &Digest,
+    new_digest: &Digest,
+) -> Result<(), JournalError> {
+    if old_digest == new_digest {
+        return Ok(());
+    }
+    if mappings.iter().any(|(existing_old, existing_new)| {
+        existing_old != old_digest && existing_new == new_digest
+    }) {
+        return Err(JournalError::InvalidState(
+            "legacy action key digests converge on one migrated digest".to_owned(),
+        ));
+    }
+    if let Some(existing) = mappings.insert(old_digest.clone(), new_digest.clone()) {
+        if existing != *new_digest {
+            return Err(JournalError::InvalidState(
+                "legacy action key has inconsistent migrated digest".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeaseState {
     Active,
@@ -1275,6 +1599,36 @@ mod tests {
         record(seed, ActionState::Planned).action_key
     }
 
+    fn legacy_record_material(record: &ActionRecord) -> (Digest, String, String) {
+        let mut value = serde_json::to_value(record).unwrap();
+        value["action_key"]["execution_policy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adoptable");
+        let action_key_value = value["action_key"].clone();
+        let old_digest = Digest::from_bytes(&canonical_json_bytes(&action_key_value).unwrap());
+        let record_json = String::from_utf8(canonical_json_bytes(&value).unwrap()).unwrap();
+        let action_key_json =
+            String::from_utf8(canonical_json_bytes(&action_key_value).unwrap()).unwrap();
+        (old_digest, record_json, action_key_json)
+    }
+
+    fn insert_legacy_event(journal: &ActionJournal, record: &ActionRecord) -> Digest {
+        let (old_digest, record_json, _) = legacy_record_material(record);
+        let state = state_name(record.state);
+        let checksum = checksum_for(&old_digest, state, &record_json);
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_events(
+                     action_key_digest, state, record_json, checksum
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![old_digest.to_string(), state, record_json, checksum],
+            )
+            .unwrap();
+        old_digest
+    }
+
     #[test]
     fn acquire_contention_has_one_atomic_winner() {
         let temp = TempDir::new().unwrap();
@@ -1439,6 +1793,329 @@ mod tests {
         drop(manager);
         let restarted = LeaseManager::open(&path, TestClock::default()).unwrap();
         assert_eq!(restarted.live_consumer_count(&action).unwrap(), 1);
+    }
+
+    #[test]
+    fn pre_adoptable_rows_migrate_keys_and_all_digest_references() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("adoptable-migration.sqlite");
+        let legacy_record = record(54, ActionState::Running);
+        let action = legacy_record.action_key.clone();
+        let new_digest = action.digest().unwrap();
+        let (old_digest, record_json, action_key_json) = legacy_record_material(&legacy_record);
+        let state = state_name(legacy_record.state);
+        let checksum = checksum_for(&old_digest, state, &record_json);
+        let journal = ActionJournal::open(&path).unwrap();
+        journal
+            .connection
+            .execute(
+                "UPDATE action_journal_meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_events(
+                     action_key_digest, state, record_json, checksum
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![old_digest.to_string(), state, record_json, checksum],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO producer_leases(
+                     action_key_digest, action_key_json, generation, owner,
+                     expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
+                 ) VALUES (?1, ?2, 1, 'worker-a', 100, 25, 100, 'active')",
+                params![old_digest.to_string(), action_key_json],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_consumers(action_key_digest, run_id)
+                 VALUES (?1, 'run-a')",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 500)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_termination_claims(
+                     action_key_digest, reason, claimed_at_ms, completed
+                 ) VALUES (?1, 'no_consumers', 0, 0)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_trust_revocations(
+                     action_key_digest, reason, revoked_at_ms
+                 ) VALUES (?1, 'legacy', 0)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        drop(journal);
+
+        let reopened = ActionJournal::open(&path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), JOURNAL_SCHEMA_VERSION);
+        let entries = reopened.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].record.action_key.execution_policy.adoptable);
+        assert_eq!(entries[0].record.action_key.digest().unwrap(), new_digest);
+        for table in [
+            "action_consumers",
+            "action_retention",
+            "action_termination_claims",
+            "action_trust_revocations",
+        ] {
+            let migrated: i64 = reopened
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE action_key_digest = ?1"),
+                    [new_digest.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let legacy: i64 = reopened
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE action_key_digest = ?1"),
+                    [old_digest.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(migrated, 1, "{table}");
+            assert_eq!(legacy, 0, "{table}");
+        }
+        drop(reopened);
+
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(&path, clock.clone()).unwrap();
+        assert_eq!(
+            manager.lease_status(&action).unwrap(),
+            Some(LeaseStatus::Active)
+        );
+        assert_eq!(manager.live_consumer_count(&action).unwrap(), 1);
+        let mut lease = ProducerLease {
+            action,
+            generation: 1,
+            owner: "worker-a".to_owned(),
+            expires_at: LogicalInstant::from_millis(100),
+            heartbeat_every: 25,
+            lease_duration: 100,
+        };
+        clock.advance(25);
+        manager.renew(&mut lease).unwrap();
+        manager.release(&lease).unwrap();
+        assert_eq!(
+            manager.lease_status(&lease.action).unwrap(),
+            Some(LeaseStatus::Released)
+        );
+    }
+
+    #[test]
+    fn malformed_adoptable_migration_rolls_back() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("malformed-adoptable-migration.sqlite");
+        let valid_record = record(55, ActionState::Running);
+        let malformed_record = record(56, ActionState::Running);
+        let journal = ActionJournal::open(&path).unwrap();
+        let valid_old_digest = insert_legacy_event(&journal, &valid_record);
+        let (malformed_old_digest, _, _) = legacy_record_material(&malformed_record);
+        let malformed_state = state_name(malformed_record.state);
+        let malformed_json = "not-json";
+        let malformed_checksum =
+            checksum_for(&malformed_old_digest, malformed_state, malformed_json);
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_events(
+                     action_key_digest, state, record_json, checksum
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    malformed_old_digest.to_string(),
+                    malformed_state,
+                    malformed_json,
+                    malformed_checksum,
+                ],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "UPDATE action_journal_meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(journal);
+
+        assert!(matches!(
+            ActionJournal::open(&path),
+            Err(JournalError::Json(_))
+        ));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let schema_version: String = connection
+            .query_row(
+                "SELECT value FROM action_journal_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, "2");
+        let stored_json: String = connection
+            .query_row(
+                "SELECT record_json FROM action_events WHERE action_key_digest = ?1",
+                [valid_old_digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored_json.contains("\"adoptable\""));
+    }
+
+    #[test]
+    fn orphan_digest_reference_migration_fails_and_rolls_back_atomically() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("orphan-adoptable-migration.sqlite");
+        let legacy_record = record(57, ActionState::Running);
+        let new_digest = legacy_record.action_key.digest().unwrap();
+        let orphan_digest = digest(200);
+        assert_ne!(new_digest, orphan_digest);
+
+        let journal = ActionJournal::open(&path).unwrap();
+        let old_digest = insert_legacy_event(&journal, &legacy_record);
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_consumers(action_key_digest, run_id)
+                 VALUES (?1, ?2)",
+                params![old_digest.to_string(), "run-valid"],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_consumers(action_key_digest, run_id)
+                 VALUES (?1, ?2)",
+                params![orphan_digest.to_string(), "run-orphan"],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 500)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_retention(action_key_digest, retained_until_ms)
+                 VALUES (?1, 500)",
+                [orphan_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_termination_claims(
+                     action_key_digest, reason, claimed_at_ms, completed
+                 ) VALUES (?1, 'legacy', 0, 0)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_termination_claims(
+                     action_key_digest, reason, claimed_at_ms, completed
+                 ) VALUES (?1, 'orphan', 0, 0)",
+                [orphan_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_trust_revocations(
+                     action_key_digest, reason, revoked_at_ms
+                 ) VALUES (?1, 'legacy', 0)",
+                [old_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "INSERT INTO action_trust_revocations(
+                     action_key_digest, reason, revoked_at_ms
+                 ) VALUES (?1, 'orphan', 0)",
+                [orphan_digest.to_string()],
+            )
+            .unwrap();
+        journal
+            .connection
+            .execute(
+                "UPDATE action_journal_meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(journal);
+
+        let error = match ActionJournal::open(&path) {
+            Ok(_) => panic!("orphan digest reference must abort migration"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unmapped action key digest"));
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let schema_version: String = connection
+            .query_row(
+                "SELECT value FROM action_journal_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, "2");
+        let stored_json: String = connection
+            .query_row(
+                "SELECT record_json FROM action_events WHERE action_key_digest = ?1",
+                [old_digest.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored_json.contains("\"adoptable\""));
+        for table in [
+            "action_consumers",
+            "action_retention",
+            "action_termination_claims",
+            "action_trust_revocations",
+        ] {
+            for (digest, expected) in [
+                (&old_digest, 1_i64),
+                (&orphan_digest, 1_i64),
+                (&new_digest, 0_i64),
+            ] {
+                let count: i64 = connection
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE action_key_digest = ?1"),
+                        [digest.to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, expected, "{table} {digest}");
+            }
+        }
     }
 
     #[test]

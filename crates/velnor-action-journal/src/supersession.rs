@@ -544,17 +544,11 @@ impl<C: Clock> SupersessionCoordinator<C> {
                     });
                 }
                 RetentionClaim::Claimed => {
-                    if let Err(error) = self.execute_claimed_termination(
+                    self.execute_claimed_termination(
                         &action,
                         KillReason::RetentionExpired,
                         terminator,
-                    ) {
-                        // The durable claim remains incomplete. Restore a
-                        // short, bounded retry deadline so a transient hook
-                        // failure cannot strand physical work forever.
-                        self.restore_retention(&digest, now.saturating_add(TERMINATION_RETRY_MS))?;
-                        return Err(error);
-                    }
+                    )?;
                     report.reaped += 1;
                     self.emit_telemetry(SupersessionTelemetryEvent {
                         action_key_digest: digest,
@@ -874,6 +868,28 @@ impl<C: Clock> SupersessionCoordinator<C> {
         terminator: &mut T,
     ) -> Result<(), SupersessionError> {
         let digest = action.digest()?;
+        let result = self.finish_claimed_termination(action, &digest, reason, terminator);
+        if let Err(error) = result {
+            let retry_at = self
+                .manager
+                .clock()
+                .now()
+                .saturating_add(TERMINATION_RETRY_MS);
+            return match self.restore_retention(&digest, retry_at) {
+                Ok(()) => Err(error),
+                Err(retention_error) => Err(retention_error),
+            };
+        }
+        Ok(())
+    }
+
+    fn finish_claimed_termination<T: PhysicalActionTerminator>(
+        &mut self,
+        action: &ActionKey,
+        digest: &Digest,
+        reason: KillReason,
+        terminator: &mut T,
+    ) -> Result<(), SupersessionError> {
         terminator
             .terminate(action, reason)
             .map_err(SupersessionError::Terminator)?;
@@ -881,7 +897,7 @@ impl<C: Clock> SupersessionCoordinator<C> {
             "UPDATE action_termination_claims SET completed = 1 WHERE action_key_digest = ?1",
             [digest.to_string()],
         )?;
-        self.delete_retention(&digest)?;
+        self.delete_retention(digest)?;
         if let Some(mut record) = self.manager.latest_action(action)? {
             if record.state != ActionState::Abandoned {
                 record.state = ActionState::Abandoned;
@@ -1253,6 +1269,75 @@ mod tests {
             .revoke_trust(&action, "retry termination", &mut spy)
             .unwrap();
         assert_eq!(spy.calls, 2);
+    }
+
+    #[test]
+    fn failed_detach_restores_immediate_retention_retry() {
+        let clock = TestClock::default();
+        let mut coordinator = SupersessionCoordinator::open(
+            ":memory:",
+            clock.clone(),
+            SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap(),
+        )
+        .unwrap();
+        let action = action(8);
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        coordinator
+            .manager_mut()
+            .attach_consumer(&action, "run-a")
+            .unwrap();
+        let mut spy = FailOnceSpy {
+            calls: 0,
+            failed: false,
+        };
+
+        assert!(matches!(
+            coordinator.detach(&action, "run-a", &mut spy),
+            Err(SupersessionError::Terminator(_))
+        ));
+        assert_eq!(
+            coordinator.next_retention().unwrap(),
+            Some(LogicalInstant::from_millis(TERMINATION_RETRY_MS))
+        );
+        clock.advance(TERMINATION_RETRY_MS);
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 1);
+        assert_eq!(spy.calls, 2);
+        assert_eq!(coordinator.next_retention().unwrap(), None);
+    }
+
+    #[test]
+    fn failed_trust_revocation_restores_retry_and_keeps_revocation() {
+        let clock = TestClock::default();
+        let mut coordinator = coordinator(clock.clone());
+        let action = action(9);
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        let mut spy = FailOnceSpy {
+            calls: 0,
+            failed: false,
+        };
+
+        assert!(matches!(
+            coordinator.revoke_trust(&action, "credential revoked", &mut spy),
+            Err(SupersessionError::Terminator(_))
+        ));
+        assert_eq!(
+            coordinator.next_retention().unwrap(),
+            Some(LogicalInstant::from_millis(TERMINATION_RETRY_MS))
+        );
+        assert!(matches!(
+            coordinator.admit(&action, "run-a", "worker-a", 1_000, 250),
+            Err(SupersessionError::TrustRevoked { reason }) if reason == "credential revoked"
+        ));
+        clock.advance(TERMINATION_RETRY_MS);
+        assert_eq!(coordinator.reap_due(&mut spy).unwrap().reaped, 1);
+        assert_eq!(spy.calls, 2);
+        assert_eq!(coordinator.next_retention().unwrap(), None);
     }
 
     #[cfg(feature = "virtual-time")]
