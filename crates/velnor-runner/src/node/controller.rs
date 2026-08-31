@@ -1087,19 +1087,22 @@ async fn reconcile_remote_registrations(
     jobs: &mut HashMap<String, Child>,
     pacing: &mut GithubPacing,
 ) -> anyhow::Result<()> {
-    let exec = match load_exec_config(&args.state_dir) {
-        Ok(exec) => exec,
-        Err(error) => {
-            eprintln!(
-                "registration reconciliation skipped: cannot load daemon execution config: {error:#}"
-            );
-            return Ok(());
-        }
-    };
-    let (Some(url), Some(pat)) = (exec.url.as_deref(), exec.pat.as_deref()) else {
-        eprintln!("registration reconciliation skipped: GitHub URL or PAT unavailable");
-        return Ok(());
-    };
+    // Reconciliation is the proof that permits and remote registration still
+    // agree. Without executable config or a PAT, that proof cannot be made;
+    // returning an error lets reconcile_once publish zero capacity and
+    // NotReady instead of silently preserving an unverified registration.
+    let exec = load_exec_config(&args.state_dir)
+        .context("registration reconciliation requires daemon execution config")?;
+    let url = exec
+        .url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("registration reconciliation requires GitHub URL"))?;
+    let pat = exec
+        .pat
+        .as_deref()
+        .filter(|pat| !pat.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("registration reconciliation requires GitHub PAT"))?;
     let scope = GitHubScope::parse(url)?;
     let client = RegistrationClient::new()?;
     let state = journal.materialized_state()?;
@@ -1617,10 +1620,43 @@ async fn reclaim_orphaned_jobs(
         let remote_acked =
             journal.has_remote_terminal_ack(&JobId(marker_job_id.clone()), slot.generation)?;
         if !remote_acked {
-            return Err(anyhow::anyhow!(
-                "in-flight marker job {} has no durable remote terminal acknowledgement",
-                marker_job_id
-            ));
+            let worker_pid =
+                cleanup::read_owned_pid(&args.state_dir, &marker_job_id, slot.generation.0)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "marker-only in-flight job {} has no valid worker ownership pid",
+                            marker_job_id
+                        )
+                    })?;
+            if prove::pid_is_alive(worker_pid) {
+                // The marker can legitimately exist between persistence and
+                // journal admission. Never terminalize a live worker in that
+                // window; the next reconciliation tick will retry.
+                continue;
+            }
+            let Some(stored) = load_local_runner_config(&slot_dir)? else {
+                return Err(anyhow::anyhow!(
+                    "runner credentials missing while recovering marker-only in-flight job {}",
+                    marker_job_id
+                ));
+            };
+            let Some(cleaned) = defer_remote_recovery_on_timeout(
+                remaining_remote_budget(remote_deadline),
+                crate::runner::complete_recorded_in_flight_job_after_journal_acceptance(
+                    &slot_dir, &stored,
+                ),
+                "complete marker-only in-flight job after journal acceptance gap",
+            )
+            .await?
+            else {
+                continue;
+            };
+            if !cleaned {
+                return Err(anyhow::anyhow!(
+                    "marker-only in-flight job {} disappeared during recovery",
+                    marker_job_id
+                ));
+            }
         }
         cleanup::remove_outbox(&args.state_dir, &marker_job_id, slot.generation.0)?;
         crate::runner::cleanup_recorded_in_flight_job(&slot_dir)?;
@@ -1690,22 +1726,26 @@ fn reconcile_orphaned_outboxes(args: &ControllerArgs, journal: &Journal) -> anyh
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("completion outbox filename is not UTF-8"))?;
         let file_metadata = std::fs::symlink_metadata(&path)?;
+        #[cfg(unix)]
+        if cleanup::outbox_quarantine_pid(name)?.is_some() {
+            if file_metadata.file_type().is_symlink() || !file_metadata.is_dir() {
+                return Err(anyhow::anyhow!(
+                    "completion outbox quarantine is not a directory: {}",
+                    path.display()
+                ));
+            }
+            if !cleanup::remove_stale_outbox_quarantine(&args.state_dir, name)? {
+                continue;
+            }
+            continue;
+        }
         if file_metadata.file_type().is_symlink() || !file_metadata.is_file() {
             return Err(anyhow::anyhow!(
                 "completion outbox entry is not a regular file: {}",
                 path.display()
             ));
         }
-        let (job_id, generation, temporary) = if let Some(stem) = name.strip_prefix('.') {
-            let Some((stem, _nonce)) = stem.rsplit_once(".tmp-") else {
-                continue;
-            };
-            let (job_id, generation) = parse_outbox_name(stem)?;
-            (job_id, generation, true)
-        } else {
-            let (job_id, generation) = parse_outbox_name(name)?;
-            (job_id, generation, false)
-        };
+        let (job_id, generation, temporary) = parse_outbox_entry_name(name)?;
         let row = state
             .outbox
             .iter()
@@ -1742,6 +1782,27 @@ fn parse_outbox_name(name: &str) -> anyhow::Result<(String, u64)> {
         anyhow::anyhow!("completion outbox filename has invalid generation {generation}: {error}")
     })?;
     Ok((job_id.to_owned(), generation))
+}
+
+fn parse_outbox_entry_name(name: &str) -> anyhow::Result<(String, u64, bool)> {
+    if let Some(stem) = name.strip_prefix("..") {
+        let (stem, nonce) = stem.rsplit_once(".tmp-").ok_or_else(|| {
+            anyhow::anyhow!("completion outbox temporary filename is malformed: {name}")
+        })?;
+        let (pid, serial) = nonce.split_once('-').ok_or_else(|| {
+            anyhow::anyhow!("completion outbox temporary filename is malformed: {name}")
+        })?;
+        pid.parse::<u32>().map_err(|error| {
+            anyhow::anyhow!("completion outbox temporary filename has invalid pid: {error}")
+        })?;
+        serial.parse::<u64>().map_err(|error| {
+            anyhow::anyhow!("completion outbox temporary filename has invalid serial: {error}")
+        })?;
+        let (job_id, generation) = parse_outbox_name(stem)?;
+        return Ok((job_id, generation, true));
+    }
+    let (job_id, generation) = parse_outbox_name(name)?;
+    Ok((job_id, generation, false))
 }
 
 fn outbox_owner_is_live(state_dir: &Path, job_id: &str, generation: u64) -> anyhow::Result<bool> {
@@ -2340,6 +2401,17 @@ mod tests {
     /// so a parallel test's cleanup `remove_var` must not land mid-test.
     static GITHUB_TOKEN_ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    #[test]
+    fn outbox_entry_parser_reserves_dot_prefixed_names_for_temporaries() {
+        assert!(parse_outbox_entry_name(".job.7").is_err());
+        assert!(parse_outbox_entry_name("..tmp-user.7").is_err());
+        assert_eq!(
+            parse_outbox_entry_name("..job.0.tmp-user.7.tmp-123-0").unwrap(),
+            ("job.0.tmp-user".to_owned(), 7, true)
+        );
+        assert!(parse_outbox_entry_name("..malformed").is_err());
+    }
 
     fn dummy_exec(url: &str) -> DaemonArgs {
         serde_json::from_value(json!({
@@ -3051,6 +3123,66 @@ mod tests {
         assert!(!slot.permit_held);
         assert!(!slot.session_live);
         assert_eq!(slot.phase, ActorPhase::Provisioning);
+    }
+
+    #[tokio::test]
+    async fn missing_execution_config_fails_registration_reconciliation_closed() {
+        let dir = metrics_test_dir("missing-exec-config");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+
+        let error = reconcile_remote_registrations(
+            &args,
+            &mut journal,
+            &mut HashMap::new(),
+            &mut GithubPacing::default(),
+        )
+        .await
+        .expect_err("missing execution config must fail closed");
+        assert!(error
+            .to_string()
+            .contains("requires daemon execution config"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_pat_fails_registration_reconciliation_closed() {
+        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let previous_token = std::env::var_os("GITHUB_TOKEN");
+        let dir = metrics_test_dir("missing-pat");
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/velnor"), 1).unwrap();
+        // SAFETY: the process-wide token lock serializes this test's env access.
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+
+        let error = reconcile_remote_registrations(
+            &args,
+            &mut journal,
+            &mut HashMap::new(),
+            &mut GithubPacing::default(),
+        )
+        .await
+        .expect_err("missing PAT must fail closed");
+        assert!(error.to_string().contains("requires GitHub PAT"));
+        // SAFETY: the process-wide token lock serializes this test's env access.
+        match previous_token {
+            Some(token) => unsafe { std::env::set_var("GITHUB_TOKEN", token) },
+            None => unsafe { std::env::remove_var("GITHUB_TOKEN") },
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "test-support")]

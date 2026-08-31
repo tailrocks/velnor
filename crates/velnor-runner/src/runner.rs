@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -284,6 +284,8 @@ struct InFlightJobRecord {
     billing_owner_id: Option<String>,
 }
 
+const MAX_IN_FLIGHT_JOB_BYTES: usize = 64 * 1024;
+
 fn in_flight_job_path(config_dir: &Path) -> PathBuf {
     config_dir.join("in-flight-job.json")
 }
@@ -323,24 +325,33 @@ fn persist_in_flight_job(
         billing_owner_id: run_service_job.billing_owner_id.clone(),
     };
     let path = in_flight_job_path(config_dir);
-    let temporary = path.with_file_name(format!("in-flight-job.json.tmp-{}", std::process::id()));
+    let temporary = path.with_file_name(format!(
+        "in-flight-job.json.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     let bytes = serde_json::to_vec_pretty(&record).context("serialize in-flight job")?;
-    if let Err(error) = fs::write(&temporary, bytes) {
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("create {}", temporary.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temporary.display()))?;
+        fs::rename(&temporary, &path)
+            .with_context(|| format!("publish in-flight job lease {}", path.display()))?;
+        sync_directory(path.parent())?;
+        Ok(())
+    })();
+    if result.is_err() {
         fs::remove_file(&temporary).ok();
-        return Err(error).context("write temporary in-flight job lease");
     }
-    OpenOptions::new()
-        .read(true)
-        .open(&temporary)
-        .with_context(|| format!("open {} for sync", temporary.display()))?
-        .sync_all()
-        .with_context(|| format!("sync {}", temporary.display()))?;
-    if let Err(error) = fs::rename(&temporary, &path) {
-        fs::remove_file(&temporary).ok();
-        return Err(error).context("publish in-flight job lease");
-    }
-    sync_directory(path.parent())?;
-    Ok(())
+    result
 }
 
 fn sync_directory(path: Option<&Path>) -> Result<()> {
@@ -380,9 +391,36 @@ fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
-    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = read_bounded_marker(&path, MAX_IN_FLIGHT_JOB_BYTES)?;
     let record = serde_json::from_slice(&bytes).context("parse in-flight job")?;
     Ok(Some(record))
+}
+
+fn read_bounded_marker(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let file = options
+        .open(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("marker is not a regular file: {}", path.display());
+    }
+    if metadata.len() > limit as u64 {
+        bail!("marker exceeds {} bytes: {}", limit, path.display());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() > limit {
+        bail!("marker exceeds {} bytes: {}", limit, path.display());
+    }
+    Ok(bytes)
 }
 
 fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
@@ -513,6 +551,34 @@ pub(crate) async fn complete_recorded_in_flight_job(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
 ) -> Result<bool> {
+    complete_recorded_in_flight_job_with_failure(
+        slot_dir,
+        stored,
+        Some("stale_busy".to_string()),
+        "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
+    )
+    .await
+}
+
+pub(crate) async fn complete_recorded_in_flight_job_after_journal_acceptance(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+) -> Result<bool> {
+    complete_recorded_in_flight_job_with_failure(
+        slot_dir,
+        stored,
+        Some("journal_acceptance".to_string()),
+        "durable in-flight marker had no accepted journal ownership; fail-closed leftover job so the runner lease can be released",
+    )
+    .await
+}
+
+async fn complete_recorded_in_flight_job_with_failure(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+) -> Result<bool> {
     let Some(record) = load_in_flight_job(slot_dir)? else {
         return Ok(false);
     };
@@ -534,8 +600,8 @@ pub(crate) async fn complete_recorded_in_flight_job(
         &ctx,
         &identity,
         None,
-        Some("stale_busy".to_string()),
-        "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
+        infrastructure_failure_category,
+        reason,
     )
     .await?;
     cleanup_recorded_in_flight_job(slot_dir)?;
@@ -555,9 +621,9 @@ pub(crate) async fn replay_recorded_completion(
     let Some(record) = load_in_flight_job(slot_dir)? else {
         return Ok(false);
     };
+    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let (generation, payload_sha256) = {
-        let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
-            .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
         let state = journal
             .materialized_state()
             .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
@@ -599,25 +665,21 @@ pub(crate) async fn replay_recorded_completion(
         load_recorded_completion_payload(journal_dir, &record, generation, &payload_sha256)?;
     let token = oauth_access_token(stored).await?;
     let client = RunServiceClient::new(token.token)?;
-    client
-        .complete_job_payload(&record.run_service_url, payload)
-        .await
-        .context("replay exact recorded completion payload")?;
-
-    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
-        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
-    let acknowledged = journal.apply(velnor_control::journal::Event::RemoteAcked {
-        job_id: velnor_model::JobId(record.job_id.clone()),
+    crate::node::complete::replay_claimed_completion_async(
+        &mut journal,
+        journal_dir,
+        &velnor_model::JobId(record.job_id.clone()),
         generation,
-    })?;
-    if acknowledged.rejected {
-        bail!(
-            "remote acknowledgement rejected for recorded job {}",
-            record.job_id
-        );
-    }
-    crate::node::cleanup::remove_outbox(journal_dir, &record.job_id, generation.0)
-        .context("remove acknowledged recorded completion outbox")?;
+        payload,
+        |payload| async move {
+            client
+                .complete_job_payload_with_acknowledgement(&record.run_service_url, payload)
+                .await
+                .map(|acknowledgement| ((), acknowledgement))
+                .context("replay exact recorded completion payload")
+        },
+    )
+    .await?;
     cleanup_recorded_in_flight_job(slot_dir)?;
     Ok(true)
 }
@@ -10164,18 +10226,7 @@ async fn complete_run_service_job(
             annotations: log.annotations.iter().map(run_service_annotation).collect(),
         })
         .collect();
-    let outputs = job_outputs
-        .into_iter()
-        .map(|(name, value)| {
-            (
-                name,
-                RunServiceVariableValue {
-                    value,
-                    is_secret: false,
-                },
-            )
-        })
-        .collect();
+    let outputs = run_service_outputs(job_outputs, &job_secret_mask_values(job));
     let telemetry = run_service_telemetry(job, &step_logs);
     let annotations: Vec<RunServiceAnnotation> = step_logs
         .iter()
@@ -10232,6 +10283,36 @@ async fn complete_run_service_job(
     send_guarded_run_service_complete(client, run_service_url, completion, journal_dir).await
 }
 
+/// Match the upstream runner boundary: a job output whose value is masked by
+/// any job secret is omitted from the completion payload. Sending it with a
+/// public `isSecret=false` bit would disclose the value to the run service;
+/// sending it marked secret would still retain the raw value in the durable
+/// completion outbox.
+fn run_service_outputs(
+    job_outputs: BTreeMap<String, String>,
+    secret_masks: &[String],
+) -> BTreeMap<String, RunServiceVariableValue> {
+    job_outputs
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if secret_masks
+                .iter()
+                .any(|secret| !secret.is_empty() && value.contains(secret))
+            {
+                eprintln!("Skipping job output '{name}' because it may contain a secret");
+                return None;
+            }
+            Some((
+                name,
+                RunServiceVariableValue {
+                    value,
+                    is_secret: false,
+                },
+            ))
+        })
+        .collect()
+}
+
 async fn send_guarded_run_service_complete(
     client: &RunServiceClient,
     run_service_url: &str,
@@ -10243,7 +10324,7 @@ async fn send_guarded_run_service_complete(
     let job_id = velnor_model::JobId(completion.job_id.clone());
     let generation = crate::node::complete::ensure_owned(&mut journal, &job_id)?;
     let payload = serde_json::to_vec(&completion)?;
-    crate::node::complete::guarded_complete_async(
+    crate::node::complete::guarded_complete_async_with_ack(
         &mut journal,
         journal_dir,
         &job_id,
@@ -10251,8 +10332,9 @@ async fn send_guarded_run_service_complete(
         &payload,
         |payload| async move {
             client
-                .complete_job_payload(run_service_url, payload)
+                .complete_job_payload_with_acknowledgement(run_service_url, payload)
                 .await
+                .map(|acknowledgement| ((), acknowledgement))
                 .context("complete run-service job")
         },
     )
@@ -11911,6 +11993,74 @@ mod tests {
         let error = recorded_in_flight_job_exists(&dir).unwrap_err();
         assert!(error.to_string().contains("must not be a symlink"));
 
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persist_in_flight_job_does_not_touch_deterministic_temp_collision() {
+        let dir = unique_temp_dir("in-flight-marker-temp-collision");
+        fs::create_dir_all(&dir).unwrap();
+        let collision = dir.join(format!("in-flight-job.json.tmp-{}", std::process::id()));
+        fs::write(&collision, b"must survive").unwrap();
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+
+        persist_in_flight_job(&dir, &context, &job).unwrap();
+
+        assert_eq!(fs::read(&collision).unwrap(), b"must survive");
+        assert_eq!(
+            load_in_flight_job(&dir).unwrap().unwrap().job_id,
+            job.job_id
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_in_flight_job_does_not_write_through_temp_symlink() {
+        let dir = unique_temp_dir("in-flight-marker-temp-symlink");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        fs::write(&target, b"must survive").unwrap();
+        let collision = dir.join(format!("in-flight-job.json.tmp-{}", std::process::id()));
+        std::os::unix::fs::symlink(&target, &collision).unwrap();
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+
+        persist_in_flight_job(&dir, &context, &job).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"must survive");
+        assert!(fs::symlink_metadata(&collision)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn in_flight_marker_read_is_bounded() {
+        let dir = unique_temp_dir("in-flight-marker-bounded");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            in_flight_job_path(&dir),
+            vec![b'{'; MAX_IN_FLIGHT_JOB_BYTES + 1],
+        )
+        .unwrap();
+
+        let error = load_in_flight_job(&dir).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -14463,6 +14613,18 @@ jobs:
             })
         );
         assert_eq!(acquired_job_identity(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn secret_valued_job_outputs_are_not_sent_to_run_service() {
+        let outputs = BTreeMap::from([
+            ("public".to_owned(), "visible".to_owned()),
+            ("secret".to_owned(), "prefix-secret-value-suffix".to_owned()),
+        ]);
+        let sanitized = run_service_outputs(outputs, &["secret-value".to_owned()]);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized["public"].value, "visible");
+        assert!(!sanitized.contains_key("secret"));
     }
 
     #[test]
