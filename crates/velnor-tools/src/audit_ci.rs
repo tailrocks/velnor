@@ -950,14 +950,6 @@ fn audit_repo_profile(
     let mut findings = Vec::new();
     findings.extend(audit_repository_surfaces(root)?);
     findings.extend(audit_fleet_policy_surface(root)?);
-    if !root.join(".github/AGENTS.md").is_file() {
-        findings.push(Finding::error(
-            "uniform-agents",
-            ".github/AGENTS.md",
-            "$",
-            "add the shared estate CI instructions",
-        ));
-    }
     let workflow_dir = root.join(".github/workflows");
     if !workflow_dir.is_dir() {
         findings.push(Finding::error(
@@ -4163,7 +4155,6 @@ jobs:
         for name in ["one", "two"] {
             let root = base.join(name);
             fs::create_dir_all(root.join(".github/workflows")).unwrap();
-            fs::write(root.join(".github/AGENTS.md"), "estate standard\n").unwrap();
             fs::write(root.join(".github/workflows/ci.yml"), BASE).unwrap();
             assert!(audit_repo(&root, true).unwrap().is_empty());
         }
@@ -4434,7 +4425,6 @@ jobs:
     #[test]
     fn legacy_runner_group_guard_scans_active_repository_surfaces() {
         let root = TestRepo::new();
-        fs::write(root.path.join(".github/AGENTS.md"), "estate standard\n").unwrap();
         fs::write(root.path.join(".github/workflows/ci.yml"), BASE).unwrap();
         fs::create_dir_all(root.path.join("config")).unwrap();
         fs::write(
