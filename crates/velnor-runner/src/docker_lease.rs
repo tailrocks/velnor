@@ -969,94 +969,106 @@ fn canonical_docker_path(target: &str) -> Result<String> {
     Ok(path)
 }
 
-/// `serde_json::Value` keeps only the last occurrence of a duplicate object
-/// key. That is unsafe for a policy rewrite: a duplicate key can make the
-/// value inspected here differ from the value Docker decodes. Walk the raw
-/// JSON first and reject duplicates at every object depth.
-fn reject_duplicate_json_keys(body: &[u8]) -> Result<()> {
+/// Parse a Docker create body while rejecting duplicate object keys at every
+/// depth. Building `Value` during the same traversal avoids a validation pass
+/// followed by a second JSON parse/materialization pass.
+fn parse_create_value(body: &[u8]) -> Result<Value> {
+    if body.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+
     struct Seed;
 
     impl<'de> serde::de::DeserializeSeed<'de> for Seed {
-        type Value = ();
+        type Value = Value;
 
-        fn deserialize<D>(self, deserializer: D) -> std::result::Result<(), D::Error>
+        fn deserialize<D>(self, deserializer: D) -> std::result::Result<Value, D::Error>
         where
             D: serde::de::Deserializer<'de>,
         {
             struct Visitor;
 
             impl<'de> serde::de::Visitor<'de> for Visitor {
-                type Value = ();
+                type Value = Value;
 
                 fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     formatter.write_str("a JSON value")
                 }
 
-                fn visit_bool<E>(self, _: bool) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_bool<E>(self, value: bool) -> std::result::Result<Value, E> {
+                    Ok(Value::Bool(value))
                 }
 
-                fn visit_i64<E>(self, _: i64) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_i64<E>(self, value: i64) -> std::result::Result<Value, E> {
+                    Ok(Value::Number(value.into()))
                 }
 
-                fn visit_u64<E>(self, _: u64) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_u64<E>(self, value: u64) -> std::result::Result<Value, E> {
+                    Ok(Value::Number(value.into()))
                 }
 
-                fn visit_f64<E>(self, _: f64) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_f64<E>(self, value: f64) -> std::result::Result<Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    serde_json::Number::from_f64(value)
+                        .map(Value::Number)
+                        .ok_or_else(|| E::custom("JSON number is not finite"))
                 }
 
-                fn visit_str<E>(self, _: &str) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_str<E>(self, value: &str) -> std::result::Result<Value, E> {
+                    Ok(Value::String(value.to_owned()))
                 }
 
-                fn visit_borrowed_str<E>(self, _: &'de str) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Value, E> {
+                    Ok(Value::String(value.to_owned()))
                 }
 
-                fn visit_string<E>(self, _: String) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_string<E>(self, value: String) -> std::result::Result<Value, E> {
+                    Ok(Value::String(value))
                 }
 
-                fn visit_unit<E>(self) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_unit<E>(self) -> std::result::Result<Value, E> {
+                    Ok(Value::Null)
                 }
 
-                fn visit_none<E>(self) -> std::result::Result<(), E> {
-                    Ok(())
+                fn visit_none<E>(self) -> std::result::Result<Value, E> {
+                    Ok(Value::Null)
                 }
 
-                fn visit_some<D>(self, deserializer: D) -> std::result::Result<(), D::Error>
+                fn visit_some<D>(self, deserializer: D) -> std::result::Result<Value, D::Error>
                 where
                     D: serde::de::Deserializer<'de>,
                 {
                     serde::de::DeserializeSeed::deserialize(Seed, deserializer)
                 }
 
-                fn visit_seq<A>(self, mut seq: A) -> std::result::Result<(), A::Error>
+                fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Value, A::Error>
                 where
                     A: serde::de::SeqAccess<'de>,
                 {
-                    while seq.next_element_seed(Seed)?.is_some() {}
-                    Ok(())
+                    let mut values = Vec::new();
+                    while let Some(value) = seq.next_element_seed(Seed)? {
+                        values.push(value);
+                    }
+                    Ok(Value::Array(values))
                 }
 
-                fn visit_map<A>(self, mut map: A) -> std::result::Result<(), A::Error>
+                fn visit_map<A>(self, mut map: A) -> std::result::Result<Value, A::Error>
                 where
                     A: serde::de::MapAccess<'de>,
                 {
-                    let mut keys = BTreeSet::new();
+                    let mut object = Map::new();
                     while let Some(key) = map.next_key::<String>()? {
-                        if !keys.insert(key.clone()) {
+                        if object.contains_key(&key) {
                             return Err(serde::de::Error::custom(format!(
                                 "duplicate JSON object key `{key}`"
                             )));
                         }
-                        map.next_value_seed(Seed)?;
+                        let value = map.next_value_seed(Seed)?;
+                        object.insert(key, value);
                     }
-                    Ok(())
+                    Ok(Value::Object(object))
                 }
             }
 
@@ -1065,12 +1077,12 @@ fn reject_duplicate_json_keys(body: &[u8]) -> Result<()> {
     }
 
     let mut deserializer = serde_json::Deserializer::from_slice(body);
-    serde::de::DeserializeSeed::deserialize(Seed, &mut deserializer)
-        .map_err(|error| anyhow::anyhow!("reject duplicate JSON object keys: {error}"))?;
+    let value = serde::de::DeserializeSeed::deserialize(Seed, &mut deserializer)
+        .map_err(|error| anyhow::anyhow!("parse Docker create JSON: {error}"))?;
     deserializer
         .end()
         .context("parse trailing data after Docker create JSON")?;
-    Ok(())
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -1078,15 +1090,6 @@ pub fn inject_ownership_labels(body: &[u8], job_id: &str, daemon_id: &str) -> Re
     let mut value = parse_create_value(body)?;
     inject_ownership_labels_value(&mut value, job_id, daemon_id)?;
     serde_json::to_vec(&value).context("serialize labeled Docker create body")
-}
-
-fn parse_create_value(body: &[u8]) -> Result<Value> {
-    if body.is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
-    reject_duplicate_json_keys(body)?;
-    serde_json::from_slice(body)
-        .context("parse Docker create JSON so ownership labels can be injected")
 }
 
 fn inject_ownership_labels_value(value: &mut Value, job_id: &str, daemon_id: &str) -> Result<()> {
@@ -2051,7 +2054,7 @@ fn handle_client_with(
     }
     let mut client_prefix = Vec::new();
     let mut host_state: Option<(UnixStream, WatchedStream)> = None;
-    let mut host_buffer = Vec::new();
+    let mut host_buffer = ResponseBuffer::default();
     loop {
         let request =
             match read_http_request_with_budget_from(&mut client, client_prefix, Some(&conns)) {
@@ -2320,7 +2323,7 @@ fn proxy_until_closed(
 #[cfg(unix)]
 fn forward_http_response(
     host: &mut std::os::unix::net::UnixStream,
-    host_buffer: &mut Vec<u8>,
+    host_buffer: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
     request_method: &str,
 ) -> Result<bool> {
@@ -2342,7 +2345,7 @@ fn forward_http_response(
         } else {
             if !host_buffer.is_empty() {
                 client
-                    .write_all(host_buffer)
+                    .write_all(host_buffer.as_slice())
                     .context("forward unframed Docker API response body")?;
                 host_buffer.clear();
             }
@@ -2353,6 +2356,57 @@ fn forward_http_response(
             continue;
         }
         return Ok(!head.close && head.status != 101);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ResponseBuffer {
+    bytes: Vec<u8>,
+    cursor: usize,
+}
+
+#[cfg(unix)]
+impl ResponseBuffer {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[self.cursor..]
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len() - self.cursor
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cursor == self.bytes.len()
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn consume(&mut self, length: usize) {
+        debug_assert!(length <= self.len());
+        self.cursor += length;
+        self.compact_if_needed();
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.cursor = 0;
+    }
+
+    /// Move the live suffix only after enough prefix has accumulated. This
+    /// makes repeated small chunk framing consumes amortized instead of
+    /// shifting the tail on every consumed line.
+    fn compact_if_needed(&mut self) {
+        if self.cursor == self.bytes.len() {
+            self.clear();
+        } else if self.cursor >= PROXY_COPY_BUFFER && self.cursor >= self.bytes.len() / 2 {
+            let remaining = self.bytes.len() - self.cursor;
+            self.bytes.copy_within(self.cursor.., 0);
+            self.bytes.truncate(remaining);
+            self.cursor = 0;
+        }
     }
 }
 
@@ -2369,13 +2423,18 @@ struct HttpResponseHead {
 #[cfg(unix)]
 fn read_http_response_head(
     host: &mut std::os::unix::net::UnixStream,
-    buffered: &mut Vec<u8>,
+    buffered: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
     request_method: &str,
 ) -> Result<HttpResponseHead> {
+    let mut scan_from: usize = 0;
     let header_end = loop {
-        if let Some(relative) = buffered.windows(4).position(|window| window == b"\r\n\r\n") {
-            let end = relative + 4;
+        let search_start = scan_from.saturating_sub(3);
+        if let Some(relative) = buffered.as_slice()[search_start..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            let end = search_start + relative + 4;
             if end > MAX_PROXY_HEADER {
                 bail!("Docker API response headers exceed lease proxy limit");
             }
@@ -2384,6 +2443,7 @@ fn read_http_response_head(
         if buffered.len() > MAX_PROXY_HEADER {
             bail!("Docker API response headers exceed lease proxy limit");
         }
+        let previous_len = buffered.len();
         wait_for_host_response(host, client)?;
         let mut scratch = [0_u8; PROXY_COPY_BUFFER];
         let read = host
@@ -2392,11 +2452,11 @@ fn read_http_response_head(
         if read == 0 {
             bail!("host Docker API closed before response headers finished");
         }
+        scan_from = previous_len;
         buffered.extend_from_slice(&scratch[..read]);
     };
-    let header_bytes = buffered[..header_end].to_vec();
-    let remainder = buffered.split_off(header_end);
-    *buffered = remainder;
+    let header_bytes = buffered.as_slice()[..header_end].to_vec();
+    buffered.consume(header_end);
     let header_text =
         std::str::from_utf8(&header_bytes).context("Docker API response headers must be UTF-8")?;
     let mut lines = header_text.split("\r\n");
@@ -2462,16 +2522,16 @@ fn read_http_response_head(
 #[cfg(unix)]
 fn forward_exact_response_body(
     host: &mut std::os::unix::net::UnixStream,
-    buffered: &mut Vec<u8>,
+    buffered: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
     mut remaining: usize,
 ) -> Result<()> {
     if !buffered.is_empty() && remaining != 0 {
         let take = remaining.min(buffered.len());
         client
-            .write_all(&buffered[..take])
+            .write_all(&buffered.as_slice()[..take])
             .context("forward buffered Docker API response body")?;
-        buffered.drain(..take);
+        buffered.consume(take);
         remaining -= take;
     }
     let mut scratch = [0_u8; PROXY_COPY_BUFFER];
@@ -2495,19 +2555,28 @@ fn forward_exact_response_body(
 #[cfg(unix)]
 fn read_response_line(
     host: &mut std::os::unix::net::UnixStream,
-    buffered: &mut Vec<u8>,
+    buffered: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
 ) -> Result<Vec<u8>> {
+    let mut scan_from: usize = 0;
     loop {
-        if let Some(relative) = buffered.windows(2).position(|window| window == b"\r\n") {
-            let end = relative + 2;
-            let line = buffered[..end].to_vec();
-            buffered.drain(..end);
+        let search_start = scan_from.saturating_sub(1);
+        if let Some(relative) = buffered.as_slice()[search_start..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+        {
+            let end = search_start + relative + 2;
+            if end > MAX_PROXY_LINE {
+                bail!("Docker API response framing line exceeds lease proxy limit");
+            }
+            let line = buffered.as_slice()[..end].to_vec();
+            buffered.consume(end);
             return Ok(line);
         }
         if buffered.len() > MAX_PROXY_LINE {
             bail!("Docker API response framing line exceeds lease proxy limit");
         }
+        let previous_len = buffered.len();
         wait_for_host_response(host, client)?;
         let mut scratch = [0_u8; 8192];
         let read = host
@@ -2516,14 +2585,56 @@ fn read_response_line(
         if read == 0 {
             bail!("host Docker API closed during chunked response framing");
         }
+        scan_from = previous_len;
         buffered.extend_from_slice(&scratch[..read]);
     }
 }
 
 #[cfg(unix)]
+fn validate_chunked_response_trailer(line: &[u8]) -> Result<()> {
+    let field = line
+        .strip_suffix(b"\r\n")
+        .context("Docker API response trailer is missing its terminating CRLF")?;
+    let Some(colon) = field.iter().position(|&byte| byte == b':') else {
+        bail!("malformed Docker API response trailer");
+    };
+    let name = &field[..colon];
+    let is_field_name_byte = |byte: &u8| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    };
+    if name.is_empty() || !name.iter().all(is_field_name_byte) {
+        bail!("malformed Docker API response trailer field name");
+    }
+    if field[colon + 1..]
+        .iter()
+        .any(|byte| byte.is_ascii_control() && *byte != b'\t')
+    {
+        bail!("malformed Docker API response trailer value");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn forward_chunked_response(
     host: &mut std::os::unix::net::UnixStream,
-    buffered: &mut Vec<u8>,
+    buffered: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
 ) -> Result<()> {
     loop {
@@ -2540,6 +2651,20 @@ fn forward_chunked_response(
         let size = usize::from_str_radix(size_text, 16)
             .context("parse Docker API response chunk-size line")?;
         forward_exact_response_body(host, buffered, client, size)?;
+        if size == 0 {
+            loop {
+                let trailer = read_response_line(host, buffered, client)?;
+                if trailer != b"\r\n" {
+                    validate_chunked_response_trailer(&trailer)?;
+                }
+                client
+                    .write_all(&trailer)
+                    .context("forward Docker API response trailer")?;
+                if trailer == b"\r\n" {
+                    return Ok(());
+                }
+            }
+        }
         let terminator = read_response_line(host, buffered, client)?;
         if terminator != b"\r\n" {
             bail!("Docker API response chunk is missing its terminating CRLF");
@@ -2547,18 +2672,6 @@ fn forward_chunked_response(
         client
             .write_all(&terminator)
             .context("forward Docker API chunk terminator")?;
-        if size != 0 {
-            continue;
-        }
-        loop {
-            let trailer = read_response_line(host, buffered, client)?;
-            client
-                .write_all(&trailer)
-                .context("forward Docker API response trailer")?;
-            if trailer == b"\r\n" {
-                return Ok(());
-            }
-        }
     }
 }
 
@@ -2785,7 +2898,11 @@ fn read_chunked_http_request(
                 .windows(2)
                 .position(|window| window == b"\r\n")
             {
-                break cursor + relative;
+                let line_end = cursor + relative;
+                if line_end.saturating_sub(cursor).saturating_add(2) > MAX_PROXY_LINE {
+                    bail!("Docker API chunk-size line exceeds lease proxy limit");
+                }
+                break line_end;
             }
             if buf.len().saturating_sub(cursor) > MAX_PROXY_LINE {
                 bail!("Docker API chunk-size line exceeds lease proxy limit");
@@ -2819,7 +2936,11 @@ fn read_chunked_http_request(
                         .windows(2)
                         .position(|window| window == b"\r\n")
                     {
-                        break cursor + relative;
+                        let trailer_end = cursor + relative;
+                        if trailer_end.saturating_sub(cursor).saturating_add(2) > MAX_PROXY_LINE {
+                            bail!("Docker API chunk trailer exceeds lease proxy limit");
+                        }
+                        break trailer_end;
                     }
                     if buf.len().saturating_sub(cursor) > MAX_PROXY_LINE {
                         bail!("Docker API chunk trailer exceeds lease proxy limit");
@@ -3084,6 +3205,36 @@ mod tests {
         )
         .expect_err("duplicate JSON keys must fail closed");
         assert!(error.to_string().contains("duplicate JSON object key"));
+    }
+
+    #[test]
+    fn materializes_nested_create_json_while_applying_policy() {
+        let body = br#"{
+            "Image":"postgres:18-alpine",
+            "Env":["POSTGRES_DB=app",{"nested":true}],
+            "Memory":12.5,
+            "Nullable":null
+        }"#;
+        let labeled = inject_ownership_labels(body, "job-a", "daemon-a").unwrap();
+        let value: Value = serde_json::from_slice(&labeled).unwrap();
+        assert_eq!(value["Env"][0], "POSTGRES_DB=app");
+        assert_eq!(value["Env"][1]["nested"], true);
+        assert_eq!(value["Memory"], 12.5);
+        assert!(value["Nullable"].is_null());
+        assert_eq!(value["Labels"][JOB_ID_LABEL], "job-a");
+    }
+
+    #[test]
+    fn rejects_duplicate_json_object_keys_at_nested_depths() {
+        for body in [
+            br#"{"HostConfig":{"Memory":1,"Memory":2}}"#.as_slice(),
+            br#"{"Env":[{"name":"A","name":"B"}]}"#.as_slice(),
+            br#"{"Labels":{"cache":true,"\u0063ache":false}}"#.as_slice(),
+        ] {
+            let error = inject_ownership_labels(body, "job-a", "daemon-a")
+                .expect_err("duplicate JSON keys at any depth must fail closed");
+            assert!(error.to_string().contains("duplicate JSON object key"));
+        }
     }
 
     #[test]
@@ -4004,6 +4155,119 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
                 .all(|call| !call.iter().any(|arg| arg == "other")),
             "foreign daemon job leaked into reclaim calls: {calls:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn response_buffer_compacts_consumed_prefix_amortized() {
+        let mut buffered = ResponseBuffer::default();
+        buffered.extend_from_slice(&vec![b'x'; PROXY_COPY_BUFFER]);
+        buffered.consume(PROXY_COPY_BUFFER - 1);
+        buffered.extend_from_slice(b"tail");
+        buffered.consume(1);
+
+        assert_eq!(buffered.cursor, 0);
+        assert_eq!(buffered.as_slice(), b"tail");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forwards_fragmented_chunked_response_with_extensions_and_trailers() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        let (mut client, mut sink) = UnixStream::pair().unwrap();
+        let wire = b"5\r\nhello\r\n6;source=test\r\n world\r\n0\r\nX-Complete: yes\r\n\r\n";
+        for byte in wire {
+            source.write_all(&[*byte]).unwrap();
+        }
+        drop(source);
+
+        let mut buffered = ResponseBuffer::default();
+        forward_chunked_response(&mut host, &mut buffered, &mut sink).unwrap();
+        drop(sink);
+
+        let mut forwarded = Vec::new();
+        client.read_to_end(&mut forwarded).unwrap();
+        assert_eq!(forwarded, wire);
+        assert!(buffered.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forwards_pipelined_chunked_and_following_keepalive_responses() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        let (mut client, mut sink) = UnixStream::pair().unwrap();
+        let first =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let second = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+        source.write_all(first).unwrap();
+        source.write_all(second).unwrap();
+        drop(source);
+
+        let mut buffered = ResponseBuffer::default();
+        assert!(forward_http_response(&mut host, &mut buffered, &mut sink, "GET").unwrap());
+        assert!(!forward_http_response(&mut host, &mut buffered, &mut sink, "GET").unwrap());
+        drop(sink);
+
+        let mut forwarded = Vec::new();
+        client.read_to_end(&mut forwarded).unwrap();
+        assert_eq!(forwarded, [first.as_slice(), second.as_slice()].concat());
+        assert!(buffered.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_chunked_response_with_missing_chunk_terminator() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        source.write_all(b"3\r\nabcX\r\n").unwrap();
+        drop(source);
+        let (client, mut sink) = UnixStream::pair().unwrap();
+        let error = forward_chunked_response(&mut host, &mut ResponseBuffer::default(), &mut sink)
+            .expect_err("chunk data without CRLF must fail closed");
+        assert!(error.to_string().contains("terminating CRLF"));
+        let _ = client.shutdown(std::net::Shutdown::Both);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_chunked_response_with_invalid_size_line() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        source.write_all(b"not-hex\r\n").unwrap();
+        drop(source);
+        let (client, mut sink) = UnixStream::pair().unwrap();
+        let error = forward_chunked_response(&mut host, &mut ResponseBuffer::default(), &mut sink)
+            .expect_err("invalid chunk size must fail closed");
+        assert!(error.to_string().contains("chunk-size"));
+        let _ = client.shutdown(std::net::Shutdown::Both);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_chunked_response_with_malformed_trailer() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        source.write_all(b"0\r\nnot-a-trailer\r\n\r\n").unwrap();
+        drop(source);
+        let (client, mut sink) = UnixStream::pair().unwrap();
+        let error = forward_chunked_response(&mut host, &mut ResponseBuffer::default(), &mut sink)
+            .expect_err("malformed chunk trailer must fail closed");
+        assert!(error
+            .to_string()
+            .contains("malformed Docker API response trailer"));
+        let _ = client.shutdown(std::net::Shutdown::Both);
     }
 
     #[cfg(unix)]
