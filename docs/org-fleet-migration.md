@@ -42,7 +42,7 @@ sequentially:
    digest requires a new review. Stop if the ledger is absent, the group is
    missing/default/inherited/read-only, closure is ambiguous, or a removal has
    no reviewed closure evidence.
-4. Route new verification to GitHub-hosted. Before smoke, cancel only
+4. Route new verification to GitHub-hosted. Before smoke, cancel only older
    pending/in-progress verification runs owned by this iteration; never cancel
    protected Release, Package update, Publish apt repo, or workflow_dispatch
    release workflows/runs, or unrelated runs, and prove each cancellation is
@@ -184,7 +184,7 @@ fleet-generate` regenerates the per-org policy JSONs under `fleet/policies/`,
    after exact semantic equality. Then start the organization daemon with `--pool-name
    velnor-trusted`, run `velnor-runner doctor`, and collect the pending runner-
    state, full guard-state, routing/denial, and warm-run acceptance evidence.
-5. Before smoke, cancel only pending/in-progress runs owned by this iteration;
+5. Before smoke, cancel only older pending/in-progress runs owned by this iteration;
    never cancel protected Release, Package update, Publish apt repo, or
    workflow_dispatch release workflows/runs, or unrelated runs, and prove each
    cancellation is terminal.
