@@ -44,17 +44,19 @@ anchors:
 - `docs/prompt.md:19-24` scopes the active surface to exactly the marked
   unified-CI contract, the tracked goal graph, and the `plans/TASKS.md`
   mirror; no earlier prompt or plan is active.
-- `.github/AGENTS.md:5-10` instructs the sole `lane=github|velnor|both`
-  selector with organization-derived defaults and no universal Velnor default;
-  lines 15–17 separate runner group `velnor-trusted` from selection label
-  `velnor-target-mvp`; lines 21–24 name final `velnorctl` binary/package
-  ownership with `velnor-runner` interim until Plan 079.
+- `.github/AGENTS.md:5-10` records the canonical plural `lanes` choice
+  (`velnor | github | both`) with organization-derived defaults; callable
+  reusable workflows keep singular `lane`, derived by callers from
+  `inputs.lanes`; lines 15–17 separate runner group `velnor-trusted` from
+  selection label `velnor-target-mvp`; lines 21–24 name final `velnorctl`
+  binary/package ownership with `velnor-runner` interim until Plan 079.
 - `crates/velnor-tools/src/main.rs:18` defaults fixture tooling to
   `tailrocks/velnor-actions-fixture`.
 - Fixture `compat.yml` covers real execution semantics. It lacks deterministic
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
-  validation. Its current manual input is `lanes`, which conflicts with the
-  marked contract's sole selector `lane`.
+  validation. Its current manual input is `lanes`, matching the canonical
+  plural selector contract; callable workflows derive singular `lane` from
+  `inputs.lanes`.
 
 ## Drift reconciliation 2026-08-24
 
