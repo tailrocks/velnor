@@ -116,7 +116,7 @@ All gates run through mise tasks invoked via rtk (rtk mise run <task>): fmt, lin
 
 Per leaf: verify rtk and mise; prove dependencies DONE; drift-check against HEAD; inspect cited symbols; record baseline commit, worktree state, fixture commit, manifest version, baseline scoped tests; reconcile plan versus reality through subagents before implementing; never silently adapt or skip. Execute one step at a time verified through its mise task; retain shortest decisive evidence; use Rust and repository patterns; consult current official docs where required; GitHub runner protocol reads actions/runner first; no strict-capability expansion without operator approval; never weaken the fixture or fake missing Velnor behavior locally.
 
-Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration and fixture gates, whitespace check, scope audit, secret scan, independent diff review; affected gates rerun after fixes; every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push every iteration. After each push, fresh security, performance, goal/acceptance, verifier, and reviewer subagents audit the exact pushed diff. Merge the assigned branch's focused PR to `main` only at the authorized safe integration checkpoint; if an urgent pre-merge Sentry validation is authorized, require exact branch-SHA-to-signed-APT binding, SSH host/user confirmation, exact installed version, health, rollback, and all lanes (`velnor`, `github`, `both`). Before every retry cancel older pending/in-progress runs and delete only validation-owned stale registrations, prove both clear, then monitor only the new run. Dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
+Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration and fixture gates, whitespace check, scope audit, secret scan, independent diff review; affected gates rerun after fixes; every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push every iteration. After each push, fresh security, performance, goal/acceptance, verifier, and reviewer subagents audit the exact pushed diff. Merge the assigned branch's focused PR to `main` only at the authorized safe integration checkpoint; if an urgent pre-merge Sentry validation is authorized, require exact branch-SHA-to-signed-APT binding, SSH host/user confirmation, exact installed version, health, rollback, and all lanes (`velnor`, `github`, `both`). Before every retry cancel only older pending/in-progress validation runs owned by that iteration; never cancel protected Release, Package update, Publish apt repo, or workflow_dispatch release workflows/runs, or unrelated runs. Delete only validation-owned stale registrations, prove both clear, then monitor only the new run. Dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
 ```
 
 Repository status and evidence, not chat memory, carry progress across
@@ -143,8 +143,10 @@ Run this loop for every leaf:
    its mise task per the tooling law. A failed gate stays in the same leaf
    until fixed or proven blocked.
 5. Verification subagent runs item integration. Before any Actions dispatch,
-   cancel all older pending/in-progress runs, delete only stale
-   validation-owned runner registrations, and prove both clean before
+   cancel only older pending/in-progress validation runs owned by this
+   iteration; never cancel protected Release, Package update, Publish apt repo,
+   or workflow_dispatch release workflows/runs, or unrelated runs. Delete only
+   stale validation-owned runner registrations, and prove both clean before
    dispatching once and monitoring only the captured new run ID. Check state
    within 60 seconds; diagnose unchanged or queued state before two minutes;
    never save rendered GitHub HTML. Fixture cleanup is mandatory, not an

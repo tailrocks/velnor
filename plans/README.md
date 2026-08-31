@@ -30,9 +30,12 @@ its authorized safe integration checkpoint. If urgent Sentry validation is
 explicitly authorized while the PR is unmergeable, release the exact branch
 SHA through the signed `velnor-apt` path and install only that signed version over
 `ssh sentry`; never copy binaries or install local packages. Verify exact
-identity, health, rollback, and `velnor`, `github`, and `both` lanes. Cancel
-older validation runs and validation-owned stale registrations before every
-retry. Fresh security, performance, goal/acceptance, verifier, and reviewer
+identity, health, rollback, and `velnor`, `github`, and `both` lanes. Before
+every retry, cancel only older pending/in-progress validation runs owned by this
+iteration; never cancel protected Release, Package update, Publish apt repo, or
+workflow_dispatch release workflows/runs, or unrelated runs.
+Remove only validation-owned stale registrations and prove both are clear.
+Fresh security, performance, goal/acceptance, verifier, and reviewer
 subagents audit every pushed iteration.
 
 Operator execution selection is `[execution] backend = "docker" | "microvm"`
@@ -55,14 +58,14 @@ stale working files were removed; Git history preserves delivery evidence. Plan
 | [`goal-execution`](goal-execution/README.md) | Durable Codex `/goal` and Claude Code controller for every current item | Current orchestration playbook |
 | [`fleet-operations`](fleet-operations/README.md) | Organization runner-group admission, routing, and drift control | Current; Plan 039 TODO |
 | [`production-readiness`](production-readiness/README.md) | Velnor, ChainArgos, Jackin, and Sentry production-readiness campaign | Current; checkbox-complete only |
-| [`velnorctl-migration`](velnorctl-migration/README.md) | Replace every `velnor-runner` product, binary, package, and command surface with `velnorctl` | Planned; Plan 063 first |
+| [`velnorctl-migration`](velnorctl-migration/README.md) | Replace every `velnor-runner` product, binary, package, and command surface with `velnorctl` | Current; Plan 063 DONE; follow the active goal graph |
 
 The migration category contains one shared-plan index plus
 [`commands/README.md`](velnorctl-migration/commands/README.md), with one task
 for each of 74 retained researched leaf commands and the required `velnorctl
-daemon` replacement. Plan 063 must land first because repository policy
-requires direction documents and the execution prompt to agree before product
-implementation.
+daemon` replacement. Plan 063 is complete: it established the direction and
+fixture control contract. Subsequent product work follows the active goal graph
+and `plans/TASKS.md`; this historical plan is not an execution procedure.
 
 ## Plan-library rules
 
