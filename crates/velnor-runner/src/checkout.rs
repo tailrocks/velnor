@@ -378,18 +378,38 @@ where
         .with_context(|| format!("create {}", destination.display()))?;
 
     run_git(runner, &["init".to_string(), path_arg(destination)], log)?;
-    run_git(
-        runner,
-        &[
-            "-C".to_string(),
-            path_arg(destination),
-            "remote".to_string(),
-            "remove".to_string(),
-            "origin".to_string(),
-        ],
-        log,
-    )
-    .ok();
+    // Remove a stale origin only when one exists: on a fresh workspace
+    // `git remote remove origin` exits non-zero and prints
+    // "error: No such remote: 'origin'" into the job log (noise the
+    // GitHub-hosted lane never emits). Probe quietly first; stay tolerant
+    // of a removal failure (`|| true`, matching the guest checkout idiom).
+    let origin_exists = runner
+        .run(
+            "git",
+            &[
+                "-C".to_string(),
+                path_arg(destination),
+                "remote".to_string(),
+                "get-url".to_string(),
+                "origin".to_string(),
+            ],
+        )
+        .map(|result| result.code == 0)
+        .unwrap_or(false);
+    if origin_exists {
+        run_git(
+            runner,
+            &[
+                "-C".to_string(),
+                path_arg(destination),
+                "remote".to_string(),
+                "remove".to_string(),
+                "origin".to_string(),
+            ],
+            log,
+        )
+        .ok();
+    }
     run_git(
         runner,
         &[
@@ -1455,6 +1475,116 @@ mod tests {
             .unwrap();
         assert_eq!(requested, origin + 1);
         assert!(requested < wildcard, "requested ref must own FETCH_HEAD");
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    /// Fresh-workspace probe: `git remote get-url origin` fails with
+    /// "error: No such remote: 'origin'".
+    #[derive(Default)]
+    struct FreshWorkspaceRunner {
+        calls: Vec<Vec<String>>,
+    }
+
+    impl CommandRunner for FreshWorkspaceRunner {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            let get_url = args.iter().any(|arg| arg == "get-url");
+            Ok(CommandResult {
+                code: if get_url { 2 } else { 0 },
+                stdout: String::new(),
+                stderr: if get_url {
+                    "error: No such remote: 'origin'".to_string()
+                } else {
+                    String::new()
+                },
+            })
+        }
+
+        fn run_with_env(
+            &mut self,
+            _program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn checkout_skips_origin_removal_on_fresh_workspace() {
+        // A fresh workspace has no origin remote: removing it prints
+        // "error: No such remote: 'origin'" into the job log. The removal
+        // must be probed quietly and skipped instead.
+        let temp =
+            std::env::temp_dir().join(format!("velnor-checkout-fresh-{}", uuid::Uuid::new_v4()));
+        let mut runner = FreshWorkspaceRunner::default();
+        let mut log = Vec::new();
+
+        fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &temp,
+            None,
+            Some(1),
+            false,
+            false,
+            true,
+            false,
+            None,
+            &mut log,
+        )
+        .unwrap();
+
+        assert!(
+            !runner.calls.iter().any(|args| args
+                .windows(2)
+                .any(|pair| pair[0] == "remote" && pair[1] == "remove")),
+            "fresh workspace must not run git remote remove: {:?}",
+            runner.calls
+        );
+        assert!(
+            !log.iter().any(|line| line.contains("No such remote")),
+            "fresh workspace log must not contain the git error: {log:?}"
+        );
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn checkout_removes_stale_origin_remote() {
+        // With an existing origin (probe succeeds), the removal still runs
+        // so re-checkout of a reused workspace stays idempotent.
+        let temp =
+            std::env::temp_dir().join(format!("velnor-checkout-stale-{}", uuid::Uuid::new_v4()));
+        let mut runner = RecordingRunner::default();
+        let mut log = Vec::new();
+
+        fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &temp,
+            None,
+            Some(1),
+            false,
+            false,
+            true,
+            false,
+            None,
+            &mut log,
+        )
+        .unwrap();
+
+        assert!(runner.calls.iter().any(|(_, args)| args
+            .windows(2)
+            .any(|pair| pair[0] == "remote" && pair[1] == "remove")));
 
         std::fs::remove_dir_all(temp).ok();
     }
