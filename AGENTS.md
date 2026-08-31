@@ -37,13 +37,13 @@ Velnor unified CI contract (2026-08-09):
 ## Operations
 
 - Wait ≤60 s → check state → diagnose stuck (>2 min pending, no renewal >25 s in-step, step unchanged >2 min).
-- Workflow verification: cancel every pending/in-progress run before retry; delete stale registrations, confirm both are clear, dispatch fresh, monitor only the new run ID.
+- Workflow verification: cancel only runs in workflows you own; delete stale registrations, confirm both are clear, dispatch fresh, monitor only the new run ID. NEVER cancel `Release`, `Package update`, or `Publish apt repo` runs (see STANDING RULE below).
 - Never commit `.velnor-compare/` HTML captures (embedded live tokens).
 - Tests: `cargo nextest run`, never `cargo test`; doctests stay nextest-discoverable regressions.
 - Unprivileged by default: no `sudo`; mise user-space; OS-package privilege only via documented mise bootstrap, enforced by `audit-ci`.
 - Rust-first scripting; Python/shell only when Rust cannot reasonably do the task.
 - Lane changes pass `velnor`, `github`, and `both`.
-- Before retrying validation, cancel older pending/in-progress runs and remove only validation-owned stale registrations; prove both are clear first.
+- Before retrying validation, cancel only older pending/in-progress runs in workflows you own and remove only validation-owned stale registrations; prove both are clear first.
 
 ## Direction & decisions
 
@@ -90,3 +90,14 @@ and ships one focused PR to `main`. All safety, lane, signed-APT, fixture,
 branch-freshness, and signed-off-commit rules remain unchanged.
 
 Full history: `git log -p -- AGENTS.md`; entries predating the marked contract that conflict with it are historical and non-executable.
+
+## STANDING RULE — never cancel protected GitHub Actions runs (2026-08-31)
+
+NEVER run `gh run cancel` (or equivalent API cancellation) on any run of:
+tailrocks/velnor `Release`, tailrocks/velnor-apt `Package update`,
+tailrocks/velnor-apt `Publish apt repo`, or any `workflow_dispatch` release
+run in those repos. SHA-staleness is never grounds for cancellation: old-head
+dispatches of these workflows are legitimate rebuilds of immutable tags, and
+other concurrent sessions depend on these runs. This overrides any
+"cancel every pending/in-progress run before retry" instruction above. If a
+run looks stale, report it in COORDINATION.md and leave it running.
