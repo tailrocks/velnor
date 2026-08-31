@@ -1088,21 +1088,42 @@ async fn reconcile_remote_registrations(
     pacing: &mut GithubPacing,
 ) -> anyhow::Result<()> {
     // Reconciliation is the proof that permits and remote registration still
-    // agree. Without executable config or a PAT, that proof cannot be made;
-    // returning an error lets reconcile_once publish zero capacity and
-    // NotReady instead of silently preserving an unverified registration.
-    let exec = load_exec_config(&args.state_dir)
-        .context("registration reconciliation requires daemon execution config")?;
-    let url = exec
-        .url
-        .as_deref()
-        .filter(|url| !url.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("registration reconciliation requires GitHub URL"))?;
-    let pat = exec
-        .pat
-        .as_deref()
-        .filter(|pat| !pat.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("registration reconciliation requires GitHub PAT"))?;
+    // agree. Without executable config or a PAT that proof cannot be made for
+    // a fleet that still holds registrations: fail closed so reconcile_once
+    // publishes zero capacity and NotReady instead of silently preserving an
+    // unverified registration. A fleet with no registered slots has no remote
+    // state to verify, so reconciliation is vacuous and the local cycle —
+    // session/executor proofs, orphan recovery, and JIT registration attempts
+    // — must still proceed.
+    let any_registered = journal
+        .materialized_state()?
+        .slots
+        .iter()
+        .any(|slot| slot.registered);
+    let exec = match load_exec_config(&args.state_dir) {
+        Ok(exec) => exec,
+        Err(error) => {
+            if any_registered {
+                return Err(error)
+                    .context("registration reconciliation requires daemon execution config");
+            }
+            eprintln!(
+                "registration reconciliation skipped: cannot load daemon execution config: {error:#}"
+            );
+            return Ok(());
+        }
+    };
+    let url = exec.url.as_deref().filter(|url| !url.trim().is_empty());
+    let pat = exec.pat.as_deref().filter(|pat| !pat.trim().is_empty());
+    let (Some(url), Some(pat)) = (url, pat) else {
+        if any_registered {
+            anyhow::bail!(
+                "registration reconciliation requires GitHub URL and PAT while slots remain registered"
+            );
+        }
+        eprintln!("registration reconciliation skipped: GitHub URL or PAT unavailable");
+        return Ok(());
+    };
     let scope = GitHubScope::parse(url)?;
     let client = RegistrationClient::new()?;
     let state = journal.materialized_state()?;
@@ -1620,17 +1641,28 @@ async fn reclaim_orphaned_jobs(
         let remote_acked =
             journal.has_remote_terminal_ack(&JobId(marker_job_id.clone()), slot.generation)?;
         if !remote_acked {
+            // A ready-slot waiter persists the in-flight marker before journal
+            // admission while its ownership pid is still keyed `wait-{slot}`;
+            // the `write_owned_pid(job_id)` marker appears only when the job
+            // worker spawns. Consult both markers independently: a live owner
+            // defers recovery, and only a genuinely dead worker and waiter
+            // make the marker safe to reclaim.
+            let waiter_id = format!("wait-{}", slot.slot_id.0);
             let worker_pid =
-                cleanup::read_owned_pid(&args.state_dir, &marker_job_id, slot.generation.0)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "marker-only in-flight job {} has no valid worker ownership pid",
-                            marker_job_id
-                        )
-                    })?;
-            if prove::pid_is_alive(worker_pid) {
+                cleanup::read_owned_pid(&args.state_dir, &marker_job_id, slot.generation.0);
+            let waiter_pid =
+                cleanup::read_owned_pid(&args.state_dir, &waiter_id, slot.generation.0);
+            if worker_pid.is_none() && waiter_pid.is_none() {
+                return Err(anyhow::anyhow!(
+                    "marker-only in-flight job {} has no valid worker or waiter ownership pid",
+                    marker_job_id
+                ));
+            }
+            if worker_pid.is_some_and(prove::pid_is_alive)
+                || waiter_pid.is_some_and(prove::pid_is_alive)
+            {
                 // The marker can legitimately exist between persistence and
-                // journal admission. Never terminalize a live worker in that
+                // journal admission. Never terminalize a live owner in that
                 // window; the next reconciliation tick will retry.
                 continue;
             }
@@ -2881,6 +2913,190 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// Journal with one `Ready` slot and no assigned job, plus an exec config
+    /// whose two-slot layout maps `velnor-1` to `slots/slot-1`.
+    fn ready_slot_journal(dir: &Path) -> Journal {
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ReadyAttempt {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        journal
+    }
+
+    fn marker_only_recovery_fixture(label: &str) -> (PathBuf, Journal, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-marker-only-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = ready_slot_journal(&dir);
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
+        let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        std::fs::write(
+            slot_dir.join("in-flight-job.json"),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": "job-9",
+                "run_service_url": "https://example.invalid/run-service",
+                "billing_owner_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        (dir, journal, slot_dir)
+    }
+
+    fn stale_pid() -> u32 {
+        let mut stale_worker = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = stale_worker.id();
+        assert!(stale_worker.wait().unwrap().success());
+        assert!(!prove::pid_is_alive(pid));
+        pid
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_defers_to_live_waiter_pid() {
+        let (dir, mut journal, slot_dir) = marker_only_recovery_fixture("live-waiter");
+        // Crash window: the waiter persisted the in-flight marker before
+        // journal admission, so ownership is still keyed `wait-{slot}` and no
+        // `job-9` worker marker exists yet. Recovery must defer to the live
+        // waiter instead of hard-erroring on the missing worker marker.
+        cleanup::write_owned_pid(
+            &dir,
+            "wait-velnor-1",
+            Generation::INITIAL.0,
+            std::process::id(),
+        )
+        .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            slot_dir.join("in-flight-job.json").exists(),
+            "live waiter must keep its in-flight marker for the next tick"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_reclaims_once_worker_and_waiter_are_dead() {
+        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("dead-waiter");
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
+            .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let error = reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap_err();
+        // Both ownership markers are dead, so recovery advances past the
+        // ownership gate and stops only at the missing runner credentials.
+        assert!(
+            error.to_string().contains(
+                "runner credentials missing while recovering marker-only in-flight job job-9"
+            ),
+            "{error:#}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_without_any_ownership_marker_errors() {
+        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("no-owner");
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let error = reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no valid worker or waiter ownership pid"),
+            "{error:#}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
@@ -3125,10 +3341,51 @@ mod tests {
         assert_eq!(slot.phase, ActorPhase::Provisioning);
     }
 
+    /// A slot that holds a remote registration is what makes reconciliation
+    /// fail closed: without it there is no remote state to verify and the
+    /// check is vacuous.
+    fn prime_registered_slot(journal: &mut Journal) {
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+    }
+
     #[tokio::test]
     async fn missing_execution_config_fails_registration_reconciliation_closed() {
         let dir = metrics_test_dir("missing-exec-config");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        prime_registered_slot(&mut journal);
         let args = ControllerArgs {
             state_dir: dir.clone(),
             scope: "velnor".to_owned(),
@@ -3152,6 +3409,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_execution_config_skips_reconciliation_without_registered_slots() {
+        let dir = metrics_test_dir("missing-exec-config-vacuous");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+
+        reconcile_remote_registrations(
+            &args,
+            &mut journal,
+            &mut HashMap::new(),
+            &mut GithubPacing::default(),
+        )
+        .await
+        .expect("reconciliation is vacuous while no slot holds a registration");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn missing_pat_fails_registration_reconciliation_closed() {
         let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let previous_token = std::env::var_os("GITHUB_TOKEN");
@@ -3160,6 +3440,7 @@ mod tests {
         // SAFETY: the process-wide token lock serializes this test's env access.
         unsafe { std::env::remove_var("GITHUB_TOKEN") };
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        prime_registered_slot(&mut journal);
         let args = ControllerArgs {
             state_dir: dir.clone(),
             scope: "velnor".to_owned(),
@@ -3176,7 +3457,7 @@ mod tests {
         )
         .await
         .expect_err("missing PAT must fail closed");
-        assert!(error.to_string().contains("requires GitHub PAT"));
+        assert!(error.to_string().contains("requires GitHub URL and PAT"));
         // SAFETY: the process-wide token lock serializes this test's env access.
         match previous_token {
             Some(token) => unsafe { std::env::set_var("GITHUB_TOKEN", token) },
