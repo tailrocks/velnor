@@ -88,6 +88,18 @@ fn task031_out_of_scope_census_row_is_authoritative() {
 }
 
 #[test]
+fn velnor_ci_producer_census_row_is_authoritative() {
+    let manifest = load();
+    let row = manifest
+        .repositories()
+        .iter()
+        .find(|repository| repository.slug == "tailrocks/velnor")
+        .expect("Velnor repository remains registered");
+    assert_eq!(row.census.kind, RepositoryKind::CiProducer);
+    assert!(!row.census.research);
+}
+
+#[test]
 fn containment_rule_is_scoped_to_path_bearing_build_fields() {
     let config = velnor_actions_generator::policy::alint_config(RepositoryClass::Code);
     assert!(config.contains(
@@ -162,7 +174,7 @@ fn repository_inventory_bytes_are_exactly_bound() {
     let bytes = std::fs::read(common::repo_root().join("fleet").join("repositories.toml")).unwrap();
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "e9c5b255fad888d242ba11ad6ab434362fb022b017884d651bbabb61b02d27ab"
+        "9f964226dbb0a4a46c1a864876bb8126b02e23cd3b96b71457568db6b923ee1e"
     );
 }
 
