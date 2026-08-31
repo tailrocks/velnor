@@ -646,19 +646,8 @@ fn number(metrics: &Value, path: &[&str]) -> u64 {
 }
 
 fn cpu_us(metrics: &Value) -> u64 {
-    [
-        "journal",
-        "filesystem",
-        "github",
-        "broker",
-        "child_supervision",
-    ]
-    .into_iter()
-    .map(|phase| {
-        number(metrics, &["cpu", phase, "user_us"])
-            .saturating_add(number(metrics, &["cpu", phase, "system_us"]))
-    })
-    .sum()
+    number(metrics, &["cpu", "controller", "user_us"])
+        .saturating_add(number(metrics, &["cpu", "controller", "system_us"]))
 }
 
 fn stop_process_group(controller: &mut Controller) {

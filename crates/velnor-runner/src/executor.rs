@@ -325,6 +325,46 @@ pub fn render_context_expressions(value: &str, context_data: &[(String, Value)])
     JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
 }
 
+pub(crate) fn render_context_expressions_bounded(
+    value: &str,
+    context_data: &[(String, Value)],
+) -> String {
+    if !expression_within_budget(value) {
+        return value.to_string();
+    }
+    render_context_expressions(value, context_data)
+}
+
+fn expression_within_budget(value: &str) -> bool {
+    const MAX_BYTES: usize = 64 * 1024;
+    const MAX_DEPTH: usize = 64;
+    const MAX_OPERATORS: usize = 1024;
+    if value.len() > MAX_BYTES {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut operators = 0usize;
+    for byte in value.bytes() {
+        match byte {
+            b'(' => {
+                depth = depth.saturating_add(1);
+                if depth > MAX_DEPTH {
+                    return false;
+                }
+            }
+            b')' => depth = depth.saturating_sub(1),
+            b'&' | b'|' | b'=' | b'!' => {
+                operators = operators.saturating_add(1);
+                if operators > MAX_OPERATORS {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 pub fn render_expressions_with_context(
     value: &str,
     base_env: &[(String, String)],
@@ -9009,8 +9049,9 @@ fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
 fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
     action
         .inputs
-        .get(name)
-        .or_else(|| action.inputs.get(&name.to_ascii_lowercase()))
+        .iter()
+        .find(|(input_name, _)| input_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value)
         .map(|value| state.resolve_expressions(value))
         .unwrap_or_default()
 }
@@ -11009,6 +11050,9 @@ impl JobExecutionState {
     }
 
     pub(crate) fn resolve_expressions(&self, value: &str) -> String {
+        if !expression_within_budget(value) {
+            return value.to_string();
+        }
         let mut rendered = String::with_capacity(value.len());
         let mut rest = value;
         while let Some(start) = rest.find("${{") {
@@ -11138,27 +11182,23 @@ impl JobExecutionState {
     fn resolve_format_expression(&self, expression: &str) -> Option<String> {
         let inner = expression.strip_prefix("format(")?.strip_suffix(')')?;
         let parts = crate::script_step::split_format_args_pub(inner);
-        if parts.is_empty() {
+        const MAX_FORMAT_ARGS: usize = 64;
+        const MAX_FORMAT_TEMPLATE_BYTES: usize = 64 * 1024;
+        if parts.is_empty() || parts.len().saturating_sub(1) > MAX_FORMAT_ARGS {
             return None;
         }
         let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-        let placeholder_open = "\x00LBRACE\x00";
-        let placeholder_close = "\x00RBRACE\x00";
-        let mut result = template
-            .replace("''", "'")
-            .replace("{{", placeholder_open)
-            .replace("}}", placeholder_close);
-        for (i, arg) in parts[1..].iter().enumerate() {
-            // Use full state resolver so runtime values (step outputs, etc.) work.
-            let resolved = self
-                .resolve_expression_value(arg.trim())
-                .unwrap_or_default();
-            result = result.replace(&format!("{{{i}}}"), &resolved);
+        if template.len() > MAX_FORMAT_TEMPLATE_BYTES {
+            return None;
         }
-        result = result
-            .replace(placeholder_open, "{")
-            .replace(placeholder_close, "}");
-        Some(result)
+        let args = parts[1..]
+            .iter()
+            .map(|arg| {
+                self.resolve_expression_value(arg.trim())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        render_format_template(template.replace("''", "'").as_str(), &args)
     }
 
     fn resolve_context_expression(&self, expression: &str) -> Option<String> {
@@ -11270,6 +11310,9 @@ impl JobExecutionState {
     }
 
     fn evaluate_condition_expr(&self, expression: &str) -> bool {
+        if !expression_within_budget(expression) {
+            return false;
+        }
         let expression = expression.trim();
         if expression == "always()" {
             return true;
@@ -11391,12 +11434,56 @@ impl JobExecutionState {
     fn resolve_context_data_value(&self, expression: &str) -> Option<&Value> {
         let mut segments = expression.trim().split('.');
         let root = segments.next()?;
-        let mut value = self.context_data.get(root)?;
+        let (root_name, mut value) = self.context_data.iter().find(|(name, _)| {
+            *name == root
+                || root.eq_ignore_ascii_case("inputs") && name.eq_ignore_ascii_case("inputs")
+        })?;
+        let input_context = root_name.eq_ignore_ascii_case("inputs");
         for segment in segments {
-            value = value.get(segment)?;
+            value = if input_context {
+                value
+                    .as_object()?
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(segment))
+                    .map(|(_, value)| value)?
+            } else {
+                value.get(segment)?
+            };
         }
         Some(value)
     }
+}
+
+fn render_format_template(template: &str, args: &[String]) -> Option<String> {
+    const MAX_FORMAT_OUTPUT_BYTES: usize = 256 * 1024;
+    let mut result = String::with_capacity(template.len());
+    let mut cursor = 0usize;
+    while cursor < template.len() {
+        let byte = template.as_bytes()[cursor];
+        if byte == b'{' {
+            if template.as_bytes().get(cursor + 1) == Some(&b'{') {
+                result.push('{');
+                cursor += 2;
+                continue;
+            }
+            let end = template[cursor + 1..].find('}')? + cursor + 1;
+            let index = template[cursor + 1..end].parse::<usize>().ok()?;
+            let replacement = args.get(index)?;
+            result.push_str(replacement);
+            cursor = end + 1;
+        } else if byte == b'}' && template.as_bytes().get(cursor + 1) == Some(&b'}') {
+            result.push('}');
+            cursor += 2;
+        } else {
+            let character = template[cursor..].chars().next()?;
+            result.push(character);
+            cursor += character.len_utf8();
+        }
+        if result.len() > MAX_FORMAT_OUTPUT_BYTES {
+            return None;
+        }
+    }
+    Some(result)
 }
 
 /// Return true only when a step condition is provably false from immutable
@@ -12141,15 +12228,26 @@ fn hash_file_search_roots(workspace: &Path, patterns: &[String]) -> Vec<PathBuf>
         })
         .collect::<Vec<_>>();
 
+    let candidate_set = candidates.iter().cloned().collect::<BTreeSet<_>>();
+    let mut selected = BTreeSet::new();
     candidates
-        .iter()
-        .enumerate()
-        .filter(|(index, candidate)| {
-            !candidates.iter().enumerate().any(|(other_index, other)| {
-                index != &other_index && candidate != &other && candidate.starts_with(other)
-            })
+        .into_iter()
+        .filter(|candidate| {
+            if selected.contains(candidate) {
+                return false;
+            }
+            let mut ancestor = candidate.clone();
+            while ancestor != workspace {
+                if !ancestor.pop() {
+                    break;
+                }
+                if candidate_set.contains(&ancestor) {
+                    return false;
+                }
+            }
+            selected.insert(candidate.clone());
+            true
         })
-        .map(|(_, candidate)| candidate.clone())
         .collect()
 }
 
@@ -12546,6 +12644,34 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_input_lookup_is_case_insensitive() {
+        let action = NativeActionInvocation {
+            git_ref: "cache-action".to_owned(),
+            adapter: NativeActionAdapter::Cache,
+            cache_kind: Some(CacheActionKind::Root),
+            source_path: None,
+            inputs: crate::action::canonicalize_input_map(
+                &[("Lookup-Only".to_owned(), "true".to_owned())]
+                    .into_iter()
+                    .collect(),
+            )
+            .unwrap(),
+            env: Vec::new(),
+        };
+        assert_eq!(
+            native_input(&action, &JobExecutionState::default(), "lookup-only"),
+            "true"
+        );
+    }
+
+    #[test]
+    fn over_budget_expression_is_not_evaluated() {
+        let state = JobExecutionState::default();
+        let expression = format!("${{{{ {} }}}}", "github.sha ".repeat(7000));
+        assert_eq!(state.resolve_expressions(&expression), expression);
+    }
 
     #[cfg(unix)]
     #[test]
