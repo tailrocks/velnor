@@ -8619,8 +8619,7 @@ struct WorkflowSourceContext {
 fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowSourceContext> {
     let path = context_string(context_data, "job.workflow_file_path")
         .or_else(|| context_string(context_data, "github.event.workflow"))?;
-    let sha = context_string(context_data, "github.workflow_sha")
-        .or_else(|| context_string(context_data, "github.sha"))?;
+    let sha = context_string(context_data, "github.workflow_sha")?;
     let repository = context_string(context_data, "job.workflow_repository")
         .or_else(|| context_string(context_data, "github.repository"))
         .or_else(|| {

@@ -914,10 +914,7 @@ fn composite_action_invocations_with_path(
                     bail!("nested local composite cycle at '{}'", nested_dir.display())
                 }
                 let metadata_path = action_metadata_path(&nested_dir)?;
-                let nested_metadata = parse_action_metadata(
-                    &fs::read_to_string(&metadata_path)
-                        .with_context(|| format!("read {}", metadata_path.display()))?,
-                )?;
+                let nested_metadata = parse_action_metadata(&read_bounded_file(&metadata_path)?)?;
                 if nested_metadata.runtime()? != ActionRuntime::Composite {
                     bail!("nested local action '{uses}' is not a composite action")
                 }
@@ -1305,7 +1302,12 @@ fn string_input_map(value: Option<&serde_json::Value>) -> Result<BTreeMap<String
                 .iter()
                 .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
             {
-                insert_bounded_input(&mut result, &mut total_bytes, name, input_value(value))?;
+                insert_bounded_input(
+                    &mut result,
+                    &mut total_bytes,
+                    name,
+                    input_value_bounded(value)?,
+                )?;
             }
             Ok(result)
         }
@@ -1314,7 +1316,12 @@ fn string_input_map(value: Option<&serde_json::Value>) -> Result<BTreeMap<String
             let mut total_bytes = 0usize;
             for item in items {
                 if let Some((name, value)) = input_pair(item) {
-                    insert_bounded_input(&mut result, &mut total_bytes, name, input_value(value))?;
+                    insert_bounded_input(
+                        &mut result,
+                        &mut total_bytes,
+                        name,
+                        input_value_bounded(value)?,
+                    )?;
                 }
             }
             Ok(result)
@@ -1397,6 +1404,49 @@ fn input_value(value: &serde_json::Value) -> String {
         }
         _ => String::new(),
     }
+}
+
+fn input_value_bounded(value: &serde_json::Value) -> Result<String> {
+    let mut current = value;
+    for _ in 0..MAX_METADATA_PARSE_NESTING {
+        match current {
+            serde_json::Value::String(value) => {
+                if value.len() > MAX_ACTION_INPUT_VALUE_BYTES {
+                    bail!("action input value exceeds {MAX_ACTION_INPUT_VALUE_BYTES} bytes");
+                }
+                return Ok(value.clone());
+            }
+            serde_json::Value::Null => return Ok(String::new()),
+            serde_json::Value::Bool(value) => return Ok(value.to_string()),
+            serde_json::Value::Number(value) => return Ok(value.to_string()),
+            serde_json::Value::Object(object) => {
+                if let Some(value) = object
+                    .get("value")
+                    .or_else(|| object.get("Value"))
+                    .or_else(|| object.get("lit"))
+                    .or_else(|| object.get("Lit"))
+                {
+                    current = value;
+                    continue;
+                }
+                if let Some(expr) = object
+                    .get("expr")
+                    .or_else(|| object.get("Expr"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    if expr.len() > MAX_ACTION_INPUT_VALUE_BYTES.saturating_sub(7) {
+                        bail!(
+                            "action input expression exceeds {MAX_ACTION_INPUT_VALUE_BYTES} bytes"
+                        );
+                    }
+                    return Ok(format!("${{{{{expr}}}}}"));
+                }
+                return Ok(String::new());
+            }
+            serde_json::Value::Array(_) => return Ok(String::new()),
+        }
+    }
+    bail!("action input value nesting exceeds {MAX_METADATA_PARSE_NESTING} levels")
 }
 
 fn input_value_as_str(value: &serde_json::Value) -> Option<&str> {
@@ -1544,12 +1594,17 @@ fn composite_expression_token_at(
     action_path: &str,
     workspace_container: &str,
 ) -> Option<(usize, String)> {
-    for (name, input) in inputs {
-        let token = format!("inputs.{name}");
-        if ascii_starts_with_case_insensitive(value, &token)
-            && token_boundary_after(value, token.len())
+    if ascii_starts_with_case_insensitive(value, "inputs.") {
+        let name_end = value["inputs.".len()..]
+            .bytes()
+            .position(|byte| !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-')
+            .map_or(value.len(), |offset| offset + "inputs.".len());
+        if name_end > "inputs.".len()
+            && let Some(input) =
+                input_value_case_insensitive(inputs, &value["inputs.".len()..name_end])
+            && token_boundary_after(value, name_end)
         {
-            return Some((token.len(), expression_single_quote(input)));
+            return Some((name_end, expression_single_quote(input)));
         }
     }
     for (token, replacement) in [

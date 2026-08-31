@@ -12112,15 +12112,26 @@ fn hash_file_search_roots(workspace: &Path, patterns: &[String]) -> Vec<PathBuf>
         })
         .collect::<Vec<_>>();
 
+    let candidate_set = candidates.iter().cloned().collect::<BTreeSet<_>>();
+    let mut selected = BTreeSet::new();
     candidates
-        .iter()
-        .enumerate()
-        .filter(|(index, candidate)| {
-            !candidates.iter().enumerate().any(|(other_index, other)| {
-                index != &other_index && candidate != &other && candidate.starts_with(other)
-            })
+        .into_iter()
+        .filter(|candidate| {
+            if selected.contains(candidate) {
+                return false;
+            }
+            let mut ancestor = candidate.clone();
+            while ancestor != workspace {
+                if !ancestor.pop() {
+                    break;
+                }
+                if candidate_set.contains(&ancestor) {
+                    return false;
+                }
+            }
+            selected.insert(candidate.clone());
+            true
         })
-        .map(|(_, candidate)| candidate.clone())
         .collect()
 }
 
