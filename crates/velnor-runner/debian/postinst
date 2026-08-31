@@ -109,6 +109,9 @@ case "$1" in
         all_velnor_units_drained || fail "refusing package configuration: active Velnor service/timer unit(s) remain (${active_units:-unknown}). Stop the exact units first."
       fi
     fi
+    # /run is tmpfs: recreate the transaction-lock path now (not only at boot)
+    # so the documented flock wrapper works immediately after install/upgrade.
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/velnor-runner.conf
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
     # Jailer chroot and writable disks must be exec-capable; /run is tmpfs noexec.
     install -d -m 0750 /var/lib/velnor/microvm /var/lib/velnor/microvm/jailer /var/lib/velnor/microvm/disks /var/lib/velnor/microvm/vsock
