@@ -46,10 +46,45 @@ fn jobs_slice_cpu_quota_is_host_scaled_and_fail_closed() {
     assert!(postrm.contains("--property=ActiveState --value velnor-jobs.slice"));
     assert!(!postrm.contains("inactive|failed"));
     assert!(postrm.contains("require_package_transaction_lock"));
+    assert!(postrm.contains("WORKER_UNIT_GLOB=velnor-job@*.service"));
+    assert!(postrm.contains("systemctl mask --runtime \"$unit\""));
+    assert!(!postrm.contains("systemctl unmask --runtime"));
+    assert!(postrm.contains("active_workers"));
+    assert!(postrm.contains("activating"));
+    assert!(!postrm.contains("systemctl mask --runtime \"velnor*.service\""));
     assert!(postrm.contains("systemctl stop \"$unit\""));
-    assert!(postrm.find("systemctl stop").unwrap() < postrm.find("rm -f").unwrap());
+    let lifecycle = postrm.split("case \"$1\" in").nth(1).unwrap();
+    let unit_enumeration = lifecycle
+        .find("all_units=$(systemctl list-unit-files")
+        .unwrap();
+    let unit_mask = lifecycle
+        .find("systemctl mask --runtime \"$unit\"")
+        .unwrap();
+    let unit_disable = lifecycle.find("systemctl disable \"$unit\"").unwrap();
+    let worker_stop = lifecycle.find("systemctl stop \"$unit\"").unwrap();
+    let worker_proofs: Vec<_> = lifecycle
+        .match_indices("verify_worker_units_inactive")
+        .map(|(offset, _)| offset)
+        .collect();
+    let slice_proofs: Vec<_> = lifecycle
+        .match_indices("verify_jobs_slice_inactive")
+        .map(|(offset, _)| offset)
+        .collect();
+    let dropin_remove = lifecycle.find("rm -f").unwrap();
+    let daemon_reload = lifecycle.find("systemctl daemon-reload").unwrap();
+    assert_eq!(worker_proofs.len(), 2);
+    assert_eq!(slice_proofs.len(), 2);
+    assert!(unit_enumeration < unit_mask);
+    assert!(unit_mask < unit_disable);
+    assert!(unit_mask < worker_stop);
+    assert!(worker_stop < worker_proofs[0]);
+    assert!(worker_proofs[0] < dropin_remove);
+    assert!(slice_proofs[0] < dropin_remove);
+    assert!(dropin_remove < daemon_reload);
+    assert!(daemon_reload < worker_proofs[1]);
+    assert!(worker_proofs[1] < slice_proofs[1]);
+    assert!(daemon_reload < slice_proofs[1]);
     assert!(postrm.contains("not provably inactive; keeping CPU quota"));
-    assert!(postrm.find("systemctl show").unwrap() < postrm.find("rm -f").unwrap());
     assert!(postrm.contains("systemctl daemon-reload"));
 }
 
