@@ -357,7 +357,7 @@ jobs:
             type=gha,scope=velnor-job-ubuntu
           cache-to: |
             type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache,mode=max
-            type=gha,scope=velnor-job-ubuntu,mode=max,ignore-error=true,timeout=1m
+            type=gha,scope=velnor-job-ubuntu,mode=max,ignore-error=true
           secrets: |
             mise_github_token=${{ github.token }}
           build-args: |
