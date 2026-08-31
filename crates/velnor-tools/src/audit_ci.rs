@@ -3173,6 +3173,7 @@ fn compact(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn audit(yaml: &str) -> Vec<Finding> {
         audit_file_with_class(".github/workflows/ci.yml", yaml, None)
@@ -4124,14 +4125,32 @@ jobs:
         path: PathBuf,
     }
 
+    static NEXT_TEST_REPO_ID: AtomicU64 = AtomicU64::new(0);
+
     impl TestRepo {
         fn new() -> Self {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("velnor-concern-test-{nonce}"));
-            fs::create_dir_all(path.join(".github/workflows")).unwrap();
+            let path = (0..128)
+                .find_map(|_| {
+                    let sequence = NEXT_TEST_REPO_ID.fetch_add(1, Ordering::Relaxed);
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos();
+                    let path = std::env::temp_dir().join(format!(
+                        "velnor-concern-test-{}-{nonce}-{sequence}",
+                        std::process::id()
+                    ));
+                    match fs::create_dir(&path) {
+                        Ok(()) => Some(path),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                        Err(error) => panic!("create isolated test repository: {error}"),
+                    }
+                })
+                .unwrap_or_else(|| panic!("create isolated test repository after 128 attempts"));
+            if let Err(error) = fs::create_dir_all(path.join(".github/workflows")) {
+                let _ = fs::remove_dir_all(&path);
+                panic!("initialize isolated test repository: {error}");
+            }
             Self { path }
         }
     }
@@ -4140,6 +4159,24 @@ jobs:
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn test_repos_get_distinct_atomic_directories_under_concurrency() {
+        let handles = (0..8)
+            .map(|_| std::thread::spawn(|| (0..32).map(|_| TestRepo::new()).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        let repos = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("fixture thread completes"))
+            .collect::<Vec<_>>();
+        let paths = repos
+            .iter()
+            .map(|repo| repo.path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paths.len(), repos.len());
+        drop(repos);
+        assert!(paths.iter().all(|path| !path.exists()), "{paths:?}");
     }
 
     fn required_concern_defaults() -> BTreeMap<String, ConcernContract> {

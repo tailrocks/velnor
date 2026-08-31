@@ -1,0 +1,9 @@
+# Plan 010 — transactional host activation, tmpfs state.
+#
+# /run is tmpfs: after every reboot the package-transaction lock path is gone,
+# and the preinst/postinst gates must fail closed (they cannot stat the lock).
+# systemd-tmpfiles recreates the directory and an empty lock file at boot so
+# the documented `flock --no-fork` apt wrapper works without manual host
+# preparation. The lock file carries no state — only its inode is meaningful.
+d /run/velnor 0750 root root - -
+f /run/velnor/package-transaction.lock 0640 root root - -
