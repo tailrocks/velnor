@@ -28,7 +28,12 @@ jobs:
     # Callable-only contract: the attestation subject inputs exist only for
     # workflow_call, so a standalone dispatch is a documented no-op instead of
     # a run that can never satisfy the immutable-source admission.
-    if: ${{ github.event_name == 'workflow_call' }}
+    # A called workflow inherits the CALLER's github.event_name (push,
+    # workflow_dispatch, ...), so event_name can never identify this file's own
+    # standalone dispatch. Discriminate on `lanes`, which only the standalone
+    # dispatch defines: a caller never passes it, a direct dispatch always has
+    # it (default `velnor`).
+    if: ${{ inputs.lanes == '' }}
     runs-on: ${{ inputs.lanes == 'github' && 'ubuntu-26.04' || 'velnor-trusted' }}
     timeout-minutes: 15
     permissions:
