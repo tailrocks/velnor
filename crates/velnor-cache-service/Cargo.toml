@@ -4,10 +4,6 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
-readme.workspace = true
-keywords.workspace = true
-categories.workspace = true
 description = "Lease-safe compiler-cache service for Velnor"
 
 [dependencies]
@@ -22,5 +18,3 @@ velnor-cas = { path = "../velnor-cas", version = "0.1.0" }
 [dev-dependencies]
 tempfile = "=3.27.0"
 tokio.workspace = true
-[lints]
-workspace = true
