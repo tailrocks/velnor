@@ -12986,6 +12986,7 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn daemon_successor_cleanup_surfaces_directory_removal_failure() {
         use wiremock::{
@@ -13993,6 +13994,7 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -14035,6 +14037,7 @@ jobs:
         fs::remove_dir_all(config_dir).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn successful_runner_delete_preserves_identity_when_stale_completion_fails() {
         use wiremock::{
@@ -14083,6 +14086,7 @@ jobs:
         fs::remove_dir_all(config_dir).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn busy_runner_delete_surfaces_leftover_completion_failure() {
         use wiremock::{
@@ -14133,6 +14137,7 @@ jobs:
         fs::remove_dir_all(config_dir).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn busy_runner_delete_surfaces_runner_config_load_failure() {
         use wiremock::{
@@ -14169,6 +14174,7 @@ jobs:
         fs::remove_dir_all(config_dir).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn journal_acceptance_failure_preserves_retry_record_after_failed_completion() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -15022,6 +15028,7 @@ jobs:
         assert_eq!(action, V2MessageAction::None);
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn transient_acquire_failure_keeps_broker_session_alive() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};

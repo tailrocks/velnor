@@ -6285,6 +6285,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn native_json_request_reuses_reqwest_transport_shape() {
         use wiremock::{
@@ -6318,6 +6319,7 @@ mod tests {
         assert_eq!(result, (201, r#"{"ok":true}"#.to_string()));
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn find_runner_group_stops_when_target_is_found() {
         use wiremock::matchers::{method, path, query_param};
@@ -6361,6 +6363,7 @@ mod tests {
         assert_eq!(group.name, "velnor-trusted");
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn jit_rate_limit_returns_without_waiting_for_reset() {
         use wiremock::matchers::{method, path};
@@ -6740,6 +6743,7 @@ mod tests {
         assert_eq!(selected[0].workflow_job_run_backend_id, "producer");
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
         use std::io::{Read, Write};
@@ -6855,6 +6859,7 @@ mod tests {
         assert!(finalize.contains("sha256:"));
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn artifact_upload_preparation_failure_sends_no_create_request() {
         use std::io::{ErrorKind, Read, Write};
@@ -7030,6 +7035,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn artifact_download_rejects_non_200_signed_responses_through_request_path() {
         use std::io::{Read, Write};
@@ -7080,6 +7086,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn results_service_download_rejects_zip_path_traversal() {
         use std::io::{Read, Write};
@@ -7132,6 +7139,7 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn results_service_download_cleans_temp_file_after_copy_failure() {
         use std::io::{Read, Write};
@@ -7195,6 +7203,7 @@ mod tests {
         std::fs::remove_dir(temp_root).unwrap();
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn results_service_download_lists_signs_and_extracts_artifact_v4() {
         use std::io::{Read, Write};
@@ -7288,6 +7297,7 @@ mod tests {
         assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn results_service_download_filters_before_signing_and_downloading() {
         // Regression: a run containing a docker/build-push-action `.dockerbuild`
@@ -7384,6 +7394,7 @@ mod tests {
         assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn results_service_download_preserves_selected_raw_artifacts() {
         // Regression: an unfiltered download-all (merge-multiple) preserves a
@@ -8010,6 +8021,7 @@ mod tests {
         assert!(!acquire_failure_is_transient(&unauthorized));
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn acquire_job_retries_transient_failure_before_parsing_job() {
         use std::sync::{
@@ -8057,6 +8069,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn acquire_job_rejects_malformed_success_without_retrying_or_swallowing() {
         use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
@@ -8654,12 +8667,25 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("userinfo"));
-        assert!(validate_authenticated_url("http://127.0.0.1:8080/api").is_ok());
+        let loopback = validate_authenticated_url("http://127.0.0.1:8080/api");
+        if cfg!(feature = "test-support") {
+            assert!(loopback.is_ok());
+        } else {
+            assert!(loopback.unwrap_err().to_string().contains("HTTPS"));
+        }
     }
 
     #[test]
     fn signed_blob_validation_requires_secure_url_and_redacts_credentials() {
-        assert!(validate_signed_blob_url("http://127.0.0.1:8080/blob", "artifact").is_ok());
+        let loopback = validate_signed_blob_url("http://127.0.0.1:8080/blob", "artifact");
+        if cfg!(feature = "test-support") {
+            assert!(loopback.is_ok());
+        } else {
+            assert!(loopback
+                .unwrap_err()
+                .chain()
+                .any(|cause| cause.to_string().contains("HTTPS")));
+        }
         assert!(validate_signed_blob_url("http://blob.example.com/blob", "artifact").is_err());
         assert!(
             validate_signed_blob_url("https://user:pass@blob.example.com/blob", "artifact")

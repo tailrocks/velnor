@@ -1535,6 +1535,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn org_probe_without_policy_writes_live_group_and_repos() {
         use serde_json::json;
@@ -1729,6 +1730,7 @@ mod tests {
     /// `x-ratelimit-reset`: the probe must surface a deadline derived from
     /// `Retry-After` so the controller paces to the requested delay instead
     /// of the fixed 600s fallback (end-to-end over the native transport).
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn rate_limited_probe_derives_reset_from_retry_after() {
         use wiremock::matchers::{method, path};
@@ -1773,6 +1775,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn org_probe_fails_closed_when_repository_lookup_fails() {
         use serde_json::json;
@@ -1831,6 +1834,7 @@ mod tests {
             .is_some_and(|diagnostic| diagnostic.contains("HTTP 503")));
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn org_probe_does_not_accept_policy_repositories_when_live_response_is_empty() {
         use serde_json::json;
@@ -1899,6 +1903,7 @@ mod tests {
             .is_some_and(|diagnostic| { diagnostic.contains("zero runner-group repositories") }));
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn queued_job_probe_preserves_valid_empty_queue() {
         use serde_json::json;
@@ -1926,6 +1931,7 @@ mod tests {
         assert!(ids.is_empty());
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn queued_job_probe_propagates_http_failure() {
         use wiremock::matchers::{method, path};
@@ -1951,6 +1957,7 @@ mod tests {
         assert!(chain.contains("upstream unavailable"), "{chain}");
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn queued_job_probe_propagates_malformed_response() {
         use wiremock::matchers::{method, path};
