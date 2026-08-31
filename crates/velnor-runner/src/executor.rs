@@ -1780,6 +1780,52 @@ where
                     continue;
                 }
             }
+            // Queue post actions before main execution. Registration is part of
+            // the action lifecycle, not a consequence of a successful main
+            // result: the Err arm below must still be able to run cleanup when
+            // continue-on-error converts an execution error into a step result.
+            if !post_registered
+                && let ExecutableStep::JavaScript {
+                    invocation,
+                    continue_on_error,
+                    timeout_minutes,
+                    ..
+                } = step
+                && invocation.post_container_path.is_some()
+            {
+                post_actions.push(PostJavaScriptAction {
+                    step_id: step_context_id.clone(),
+                    display_name: display_name.clone(),
+                    invocation: invocation.clone(),
+                    condition: invocation.post_condition.clone(),
+                    continue_on_error: *continue_on_error,
+                    timeout_minutes: *timeout_minutes,
+                    umbrella_display: composite_frame
+                        .as_ref()
+                        .map(|frame| frame.display_name.clone()),
+                });
+            }
+            if let ExecutableStep::Native {
+                invocation,
+                continue_on_error,
+                timeout_minutes,
+                ..
+            } = step
+                && let Some(condition) =
+                    native_post_condition(invocation.adapter, invocation.cache_kind)
+            {
+                native_post_actions.push(PostNativeAction {
+                    step_id: step_context_id.clone(),
+                    display_name: display_name.clone(),
+                    invocation: invocation.clone(),
+                    condition: Some(condition.to_string()),
+                    continue_on_error: *continue_on_error,
+                    timeout_minutes: *timeout_minutes,
+                    umbrella_display: composite_frame
+                        .as_ref()
+                        .map(|frame| frame.display_name.clone()),
+                });
+            }
             let step_state = state.with_step_action(&step_context_id);
             let main_started_at = if composite_frame.is_none() && step.reports_timeline_start() {
                 self.emit_step_started(step_backend_id.clone(), &display_name, &mut timeline_order)
@@ -1964,48 +2010,6 @@ where
             match result {
                 Ok(mut result) => {
                     let failed = result.exit_code != 0;
-                    if let ExecutableStep::JavaScript {
-                        invocation,
-                        continue_on_error,
-                        timeout_minutes,
-                        ..
-                    } = step
-                        && invocation.post_container_path.is_some()
-                        && !post_registered
-                    {
-                        post_actions.push(PostJavaScriptAction {
-                            step_id: step_context_id.clone(),
-                            display_name: display_name.clone(),
-                            invocation: invocation.clone(),
-                            condition: invocation.post_condition.clone(),
-                            continue_on_error: *continue_on_error,
-                            timeout_minutes: *timeout_minutes,
-                            umbrella_display: composite_frame
-                                .as_ref()
-                                .map(|frame| frame.display_name.clone()),
-                        });
-                    }
-                    if let ExecutableStep::Native {
-                        invocation,
-                        continue_on_error,
-                        timeout_minutes,
-                        ..
-                    } = step
-                        && let Some(condition) =
-                            native_post_condition(invocation.adapter, invocation.cache_kind)
-                    {
-                        native_post_actions.push(PostNativeAction {
-                            step_id: step_context_id.clone(),
-                            display_name: display_name.clone(),
-                            invocation: invocation.clone(),
-                            condition: Some(condition.to_string()),
-                            continue_on_error: *continue_on_error,
-                            timeout_minutes: *timeout_minutes,
-                            umbrella_display: composite_frame
-                                .as_ref()
-                                .map(|frame| frame.display_name.clone()),
-                        });
-                    }
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
                     }
@@ -2042,8 +2046,54 @@ where
                     results.push(result);
                 }
                 Err(error) => {
-                    step_error = Some(error);
-                    break;
+                    // actions/runner parity (RunStepAsync catch + ApplyContinueOnError):
+                    // a step that fails by throwing still honors
+                    // continue-on-error — outcome stays failure, the reported
+                    // conclusion is success, and the job runs remaining steps.
+                    if step.continue_on_error() {
+                        eprintln!(
+                            "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
+                        );
+                        let result = StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: true,
+                            stdout: String::new(),
+                            stderr: format!("{error:#}"),
+                        };
+                        if let Some(frame) = composite_frame.as_mut() {
+                            if step.reports_timeline_start() {
+                                frame.append_inner(
+                                    &display_name,
+                                    &step_log_prelude(step, &step_state),
+                                    &result,
+                                );
+                            } else {
+                                frame.absorb(&result);
+                            }
+                        } else if step.reports_timeline_start() {
+                            let log = step_log_with_name(
+                                &step_backend_id,
+                                &display_name,
+                                timeline_order,
+                                &main_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &step_log_prelude(step, &step_state),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                        }
+                        state.apply(&step_context_id, &result);
+                        if step.reports_timeline_start() {
+                            executed_physical_actions += 1;
+                        }
+                        results.push(result);
+                    } else {
+                        step_error = Some(error);
+                        break;
+                    }
                 }
             }
             self.live_step = None;
@@ -13005,6 +13055,75 @@ mod tests {
     }
 
     #[derive(Default)]
+    /// Step command execution fails by throwing (Err), not by exit code —
+    /// the actions/runner exception path. `fail_execs` bounds how many
+    /// `docker exec` invocations fail so later steps still run.
+    struct ErroringExecRunner {
+        calls: Vec<(String, Vec<String>)>,
+        fail_execs: usize,
+    }
+
+    impl CommandRunner for ErroringExecRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.first().is_some_and(|arg| arg == "exec") && self.fail_execs > 0 {
+                self.fail_execs -= 1;
+                anyhow::bail!("docker daemon connection lost");
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct MainActionErrorRunner {
+        calls: Vec<(String, Vec<String>)>,
+        failure_marker: String,
+    }
+
+    impl CommandRunner for MainActionErrorRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args
+                .last()
+                .is_some_and(|arg| arg.contains(&self.failure_marker))
+            {
+                bail!("main action execution failed");
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
     struct FailingCheckoutRunner {
         calls: Vec<(String, Vec<String>)>,
     }
@@ -20080,6 +20199,236 @@ fi"#
             })
             .count();
         assert_eq!(exec_count, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    // actions/runner parity (RunStepAsync catch + ExecutionContext.ApplyContinueOnError):
+    // a step that fails by THROWING (not exit code) with continue-on-error: true
+    // keeps outcome=failure for `steps.<id>.outcome`, reports conclusion=success,
+    // and the job runs the remaining steps and finishes green.
+    // Regression: jackin-project/jackin Hygiene run 33319391723 ("miri jackin-config").
+    #[test]
+    fn script_step_execution_error_honors_continue_on_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "miri".into(),
+                display_name: "miri crate".into(),
+                script: "cargo +nightly miri test".into(),
+                shell: Shell::Bash,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: true,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "summary".into(),
+                display_name: "summary".into(),
+                script: "echo summary".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("success()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "outcome-probe".into(),
+                display_name: "probe".into(),
+                script: "echo probe".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("steps.miri.outcome == 'failure'".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+            calls: Vec::new(),
+            fail_execs: 1,
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .expect("continue-on-error step error must not fail the job");
+
+        assert_eq!(summary.step_results.len(), 3);
+        // outcome stays failure internally...
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(!summary.step_results[0].skipped);
+        // ...while the reported conclusion is success (failure_ignored).
+        assert!(summary.step_results[0].failure_ignored);
+        // The job continues: success() is true (conclusion-based)...
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert!(!summary.step_results[1].skipped);
+        // ...and steps.miri.outcome still reports failure.
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        assert!(!summary.step_results[2].skipped);
+        // The step record carries the error text but maps to success.
+        let log = &summary.step_logs[0];
+        assert_eq!(log.display_name, "miri crate");
+        assert!(log.failure_ignored);
+        assert!(log
+            .lines
+            .iter()
+            .any(|line| line.contains("docker daemon connection lost")));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn script_step_execution_error_without_continue_on_error_fails_job() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "miri".into(),
+            display_name: "miri crate".into(),
+            script: "cargo +nightly miri test".into(),
+            shell: Shell::Bash,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        })];
+        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+            calls: Vec::new(),
+            fail_execs: 1,
+        });
+
+        let error = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .expect_err("step execution error without continue-on-error must fail the job");
+        assert!(format!("{error:#}").contains("docker daemon connection lost"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn javascript_post_action_is_registered_before_main_execution_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "action".into(),
+            display_name: "action".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                pre_container_path: None,
+                pre_condition: None,
+                main_container_path: "/__a/_actions/acme_action/v1/main.js".into(),
+                post_container_path: Some("/__a/_actions/acme_action/v1/post.js".into()),
+                post_condition: Some("always()".into()),
+                action_container_path: "/__a/_actions/acme_action/v1".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: true,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
+            calls: Vec::new(),
+            failure_marker: "/__a/_actions/acme_action/v1/main.js".into(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .expect("continue-on-error must preserve the JavaScript post action");
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(summary.step_results[0].failure_ignored);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:20-bookworm".into())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        assert!(node_calls[0].1.ends_with(&[
+            "node:20-bookworm".into(),
+            "/__a/_actions/acme_action/v1/main.js".into()
+        ]));
+        assert!(node_calls[1].1.ends_with(&[
+            "node:20-bookworm".into(),
+            "/__a/_actions/acme_action/v1/post.js".into()
+        ]));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_post_action_is_registered_before_main_execution_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "sccache".into(),
+            display_name: "sccache".into(),
+            invocation: NativeActionInvocation {
+                git_ref: "v1".into(),
+                adapter: NativeActionAdapter::Sccache,
+                cache_kind: None,
+                source_path: None,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: true,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
+            calls: Vec::new(),
+            failure_marker: "sccache --start-server".into(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .expect("continue-on-error must preserve the native post action");
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(summary.step_results[0].failure_ignored);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert!(executor.runner().calls.iter().any(|(_, args)| {
+            args.last()
+                .is_some_and(|arg| arg.contains("sccache --stop-server"))
+        }));
         fs::remove_dir_all(temp).unwrap();
     }
 
