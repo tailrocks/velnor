@@ -44,10 +44,10 @@ impl HealthServer {
         let tmp = self.dir.join(".health.json.tmp");
         std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, &file)?;
-        if let Some(listener) = &self.listener {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let _ = stream.write_all(&json);
-            }
+        if let Some(listener) = &self.listener
+            && let Ok((mut stream, _)) = listener.accept()
+        {
+            let _ = stream.write_all(&json);
         }
         Ok(file)
     }
@@ -59,14 +59,14 @@ impl HealthServer {
 /// Missing document or JSON decode failure.
 pub fn fetch(dir: &Path) -> anyhow::Result<HealthDocument> {
     let socket = dir.join("health.sock");
-    if socket.exists() {
-        if let Ok(mut stream) = UnixStream::connect(&socket) {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut buf = Vec::new();
-            stream.read_to_end(&mut buf)?;
-            if !buf.is_empty() {
-                return Ok(serde_json::from_slice(&buf)?);
-            }
+    if socket.exists()
+        && let Ok(mut stream) = UnixStream::connect(&socket)
+    {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf)?;
+        if !buf.is_empty() {
+            return Ok(serde_json::from_slice(&buf)?);
         }
     }
     let bytes = std::fs::read(dir.join("health.json"))?;

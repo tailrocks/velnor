@@ -788,14 +788,14 @@ fn github_headers(user_agent: &'static str) -> Result<HeaderMap> {
         "X-GitHub-Api-Version",
         HeaderValue::from_static("2026-03-10"),
     );
-    if let Ok(token) = env::var("GITHUB_TOKEN") {
-        if !token.trim().is_empty() {
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {token}"))
-                    .context("build GitHub authorization header")?,
-            );
-        }
+    if let Ok(token) = env::var("GITHUB_TOKEN")
+        && !token.trim().is_empty()
+    {
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}"))
+                .context("build GitHub authorization header")?,
+        );
     }
     Ok(headers)
 }
@@ -2102,25 +2102,25 @@ fn collect_step(surface: &mut TargetSurface, workflow_path: &str, step: &serde_y
     let family = normalize_uses(uses).to_string();
     increment(&mut surface.uses, family.clone());
 
-    if family == "actions/checkout" {
-        if let Some(with) = mapping_get(step, "with").and_then(|value| value.as_mapping()) {
-            for input in with.keys() {
-                let supported = matches!(
-                    input.as_str(),
-                    "repository"
-                        | "ref"
-                        | "token"
-                        | "path"
-                        | "fetch-depth"
-                        | "submodules"
-                        | "persist-credentials"
-                        | "lfs"
-                );
-                if !supported {
-                    surface.unsupported.push(format!(
-                        "{workflow_path}: unsupported actions/checkout input {input}"
-                    ));
-                }
+    if family == "actions/checkout"
+        && let Some(with) = mapping_get(step, "with").and_then(|value| value.as_mapping())
+    {
+        for input in with.keys() {
+            let supported = matches!(
+                input.as_str(),
+                "repository"
+                    | "ref"
+                    | "token"
+                    | "path"
+                    | "fetch-depth"
+                    | "submodules"
+                    | "persist-credentials"
+                    | "lfs"
+            );
+            if !supported {
+                surface.unsupported.push(format!(
+                    "{workflow_path}: unsupported actions/checkout input {input}"
+                ));
             }
         }
     }
@@ -4055,42 +4055,42 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
         bail!("velnor-runner daemon exited with {status}");
     }
 
-    if let Some(run_id) = run_id {
-        if plan.watch_run {
-            println!("==> Waiting for target run completion");
-            let watch_status = Command::new("gh")
-                .args([
-                    "run",
-                    "watch",
-                    &run_id.to_string(),
-                    "--repo",
-                    &plan.repo,
-                    "--exit-status",
-                ])
-                .status()
-                .context("gh run watch")?;
-            if watch_status.success() {
-                write_target_evidence(
-                    root,
-                    "completed",
-                    run_id,
-                    &plan.repo,
-                    &args,
-                    &work_dir,
-                    &dump_job_messages,
-                )?;
-            } else {
-                write_target_evidence(
-                    root,
-                    "completed-with-failure",
-                    run_id,
-                    &plan.repo,
-                    &args,
-                    &work_dir,
-                    &dump_job_messages,
-                )?;
-                bail!("target run completed with failure (exit {})", watch_status);
-            }
+    if let Some(run_id) = run_id
+        && plan.watch_run
+    {
+        println!("==> Waiting for target run completion");
+        let watch_status = Command::new("gh")
+            .args([
+                "run",
+                "watch",
+                &run_id.to_string(),
+                "--repo",
+                &plan.repo,
+                "--exit-status",
+            ])
+            .status()
+            .context("gh run watch")?;
+        if watch_status.success() {
+            write_target_evidence(
+                root,
+                "completed",
+                run_id,
+                &plan.repo,
+                &args,
+                &work_dir,
+                &dump_job_messages,
+            )?;
+        } else {
+            write_target_evidence(
+                root,
+                "completed-with-failure",
+                run_id,
+                &plan.repo,
+                &args,
+                &work_dir,
+                &dump_job_messages,
+            )?;
+            bail!("target run completed with failure (exit {})", watch_status);
         }
     }
 

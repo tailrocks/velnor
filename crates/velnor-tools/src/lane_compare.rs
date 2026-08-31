@@ -710,11 +710,14 @@ pub fn is_regression(
         let Some(current_ratio) = current_stats.velnor_ratio() else {
             continue;
         };
-        let baseline_ratio = baseline
+        let Some(baseline_ratio) = baseline
             .jobs
             .get(job_class)
-            .and_then(|stats| stats.velnor_ratio())
-            .unwrap_or(1.0);
+            .copied()
+            .and_then(JobClassStats::velnor_ratio)
+        else {
+            continue;
+        };
         if current_ratio > baseline_ratio * multiplier {
             reasons.push(format!(
                 "{job_class}: velnor/github ratio {:.2} exceeds baseline {:.2} by >{threshold_pct:.1}%",
@@ -754,11 +757,16 @@ fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
             LaneLogStats::default(),
         )?;
         stats.parity_worse_rows += worse;
+        let (Some(github_seconds), Some(velnor_seconds)) =
+            (job_duration_seconds(github), job_duration_seconds(velnor))
+        else {
+            continue;
+        };
         stats.jobs.insert(
             pair_key(&github.name),
             JobClassStats {
-                github_seconds: job_duration_seconds(github).unwrap_or_default() as f64,
-                velnor_seconds: job_duration_seconds(velnor).unwrap_or_default() as f64,
+                github_seconds: github_seconds as f64,
+                velnor_seconds: velnor_seconds as f64,
             },
         );
     }
@@ -777,6 +785,12 @@ fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
             entry.1 += stats.velnor_seconds;
             entry.2 += 1;
         }
+    }
+    if sums.is_empty() {
+        // No baseline sample produced a complete timing pair. A baseline with
+        // no job timings would silently skip every regression comparison and
+        // false-green the gate, so refuse the baseline instead.
+        return None;
     }
     let jobs = sums
         .into_iter()
@@ -826,18 +840,25 @@ fn regression_report(
         "|-----------|-------------|-----------------|------------|----------------|-------------|"
     )?;
     for (job_class, current_stats) in &current.jobs {
-        let baseline_stats = baseline.jobs.get(job_class).copied().unwrap_or_default();
-        let baseline_ratio = baseline_stats.velnor_ratio().unwrap_or_default();
-        let current_ratio = current_stats.velnor_ratio().unwrap_or_default();
+        let baseline_stats = baseline.jobs.get(job_class).copied();
+        let (baseline_github, baseline_velnor, baseline_ratio) = match baseline_stats {
+            Some(stats) => (
+                format!("{:.1}s", stats.github_seconds),
+                format!("{:.1}s", stats.velnor_seconds),
+                stats
+                    .velnor_ratio()
+                    .map_or_else(|| "—".to_string(), |ratio| format!("{ratio:.2}")),
+            ),
+            None => ("—".to_string(), "—".to_string(), "—".to_string()),
+        };
+        let current_ratio = current_stats
+            .velnor_ratio()
+            .map_or_else(|| "—".to_string(), |ratio| format!("{ratio:.2}"));
         writeln!(
             report,
-            "| {job_class} | {:.1}s | {:.1}s | {:.1}s | {:.1}s | {:.2} -> {:.2} |",
-            baseline_stats.github_seconds,
-            baseline_stats.velnor_seconds,
+            "| {job_class} | {baseline_github} | {baseline_velnor} | {:.1}s | {:.1}s | {baseline_ratio} -> {current_ratio} |",
             current_stats.github_seconds,
             current_stats.velnor_seconds,
-            baseline_ratio,
-            current_ratio,
         )?;
     }
     writeln!(report)?;
@@ -869,18 +890,22 @@ fn job_duration_seconds(job: &Job) -> Option<i64> {
     let mut started = None;
     let mut completed = None;
     for step in &job.steps {
-        let step_start = parse_rfc3339(step.started_at.as_deref()?);
-        let step_end = parse_rfc3339(step.completed_at.as_deref()?);
-        if let (Some(step_start), Some(step_end)) = (step_start, step_end) {
-            started = Some(started.map_or(step_start, |current: time::OffsetDateTime| {
-                current.min(step_start)
-            }));
-            completed = Some(completed.map_or(step_end, |current: time::OffsetDateTime| {
-                current.max(step_end)
-            }));
-        }
+        let (Some(step_start), Some(step_end)) = (
+            step.started_at.as_deref().and_then(parse_rfc3339),
+            step.completed_at.as_deref().and_then(parse_rfc3339),
+        ) else {
+            continue;
+        };
+        started = Some(started.map_or(step_start, |current: time::OffsetDateTime| {
+            current.min(step_start)
+        }));
+        completed = Some(completed.map_or(step_end, |current: time::OffsetDateTime| {
+            current.max(step_end)
+        }));
     }
-    Some((completed? - started?).whole_seconds())
+    started
+        .zip(completed)
+        .map(|(started, completed)| (completed - started).whole_seconds())
 }
 
 enum AlignedRow<'a> {
@@ -1049,10 +1074,11 @@ fn step_verdict(
     }
     let gh_expandable = github_html.get(&github.number).map(|step| step.expandable);
     let vl_expandable = velnor_html.get(&velnor.number).map(|step| step.expandable);
-    if executed(github) && executed(velnor) {
-        if let (Some(true), Some(false)) = (gh_expandable, vl_expandable) {
-            worse.push("not expandable".to_string());
-        }
+    if executed(github)
+        && executed(velnor)
+        && let (Some(true), Some(false)) = (gh_expandable, vl_expandable)
+    {
+        worse.push("not expandable".to_string());
     }
     if worse.is_empty() {
         ("ok".to_string(), false)
@@ -1205,6 +1231,17 @@ mod tests {
             number,
             started_at: Some("2026-06-11T07:00:00Z".to_string()),
             completed_at: Some("2026-06-11T07:00:05Z".to_string()),
+        }
+    }
+
+    fn job(steps: Vec<Step>) -> Job {
+        Job {
+            id: 1,
+            name: "compat (app-a, github)".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+            html_url: None,
+            steps,
         }
     }
 
@@ -1437,6 +1474,35 @@ mod tests {
     }
 
     #[test]
+    fn job_duration_skips_incomplete_and_malformed_steps() {
+        let mut incomplete = step(1, "incomplete", "success");
+        incomplete.completed_at = None;
+        let mut malformed = step(2, "malformed", "success");
+        malformed.started_at = Some("not-rfc3339".to_string());
+        let mut valid = step(3, "valid", "success");
+        valid.started_at = Some("2026-06-11T07:00:10Z".to_string());
+        valid.completed_at = Some("2026-06-11T07:00:17Z".to_string());
+
+        assert_eq!(
+            job_duration_seconds(&job(vec![incomplete, malformed, valid])),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn job_duration_is_unavailable_without_a_complete_pair() {
+        let mut incomplete = step(1, "incomplete", "success");
+        incomplete.started_at = None;
+        let mut malformed = step(2, "malformed", "success");
+        malformed.completed_at = Some("not-rfc3339".to_string());
+
+        assert_eq!(
+            job_duration_seconds(&job(vec![incomplete, malformed])),
+            None
+        );
+    }
+
+    #[test]
     fn class_d_wall_budget_accepts_sixty_seconds() {
         assert_eq!(
             wall_budget_verdict(RunClass::D, 60),
@@ -1508,5 +1574,50 @@ mod tests {
         let verdict = is_regression(&baseline, &current, 0.0);
 
         assert!(!verdict.regression, "{:?}", verdict.reasons);
+    }
+
+    #[test]
+    fn is_regression_skips_job_without_baseline_timing() {
+        let baseline = LaneStats::default();
+        let current = lane_stats(100.0, 140.0, 0);
+
+        let verdict = is_regression(&baseline, &current, 0.0);
+
+        assert!(!verdict.regression, "{:?}", verdict.reasons);
+    }
+
+    #[test]
+    fn baseline_from_samples_rejects_samples_without_usable_timing() {
+        let samples = vec![LaneStats::default(), LaneStats::default()];
+
+        assert!(baseline_from_samples(&samples).is_none());
+    }
+
+    #[test]
+    fn baseline_from_samples_accepts_partial_timing_coverage() {
+        let samples = vec![lane_stats(100.0, 110.0, 0), LaneStats::default()];
+
+        let baseline = baseline_from_samples(&samples).expect("baseline should be usable");
+
+        assert_eq!(baseline.baseline_runs, 2);
+        assert_eq!(baseline.jobs.len(), 1);
+    }
+
+    #[test]
+    fn regression_report_marks_missing_baseline_timing_unavailable() {
+        let baseline = LaneStats::default();
+        let current = lane_stats(100.0, 140.0, 0);
+
+        let report = regression_report(
+            "tailrocks/velnor",
+            "compat.yml",
+            &baseline,
+            &current,
+            &is_regression(&baseline, &current, 0.0),
+        )
+        .expect("report should render");
+
+        assert!(report.contains("| compat (app-a | — | — | 100.0s | 140.0s | — -> 1.40 |"));
+        assert!(!report.contains("| 0.0s |"));
     }
 }

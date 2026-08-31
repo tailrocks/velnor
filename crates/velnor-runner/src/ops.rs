@@ -256,19 +256,19 @@ impl<'a> RetentionLeaseGuard<'a> {
 
 impl Drop for RetentionLeaseGuard<'_> {
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            if self.store.release_retention_lease_final(&lease).is_err() {
-                if let Some(sink) = self.telemetry {
-                    sink.report_lease_finalization_failure();
-                } else {
-                    eprintln!(
-                        "{}",
-                        forensic_failure_line(
-                            "store.prune-lease-release",
-                            "bounded finalization attempt failed",
-                        )
-                    );
-                }
+        if let Some(lease) = self.lease.take()
+            && self.store.release_retention_lease_final(&lease).is_err()
+        {
+            if let Some(sink) = self.telemetry {
+                sink.report_lease_finalization_failure();
+            } else {
+                eprintln!(
+                    "{}",
+                    forensic_failure_line(
+                        "store.prune-lease-release",
+                        "bounded finalization attempt failed",
+                    )
+                );
             }
         }
     }

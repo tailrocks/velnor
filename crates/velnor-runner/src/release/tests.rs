@@ -208,6 +208,18 @@ fn debian_package_includes_fleet_policy_audit_units() {
 
     let service = include_str!("../../../velnor-tools/debian/velnor-fleet-policy-audit.service");
     assert!(
+        service.contains(
+            "ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /bin/sh -c "
+        ),
+        "fleet-policy audit service must hold the shared package transaction lock"
+    );
+    assert!(
+        service.contains(
+            "RuntimeDirectory=velnor\nRuntimeDirectoryMode=0750\nRuntimeDirectoryPreserve=yes"
+        ),
+        "fleet-policy audit service must preserve its shared runtime directory securely"
+    );
+    assert!(
         service.contains("/usr/bin/velnor-tools fleet-policy audit --policy "),
         "fleet-policy audit service must invoke the packaged audit command"
     );

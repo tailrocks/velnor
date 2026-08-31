@@ -12,6 +12,8 @@ Velnor unified CI contract (2026-08-09):
 - Performance: maximize correctness-safe warm and cross-workflow reuse; bound GitHub cache-key cardinality and eviction; prefer compatible partial restore over cold rebuild; use larger persistent Velnor caches only with isolation, quotas, cleanup, and disk attribution intact.
 - Product ownership: missing workflow capability is implemented in Velnor, never hidden by a repository-local workaround.
 - Supersession: every conflicting earlier execution authority, estate count or membership, class, selector, default, trust route, cache policy, or merge-context statement in this repository is historical and non-executable.
+- Repository map: README → ## Repository map
+- Deferred work: repolint.toml [[deferred.item]]
 <!-- unified-ci-contract:end -->
 
 ## HARD RULEs

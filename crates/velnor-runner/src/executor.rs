@@ -426,14 +426,14 @@ impl CommandRunner for ProcessCommandRunner {
         } else {
             None
         };
-        if let Some(claim) = rm_claim.as_ref() {
-            if claim.ids.is_empty() {
-                return Ok(CommandResult {
-                    code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
+        if let Some(claim) = rm_claim.as_ref()
+            && claim.ids.is_empty()
+        {
+            return Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
         }
         let claimed_args = rm_claim
             .as_ref()
@@ -1210,6 +1210,10 @@ pub(crate) struct DockerJobEngine<R> {
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
     docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
+    /// Armed when the job network is created, defused once terminal cleanup
+    /// removed it. Drop then removes the network, so no executor exit path can
+    /// leak a `velnor-net-*` network (address-pool exhaustion class).
+    job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
 }
 
@@ -1239,6 +1243,7 @@ where
             live_step: None,
             job_environment_started: false,
             docker_lease: None,
+            job_network_guard: None,
             lifecycle_telemetry: None,
         }
     }
@@ -1712,73 +1717,67 @@ where
                 timeout_minutes,
                 ..
             } = step
+                && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
+                && step_state.evaluate_post_condition(invocation.pre_condition.as_deref())
             {
-                if let Some(pre_container_path) = invocation.pre_container_path.as_deref() {
-                    if step_state.evaluate_post_condition(invocation.pre_condition.as_deref()) {
-                        if invocation.post_container_path.is_some() {
-                            post_actions.push(PostJavaScriptAction {
-                                step_id: step_id.clone(),
-                                display_name: display_name.clone(),
-                                invocation: invocation.clone(),
-                                condition: invocation.post_condition.clone(),
-                                continue_on_error: *continue_on_error,
-                                timeout_minutes: *timeout_minutes,
-                                umbrella_display: composite_frame
-                                    .as_ref()
-                                    .map(|frame| frame.display_name.clone()),
-                            });
-                            post_registered = true;
-                        }
-                        let pre_step_id = uuid::Uuid::new_v4().to_string();
-                        let pre_started_at = if composite_frame.is_none() {
-                            self.emit_step_started(
-                                pre_step_id.clone(),
-                                &display_name,
-                                &mut timeline_order,
-                            )
-                        } else {
-                            unix_now_rfc3339()
-                        };
-                        let mut result = self.execute_javascript_action_in_started_container(
-                            container,
-                            step_id,
-                            invocation,
-                            pre_container_path,
-                            &step_state.action_state_env(step_id),
-                            temp_host,
-                            &step_state,
-                            effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                        )?;
-                        let failed = result.exit_code != 0;
-                        if failed && *continue_on_error {
-                            result.failure_ignored = true;
-                        }
-                        if let Some(frame) = composite_frame.as_mut() {
-                            frame.append_inner(
-                                &display_name,
-                                &step_log_prelude(step, &step_state),
-                                &result,
-                            );
-                        } else {
-                            let log = step_log_with_name(
-                                &pre_step_id,
-                                &display_name,
-                                timeline_order,
-                                &pre_started_at,
-                                &unix_now_rfc3339(),
-                                &result,
-                                &step_log_prelude(step, &step_state),
-                            );
-                            self.emit_step_log(&log);
-                            step_logs.push(log);
-                        }
-                        state.apply(step_id, &result);
-                        executed_physical_actions += 1;
-                        results.push(result);
-                        if failed {
-                            continue;
-                        }
-                    }
+                if invocation.post_container_path.is_some() {
+                    post_actions.push(PostJavaScriptAction {
+                        step_id: step_id.clone(),
+                        display_name: display_name.clone(),
+                        invocation: invocation.clone(),
+                        condition: invocation.post_condition.clone(),
+                        continue_on_error: *continue_on_error,
+                        timeout_minutes: *timeout_minutes,
+                        umbrella_display: composite_frame
+                            .as_ref()
+                            .map(|frame| frame.display_name.clone()),
+                    });
+                    post_registered = true;
+                }
+                let pre_step_id = uuid::Uuid::new_v4().to_string();
+                let pre_started_at = if composite_frame.is_none() {
+                    self.emit_step_started(pre_step_id.clone(), &display_name, &mut timeline_order)
+                } else {
+                    unix_now_rfc3339()
+                };
+                let mut result = self.execute_javascript_action_in_started_container(
+                    container,
+                    step_id,
+                    invocation,
+                    pre_container_path,
+                    &step_state.action_state_env(step_id),
+                    temp_host,
+                    &step_state,
+                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
+                )?;
+                let failed = result.exit_code != 0;
+                if failed && *continue_on_error {
+                    result.failure_ignored = true;
+                }
+                if let Some(frame) = composite_frame.as_mut() {
+                    frame.append_inner(
+                        &display_name,
+                        &step_log_prelude(step, &step_state),
+                        &result,
+                    );
+                } else {
+                    let log = step_log_with_name(
+                        &pre_step_id,
+                        &display_name,
+                        timeline_order,
+                        &pre_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                        &step_log_prelude(step, &step_state),
+                    );
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                }
+                state.apply(step_id, &result);
+                executed_physical_actions += 1;
+                results.push(result);
+                if failed {
+                    continue;
                 }
             }
             let step_state = state.with_step_action(&step_context_id);
@@ -1971,20 +1970,20 @@ where
                         timeout_minutes,
                         ..
                     } = step
+                        && invocation.post_container_path.is_some()
+                        && !post_registered
                     {
-                        if invocation.post_container_path.is_some() && !post_registered {
-                            post_actions.push(PostJavaScriptAction {
-                                step_id: step_context_id.clone(),
-                                display_name: display_name.clone(),
-                                invocation: invocation.clone(),
-                                condition: invocation.post_condition.clone(),
-                                continue_on_error: *continue_on_error,
-                                timeout_minutes: *timeout_minutes,
-                                umbrella_display: composite_frame
-                                    .as_ref()
-                                    .map(|frame| frame.display_name.clone()),
-                            });
-                        }
+                        post_actions.push(PostJavaScriptAction {
+                            step_id: step_context_id.clone(),
+                            display_name: display_name.clone(),
+                            invocation: invocation.clone(),
+                            condition: invocation.post_condition.clone(),
+                            continue_on_error: *continue_on_error,
+                            timeout_minutes: *timeout_minutes,
+                            umbrella_display: composite_frame
+                                .as_ref()
+                                .map(|frame| frame.display_name.clone()),
+                        });
                     }
                     if let ExecutableStep::Native {
                         invocation,
@@ -1992,22 +1991,20 @@ where
                         timeout_minutes,
                         ..
                     } = step
-                    {
-                        if let Some(condition) =
+                        && let Some(condition) =
                             native_post_condition(invocation.adapter, invocation.cache_kind)
-                        {
-                            native_post_actions.push(PostNativeAction {
-                                step_id: step_context_id.clone(),
-                                display_name: display_name.clone(),
-                                invocation: invocation.clone(),
-                                condition: Some(condition.to_string()),
-                                continue_on_error: *continue_on_error,
-                                timeout_minutes: *timeout_minutes,
-                                umbrella_display: composite_frame
-                                    .as_ref()
-                                    .map(|frame| frame.display_name.clone()),
-                            });
-                        }
+                    {
+                        native_post_actions.push(PostNativeAction {
+                            step_id: step_context_id.clone(),
+                            display_name: display_name.clone(),
+                            invocation: invocation.clone(),
+                            condition: Some(condition.to_string()),
+                            continue_on_error: *continue_on_error,
+                            timeout_minutes: *timeout_minutes,
+                            umbrella_display: composite_frame
+                                .as_ref()
+                                .map(|frame| frame.display_name.clone()),
+                        });
                     }
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
@@ -2234,16 +2231,15 @@ where
         if target_materialized
             && step_error.is_none()
             && persistent_target_results_publishable(&results)
-        {
-            if let Err(error) = publish_persistent_target(
+            && let Err(error) = publish_persistent_target(
                 container,
                 state.env.get("GITHUB_SHA").map(String::as_str),
-            ) {
-                eprintln!(
-                    "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
-                    container.name
-                );
-            }
+            )
+        {
+            eprintln!(
+                "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
+                container.name
+            );
         }
         if let Some(error) = step_error {
             return Err(error);
@@ -3557,8 +3553,23 @@ where
         Ok(files)
     }
 
+    /// Disarm the job-network guard after terminal cleanup removed the
+    /// network; a failed cleanup keeps it armed so its drop retries removal.
+    fn defuse_job_network_guard(&mut self) {
+        if let Some(guard) = self.job_network_guard.take() {
+            guard.defuse();
+        }
+    }
+
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard()?;
+        // Service containers hold endpoints on the job network. Remove them
+        // BEFORE reclaiming job-owned resources: reclaim includes the network,
+        // and `docker network rm` fails while an endpoint is still attached.
+        // The old order (reclaim first) failed the network removal on every
+        // service job and orphaned the network once the services went away —
+        // the `velnor-net-*` address-pool exhaustion leak.
+        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Job container is gone; abort in-flight Engine HTTP (BuildKit start)
         // before reclaim. `docker rm` of Created BuildKit waits forever on
@@ -3566,13 +3577,17 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
-        let service_result = self.cleanup_services_unlocked(container);
 
-        container_result?;
-        owned_result?;
-        buildkit_result?;
-        service_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result?;
+            buildkit_result?;
+            service_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     /// Remove the job-owned containers, services, network, and lease without
@@ -3588,18 +3603,25 @@ where
     }
 
     fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
+        // Services first: their endpoints block the network removal inside
+        // reclaim (see `cleanup`).
+        let service_result = self.cleanup_services_unlocked(container);
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Abort in-flight Engine HTTP before the deferred BuildKit worker
         // runs. Dropping the lease at the end used to leave ContainerStart
         // held, so the worker's `docker rm` of Created BuildKit hung.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let service_result = self.cleanup_services_unlocked(container);
 
-        container_result?;
-        owned_result?;
-        service_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result?;
+            service_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -3625,10 +3647,15 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
-        container_result?;
-        owned_result?;
-        buildkit_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result?;
+            buildkit_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     pub(crate) fn cleanup_job_and_network_without_buildkit(
@@ -3646,9 +3673,14 @@ where
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        container_result?;
-        owned_result?;
-        Ok(())
+        let result = (|| {
+            container_result?;
+            owned_result
+        })();
+        if result.is_ok() {
+            self.defuse_job_network_guard();
+        }
+        result
     }
 
     fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
@@ -3793,9 +3825,23 @@ where
         // calls. Readiness polling below can take up to 30s and does not
         // mutate Docker state; keeping the permit across it serializes other
         // slots behind a non-mutating wait.
+        // Retrying this function reuses the same network name: retire any
+        // guard from a previous attempt BEFORE creating, so its drop can never
+        // remove the freshly created network.
+        if let Some(previous) = self.job_network_guard.take() {
+            drop(previous);
+        }
         self.with_docker_lifecycle(|executor| {
             executor.run_docker(&container.create_network_args())
         })?;
+        // Own the network from creation to terminal cleanup. Dropping the
+        // executor on any error path now removes it instead of leaking it.
+        // Defuse only after cleanup reclaimed it; Docker refuses to remove a
+        // network with active endpoints, so a late guard fire cannot break a
+        // live job.
+        self.job_network_guard = Some(crate::docker_lease::JobNetworkGuard::arm(
+            container.network.clone(),
+        ));
         for service in &container.services {
             self.with_docker_lifecycle(|executor| executor.run_docker(&service.start_args()))?;
             self.wait_for_service(service)?;
@@ -3942,7 +3988,22 @@ where
             ))
             .ok();
         }
-        self.reclaim_stale_job_owned_docker(&container.name).ok();
+        if self.reclaim_stale_job_owned_docker(&container.name).is_ok() {
+            // The stale reclaim can legitimately skip the network (its
+            // liveness gate only guards containers). Remove it explicitly:
+            // the job container is absent or stopped here, so no endpoint can
+            // block the removal. A "not found" is success — already gone.
+            let removed =
+                match self.run_docker_cleanup(&crate::docker_lease::force_remove_network_args(
+                    std::slice::from_ref(&container.network),
+                )) {
+                    Ok(_) => true,
+                    Err(error) => error.to_string().contains("not found"),
+                };
+            if removed {
+                self.defuse_job_network_guard();
+            }
+        }
     }
 
     fn reclaim_stale_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
@@ -4168,10 +4229,9 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
         if matches!(
             name.as_str(),
             "GITHUB_OUTPUT" | "GITHUB_ENV" | "GITHUB_PATH" | "GITHUB_STATE" | "GITHUB_STEP_SUMMARY"
-        ) {
-            if let Some(file_name) = value.strip_prefix("/__t/") {
-                *value = format!("/github/file_commands/{file_name}");
-            }
+        ) && let Some(file_name) = value.strip_prefix("/__t/")
+        {
+            *value = format!("/github/file_commands/{file_name}");
         }
     }
 }
@@ -4771,10 +4831,10 @@ fn native_cache_restore_main(
     let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
     let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version, &path)?;
-    if let Some(matched_key) = &matched_key {
-        if !lookup_only {
-            restore_cache_paths(&action_state, matched_key, &path, &version)?;
-        }
+    if let Some(matched_key) = &matched_key
+        && !lookup_only
+    {
+        restore_cache_paths(&action_state, matched_key, &path, &version)?;
     }
     let restore_ms = t0.elapsed().as_millis();
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
@@ -5401,17 +5461,16 @@ fn cache_glob_source_overlaps_persistent_exact(
         if has_glob_pattern(declared) || !velnor_persistent_cache_path(state, declared) {
             continue;
         }
-        if state.persistent_workspace_target {
-            if let Some(target_relative) = workspace_target_relative(declared) {
-                if relative == target_relative || relative.starts_with(&target_relative) {
-                    return true;
-                }
-            }
+        if state.persistent_workspace_target
+            && let Some(target_relative) = workspace_target_relative(declared)
+            && (relative == target_relative || relative.starts_with(&target_relative))
+        {
+            return true;
         }
-        if let Some(persistent_path) = resolve_cache_path(state, declared) {
-            if source == persistent_path || source.starts_with(&persistent_path) {
-                return true;
-            }
+        if let Some(persistent_path) = resolve_cache_path(state, declared)
+            && (source == persistent_path || source.starts_with(&persistent_path))
+        {
+            return true;
         }
     }
     false
@@ -6582,59 +6641,56 @@ fn native_upload_artifact(
     // jobs (like compare/aggregate jobs) can download the artifact via
     // `actions/download-artifact`. Without this, only same-host Velnor jobs can
     // access local artifacts.
-    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN") {
-        if let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token) {
-            // Pass artifact-store paths directly. The Results Service upload
-            // streams each source file and never materializes the artifact in RAM.
-            let zip_files = artifact_upload_sources(
-                &name,
-                &artifact_dir,
-                RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS,
-            )?
-            .into_iter()
-            .map(|source| crate::protocol::ArtifactUploadFile {
-                archive_path: source.file_name,
-                source: crate::protocol::ArtifactUploadSource::Relative {
-                    root: source.root,
-                    relative: source.relative,
-                },
-                source_path: source.path,
-            })
-            .collect::<Vec<_>>();
-            if !zip_files.is_empty() {
-                match crate::protocol::upload_artifact_files_blocking(
-                    &results_url,
-                    runtime_token,
-                    &plan_id,
-                    &job_id,
-                    &name,
-                    zip_files,
-                    crate::protocol::ArtifactUploadOptions {
-                        store_uncompressed,
-                        retention_days,
-                        overwrite,
+    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN")
+        && let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token)
+    {
+        // Pass artifact-store paths directly. The Results Service upload
+        // streams each source file and never materializes the artifact in RAM.
+        let zip_files =
+            artifact_upload_sources(&name, &artifact_dir, RESULTS_ARTIFACT_UPLOAD_SOURCE_LIMITS)?
+                .into_iter()
+                .map(|source| crate::protocol::ArtifactUploadFile {
+                    archive_path: source.file_name,
+                    source: crate::protocol::ArtifactUploadSource::Relative {
+                        root: source.root,
+                        relative: source.relative,
                     },
-                ) {
-                    Ok(finalized) => {
-                        artifact_id = finalized.id;
-                        digest = finalized.digest;
-                    }
-                    Err(e) => {
-                        let message =
-                            format!("Results Service artifact upload failed for '{name}': {e:#}\n");
-                        eprintln!("{message}");
-                        return Ok(StepExecutionResult {
-                            exit_code: 1,
-                            state: StepCommandState::default(),
-                            skipped: false,
-                            failure_ignored: false,
-                            stdout: format!(
-                                "Saved local artifact '{name}' with {} path(s)\n",
-                                uploaded_count
-                            ),
-                            stderr: message,
-                        });
-                    }
+                    source_path: source.path,
+                })
+                .collect::<Vec<_>>();
+        if !zip_files.is_empty() {
+            match crate::protocol::upload_artifact_files_blocking(
+                &results_url,
+                runtime_token,
+                &plan_id,
+                &job_id,
+                &name,
+                zip_files,
+                crate::protocol::ArtifactUploadOptions {
+                    store_uncompressed,
+                    retention_days,
+                    overwrite,
+                },
+            ) {
+                Ok(finalized) => {
+                    artifact_id = finalized.id;
+                    digest = finalized.digest;
+                }
+                Err(e) => {
+                    let message =
+                        format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                    eprintln!("{message}");
+                    return Ok(StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: format!(
+                            "Saved local artifact '{name}' with {} path(s)\n",
+                            uploaded_count
+                        ),
+                        stderr: message,
+                    });
                 }
             }
         }
@@ -7269,13 +7325,13 @@ fn append_pages_archive_dir<W: Write>(
         };
         match opened {
             crate::fs_copy::NoFollowSource::Directory(directory) => {
-                if let Some(canonical) = &canonical {
-                    if !active_directories.insert(canonical.clone()) {
-                        bail!(
-                            "Pages artifact directory contains a symlink cycle at {}",
-                            child.display()
-                        );
-                    }
+                if let Some(canonical) = &canonical
+                    && !active_directories.insert(canonical.clone())
+                {
+                    bail!(
+                        "Pages artifact directory contains a symlink cycle at {}",
+                        child.display()
+                    );
                 }
                 record_pages_archive_entry(bounds, &child_relative, 0)?;
                 append_pages_directory_header(builder, &child_relative)?;
@@ -8568,13 +8624,12 @@ fn preflight_prepared_artifact_zip<R: Read + std::io::Seek>(
         for ancestor in ordered_entries[index].relative.ancestors().skip(1) {
             if let Ok(ancestor_index) =
                 ordered_entries.binary_search_by(|entry| entry.relative.as_path().cmp(ancestor))
+                && !ordered_entries[ancestor_index].is_directory
             {
-                if !ordered_entries[ancestor_index].is_directory {
-                    bail!(
-                        "prepared CI artifact archive has a file ancestor conflict at {}",
-                        ancestor.display()
-                    );
-                }
+                bail!(
+                    "prepared CI artifact archive has a file ancestor conflict at {}",
+                    ancestor.display()
+                );
             }
         }
     }
@@ -8714,14 +8769,13 @@ fn repository_artifact_matches_trusted_producer(
     if event.starts_with("pull_request") {
         return false;
     }
-    if let Some(branch) = current_ref.strip_prefix("refs/heads/") {
-        if workflow_run
+    if let Some(branch) = current_ref.strip_prefix("refs/heads/")
+        && workflow_run
             .get("head_branch")
             .and_then(serde_json::Value::as_str)
             != Some(branch)
-        {
-            return false;
-        }
+    {
+        return false;
     }
     true
 }
@@ -9306,10 +9360,10 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     if path.is_empty() || artifact_path_has_parent_component(path) {
         return None;
     }
-    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
-        if let Some(base) = &state.cargo_target_host {
-            return Some(base.clone());
-        }
+    if (path == "target" || path == "/__w/target" || path == "/github/workspace/target")
+        && let Some(base) = &state.cargo_target_host
+    {
+        return Some(base.clone());
     }
     for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
         if let Some(rest) = path.strip_prefix(prefix) {
@@ -17698,7 +17752,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let results = executor
@@ -17724,7 +17778,12 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls[4].1,
             crate::docker_lease::list_owned_volumes_args("job")
         );
-        assert_eq!(calls[5].1, expected_network_create_args());
+        // Retry cleanup removes the job network before the retry recreates it.
+        assert_eq!(
+            calls[5].1,
+            crate::docker_lease::force_remove_network_args(&["net".to_string()])
+        );
+        assert_eq!(calls[6].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -17736,7 +17795,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -17762,23 +17821,31 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls[4].1,
             crate::docker_lease::list_owned_volumes_args("job")
         );
-        assert_eq!(calls[5].1, expected_network_create_args());
-        assert_eq!(calls[6].1[0], "run");
         assert_eq!(
-            calls[7].1,
-            crate::docker_lease::list_owned_containers_state_args("job")
+            calls[5].1,
+            crate::docker_lease::force_remove_network_args(&["net".to_string()])
         );
+        assert_eq!(calls[6].1, expected_network_create_args());
+        assert_eq!(calls[7].1[0], "run");
         assert_eq!(
             calls[8].1,
             crate::docker_lease::list_owned_containers_state_args("job")
         );
         assert_eq!(
             calls[9].1,
-            crate::docker_lease::list_owned_networks_args("job")
+            crate::docker_lease::list_owned_containers_state_args("job")
         );
         assert_eq!(
             calls[10].1,
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls[11].1,
             crate::docker_lease::list_owned_volumes_args("job")
+        );
+        assert_eq!(
+            calls[12].1,
+            crate::docker_lease::force_remove_network_args(&["net".to_string()])
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -24402,10 +24469,10 @@ bitcoin-processor-app.push=true")
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key == name {
-                        if let Some(value) = value.as_str() {
-                            strings.push(value);
-                        }
+                    if key == name
+                        && let Some(value) = value.as_str()
+                    {
+                        strings.push(value);
                     }
                     collect_yaml_key_strings(value, name, strings);
                 }

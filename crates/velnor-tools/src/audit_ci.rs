@@ -1791,19 +1791,19 @@ fn audit_generated_caller(
                 "owner callable class must be exactly code, tap, apt, or fixture",
             ));
         }
-        if let (Some(observed), Some(expected)) = (parsed_class, expected_class) {
-            if observed != expected {
-                findings.push(Finding::error(
-                    "generated-caller",
-                    file,
-                    format!("$.jobs.{owner}.uses"),
-                    format!(
-                        "canonical fleet map requires class {}, observed {}",
-                        expected.as_str(),
-                        observed.as_str()
-                    ),
-                ));
-            }
+        if let (Some(observed), Some(expected)) = (parsed_class, expected_class)
+            && observed != expected
+        {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.uses"),
+                format!(
+                    "canonical fleet map requires class {}, observed {}",
+                    expected.as_str(),
+                    observed.as_str()
+                ),
+            ));
         }
         if sha.len() != SHA_LEN || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             findings.push(Finding::error(
@@ -2103,15 +2103,15 @@ fn audit_steps(
                 "remove hardcoded runner identity from workload scripts",
             ));
         }
-        if let Some(condition) = object_get(step, "if").and_then(Value::as_str) {
-            if condition.contains("matrix.config.lane") {
-                findings.push(Finding::error(
-                    "lane-conditional",
-                    file,
-                    format!("{path}.if"),
-                    "step lane branching is forbidden; only matrix.config.writer is sanctioned",
-                ));
-            }
+        if let Some(condition) = object_get(step, "if").and_then(Value::as_str)
+            && condition.contains("matrix.config.lane")
+        {
+            findings.push(Finding::error(
+                "lane-conditional",
+                file,
+                format!("{path}.if"),
+                "step lane branching is forbidden; only matrix.config.writer is sanctioned",
+            ));
         }
         let Some(uses) = object_get(step, "uses").and_then(Value::as_str) else {
             continue;
@@ -2138,34 +2138,32 @@ fn audit_steps(
         }
         sccache |= family == "mozilla-actions/sccache-action";
         swatinem |= family == "Swatinem/rust-cache";
-        if family == "actions/cache" {
-            if let Some(with) = object_get(step, "with") {
-                let caches_target = object_get(with, "path").is_some_and(|value| {
-                    compact(value).lines().any(|line| line.contains("target"))
-                });
-                fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
-                    compact(value).lines().any(|line| {
-                        let path = line.trim();
-                        path == "fuzz/target" || path.ends_with("/fuzz/target")
-                    })
-                });
-                target_cache |= caches_target;
-                if caches_target {
-                    first_target_cache_step.get_or_insert(index);
-                }
-                literal_target_cache |= object_get(with, "path").is_some_and(|value| {
-                    compact(value).lines().any(|line| line.trim() == "target")
-                });
-                if caches_target {
-                    let key = object_get(with, "key").map(compact).unwrap_or_default();
-                    let restore = object_get(with, "restore-keys")
-                        .map(compact)
-                        .unwrap_or_default();
-                    target_cache_generation |= key.contains("github.sha")
-                        && !key.contains("github.ref")
-                        && !restore.contains("github.sha")
-                        && !restore.contains("github.ref");
-                }
+        if family == "actions/cache"
+            && let Some(with) = object_get(step, "with")
+        {
+            let caches_target = object_get(with, "path")
+                .is_some_and(|value| compact(value).lines().any(|line| line.contains("target")));
+            fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
+                compact(value).lines().any(|line| {
+                    let path = line.trim();
+                    path == "fuzz/target" || path.ends_with("/fuzz/target")
+                })
+            });
+            target_cache |= caches_target;
+            if caches_target {
+                first_target_cache_step.get_or_insert(index);
+            }
+            literal_target_cache |= object_get(with, "path")
+                .is_some_and(|value| compact(value).lines().any(|line| line.trim() == "target"));
+            if caches_target {
+                let key = object_get(with, "key").map(compact).unwrap_or_default();
+                let restore = object_get(with, "restore-keys")
+                    .map(compact)
+                    .unwrap_or_default();
+                target_cache_generation |= key.contains("github.sha")
+                    && !key.contains("github.ref")
+                    && !restore.contains("github.sha")
+                    && !restore.contains("github.ref");
             }
         }
         audit_ref(file, &path, uses, raw, offline, latest, findings);
@@ -2601,6 +2599,7 @@ fn compact(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn audit(yaml: &str) -> Vec<Finding> {
         audit_file_with_class(".github/workflows/ci.yml", yaml, None)
@@ -3552,14 +3551,32 @@ jobs:
         path: PathBuf,
     }
 
+    static NEXT_TEST_REPO_ID: AtomicU64 = AtomicU64::new(0);
+
     impl TestRepo {
         fn new() -> Self {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!("velnor-concern-test-{nonce}"));
-            fs::create_dir_all(path.join(".github/workflows")).unwrap();
+            let path = (0..128)
+                .find_map(|_| {
+                    let sequence = NEXT_TEST_REPO_ID.fetch_add(1, Ordering::Relaxed);
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos();
+                    let path = std::env::temp_dir().join(format!(
+                        "velnor-concern-test-{}-{nonce}-{sequence}",
+                        std::process::id()
+                    ));
+                    match fs::create_dir(&path) {
+                        Ok(()) => Some(path),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                        Err(error) => panic!("create isolated test repository: {error}"),
+                    }
+                })
+                .unwrap_or_else(|| panic!("create isolated test repository after 128 attempts"));
+            if let Err(error) = fs::create_dir_all(path.join(".github/workflows")) {
+                let _ = fs::remove_dir_all(&path);
+                panic!("initialize isolated test repository: {error}");
+            }
             Self { path }
         }
     }
@@ -3568,6 +3585,24 @@ jobs:
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn test_repos_get_distinct_atomic_directories_under_concurrency() {
+        let handles = (0..8)
+            .map(|_| std::thread::spawn(|| (0..32).map(|_| TestRepo::new()).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        let repos = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("fixture thread completes"))
+            .collect::<Vec<_>>();
+        let paths = repos
+            .iter()
+            .map(|repo| repo.path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(paths.len(), repos.len());
+        drop(repos);
+        assert!(paths.iter().all(|path| !path.exists()), "{paths:?}");
     }
 
     fn required_concern_defaults() -> BTreeMap<String, ConcernContract> {

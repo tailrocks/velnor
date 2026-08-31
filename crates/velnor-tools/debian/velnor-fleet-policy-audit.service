@@ -6,6 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+RuntimeDirectory=velnor
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 Environment=VELNOR_FLEET_POLICY_DIR=/var/lib/velnor/fleet-policy
 EnvironmentFile=/etc/velnor/fleet-policy-audit.env
 EnvironmentFile=-/etc/velnor/secrets.env
@@ -13,4 +16,4 @@ EnvironmentFile=-/etc/velnor/secrets.env
 # Organizations are audited sequentially from VELNOR_FLEET_ORGS (config-driven);
 # the first drift exits nonzero and stops the remaining organizations.
 # "$$" yields a literal shell "$" (systemd expands single "$" itself).
-ExecStart=/bin/sh -c '[ -n "${VELNOR_FLEET_ORGS}" ] || { echo "VELNOR_FLEET_ORGS is empty; refusing no-op audit" >&2; exit 2; }; for org in ${VELNOR_FLEET_ORGS}; do /usr/bin/velnor-tools fleet-policy audit --policy "${VELNOR_FLEET_POLICY_DIR}/$${org}-desired-policy.json" --ledger /usr/share/velnor/fleet/release-refs.toml --organization "$$org" || exit $?; done'
+ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /bin/sh -c '[ -n "${VELNOR_FLEET_ORGS}" ] || { echo "VELNOR_FLEET_ORGS is empty; refusing no-op audit" >&2; exit 2; }; for org in ${VELNOR_FLEET_ORGS}; do /usr/bin/velnor-tools fleet-policy audit --policy "${VELNOR_FLEET_POLICY_DIR}/$${org}-desired-policy.json" --ledger /usr/share/velnor/fleet/release-refs.toml --organization "$$org" || exit $?; done'
