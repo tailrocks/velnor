@@ -7,7 +7,7 @@ Status: prepared 2026-07-21; no repository policy changed.
 Choose one policy for automatic pull-request validation:
 
 1. **Velnor required** — require the `(...Velnor)` contexts below. GitHub is
-   available through manual `lane=github`/`lane=both` comparison.
+   available through manual `lanes=github`/`lanes=both` comparison.
 2. **GitHub required** — change the automatic-event default before protection;
    the current workflows do not emit GitHub contexts automatically.
 3. **Both required** — change the canonical automatic-event matrix before
