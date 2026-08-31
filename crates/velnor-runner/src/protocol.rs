@@ -1767,9 +1767,56 @@ pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
 }
 
 /// Completion must retry transport failures, 5xx, and status-less failures; other
-/// 4xx (auth, validation, conflict) will not change on retry.
+/// Deterministic 4xx (auth and validation) will not change on retry. A
+/// transient 409 conflict retries like the upstream RunService client. A
+/// provider's typed run-service 404 job-not-found response is handled as a
+/// separate successful terminal observation by the completion loop.
 pub fn is_retriable_completion_status(status: u16) -> bool {
-    !(400..500).contains(&status) || status == 408 || status == 429
+    !(400..500).contains(&status) || matches!(status, 408 | 409 | 429)
+}
+
+/// Protocol disposition for a completion POST.
+///
+/// `RemoteObservedTerminal` is a successful observation: the remote service
+/// already accepted or terminalized the job, so retrying would risk
+/// redelivery. The journal-owning caller must persist this disposition as its
+/// durable `RemoteObservedTerminal` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionAcknowledgement {
+    Accepted,
+    RemoteObservedTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionResponseClass {
+    Accepted,
+    RemoteObservedTerminal,
+    RetryableFailure,
+    PermanentFailure,
+}
+
+fn classify_completion_response(status: u16, body: &str) -> CompletionResponseClass {
+    match status {
+        200..=299 => CompletionResponseClass::Accepted,
+        404 if is_run_service_job_not_found(body) => {
+            CompletionResponseClass::RemoteObservedTerminal
+        }
+        status if is_retriable_completion_status(status) => {
+            CompletionResponseClass::RetryableFailure
+        }
+        _ => CompletionResponseClass::PermanentFailure,
+    }
+}
+
+/// Match the exact error shape used by actions/runner's RunService client for
+/// a missing completion job. A bare 404 or an unrelated API 404 is not proof
+/// that this job was already terminal.
+fn is_run_service_job_not_found(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    value.get("source").and_then(Value::as_str) == Some("actions-run-service")
+        && value.get("code").and_then(Value::as_u64) == Some(404)
 }
 
 /// Decode a GET /actions/runners/{id} response: `Ok(None)` only on a definite
@@ -2076,6 +2123,19 @@ impl RunServiceClient {
         self.complete_job_payload(run_service_url, payload).await
     }
 
+    /// Report the job result and return whether the remote service observed it
+    /// as already terminal. The acknowledgement is not journaled here because
+    /// this protocol client does not own the control journal.
+    pub async fn complete_job_with_acknowledgement(
+        &self,
+        run_service_url: &str,
+        completion: RunServiceCompleteJob,
+    ) -> Result<CompletionAcknowledgement> {
+        let payload = serde_json::to_vec(&completion).context("serialize complete job request")?;
+        self.complete_job_payload_with_acknowledgement(run_service_url, payload)
+            .await
+    }
+
     /// Report a previously serialized job result without changing its JSON.
     /// Used by crash recovery to preserve the exact durable outbox payload.
     pub async fn complete_job_payload(
@@ -2083,6 +2143,18 @@ impl RunServiceClient {
         run_service_url: &str,
         payload: Vec<u8>,
     ) -> Result<()> {
+        self.complete_job_payload_with_acknowledgement(run_service_url, payload)
+            .await
+            .map(|_| ())
+    }
+
+    /// Report previously serialized completion bytes and preserve the remote
+    /// terminal disposition for the journal-owning caller.
+    pub async fn complete_job_payload_with_acknowledgement(
+        &self,
+        run_service_url: &str,
+        payload: Vec<u8>,
+    ) -> Result<CompletionAcknowledgement> {
         const MAX_ATTEMPTS: u32 = 6;
         let url = run_service_complete_job_url(run_service_url)?;
         let body = String::from_utf8(payload).context("complete job payload is not UTF-8")?;
@@ -2097,8 +2169,16 @@ impl RunServiceClient {
             )
             .await;
             let retriable = match &outcome {
-                Ok((status, _)) if (200..300).contains(status) => return Ok(()),
-                Ok((status, _)) => is_retriable_completion_status(*status),
+                Ok((status, body)) => match classify_completion_response(*status, body) {
+                    CompletionResponseClass::Accepted => {
+                        return Ok(CompletionAcknowledgement::Accepted);
+                    }
+                    CompletionResponseClass::RemoteObservedTerminal => {
+                        return Ok(CompletionAcknowledgement::RemoteObservedTerminal);
+                    }
+                    CompletionResponseClass::RetryableFailure => true,
+                    CompletionResponseClass::PermanentFailure => false,
+                },
                 Err(_) => true,
             };
             if attempt >= MAX_ATTEMPTS || !retriable {
@@ -7621,9 +7701,87 @@ mod tests {
         assert!(!is_retriable_completion_status(400));
         assert!(!is_retriable_completion_status(401));
         assert!(!is_retriable_completion_status(404));
-        assert!(!is_retriable_completion_status(409));
+        assert!(is_retriable_completion_status(409));
         assert!(!is_retriable_completion_status(422));
     }
+
+    #[test]
+    fn completion_response_classifies_terminal_observations_without_retry() {
+        assert_eq!(
+            classify_completion_response(204, ""),
+            CompletionResponseClass::Accepted
+        );
+        assert_eq!(
+            classify_completion_response(
+                404,
+                r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#,
+            ),
+            CompletionResponseClass::RemoteObservedTerminal
+        );
+        assert_eq!(
+            classify_completion_response(409, ""),
+            CompletionResponseClass::RetryableFailure
+        );
+        assert_eq!(
+            classify_completion_response(404, r#"{"message":"Not Found"}"#),
+            CompletionResponseClass::PermanentFailure
+        );
+        assert_eq!(
+            classify_completion_response(503, ""),
+            CompletionResponseClass::RetryableFailure
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn complete_job_returns_terminal_ack_without_retrying() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let run_service_url = format!("{}/run/jobs/123", server.uri());
+        let completion = RunServiceCompleteJob {
+            plan_id: "plan".to_owned(),
+            job_id: "job".to_owned(),
+            conclusion: TaskResult::Succeeded,
+            outputs: BTreeMap::new(),
+            step_results: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            environment_url: None,
+            billing_owner_id: None,
+            infrastructure_failure_category: None,
+        };
+
+        for status in [404] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/run/jobs/123/completejob"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                        "source": "actions-run-service",
+                        "code": status,
+                        "message": "Job not found",
+                    })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let acknowledgement = RunServiceClient::new("token")
+                .unwrap()
+                .complete_job_with_acknowledgement(&run_service_url, completion.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                acknowledgement,
+                CompletionAcknowledgement::RemoteObservedTerminal
+            );
+        }
+    }
+
     use rsa::{pkcs8::DecodePrivateKey, traits::PrivateKeyParts};
 
     #[test]

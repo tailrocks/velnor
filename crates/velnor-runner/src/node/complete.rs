@@ -1,5 +1,6 @@
-//! Persist completion intent before any GitHub `complete_job` send, then
-//! `RemoteAcked` after send succeeds so the slot leaves Completing.
+//! Persist completion intent and one durable send claim before any GitHub
+//! `complete_job` send, then acknowledge the exact remote disposition so the
+//! slot leaves Completing.
 //!
 //! The journal directory is a function argument, never thread-local: the
 //! service binary uses a multi-thread Tokio runtime, so TLS set before an
@@ -12,6 +13,7 @@ use velnor_control::journal::{payload_checksum, Event, Journal};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use super::cleanup;
+use crate::protocol::CompletionAcknowledgement;
 
 /// Walk from a slot config dir to the fleet journal directory.
 #[must_use]
@@ -29,8 +31,8 @@ pub fn journal_dir_near(config_dir: &Path) -> PathBuf {
     config_dir.to_path_buf()
 }
 
-/// Publish the outbox, apply `CompletionIntended`, then call `send`.
-/// If intent is rejected, `send` is never invoked.
+/// Publish the outbox, apply `CompletionIntended`, claim the send durably, then
+/// call `send`. If either durable step is rejected, `send` is never invoked.
 ///
 /// # Errors
 /// Journal rejection, outbox I/O, or `send`.
@@ -48,15 +50,15 @@ where
     if commit_intent(journal, state_dir, job_id, generation, payload)?.is_none() {
         anyhow::bail!("completion intent rejected for job {}", job_id.0);
     }
-    let started = journal.apply(Event::CompletionSendStarted {
-        job_id: job_id.clone(),
-        generation,
-    })?;
-    if started.rejected {
-        anyhow::bail!("completion send-started rejected for job {}", job_id.0);
-    }
+    claim_completion_send(journal, job_id, generation)?;
     let result = send().map_err(Into::into)?;
-    ack_remote(journal, state_dir, job_id, generation)?;
+    ack_remote(
+        journal,
+        state_dir,
+        job_id,
+        generation,
+        CompletionAcknowledgement::Accepted,
+    )?;
     Ok(result)
 }
 
@@ -76,17 +78,101 @@ where
     F: FnOnce(Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
+    guarded_complete_async_with_ack(
+        journal,
+        state_dir,
+        job_id,
+        generation,
+        payload,
+        |durable| async move {
+            send(durable)
+                .await
+                .map(|result| (result, CompletionAcknowledgement::Accepted))
+        },
+    )
+    .await
+}
+
+/// Async completion guard whose transport reports whether the remote service
+/// accepted the payload or had already terminalized the job.
+pub async fn guarded_complete_async_with_ack<T, F, Fut>(
+    journal: &mut Journal,
+    state_dir: &Path,
+    job_id: &JobId,
+    generation: Generation,
+    payload: &[u8],
+    send: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<(T, CompletionAcknowledgement)>>,
+{
     let durable_payload = commit_intent(journal, state_dir, job_id, generation, payload)?
         .ok_or_else(|| anyhow::anyhow!("completion intent rejected for job {}", job_id.0))?;
-    let started = journal.apply(Event::CompletionSendStarted {
-        job_id: job_id.clone(),
-        generation,
-    })?;
-    if started.rejected {
-        anyhow::bail!("completion send-started rejected for job {}", job_id.0);
+    claim_completion_send(journal, job_id, generation)?;
+    let (result, acknowledgement) = send(durable_payload).await?;
+    ack_remote(journal, state_dir, job_id, generation, acknowledgement)?;
+    Ok(result)
+}
+
+/// Replay a completion after the controller has proven the original worker
+/// dead. A pre-send crash acquires the still-unclaimed row; a send-in-progress
+/// crash reuses its existing claim. The replay never creates a second claim.
+pub async fn replay_claimed_completion_async<T, F, Fut>(
+    journal: &mut Journal,
+    state_dir: &Path,
+    job_id: &JobId,
+    generation: Generation,
+    payload: Vec<u8>,
+    send: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<(T, CompletionAcknowledgement)>>,
+{
+    let state = journal.materialized_state()?;
+    let row = state
+        .outbox
+        .iter()
+        .find(|row| row.job_id == *job_id && row.generation == generation)
+        .ok_or_else(|| anyhow::anyhow!("completion outbox row is missing for job {}", job_id.0))?;
+    if !row.intended || row.remote_acked {
+        anyhow::bail!("completion replay claim is not active for job {}", job_id.0);
     }
-    let result = send(durable_payload).await?;
-    ack_remote(journal, state_dir, job_id, generation)?;
+    let send_started = row.send_started;
+    if payload_checksum(&payload) != row.payload_sha256 {
+        anyhow::bail!("completion replay payload changed for job {}", job_id.0);
+    }
+    if !send_started {
+        claim_completion_send(journal, job_id, generation)?;
+    }
+
+    // Re-read after any claim so a concurrent terminal acknowledgement or
+    // ownership transition cannot turn this replay into a stale send.
+    let state = journal.materialized_state()?;
+    let row = state
+        .outbox
+        .iter()
+        .find(|row| row.job_id == *job_id && row.generation == generation)
+        .ok_or_else(|| anyhow::anyhow!("completion outbox row is missing for job {}", job_id.0))?;
+    let owner_is_current = state
+        .slots
+        .iter()
+        .any(|slot| slot.slot_id == row.slot_id && slot.generation == row.generation)
+        && state.jobs.iter().any(|job| {
+            job.job_id == row.job_id
+                && job.slot_id == row.slot_id
+                && job.generation == row.generation
+                && job.phase == ActorPhase::Completing
+        });
+    if !row.intended || row.remote_acked || !row.send_started || !owner_is_current {
+        anyhow::bail!(
+            "completion replay claim is no longer current for job {}",
+            job_id.0
+        );
+    }
+    let (result, acknowledgement) = send(payload).await?;
+    ack_remote(journal, state_dir, job_id, generation, acknowledgement)?;
     Ok(result)
 }
 
@@ -259,6 +345,23 @@ fn commit_intent(
     Ok(Some(durable))
 }
 
+/// Atomically claim the one permitted terminal send for this job generation.
+/// A second caller, including a replay, fails closed before transport.
+fn claim_completion_send(
+    journal: &mut Journal,
+    job_id: &JobId,
+    generation: Generation,
+) -> anyhow::Result<()> {
+    let claimed = journal.apply(Event::CompletionSendStarted {
+        job_id: job_id.clone(),
+        generation,
+    })?;
+    if claimed.rejected {
+        anyhow::bail!("completion send claim rejected for job {}", job_id.0);
+    }
+    Ok(())
+}
+
 /// GitHub accepted `complete_job`. Commit that before deleting the payload so
 /// crash recovery can prove the remote terminal transition before cleanup.
 fn ack_remote(
@@ -266,11 +369,19 @@ fn ack_remote(
     state_dir: &Path,
     job_id: &JobId,
     generation: Generation,
+    acknowledgement: CompletionAcknowledgement,
 ) -> anyhow::Result<()> {
-    let outcome = journal.apply(Event::RemoteAcked {
-        job_id: job_id.clone(),
-        generation,
-    })?;
+    let event = match acknowledgement {
+        CompletionAcknowledgement::Accepted => Event::RemoteAcked {
+            job_id: job_id.clone(),
+            generation,
+        },
+        CompletionAcknowledgement::RemoteObservedTerminal => Event::RemoteObservedTerminal {
+            job_id: job_id.clone(),
+            generation,
+        },
+    };
+    let outcome = journal.apply(event)?;
     if outcome.rejected {
         anyhow::bail!("remote ack rejected for job {}", job_id.0);
     }
@@ -491,6 +602,74 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[tokio::test]
+    async fn async_complete_job_remote_terminal_observation_acks_and_cleans_up() {
+        let dir = tmp("observed-terminal-async");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-observed-terminal".into());
+        let generation = prime_owned(&mut journal, &job_id);
+        guarded_complete_async_with_ack(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"conclusion=success",
+            |durable| async move {
+                assert_eq!(durable, b"conclusion=success");
+                Ok(((), CompletionAcknowledgement::RemoteObservedTerminal))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        assert!(journal.load_state().unwrap().jobs.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn replay_claimed_completion_reuses_only_existing_send_claim() {
+        let dir = tmp("replay-claimed");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-replay-claimed".into());
+        let generation = prime_owned(&mut journal, &job_id);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"exact-payload").unwrap();
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job_id.clone(),
+                    generation,
+                    payload_sha256: payload_checksum(b"exact-payload"),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionSendStarted {
+                    job_id: job_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        replay_claimed_completion_async(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"exact-payload".to_vec(),
+            |payload| async move {
+                assert_eq!(payload, b"exact-payload");
+                Ok(((), CompletionAcknowledgement::Accepted))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn rejected_intent_never_sends() {
         let dir = tmp("reject");
@@ -516,7 +695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_reuses_pending_payload_and_rejects_payload_drift() {
+    async fn replay_reuses_pending_payload_but_rejects_second_send_claim() {
         let dir = tmp("retry-exact");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         let job_id = JobId("job-retry".into());
@@ -554,20 +733,88 @@ mod tests {
             b"first-payload"
         );
 
-        guarded_complete_async(
+        let replay = guarded_complete_async(
             &mut journal,
             &dir,
             &job_id,
             generation,
             b"first-payload",
-            |durable| async move {
-                assert_eq!(durable, b"first-payload");
-                Ok::<(), anyhow::Error>(())
-            },
+            |_durable| async move { Ok::<(), anyhow::Error>(()) },
         )
         .await
+        .unwrap_err();
+        assert!(
+            replay.to_string().contains("send claim rejected"),
+            "{replay}"
+        );
+        assert_eq!(
+            cleanup::read_outbox(&dir, &job_id.0, generation.0).unwrap(),
+            b"first-payload"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn retry_adopts_exact_payload_published_before_intent_apply() {
+        let dir = tmp("apply-failure-equivalent");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-apply-failure".into());
+        let generation = prime_owned(&mut journal, &job_id);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"exact-payload").unwrap();
+        assert!(journal.pending_outbox().unwrap().is_empty());
+
+        guarded_complete(
+            &mut journal,
+            &dir,
+            &job_id,
+            generation,
+            b"exact-payload",
+            || Ok::<(), anyhow::Error>(()),
+        )
         .unwrap();
         assert!(!cleanup::outbox_path(&dir, &job_id.0, generation.0).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn concurrent_completion_claims_allow_one_terminal_send() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tmp("claim-race");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-race".into());
+        let generation = prime_owned(&mut journal, &job_id);
+        drop(journal);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let dir = dir.clone();
+                let job_id = job_id.clone();
+                std::thread::spawn(move || {
+                    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+                    let durable =
+                        commit_intent(&mut journal, &dir, &job_id, generation, b"race-payload")
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(durable, b"race-payload");
+                    barrier.wait();
+                    claim_completion_send(&mut journal, &job_id, generation).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        let claimed = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|claimed| *claimed)
+            .count();
+        assert_eq!(claimed, 1, "exactly one caller may claim the terminal send");
+
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        let pending = journal.pending_outbox().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].send_started);
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -17,6 +17,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,8 +27,13 @@ use std::time::Duration;
 
 pub const JOB_ID_LABEL: &str = "velnor.job-id";
 pub const DAEMON_ID_LABEL: &str = "velnor.daemon-id";
+/// Every Docker object created for a job must stay below the package-owned
+/// aggregate resource boundary, including containers created through the
+/// per-job API proxy (BuildKit and Testcontainers).
+pub const JOB_CGROUP_PARENT: &str = "velnor-jobs.slice";
 pub const TESTCONTAINERS_LABEL: &str = "org.testcontainers.managed-by=testcontainers";
 pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
+const HOST_DOCKER_ENDPOINT: &str = "unix:///var/run/docker.sock";
 /// Host-visible runtime dir. systemd `PrivateTmp=yes` remaps daemon `/tmp`, so
 /// a lease socket there is invisible to host dockerd and the guest bind-mount
 /// of `/tmp/vdl-*.sock` is not the proxy.
@@ -44,6 +50,13 @@ pub const JOB_CONTAINER_NAME_PREFIX: &str = "velnor-job-";
 pub const BUILDKIT_CONTAINER_NAME_PREFIX: &str = "buildx_buildkit_velnor-builder-";
 
 const MAX_PROXY_BODY: usize = 32 * 1024 * 1024;
+const MAX_PROXY_HEADER: usize = 64 * 1024;
+const MAX_PROXY_LINE: usize = 8 * 1024;
+const MAX_LEASE_CONNECTIONS: usize = 64;
+const MAX_LEASE_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
+const PROXY_COPY_BUFFER: usize = 64 * 1024;
+const PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const PROXY_MAX_UPGRADE_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
     let mut hasher = Sha256::new();
@@ -899,30 +912,201 @@ pub fn unlabeled_testcontainer_ids(formatted: &str) -> Vec<String> {
     ids
 }
 
+#[allow(dead_code)]
 pub fn is_docker_object_create(method: &str, target: &str) -> bool {
     if !method.eq_ignore_ascii_case("POST") {
         return false;
     }
-    let path = target.split('?').next().unwrap_or(target);
-    path.ends_with("/containers/create")
-        || path.ends_with("/networks/create")
-        || path.ends_with("/volumes/create")
+    canonical_docker_path(target).is_ok_and(|path| is_docker_object_create_path(method, &path))
 }
 
-pub fn inject_ownership_labels(body: &[u8], job_id: &str, daemon_id: &str) -> Result<Vec<u8>> {
-    if body.is_empty() {
-        let mut object = Map::new();
-        object.insert("Labels".into(), ownership_labels_value(job_id, daemon_id));
-        return serde_json::to_vec(&Value::Object(object)).context("serialize empty create body");
+fn is_docker_object_create_path(method: &str, path: &str) -> bool {
+    method.eq_ignore_ascii_case("POST")
+        && (path.ends_with("/containers/create")
+            || path.ends_with("/networks/create")
+            || path.ends_with("/volumes/create"))
+}
+
+fn canonical_docker_path(target: &str) -> Result<String> {
+    let raw_path = target.split_once('?').map_or(target, |(path, _)| path);
+    if !raw_path.starts_with('/') {
+        bail!("Docker API target path must be absolute");
     }
-    let mut value: Value = serde_json::from_slice(body)
-        .context("parse Docker create JSON so ownership labels can be injected")?;
+    let mut path = Vec::with_capacity(raw_path.len());
+    let bytes = raw_path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = bytes
+                .get(index + 1)
+                .and_then(|byte| (*byte as char).to_digit(16))
+                .context("Docker API target contains an incomplete percent escape")?;
+            let low = bytes
+                .get(index + 2)
+                .and_then(|byte| (*byte as char).to_digit(16))
+                .context("Docker API target contains an invalid percent escape")?;
+            let decoded = ((high << 4) | low) as u8;
+            if decoded == b'/' || decoded == b'\\' {
+                bail!("Docker API target contains an encoded path separator");
+            }
+            path.push(decoded);
+            index += 3;
+        } else {
+            if bytes[index] == b'\\' {
+                bail!("Docker API target contains a path separator alias");
+            }
+            path.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let path = String::from_utf8(path).context("Docker API target path must be UTF-8")?;
+    if path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        bail!("Docker API target contains a dot path segment");
+    }
+    Ok(path)
+}
+
+/// Parse a Docker create body while rejecting duplicate object keys at every
+/// depth. Building `Value` during the same traversal avoids a validation pass
+/// followed by a second JSON parse/materialization pass.
+fn parse_create_value(body: &[u8]) -> Result<Value> {
+    if body.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+
+    struct Seed;
+
+    impl<'de> serde::de::DeserializeSeed<'de> for Seed {
+        type Value = Value;
+
+        fn deserialize<D>(self, deserializer: D) -> std::result::Result<Value, D::Error>
+        where
+            D: serde::de::Deserializer<'de>,
+        {
+            struct Visitor;
+
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Value;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("a JSON value")
+                }
+
+                fn visit_bool<E>(self, value: bool) -> std::result::Result<Value, E> {
+                    Ok(Value::Bool(value))
+                }
+
+                fn visit_i64<E>(self, value: i64) -> std::result::Result<Value, E> {
+                    Ok(Value::Number(value.into()))
+                }
+
+                fn visit_u64<E>(self, value: u64) -> std::result::Result<Value, E> {
+                    Ok(Value::Number(value.into()))
+                }
+
+                fn visit_f64<E>(self, value: f64) -> std::result::Result<Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    serde_json::Number::from_f64(value)
+                        .map(Value::Number)
+                        .ok_or_else(|| E::custom("JSON number is not finite"))
+                }
+
+                fn visit_str<E>(self, value: &str) -> std::result::Result<Value, E> {
+                    Ok(Value::String(value.to_owned()))
+                }
+
+                fn visit_borrowed_str<E>(self, value: &'de str) -> std::result::Result<Value, E> {
+                    Ok(Value::String(value.to_owned()))
+                }
+
+                fn visit_string<E>(self, value: String) -> std::result::Result<Value, E> {
+                    Ok(Value::String(value))
+                }
+
+                fn visit_unit<E>(self) -> std::result::Result<Value, E> {
+                    Ok(Value::Null)
+                }
+
+                fn visit_none<E>(self) -> std::result::Result<Value, E> {
+                    Ok(Value::Null)
+                }
+
+                fn visit_some<D>(self, deserializer: D) -> std::result::Result<Value, D::Error>
+                where
+                    D: serde::de::Deserializer<'de>,
+                {
+                    serde::de::DeserializeSeed::deserialize(Seed, deserializer)
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    let mut values = Vec::new();
+                    while let Some(value) = seq.next_element_seed(Seed)? {
+                        values.push(value);
+                    }
+                    Ok(Value::Array(values))
+                }
+
+                fn visit_map<A>(self, mut map: A) -> std::result::Result<Value, A::Error>
+                where
+                    A: serde::de::MapAccess<'de>,
+                {
+                    let mut object = Map::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        if object.contains_key(&key) {
+                            return Err(serde::de::Error::custom(format!(
+                                "duplicate JSON object key `{key}`"
+                            )));
+                        }
+                        let value = map.next_value_seed(Seed)?;
+                        object.insert(key, value);
+                    }
+                    Ok(Value::Object(object))
+                }
+            }
+
+            deserializer.deserialize_any(Visitor)
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let value = serde::de::DeserializeSeed::deserialize(Seed, &mut deserializer)
+        .map_err(|error| anyhow::anyhow!("parse Docker create JSON: {error}"))?;
+    deserializer
+        .end()
+        .context("parse trailing data after Docker create JSON")?;
+    Ok(value)
+}
+
+#[cfg(test)]
+pub fn inject_ownership_labels(body: &[u8], job_id: &str, daemon_id: &str) -> Result<Vec<u8>> {
+    let mut value = parse_create_value(body)?;
+    inject_ownership_labels_value(&mut value, job_id, daemon_id)?;
+    serde_json::to_vec(&value).context("serialize labeled Docker create body")
+}
+
+fn inject_ownership_labels_value(value: &mut Value, job_id: &str, daemon_id: &str) -> Result<()> {
     let Some(object) = value.as_object_mut() else {
         bail!("Docker create body must be a JSON object");
     };
-    let labels = object
-        .remove("Labels")
-        .or_else(|| object.remove("labels"))
+    let label_keys = object
+        .keys()
+        .filter(|key| key.eq_ignore_ascii_case("Labels"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if label_keys.len() > 1 {
+        bail!("Docker create contains duplicate case-insensitive Labels keys");
+    }
+    let labels = label_keys
+        .first()
+        .and_then(|key| object.remove(key))
         .unwrap_or(Value::Object(Map::new()));
     let mut labels = match labels {
         Value::Null => Map::new(),
@@ -934,14 +1118,7 @@ pub fn inject_ownership_labels(body: &[u8], job_id: &str, daemon_id: &str) -> Re
     labels.insert(JOB_ID_LABEL.into(), Value::String(job_id.to_string()));
     labels.insert(DAEMON_ID_LABEL.into(), Value::String(daemon_id.to_string()));
     object.insert("Labels".into(), Value::Object(labels));
-    serde_json::to_vec(&value).context("serialize labeled Docker create body")
-}
-
-fn ownership_labels_value(job_id: &str, daemon_id: &str) -> Value {
-    let mut labels = Map::new();
-    labels.insert(JOB_ID_LABEL.into(), Value::String(job_id.to_string()));
-    labels.insert(DAEMON_ID_LABEL.into(), Value::String(daemon_id.to_string()));
-    Value::Object(labels)
+    Ok(())
 }
 
 /// Rewrite a Docker Engine HTTP/1.1 request so object creates carry job labels.
@@ -964,29 +1141,51 @@ pub fn rewrite_docker_api_request(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
-    if !is_docker_object_create(method, target) {
+    let path = canonical_docker_path(target)?;
+    let is_create = is_docker_object_create_path(method, &path);
+    if !is_create {
         return Ok(request.to_vec());
     }
-    let labeled = inject_ownership_labels(body, job_id, daemon_id)?;
     let mut headers = Vec::new();
-    let mut skipped_length = false;
+    let mut content_length_seen = false;
     for line in lines {
         if line.is_empty() {
             continue;
         }
-        if line.len() >= 15 && line[..15].eq_ignore_ascii_case("content-length:") {
-            skipped_length = true;
+        let Some((name, value)) = line.split_once(':') else {
+            headers.push(line);
             continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length_seen {
+                bail!("refusing to rewrite Docker create request with duplicate Content-Length");
+            }
+            let declared = value
+                .trim()
+                .parse::<usize>()
+                .context("parse Docker API Content-Length")?;
+            if declared != body.len() {
+                bail!(
+                    "Docker API Content-Length {declared} does not match request body length {}",
+                    body.len()
+                );
+            }
+            content_length_seen = true;
+            continue;
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            bail!("refusing to rewrite Docker create request with Transfer-Encoding");
         }
         headers.push(line);
     }
-    if !skipped_length
-        && headers
-            .iter()
-            .any(|line| line.len() >= 18 && line[..18].eq_ignore_ascii_case("transfer-encoding:"))
-    {
-        bail!("refusing to rewrite chunked Docker create request");
+    let mut value = parse_create_value(body)?;
+    inject_ownership_labels_value(&mut value, job_id, daemon_id)?;
+    if path.ends_with("/containers/create") {
+        inject_job_cgroup_parent_value(&mut value)?;
+    } else if path.ends_with("/volumes/create") {
+        reject_unsafe_volume_create_value(&value)?;
     }
+    let labeled = serde_json::to_vec(&value).context("serialize rewritten Docker create body")?;
     let mut out = Vec::new();
     out.extend_from_slice(request_line.as_bytes());
     out.extend_from_slice(b"\r\n");
@@ -999,21 +1198,195 @@ pub fn rewrite_docker_api_request(
     Ok(out)
 }
 
-/// Docker Engine 29 keeps HTTP/1.1 connections open after a response. This
-/// proxy handles one request then `io::copy` until host EOF, so a keepalive
-/// engine deadlocks the guest `docker` CLI on the second request (`docker
-/// version` prints Client then hangs on Server; `docker login` never returns).
-/// Forcing `Connection: close` on non-upgrade traffic matches that one-shot
-/// architecture: dockerd EOFs, `io::copy` returns, the CLI reconnects.
-fn with_connection_close(request: &[u8]) -> Result<Vec<u8>> {
+/// Force every job-created Docker container into the runner-owned aggregate
+/// cgroup. The lease proxy is the only Docker socket exposed to a job, so this
+/// also covers BuildKit and nested Testcontainers creates. Runner policy wins
+/// over a workflow-supplied `HostConfig.CgroupParent`.
+fn inject_job_cgroup_parent_value(value: &mut Value) -> Result<()> {
+    let Some(object) = value.as_object_mut() else {
+        bail!("Docker container create body must be a JSON object");
+    };
+    if let Some(alias) = object
+        .keys()
+        .find(|key| key.as_str() != "HostConfig" && key.eq_ignore_ascii_case("HostConfig"))
+    {
+        bail!("Docker container create contains ambiguous HostConfig key {alias:?}");
+    }
+    let host_config = object
+        .remove("HostConfig")
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let mut host_config = match host_config {
+        Value::Null => Map::new(),
+        Value::Object(map) => map,
+        other => {
+            bail!("Docker container create HostConfig must be an object, got {other}");
+        }
+    };
+    reject_unsafe_nested_host_controls(&host_config)?;
+    if let Some(alias) = host_config
+        .keys()
+        .find(|key| key.as_str() != "CgroupParent" && key.eq_ignore_ascii_case("CgroupParent"))
+    {
+        bail!("Docker container create contains ambiguous CgroupParent key {alias:?}");
+    }
+    host_config.insert(
+        "CgroupParent".into(),
+        Value::String(JOB_CGROUP_PARENT.to_owned()),
+    );
+    object.insert("HostConfig".into(), Value::Object(host_config));
+    Ok(())
+}
+
+fn reject_unsafe_volume_create_value(value: &Value) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        bail!("Docker volume create body must be a JSON object");
+    };
+    let mut normalized_keys = BTreeSet::new();
+    for key in object.keys() {
+        if !normalized_keys.insert(key.to_ascii_lowercase()) {
+            bail!("Docker volume create contains duplicate case-insensitive key {key:?}");
+        }
+    }
+    if let Some((key, driver)) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("driver"))
+    {
+        let Some(driver) = driver.as_str() else {
+            bail!("Docker volume create field {key:?} must be a string");
+        };
+        if !driver.trim().is_empty() && !driver.eq_ignore_ascii_case("local") {
+            bail!("Docker volume create field {key:?} requests host control access");
+        }
+    }
+    if let Some((key, options)) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("driveropts"))
+        && value_is_present(options)
+    {
+        bail!("Docker volume create field {key:?} requests host control access");
+    }
+    Ok(())
+}
+
+fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Result<()> {
+    reject_case_insensitive_duplicate_keys(host_config, "Docker container HostConfig")?;
+    for (key, value) in host_config {
+        let unsafe_control = match key.to_ascii_lowercase().as_str() {
+            "pidmode" | "ipcmode" | "networkmode" | "cgroupnsmode" | "usernsmode" | "utsmode" => {
+                !is_default_mode(value)
+            }
+            "privileged" => match value {
+                Value::Null | Value::Bool(false) => false,
+                Value::Bool(true) => true,
+                _ => true,
+            },
+            "capadd" | "devices" | "devicecgrouprules" | "devicerequests" | "securityopt"
+            | "runtime" | "sysctls" | "volumedriver" | "volumesfrom" | "volumeoptions"
+            | "portbindings" | "publishallports" | "containeridfile" | "restartpolicy" => {
+                value_is_present(value)
+            }
+            "binds" | "mounts" => contains_host_bind(value)? || value_is_present(value),
+            "autoremove" | "cgroupparent" | "cpucount" | "cpupercent" | "cpushares"
+            | "cpuquota" | "cpuperiod" | "cpurealtimeperiod" | "cpurealtimeruntime"
+            | "cpusetcpus" | "cpusetmems" | "memory" | "memoryreservation" | "memoryswap"
+            | "memoryswappiness" | "nanocpus" | "oomkilldisable" | "pidslimit"
+            | "readonlyrootfs" | "shmsize" | "init" | "stopsignal" | "stoptimeout" | "dns"
+            | "dnsoptions" | "dnssearch" | "extrahosts" | "groupadd" | "ulimits"
+            | "maskedpaths" | "readonlypaths" => false,
+            _ => true,
+        };
+        if unsafe_control {
+            bail!("Docker container create HostConfig field {key:?} requests host control access");
+        }
+    }
+    Ok(())
+}
+
+fn is_default_mode(value: &Value) -> bool {
+    value.as_str().is_some_and(|mode| {
+        let mode = mode.trim();
+        mode.is_empty() || mode.eq_ignore_ascii_case("default")
+    })
+}
+
+fn value_is_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+        Value::Number(_) => true,
+    }
+}
+
+fn reject_case_insensitive_duplicate_keys(
+    object: &Map<String, Value>,
+    description: &str,
+) -> Result<()> {
+    let mut normalized_keys = BTreeSet::new();
+    for key in object.keys() {
+        if !normalized_keys.insert(key.to_ascii_lowercase()) {
+            bail!("{description} contains duplicate case-insensitive key {key:?}");
+        }
+    }
+    Ok(())
+}
+
+fn contains_host_bind(value: &Value) -> Result<bool> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                if contains_host_bind(value)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Value::Object(object) => {
+            reject_case_insensitive_duplicate_keys(object, "Docker mount object")?;
+            let mount_type = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("type"))
+                .and_then(|(_, value)| value.as_str());
+            let source = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("source"))
+                .and_then(|(_, value)| value.as_str());
+            Ok(
+                mount_type.is_none_or(|kind| !kind.eq_ignore_ascii_case("volume"))
+                    && source.is_some_and(is_host_bind_source),
+            )
+        }
+        Value::String(bind) => Ok(bind.split_once(':').map_or_else(
+            || is_host_bind_source(bind),
+            |(source, _)| is_host_bind_source(source),
+        )),
+        _ => Ok(false),
+    }
+}
+
+fn is_host_bind_source(path: &str) -> bool {
+    let path = path.trim();
+    path.starts_with('/')
+        || path == "."
+        || path == ".."
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path == "~"
+        || path.starts_with("~/")
+}
+
+#[cfg(unix)]
+fn without_expect_continue(request: &[u8]) -> Result<Vec<u8>> {
     let header_end = request
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .map(|index| index + 4)
         .context("Docker API request is missing header terminator")?;
-    let header_text =
+    let header =
         std::str::from_utf8(&request[..header_end]).context("Docker API headers must be UTF-8")?;
-    let mut lines = header_text.split("\r\n");
+    let mut lines = header.split("\r\n");
     let request_line = lines.next().context("Docker API request line")?;
     let mut out = Vec::new();
     out.extend_from_slice(request_line.as_bytes());
@@ -1022,13 +1395,16 @@ fn with_connection_close(request: &[u8]) -> Result<Vec<u8>> {
         if line.is_empty() {
             continue;
         }
-        if line.len() >= 11 && line[..11].eq_ignore_ascii_case("connection:") {
+        if line
+            .split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("expect"))
+        {
             continue;
         }
         out.extend_from_slice(line.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
-    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(b"\r\n");
     out.extend_from_slice(&request[header_end..]);
     Ok(out)
 }
@@ -1160,7 +1536,8 @@ pub fn run_host_docker(args: &[String]) -> Result<String> {
     {
         return run_host_docker_bounded(args, docker_cli_timeout(args, DOCKER_RM_TIMEOUT));
     }
-    let output = std::process::Command::new("docker")
+    let mut command = host_docker_command(args)?;
+    let output = command
         .args(args)
         .output()
         .with_context(|| format!("run docker {}", args.join(" ")))?;
@@ -1188,7 +1565,8 @@ pub(crate) fn run_host_docker_bounded(
         .as_ref()
         .map(|claim| container_rm_args_with_claimed_ids(args, &claim.ids));
     let args = claimed_args.as_deref().unwrap_or(args);
-    let child = std::process::Command::new("docker")
+    let mut command = host_docker_command(args)?;
+    let child = command
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1221,6 +1599,15 @@ pub(crate) fn run_host_docker_bounded(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn host_docker_command(args: &[String]) -> Result<std::process::Command> {
+    let mut command = std::process::Command::new("docker");
+    crate::executor::configure_host_docker_command(&mut command, "docker", args)?;
+    command
+        .env("DOCKER_HOST", HOST_DOCKER_ENDPOINT)
+        .env_remove("DOCKER_CONTEXT");
+    Ok(command)
+}
+
 fn reclaim_listed(
     list_args: &[String],
     docker: &mut impl FnMut(&[String]) -> Result<String>,
@@ -1250,6 +1637,8 @@ pub struct DockerLeaseGuard {
 #[cfg(unix)]
 struct LeaseConnSet {
     shutdown: Arc<AtomicBool>,
+    connection_count: std::sync::atomic::AtomicUsize,
+    buffered_bytes: std::sync::atomic::AtomicUsize,
     next_id: Mutex<u64>,
     streams: Mutex<BTreeMap<u64, std::os::unix::net::UnixStream>>,
 }
@@ -1265,13 +1654,58 @@ impl LeaseConnSet {
     fn new(shutdown: Arc<AtomicBool>) -> Arc<Self> {
         Arc::new(Self {
             shutdown,
+            connection_count: std::sync::atomic::AtomicUsize::new(0),
+            buffered_bytes: std::sync::atomic::AtomicUsize::new(0),
             next_id: Mutex::new(0),
             streams: Mutex::new(BTreeMap::new()),
         })
     }
 
+    fn try_acquire_connection(self: &Arc<Self>) -> Option<LeaseConnectionPermit> {
+        let mut current = self.connection_count.load(Ordering::Acquire);
+        loop {
+            if current >= MAX_LEASE_CONNECTIONS || self.is_shutdown() {
+                return None;
+            }
+            match self.connection_count.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(LeaseConnectionPermit(Arc::clone(self))),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
+    }
+
+    fn try_acquire_bytes(&self, bytes: usize) -> bool {
+        let mut current = self.buffered_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
+            if next > MAX_LEASE_BUFFERED_BYTES || self.is_shutdown() {
+                return false;
+            }
+            match self.buffered_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release_bytes(&self, bytes: usize) {
+        self.buffered_bytes.fetch_sub(bytes, Ordering::AcqRel);
     }
 
     fn abort(&self) {
@@ -1308,6 +1742,61 @@ impl LeaseConnSet {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .remove(&id);
+    }
+}
+
+#[cfg(unix)]
+struct LeaseConnectionPermit(Arc<LeaseConnSet>);
+
+#[cfg(unix)]
+impl Drop for LeaseConnectionPermit {
+    fn drop(&mut self) {
+        self.0.connection_count.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(unix)]
+struct RequestByteBudget {
+    set: Option<Arc<LeaseConnSet>>,
+    bytes: usize,
+}
+
+#[cfg(unix)]
+impl RequestByteBudget {
+    fn new(set: Option<&Arc<LeaseConnSet>>) -> Self {
+        Self {
+            set: set.cloned(),
+            bytes: 0,
+        }
+    }
+
+    fn reserve(&mut self, bytes: usize) -> Result<()> {
+        if let Some(set) = &self.set
+            && !set.try_acquire_bytes(bytes)
+        {
+            bail!("job Docker lease buffered-byte budget exceeded");
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .context("job Docker lease buffered-byte accounting overflow")?;
+        Ok(())
+    }
+
+    fn release(&mut self, bytes: usize) {
+        self.bytes = self.bytes.saturating_sub(bytes);
+        if let Some(set) = &self.set {
+            set.release_bytes(bytes);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RequestByteBudget {
+    fn drop(&mut self) {
+        if let Some(set) = &self.set {
+            set.release_bytes(self.bytes);
+        }
     }
 }
 
@@ -1505,6 +1994,10 @@ fn accept_loop(
         if conns.is_shutdown() {
             break;
         }
+        let Some(permit) = conns.try_acquire_connection() else {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            continue;
+        };
         let host_socket = host_socket.clone();
         let job_id = job_id.clone();
         let daemon_id = daemon_id.clone();
@@ -1512,6 +2005,7 @@ fn accept_loop(
         let _ = std::thread::Builder::new()
             .name("velnor-docker-lease-conn".into())
             .spawn(move || {
+                let _permit = permit;
                 if let Err(error) =
                     handle_client_with(stream, &host_socket, &job_id, &daemon_id, conns)
                 {
@@ -1548,52 +2042,205 @@ fn handle_client_with(
 ) -> Result<()> {
     use std::os::unix::net::UnixStream;
 
+    client
+        .set_read_timeout(Some(PROXY_IDLE_TIMEOUT))
+        .context("configure job Docker lease client idle timeout")?;
+    client
+        .set_write_timeout(Some(PROXY_IDLE_TIMEOUT))
+        .context("configure job Docker lease client write timeout")?;
     let _client_watch = conns.watch(&client);
     if conns.is_shutdown() {
         return Ok(());
     }
-    let request = match read_http_request(&mut client) {
-        Ok(request) => request,
-        Err(_) if conns.is_shutdown() => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let forwarded = rewrite_docker_api_request(&request, job_id, daemon_id)?;
-    let upgrade = std::str::from_utf8(&request).is_ok_and(|header| {
-        header.lines().any(|line| {
-            (line.len() >= 8 && line[..8].eq_ignore_ascii_case("upgrade:"))
-                || (line.len() >= 11
-                    && line[..11].eq_ignore_ascii_case("connection:")
-                    && line.to_ascii_lowercase().contains("upgrade"))
-        })
-    });
-    let forwarded = if upgrade {
-        forwarded
-    } else {
-        with_connection_close(&forwarded)?
-    };
-    if conns.is_shutdown() {
-        return Ok(());
+    let mut client_prefix = Vec::new();
+    let mut host_state: Option<(UnixStream, WatchedStream)> = None;
+    let mut host_buffer = ResponseBuffer::default();
+    loop {
+        let request =
+            match read_http_request_with_budget_from(&mut client, client_prefix, Some(&conns)) {
+                Ok(request) => request,
+                Err(_) if conns.is_shutdown() => return Ok(()),
+                Err(error) => return Err(error),
+            };
+        let HttpRequest {
+            bytes,
+            remainder,
+            mut budget,
+        } = request;
+        let request_method = http_request_method(&bytes)?.to_owned();
+        let request_wants_close = http_request_wants_close(&bytes);
+        let upgrade = request_is_upgrade(&bytes);
+        let forwarded = transform_request_buffer(bytes, &mut budget, |request| {
+            rewrite_docker_api_request(request, job_id, daemon_id)
+        })?;
+        let forwarded = transform_request_buffer(forwarded, &mut budget, without_expect_continue)?;
+        if conns.is_shutdown() {
+            return Ok(());
+        }
+        if upgrade {
+            let (mut host, _host_watch) = connect_lease_host(host_socket, &conns)?;
+            host.write_all(&forwarded)
+                .context("forward Docker API request through job lease")?;
+            // Keep the same idle timeout on hijacked streams. Clearing it
+            // would let an abandoned attach/build session hold one of the
+            // bounded lease connections forever.
+            if !remainder.is_empty() {
+                host.write_all(&remainder)
+                    .context("forward buffered Docker upgrade bytes")?;
+            }
+            return proxy_until_closed(host, client);
+        }
+
+        if host_state.is_none() {
+            host_state = Some(connect_lease_host(host_socket, &conns)?);
+        }
+        let reusable = {
+            let (host, _) = host_state.as_mut().expect("host state initialized");
+            if let Err(error) = host
+                .write_all(&forwarded)
+                .context("forward Docker API request through job lease")
+            {
+                if conns.is_shutdown() {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            match forward_http_response(host, &mut host_buffer, &mut client, &request_method) {
+                Ok(reusable) => reusable,
+                Err(error) if error.downcast_ref::<GuestClosed>().is_some() => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        };
+        drop(forwarded);
+        drop(budget);
+        if !reusable || request_wants_close {
+            return Ok(());
+        }
+        client_prefix = remainder;
+        if conns.is_shutdown() {
+            return Ok(());
+        }
     }
-    let mut host = UnixStream::connect(host_socket).with_context(|| {
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct GuestClosed;
+
+#[cfg(unix)]
+impl fmt::Display for GuestClosed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("guest Docker client closed while awaiting response")
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for GuestClosed {}
+
+#[cfg(unix)]
+fn connect_lease_host(
+    host_socket: &Path,
+    conns: &Arc<LeaseConnSet>,
+) -> Result<(std::os::unix::net::UnixStream, WatchedStream)> {
+    let host = std::os::unix::net::UnixStream::connect(host_socket).with_context(|| {
         format!(
             "connect job Docker lease to host engine {}",
             host_socket.display()
         )
     })?;
-    let _host_watch = conns.watch(&host);
+    host.set_read_timeout(Some(PROXY_IDLE_TIMEOUT))
+        .context("configure host Docker lease idle timeout")?;
+    host.set_write_timeout(Some(PROXY_IDLE_TIMEOUT))
+        .context("configure host Docker lease write timeout")?;
+    let watch = conns.watch(&host);
     if conns.is_shutdown() {
-        return Ok(());
+        return Ok((host, watch));
     }
-    if let Err(error) = host
-        .write_all(&forwarded)
-        .context("forward Docker API request through job lease")
-    {
-        if conns.is_shutdown() {
-            return Ok(());
+    Ok((host, watch))
+}
+
+#[cfg(unix)]
+fn http_request_method(request: &[u8]) -> Result<&str> {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("Docker API request is missing header terminator")?;
+    let request_line = std::str::from_utf8(&request[..header_end])?
+        .split_once("\r\n")
+        .map_or_else(
+            || std::str::from_utf8(&request[..header_end]),
+            |(line, _)| Ok(line),
+        )?;
+    request_line
+        .split_ascii_whitespace()
+        .next()
+        .context("Docker API request has no method")
+}
+
+#[cfg(unix)]
+fn http_request_wants_close(request: &[u8]) -> bool {
+    let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return true;
+    };
+    let Ok(header) = std::str::from_utf8(&request[..header_end]) else {
+        return true;
+    };
+    let mut lines = header.split("\r\n");
+    let version = lines
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(2));
+    let mut keep_alive = false;
+    let mut close = false;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("connection") {
+            continue;
         }
-        return Err(error);
+        for token in value.split(',').map(str::trim) {
+            close |= token.eq_ignore_ascii_case("close");
+            keep_alive |= token.eq_ignore_ascii_case("keep-alive");
+        }
     }
-    proxy_until_closed(host, client)
+    close || (version == Some("HTTP/1.0") && !keep_alive)
+}
+
+#[cfg(unix)]
+fn request_is_upgrade(request: &[u8]) -> bool {
+    let Some(header_end) = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+    else {
+        return false;
+    };
+    let Ok(header) = std::str::from_utf8(&request[..header_end]) else {
+        return false;
+    };
+    let mut connection_upgrade = false;
+    let mut supported_upgrade = false;
+    let mut connection_headers = 0;
+    let mut upgrade_headers = 0;
+    for line in header.lines().skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("upgrade") {
+            upgrade_headers += 1;
+            supported_upgrade = value.trim().eq_ignore_ascii_case("tcp")
+                || value.trim().eq_ignore_ascii_case("h2c");
+        } else if name.eq_ignore_ascii_case("connection") {
+            connection_headers += 1;
+            connection_upgrade = value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+        }
+    }
+    connection_headers == 1 && upgrade_headers == 1 && connection_upgrade && supported_upgrade
 }
 
 /// Copy both directions, propagating half-closes instead of full teardown.
@@ -1619,6 +2266,25 @@ fn proxy_until_closed(
     host: std::os::unix::net::UnixStream,
     client: std::os::unix::net::UnixStream,
 ) -> Result<()> {
+    let lifetime_host = host
+        .try_clone()
+        .context("clone host Docker lease timer stream")?;
+    let lifetime_client = client
+        .try_clone()
+        .context("clone job Docker lease timer stream")?;
+    let (lifetime_cancel, lifetime_cancelled) = std::sync::mpsc::channel();
+    let lifetime = std::thread::Builder::new()
+        .name("velnor-docker-lease-lifetime".into())
+        .spawn(move || {
+            if lifetime_cancelled
+                .recv_timeout(PROXY_MAX_UPGRADE_LIFETIME)
+                .is_err()
+            {
+                let _ = lifetime_host.shutdown(std::net::Shutdown::Both);
+                let _ = lifetime_client.shutdown(std::net::Shutdown::Both);
+            }
+        })
+        .context("start job Docker lease lifetime timer")?;
     let mut host_read = host.try_clone().context("clone host Docker lease stream")?;
     let mut client_write = client
         .try_clone()
@@ -1646,57 +2312,740 @@ fn proxy_until_closed(
     // output stream still flowing in the copy thread above.
     let _ = host.shutdown(std::net::Shutdown::Write);
     let _ = up.join();
+    let _ = lifetime_cancel.send(());
+    let _ = lifetime.join();
+    Ok(())
+}
+
+/// Forward framed ordinary HTTP responses while keeping the guest and Engine
+/// connections reusable. A response without HTTP framing remains a bounded
+/// one-shot fallback because its end is defined by host EOF.
+#[cfg(unix)]
+fn forward_http_response(
+    host: &mut std::os::unix::net::UnixStream,
+    host_buffer: &mut ResponseBuffer,
+    client: &mut std::os::unix::net::UnixStream,
+    request_method: &str,
+) -> Result<bool> {
+    loop {
+        let head = read_http_response_head(host, host_buffer, client, request_method)?;
+        client
+            .write_all(&head.bytes)
+            .context("forward Docker API response headers through job lease")?;
+        if head.no_body {
+            if (100..200).contains(&head.status) && head.status != 101 {
+                continue;
+            }
+            return Ok(!head.close && head.status != 101);
+        }
+        if head.chunked {
+            forward_chunked_response(host, host_buffer, client)?;
+        } else if let Some(content_length) = head.content_length {
+            forward_exact_response_body(host, host_buffer, client, content_length)?;
+        } else {
+            if !host_buffer.is_empty() {
+                client
+                    .write_all(host_buffer.as_slice())
+                    .context("forward unframed Docker API response body")?;
+                host_buffer.clear();
+            }
+            forward_unframed_response(host, client)?;
+            return Ok(false);
+        }
+        if (100..200).contains(&head.status) && head.status != 101 {
+            continue;
+        }
+        return Ok(!head.close && head.status != 101);
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ResponseBuffer {
+    bytes: Vec<u8>,
+    cursor: usize,
+}
+
+#[cfg(unix)]
+impl ResponseBuffer {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[self.cursor..]
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len() - self.cursor
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cursor == self.bytes.len()
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn consume(&mut self, length: usize) {
+        debug_assert!(length <= self.len());
+        self.cursor += length;
+        self.compact_if_needed();
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.cursor = 0;
+    }
+
+    /// Move the live suffix only after enough prefix has accumulated. This
+    /// makes repeated small chunk framing consumes amortized instead of
+    /// shifting the tail on every consumed line.
+    fn compact_if_needed(&mut self) {
+        if self.cursor == self.bytes.len() {
+            self.clear();
+        } else if self.cursor >= PROXY_COPY_BUFFER && self.cursor >= self.bytes.len() / 2 {
+            let remaining = self.bytes.len() - self.cursor;
+            self.bytes.copy_within(self.cursor.., 0);
+            self.bytes.truncate(remaining);
+            self.cursor = 0;
+        }
+    }
+}
+
+#[cfg(unix)]
+struct HttpResponseHead {
+    bytes: Vec<u8>,
+    status: u16,
+    content_length: Option<usize>,
+    chunked: bool,
+    close: bool,
+    no_body: bool,
+}
+
+#[cfg(unix)]
+fn read_http_response_head(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut ResponseBuffer,
+    client: &mut std::os::unix::net::UnixStream,
+    request_method: &str,
+) -> Result<HttpResponseHead> {
+    let mut scan_from: usize = 0;
+    let header_end = loop {
+        let search_start = scan_from.saturating_sub(3);
+        if let Some(relative) = buffered.as_slice()[search_start..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            let end = search_start + relative + 4;
+            if end > MAX_PROXY_HEADER {
+                bail!("Docker API response headers exceed lease proxy limit");
+            }
+            break end;
+        }
+        if buffered.len() > MAX_PROXY_HEADER {
+            bail!("Docker API response headers exceed lease proxy limit");
+        }
+        let previous_len = buffered.len();
+        wait_for_host_response(host, client)?;
+        let mut scratch = [0_u8; PROXY_COPY_BUFFER];
+        let read = host
+            .read(&mut scratch)
+            .context("read Docker API response headers")?;
+        if read == 0 {
+            bail!("host Docker API closed before response headers finished");
+        }
+        scan_from = previous_len;
+        buffered.extend_from_slice(&scratch[..read]);
+    };
+    let header_bytes = buffered.as_slice()[..header_end].to_vec();
+    buffered.consume(header_end);
+    let header_text =
+        std::str::from_utf8(&header_bytes).context("Docker API response headers must be UTF-8")?;
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines.next().context("Docker API response status line")?;
+    let mut status_parts = status_line.split_ascii_whitespace();
+    let version = status_parts.next().context("Docker API response version")?;
+    if !version.eq_ignore_ascii_case("HTTP/1.0") && !version.eq_ignore_ascii_case("HTTP/1.1") {
+        bail!("unsupported Docker API response version {version:?}");
+    }
+    let status: u16 = status_parts
+        .next()
+        .context("Docker API response status code")?
+        .parse()
+        .context("parse Docker API response status code")?;
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut close = version.eq_ignore_ascii_case("HTTP/1.0");
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            bail!("malformed Docker API response header");
+        };
+        if name.trim().is_empty() {
+            bail!("Docker API response header has no field name");
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let length = value
+                .trim()
+                .parse()
+                .context("parse Docker API response Content-Length")?;
+            if content_length.replace(length).is_some() {
+                bail!("refusing Docker API response with duplicate Content-Length");
+            }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                bail!("refusing Docker API response with unsupported Transfer-Encoding");
+            }
+            chunked = true;
+        } else if name.eq_ignore_ascii_case("connection") {
+            close |= value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("close"));
+        }
+    }
+    if chunked && content_length.is_some() {
+        bail!("refusing Docker API response with both Content-Length and Transfer-Encoding");
+    }
+    let no_body = request_method.eq_ignore_ascii_case("HEAD")
+        || (100..200).contains(&status)
+        || matches!(status, 204 | 304);
+    Ok(HttpResponseHead {
+        bytes: header_bytes,
+        status,
+        content_length,
+        chunked,
+        close,
+        no_body,
+    })
+}
+
+#[cfg(unix)]
+fn forward_exact_response_body(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut ResponseBuffer,
+    client: &mut std::os::unix::net::UnixStream,
+    mut remaining: usize,
+) -> Result<()> {
+    if !buffered.is_empty() && remaining != 0 {
+        let take = remaining.min(buffered.len());
+        client
+            .write_all(&buffered.as_slice()[..take])
+            .context("forward buffered Docker API response body")?;
+        buffered.consume(take);
+        remaining -= take;
+    }
+    let mut scratch = [0_u8; PROXY_COPY_BUFFER];
+    while remaining != 0 {
+        let read_len = remaining.min(scratch.len());
+        wait_for_host_response(host, client)?;
+        let read = host
+            .read(&mut scratch[..read_len])
+            .context("read Docker API response body")?;
+        if read == 0 {
+            bail!("host Docker API closed before response body finished");
+        }
+        client
+            .write_all(&scratch[..read])
+            .context("forward Docker API response body")?;
+        remaining -= read;
+    }
     Ok(())
 }
 
 #[cfg(unix)]
-fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut byte = [0_u8; 1];
+fn read_response_line(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut ResponseBuffer,
+    client: &mut std::os::unix::net::UnixStream,
+) -> Result<Vec<u8>> {
+    let mut scan_from: usize = 0;
     loop {
+        let search_start = scan_from.saturating_sub(1);
+        if let Some(relative) = buffered.as_slice()[search_start..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+        {
+            let end = search_start + relative + 2;
+            if end > MAX_PROXY_LINE {
+                bail!("Docker API response framing line exceeds lease proxy limit");
+            }
+            let line = buffered.as_slice()[..end].to_vec();
+            buffered.consume(end);
+            return Ok(line);
+        }
+        if buffered.len() > MAX_PROXY_LINE {
+            bail!("Docker API response framing line exceeds lease proxy limit");
+        }
+        let previous_len = buffered.len();
+        wait_for_host_response(host, client)?;
+        let mut scratch = [0_u8; 8192];
+        let read = host
+            .read(&mut scratch)
+            .context("read Docker API response framing")?;
+        if read == 0 {
+            bail!("host Docker API closed during chunked response framing");
+        }
+        scan_from = previous_len;
+        buffered.extend_from_slice(&scratch[..read]);
+    }
+}
+
+#[cfg(unix)]
+fn validate_chunked_response_trailer(line: &[u8]) -> Result<()> {
+    let field = line
+        .strip_suffix(b"\r\n")
+        .context("Docker API response trailer is missing its terminating CRLF")?;
+    let Some(colon) = field.iter().position(|&byte| byte == b':') else {
+        bail!("malformed Docker API response trailer");
+    };
+    let name = &field[..colon];
+    let is_field_name_byte = |byte: &u8| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    };
+    if name.is_empty() || !name.iter().all(is_field_name_byte) {
+        bail!("malformed Docker API response trailer field name");
+    }
+    if field[colon + 1..]
+        .iter()
+        .any(|byte| byte.is_ascii_control() && *byte != b'\t')
+    {
+        bail!("malformed Docker API response trailer value");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn forward_chunked_response(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut ResponseBuffer,
+    client: &mut std::os::unix::net::UnixStream,
+) -> Result<()> {
+    loop {
+        let line = read_response_line(host, buffered, client)?;
+        client
+            .write_all(&line)
+            .context("forward Docker API chunk header")?;
+        let line_text = std::str::from_utf8(&line[..line.len() - 2])
+            .context("Docker API response chunk-size line must be UTF-8")?;
+        let size_text = line_text
+            .split_once(';')
+            .map_or(line_text, |(size, _)| size)
+            .trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .context("parse Docker API response chunk-size line")?;
+        forward_exact_response_body(host, buffered, client, size)?;
+        if size == 0 {
+            loop {
+                let trailer = read_response_line(host, buffered, client)?;
+                if trailer != b"\r\n" {
+                    validate_chunked_response_trailer(&trailer)?;
+                }
+                client
+                    .write_all(&trailer)
+                    .context("forward Docker API response trailer")?;
+                if trailer == b"\r\n" {
+                    return Ok(());
+                }
+            }
+        }
+        let terminator = read_response_line(host, buffered, client)?;
+        if terminator != b"\r\n" {
+            bail!("Docker API response chunk is missing its terminating CRLF");
+        }
+        client
+            .write_all(&terminator)
+            .context("forward Docker API chunk terminator")?;
+    }
+}
+
+#[cfg(unix)]
+fn forward_unframed_response(
+    host: &mut std::os::unix::net::UnixStream,
+    client: &mut std::os::unix::net::UnixStream,
+) -> Result<()> {
+    let mut scratch = [0_u8; PROXY_COPY_BUFFER];
+    loop {
+        wait_for_host_response(host, client)?;
+        let read = host
+            .read(&mut scratch)
+            .context("read unframed Docker API response")?;
+        if read == 0 {
+            return Ok(());
+        }
+        client
+            .write_all(&scratch[..read])
+            .context("forward unframed Docker API response")?;
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_host_response(
+    host: &std::os::unix::net::UnixStream,
+    client: &std::os::unix::net::UnixStream,
+) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut poll_fds = [
+        libc::pollfd {
+            fd: host.as_raw_fd(),
+            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: client.as_raw_fd(),
+            events: libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        },
+    ];
+    loop {
+        let polled = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, -1) };
+        if polled < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(io::Error::last_os_error()).context("poll Docker lease response streams");
+        }
+        if poll_fds[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            let _ = host.shutdown(std::net::Shutdown::Both);
+            return Err(GuestClosed.into());
+        }
+        if poll_fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+            != 0
+        {
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(unix)]
+struct HttpRequest {
+    bytes: Vec<u8>,
+    remainder: Vec<u8>,
+    budget: RequestByteBudget,
+}
+
+#[cfg(unix)]
+fn transform_request_buffer(
+    input: Vec<u8>,
+    budget: &mut RequestByteBudget,
+    transform: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let input_len = input.len();
+    // Reserve one input-sized buffer before allocating the transformed copy.
+    // This makes rewrite/header normalization participate in the same
+    // lease-wide budget as socket reads instead of permitting copy
+    // amplification above MAX_LEASE_BUFFERED_BYTES.
+    budget.reserve(input_len)?;
+    let output = transform(&input)?;
+    if output.len() > input_len {
+        budget.reserve(output.len() - input_len)?;
+    }
+    drop(input);
+    budget.release(input_len);
+    if output.len() < input_len {
+        budget.release(input_len - output.len());
+    }
+    Ok(output)
+}
+
+#[cfg(all(test, unix))]
+fn read_http_request(stream: &mut std::os::unix::net::UnixStream) -> Result<HttpRequest> {
+    read_http_request_with_budget_from(stream, Vec::new(), None)
+}
+
+#[cfg(unix)]
+fn read_http_request_with_budget_from(
+    stream: &mut std::os::unix::net::UnixStream,
+    prefix: Vec<u8>,
+    set: Option<&Arc<LeaseConnSet>>,
+) -> Result<HttpRequest> {
+    let mut budget = RequestByteBudget::new(set);
+    budget.reserve(prefix.len())?;
+    let mut buf = prefix;
+    let mut chunk = [0_u8; 8192];
+    let mut scan_from: usize = 0;
+    let header_end = loop {
+        let search_start = scan_from.saturating_sub(3);
+        if let Some(relative) = buf[search_start..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            let end = search_start + relative + 4;
+            if end > MAX_PROXY_HEADER {
+                bail!("Docker API request headers exceed lease proxy limit");
+            }
+            break end;
+        }
+        if buf.len() > MAX_PROXY_HEADER {
+            bail!("Docker API request headers exceed lease proxy limit");
+        }
+        let previous_len = buf.len();
         let read = stream
-            .read(&mut byte)
+            .read(&mut chunk)
             .context("read Docker API request header")?;
         if read == 0 {
             bail!("client closed Docker API request before headers finished");
         }
-        buf.push(byte[0]);
-        if buf.len() > MAX_PROXY_BODY {
-            bail!("Docker API request headers exceed lease proxy limit");
-        }
-        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-    let header_end = buf
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)
-        .context("Docker API request is missing header terminator")?;
+        scan_from = previous_len;
+        budget.reserve(read)?;
+        buf.extend_from_slice(&chunk[..read]);
+    };
     let header_text =
         std::str::from_utf8(&buf[..header_end]).context("Docker API headers must be UTF-8")?;
-    let mut content_length = 0_usize;
+    let mut content_length = None;
+    let mut transfer_encoding = None;
+    let mut expect_continue = false;
     for line in header_text.split("\r\n").skip(1) {
-        if line.len() >= 15 && line[..15].eq_ignore_ascii_case("content-length:") {
-            content_length = line[15..]
-                .trim()
-                .parse()
-                .context("parse Docker API Content-Length")?;
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if transfer_encoding.is_some() {
+                bail!("refusing Docker API request with duplicate Transfer-Encoding");
+            }
+            if !value.trim().eq_ignore_ascii_case("chunked") {
+                bail!("refusing Docker API request with unsupported Transfer-Encoding");
+            }
+            transfer_encoding = Some(());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                bail!("refusing Docker API request with duplicate Content-Length");
+            }
+            content_length = Some(
+                value
+                    .trim()
+                    .parse()
+                    .context("parse Docker API Content-Length")?,
+            );
+            continue;
+        }
+        if name.eq_ignore_ascii_case("expect") {
+            if expect_continue {
+                bail!("refusing Docker API request with duplicate Expect");
+            }
+            if !value.trim().eq_ignore_ascii_case("100-continue") {
+                bail!("refusing Docker API request with unsupported Expect");
+            }
+            expect_continue = true;
         }
     }
+    if expect_continue {
+        stream
+            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+            .context("acknowledge Docker API Expect: 100-continue")?;
+    }
+    if transfer_encoding.is_some() {
+        if content_length.is_some() {
+            bail!("refusing Docker API request with both Content-Length and Transfer-Encoding");
+        }
+        return read_chunked_http_request(stream, buf, header_end, &mut chunk, &mut budget);
+    }
+    let content_length = content_length.unwrap_or(0);
     if content_length > MAX_PROXY_BODY {
         bail!("Docker API request body exceeds lease proxy limit");
     }
-    while buf.len() < header_end + content_length {
-        let read = stream
-            .read(&mut byte)
-            .context("read Docker API request body")?;
-        if read == 0 {
-            bail!("client closed Docker API request before body finished");
-        }
-        buf.push(byte[0]);
+    let request_len = header_end + content_length;
+    while buf.len() < request_len {
+        read_request_bytes(
+            stream,
+            &mut buf,
+            &mut chunk,
+            &mut budget,
+            MAX_PROXY_BODY.saturating_add(MAX_PROXY_HEADER),
+        )?;
     }
-    Ok(buf)
+    let remainder = buf.split_off(request_len);
+    Ok(HttpRequest {
+        bytes: buf,
+        remainder,
+        budget,
+    })
+}
+
+#[cfg(unix)]
+fn read_chunked_http_request(
+    stream: &mut std::os::unix::net::UnixStream,
+    mut buf: Vec<u8>,
+    header_end: usize,
+    scratch: &mut [u8],
+    budget: &mut RequestByteBudget,
+) -> Result<HttpRequest> {
+    let max_raw = MAX_PROXY_BODY.saturating_add(MAX_PROXY_HEADER);
+    let mut cursor = header_end;
+    let mut write_cursor = header_end;
+    loop {
+        let line_end = loop {
+            if let Some(relative) = buf[cursor..]
+                .windows(2)
+                .position(|window| window == b"\r\n")
+            {
+                let line_end = cursor + relative;
+                if line_end.saturating_sub(cursor).saturating_add(2) > MAX_PROXY_LINE {
+                    bail!("Docker API chunk-size line exceeds lease proxy limit");
+                }
+                break line_end;
+            }
+            if buf.len().saturating_sub(cursor) > MAX_PROXY_LINE {
+                bail!("Docker API chunk-size line exceeds lease proxy limit");
+            }
+            read_request_bytes(stream, &mut buf, scratch, budget, max_raw)?;
+        };
+        let line = std::str::from_utf8(&buf[cursor..line_end])
+            .context("Docker chunk-size line must be UTF-8")?;
+        let size_text = line.split_once(';').map_or(line, |(size, _)| size).trim();
+        if size_text.is_empty() {
+            bail!("Docker API chunk-size line is empty");
+        }
+        let size =
+            usize::from_str_radix(size_text, 16).context("parse Docker API chunk-size line")?;
+        let data_start = line_end + 2;
+        let data_end = data_start
+            .checked_add(size)
+            .context("Docker API chunk size overflows usize")?;
+        let decoded_len = write_cursor.saturating_sub(header_end);
+        if decoded_len
+            .checked_add(size)
+            .is_none_or(|length| length > MAX_PROXY_BODY)
+        {
+            bail!("Docker API request body exceeds lease proxy limit");
+        }
+        if size == 0 {
+            cursor = data_start;
+            loop {
+                let trailer_end = loop {
+                    if let Some(relative) = buf[cursor..]
+                        .windows(2)
+                        .position(|window| window == b"\r\n")
+                    {
+                        let trailer_end = cursor + relative;
+                        if trailer_end.saturating_sub(cursor).saturating_add(2) > MAX_PROXY_LINE {
+                            bail!("Docker API chunk trailer exceeds lease proxy limit");
+                        }
+                        break trailer_end;
+                    }
+                    if buf.len().saturating_sub(cursor) > MAX_PROXY_LINE {
+                        bail!("Docker API chunk trailer exceeds lease proxy limit");
+                    }
+                    read_request_bytes(stream, &mut buf, scratch, budget, max_raw)?;
+                };
+                if trailer_end == cursor {
+                    cursor += 2;
+                    break;
+                }
+                let trailer = std::str::from_utf8(&buf[cursor..trailer_end])
+                    .context("Docker API chunk trailer must be UTF-8")?;
+                let Some((name, _)) = trailer.split_once(':') else {
+                    bail!("Docker API chunk trailer is malformed");
+                };
+                if name.trim().is_empty() {
+                    bail!("Docker API chunk trailer has no field name");
+                }
+                cursor = trailer_end + 2;
+            }
+            break;
+        }
+        let framing_end = data_end
+            .checked_add(2)
+            .context("Docker API chunk framing overflows usize")?;
+        while buf.len() < framing_end {
+            read_request_bytes(stream, &mut buf, scratch, budget, max_raw)?;
+        }
+        if &buf[data_end..framing_end] != b"\r\n" {
+            bail!("Docker API chunk is missing its terminating CRLF");
+        }
+        buf.copy_within(data_start..data_end, write_cursor);
+        write_cursor = write_cursor
+            .checked_add(size)
+            .context("decoded Docker API chunk body overflows usize")?;
+        cursor = framing_end;
+    }
+    let decoded_len = write_cursor.saturating_sub(header_end);
+    let mut normalized = normalize_chunked_request_header(&buf[..header_end], decoded_len)?;
+    let normalized_body_len = normalized
+        .len()
+        .checked_add(decoded_len)
+        .context("normalized Docker API request size overflows usize")?;
+    budget.reserve(normalized_body_len)?;
+    normalized.extend_from_slice(&buf[header_end..write_cursor]);
+    let remainder = buf.split_off(cursor);
+    let raw_request_bytes = buf.len();
+    drop(buf);
+    budget.release(raw_request_bytes);
+    Ok(HttpRequest {
+        bytes: normalized,
+        remainder,
+        budget: std::mem::replace(budget, RequestByteBudget::new(None)),
+    })
+}
+
+#[cfg(unix)]
+fn read_request_bytes(
+    stream: &mut std::os::unix::net::UnixStream,
+    buf: &mut Vec<u8>,
+    scratch: &mut [u8],
+    budget: &mut RequestByteBudget,
+    max_len: usize,
+) -> Result<()> {
+    let read = stream
+        .read(scratch)
+        .context("read Docker API chunked request")?;
+    if read == 0 {
+        bail!("client closed Docker API request before chunked body finished");
+    }
+    budget.reserve(read)?;
+    buf.extend_from_slice(&scratch[..read]);
+    if buf.len() > max_len {
+        bail!("Docker API chunked request exceeds lease proxy limit");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn normalize_chunked_request_header(header: &[u8], body_len: usize) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(header).context("Docker API headers must be UTF-8")?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().context("Docker API request line")?;
+    let mut normalized = Vec::new();
+    normalized.extend_from_slice(request_line.as_bytes());
+    normalized.extend_from_slice(b"\r\n");
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, _)) = line.split_once(':') else {
+            normalized.extend_from_slice(line.as_bytes());
+            normalized.extend_from_slice(b"\r\n");
+            continue;
+        };
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case("content-length")
+        {
+            continue;
+        }
+        normalized.extend_from_slice(line.as_bytes());
+        normalized.extend_from_slice(b"\r\n");
+    }
+    normalized.extend_from_slice(format!("Content-Length: {body_len}\r\n\r\n").as_bytes());
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -1848,6 +3197,166 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_json_object_keys_before_policy_rewrite() {
+        let error = inject_ownership_labels(
+            br#"{"Image":"postgres:18-alpine","Labels":{},"Labels":{}}"#,
+            "job-a",
+            "daemon-a",
+        )
+        .expect_err("duplicate JSON keys must fail closed");
+        assert!(error.to_string().contains("duplicate JSON object key"));
+    }
+
+    #[test]
+    fn materializes_nested_create_json_while_applying_policy() {
+        let body = br#"{
+            "Image":"postgres:18-alpine",
+            "Env":["POSTGRES_DB=app",{"nested":true}],
+            "Memory":12.5,
+            "Nullable":null
+        }"#;
+        let labeled = inject_ownership_labels(body, "job-a", "daemon-a").unwrap();
+        let value: Value = serde_json::from_slice(&labeled).unwrap();
+        assert_eq!(value["Env"][0], "POSTGRES_DB=app");
+        assert_eq!(value["Env"][1]["nested"], true);
+        assert_eq!(value["Memory"], 12.5);
+        assert!(value["Nullable"].is_null());
+        assert_eq!(value["Labels"][JOB_ID_LABEL], "job-a");
+    }
+
+    #[test]
+    fn rejects_duplicate_json_object_keys_at_nested_depths() {
+        for body in [
+            br#"{"HostConfig":{"Memory":1,"Memory":2}}"#.as_slice(),
+            br#"{"Env":[{"name":"A","name":"B"}]}"#.as_slice(),
+            br#"{"Labels":{"cache":true,"\u0063ache":false}}"#.as_slice(),
+        ] {
+            let error = inject_ownership_labels(body, "job-a", "daemon-a")
+                .expect_err("duplicate JSON keys at any depth must fail closed");
+            assert!(error.to_string().contains("duplicate JSON object key"));
+        }
+    }
+
+    #[test]
+    fn rewrite_injects_cgroup_parent_and_overrides_nested_container_policy() {
+        let body = br#"{
+            "Image":"postgres:18-alpine",
+            "HostConfig":{"CgroupParent":"untrusted.slice","Memory":123}
+        }"#;
+        let request = format!(
+            "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let rewritten =
+            rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a").unwrap();
+        let text = String::from_utf8(rewritten).unwrap();
+        let body = text.split("\r\n\r\n").nth(1).unwrap();
+        let value: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value["HostConfig"]["CgroupParent"], JOB_CGROUP_PARENT);
+        assert_eq!(value["HostConfig"]["Memory"], 123);
+    }
+
+    #[test]
+    fn rewrite_rejects_malformed_nested_container_policy() {
+        let body = br#"{"Image":"postgres:18-alpine","HostConfig":[]}"#;
+        let request = format!(
+            "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+            .expect_err("malformed HostConfig must fail closed");
+        assert!(error.to_string().contains("HostConfig must be an object"));
+    }
+
+    #[test]
+    fn rewrite_rejects_nested_host_control_access() {
+        for body in [
+            br#"{"Image":"alpine:3.20","HostConfig":{"Binds":["/var/run/docker.sock:/host.sock"]}}"#
+                .as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"Mounts":[{"Type":"bind","Source":"/run/docker.sock","Target":"/host.sock"}]}}"#
+                .as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"NetworkMode":"host"}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"CgroupnsMode":"host"}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"Privileged":true}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"CapAdd":["SYS_ADMIN"]}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"Devices":[{"PathOnHost":"/dev/kvm"}]}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"SecurityOpt":["seccomp=unconfined"]}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"Binds":["/etc:/host-etc"]}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"Binds":["./relative:/host"]}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"Mounts":[{"Type":"bind","Source":"../host","Target":"/host"}]}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"VolumeDriver":"local"}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"VolumesFrom":["other"]}}"#.as_slice(),
+            br#"{"Image":"alpine:3.20","HostConfig":{"UtsMode":"host"}}"#.as_slice(),
+        ] {
+            let request = format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            );
+            let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+                .expect_err("nested Docker host control access must fail closed");
+            assert!(error.to_string().contains("host control access"));
+        }
+    }
+
+    #[test]
+    fn rewrite_rejects_case_insensitive_cgroup_policy_aliases() {
+        for body in [
+            br#"{"Image":"postgres:18-alpine","hostconfig":{"CgroupParent":"untrusted.slice"}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"cgroupParent":"untrusted.slice"}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","Labels":{},"labels":{}}"#.as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"Mounts":[],"mounts":[]}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"Binds":[],"binds":[]}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"Mounts":[{"Type":"volume","type":"bind","Source":"/run/docker.sock"}]}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"Mounts":[{"Type":"bind","Source":"/safe","source":"/run/docker.sock"}]}}"#
+                .as_slice(),
+        ] {
+            let request = format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            );
+            let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+                .expect_err("case-insensitive Docker policy aliases must fail closed");
+            let message = error.to_string();
+            assert!(message.contains("ambiguous") || message.contains("duplicate"));
+        }
+    }
+
+    #[test]
+    fn rewrite_rejects_ambiguous_or_malformed_http_framing() {
+        let body = br#"{"Image":"postgres:18-alpine"}"#;
+        let requests = [
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            ),
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: nope\r\n\r\n{}",
+                std::str::from_utf8(body).unwrap()
+            ),
+            format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\nTransfer-Encoding: chunked\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            ),
+        ];
+        for request in requests {
+            rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+                .expect_err("ambiguous Docker request framing must fail closed");
+        }
+    }
+
+    #[test]
     fn rewrite_labels_container_create_and_passes_other_methods_through() {
         let body = br#"{"Image":"redis:5.0"}"#;
         let request = format!(
@@ -1869,13 +3378,176 @@ mod tests {
     }
 
     #[test]
-    fn with_connection_close_replaces_keepalive_and_preserves_body() {
-        let request = b"POST /auth HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}";
-        let closed = with_connection_close(request).unwrap();
-        let text = String::from_utf8(closed).unwrap();
-        assert!(text.contains("Connection: close\r\n\r\n{}"));
-        assert!(!text.to_ascii_lowercase().contains("keep-alive"));
-        assert_eq!(text.matches("Connection:").count(), 1);
+    fn rewrite_canonicalizes_encoded_route_once_and_rejects_encoded_separators() {
+        let body = br#"{"Image":"alpine:3.20"}"#;
+        let request = format!(
+            "POST /v1.43/%63ontainers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let rewritten =
+            rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a").unwrap();
+        assert!(String::from_utf8(rewritten)
+            .unwrap()
+            .contains("velnor.job-id"));
+        assert!(!is_docker_object_create(
+            "POST",
+            "/v1.43/%2fcontainers/create"
+        ));
+        let encoded_separator = request.replace("%63ontainers", "%2fcontainers");
+        rewrite_docker_api_request(encoded_separator.as_bytes(), "job-a", "daemon-a")
+            .expect_err("encoded path separators must not bypass the policy route");
+    }
+
+    #[test]
+    fn rewrite_rejects_host_volume_driver_controls() {
+        for body in [
+            br#"{"Name":"escape","Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/"}}"#.as_slice(),
+            br#"{"Name":"escape","Driver":"local","DriverOpts":{"device":"/etc"}}"#.as_slice(),
+            br#"{"Name":"escape","Driver":"host-plugin"}"#.as_slice(),
+            br#"{"Name":"escape","DriverOpts":{},"driveropts":{"device":"/"}}"#.as_slice(),
+        ] {
+            let request = format!(
+                "POST /v1.43/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            );
+            let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+                .expect_err("host-backed volume creation must fail closed");
+            let message = error.to_string();
+            assert!(
+                message.contains("host control access") || message.contains("duplicate"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_allows_plain_local_volume_creation() {
+        let body = br#"{"Name":"cache","Driver":"local","Labels":{}}"#;
+        let request = format!(
+            "POST /v1.43/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let rewritten = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+            .expect("plain local volume creation is safe");
+        assert!(String::from_utf8(rewritten)
+            .unwrap()
+            .contains("velnor.job-id"));
+    }
+
+    #[test]
+    fn request_keepalive_policy_honors_http_versions_and_close_tokens() {
+        assert!(!http_request_wants_close(
+            b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\n\r\n"
+        ));
+        assert!(http_request_wants_close(
+            b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
+        ));
+        assert!(http_request_wants_close(
+            b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_is_upgrade_requires_supported_docker_hijack_headers() {
+        assert!(request_is_upgrade(
+            b"POST /v1.43/containers/abc/attach HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+        ));
+        assert!(request_is_upgrade(
+            b"POST /v1.43/build HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+        ));
+        assert!(!request_is_upgrade(
+            b"POST /v1.43/containers/abc/attach HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: bogus\r\n\r\n"
+        ));
+        assert!(!request_is_upgrade(
+            b"POST /v1.43/containers/abc/attach HTTP/1.1\r\nUpgrade: tcp\r\n\r\n"
+        ));
+        let mut binary_body =
+            b"POST /v1.43/containers/abc/attach HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 2\r\n\r\n"
+                .to_vec();
+        binary_body.extend_from_slice(&[0xff, 0xfe]);
+        assert!(request_is_upgrade(&binary_body));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_http_request_batches_reads_and_retains_pipeline_bytes() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let first = b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n";
+        let second = b"POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: 2\r\n\r\n{}";
+        writer
+            .write_all(&[first.as_slice(), second.as_slice()].concat())
+            .unwrap();
+
+        let request = read_http_request(&mut reader).unwrap();
+        assert_eq!(request.bytes, first);
+        assert_eq!(request.remainder, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_http_request_decodes_chunked_body_and_retains_pipeline_bytes() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let body = br#"{"Name":"cache"}"#;
+        let split = 5;
+        let second = b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n";
+        let wire = format!(
+            "POST /v1.43/volumes/create HTTP/1.1\r\nHost: docker\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n{}\r\n{:X}\r\n{}\r\n0\r\nX-Ignored: trailer\r\n\r\n{}",
+            split,
+            std::str::from_utf8(&body[..split]).unwrap(),
+            body.len() - split,
+            std::str::from_utf8(&body[split..]).unwrap(),
+            std::str::from_utf8(second).unwrap(),
+        );
+        writer.write_all(wire.as_bytes()).unwrap();
+
+        let request = read_http_request(&mut reader).unwrap();
+        let expected = format!(
+            "POST /v1.43/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap(),
+        );
+        assert_eq!(request.bytes, expected.as_bytes());
+        assert_eq!(request.remainder, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_http_request_acknowledges_expect_continue_before_body_completion() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let body = br#"{"Name":"cache"}"#;
+        let request = format!(
+            "POST /v1.43/volumes/create HTTP/1.1\r\nHost: docker\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        writer.write_all(request.as_bytes()).unwrap();
+
+        let parsed = read_http_request(&mut reader).unwrap();
+        let mut acknowledgement = vec![0; b"HTTP/1.1 100 Continue\r\n\r\n".len()];
+        writer.read_exact(&mut acknowledgement).unwrap();
+        assert_eq!(acknowledgement, b"HTTP/1.1 100 Continue\r\n\r\n");
+        assert_eq!(
+            without_expect_continue(&parsed.bytes).unwrap(),
+            format!(
+                "POST /v1.43/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            )
+            .as_bytes()
+        );
     }
 
     #[test]
@@ -2487,7 +4159,120 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
     #[cfg(unix)]
     #[test]
-    fn handle_client_finishes_when_engine_honors_injected_connection_close() {
+    fn response_buffer_compacts_consumed_prefix_amortized() {
+        let mut buffered = ResponseBuffer::default();
+        buffered.extend_from_slice(&vec![b'x'; PROXY_COPY_BUFFER]);
+        buffered.consume(PROXY_COPY_BUFFER - 1);
+        buffered.extend_from_slice(b"tail");
+        buffered.consume(1);
+
+        assert_eq!(buffered.cursor, 0);
+        assert_eq!(buffered.as_slice(), b"tail");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forwards_fragmented_chunked_response_with_extensions_and_trailers() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        let (mut client, mut sink) = UnixStream::pair().unwrap();
+        let wire = b"5\r\nhello\r\n6;source=test\r\n world\r\n0\r\nX-Complete: yes\r\n\r\n";
+        for byte in wire {
+            source.write_all(&[*byte]).unwrap();
+        }
+        drop(source);
+
+        let mut buffered = ResponseBuffer::default();
+        forward_chunked_response(&mut host, &mut buffered, &mut sink).unwrap();
+        drop(sink);
+
+        let mut forwarded = Vec::new();
+        client.read_to_end(&mut forwarded).unwrap();
+        assert_eq!(forwarded, wire);
+        assert!(buffered.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forwards_pipelined_chunked_and_following_keepalive_responses() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        let (mut client, mut sink) = UnixStream::pair().unwrap();
+        let first =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let second = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+        source.write_all(first).unwrap();
+        source.write_all(second).unwrap();
+        drop(source);
+
+        let mut buffered = ResponseBuffer::default();
+        assert!(forward_http_response(&mut host, &mut buffered, &mut sink, "GET").unwrap());
+        assert!(!forward_http_response(&mut host, &mut buffered, &mut sink, "GET").unwrap());
+        drop(sink);
+
+        let mut forwarded = Vec::new();
+        client.read_to_end(&mut forwarded).unwrap();
+        assert_eq!(forwarded, [first.as_slice(), second.as_slice()].concat());
+        assert!(buffered.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_chunked_response_with_missing_chunk_terminator() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        source.write_all(b"3\r\nabcX\r\n").unwrap();
+        drop(source);
+        let (client, mut sink) = UnixStream::pair().unwrap();
+        let error = forward_chunked_response(&mut host, &mut ResponseBuffer::default(), &mut sink)
+            .expect_err("chunk data without CRLF must fail closed");
+        assert!(error.to_string().contains("terminating CRLF"));
+        let _ = client.shutdown(std::net::Shutdown::Both);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_chunked_response_with_invalid_size_line() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        source.write_all(b"not-hex\r\n").unwrap();
+        drop(source);
+        let (client, mut sink) = UnixStream::pair().unwrap();
+        let error = forward_chunked_response(&mut host, &mut ResponseBuffer::default(), &mut sink)
+            .expect_err("invalid chunk size must fail closed");
+        assert!(error.to_string().contains("chunk-size"));
+        let _ = client.shutdown(std::net::Shutdown::Both);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_chunked_response_with_malformed_trailer() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut source, mut host) = UnixStream::pair().unwrap();
+        source.write_all(b"0\r\nnot-a-trailer\r\n\r\n").unwrap();
+        drop(source);
+        let (client, mut sink) = UnixStream::pair().unwrap();
+        let error = forward_chunked_response(&mut host, &mut ResponseBuffer::default(), &mut sink)
+            .expect_err("malformed chunk trailer must fail closed");
+        assert!(error
+            .to_string()
+            .contains("malformed Docker API response trailer"));
+        let _ = client.shutdown(std::net::Shutdown::Both);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_client_reuses_keepalive_connection_for_sequential_requests() {
         use std::os::unix::net::{UnixListener, UnixStream};
         use std::sync::mpsc;
         use std::time::Duration;
@@ -2503,18 +4288,28 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         std::fs::create_dir_all(&dir).unwrap();
         let engine_path = dir.join("engine.sock");
         let engine = UnixListener::bind(&engine_path).unwrap();
+        fn read_response(stream: &mut UnixStream) -> Vec<u8> {
+            let mut response = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !response.ends_with(b"\r\n\r\nOK") {
+                let read = stream.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "response stream closed before the body arrived");
+                response.extend_from_slice(&chunk[..read]);
+            }
+            response
+        }
         let engine_thread = std::thread::spawn(move || {
             let (mut sock, _) = engine.accept().unwrap();
-            let mut buf = vec![0_u8; 4096];
-            let n = sock.read(&mut buf).unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            let first = read_http_request(&mut sock).unwrap();
+            assert!(String::from_utf8_lossy(&first.bytes).contains("GET /_ping"));
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK",
+            )
+            .unwrap();
+            let second = read_http_request(&mut sock).unwrap();
+            assert!(String::from_utf8_lossy(&second.bytes).contains("GET /version"));
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
                 .unwrap();
-            if req.contains("connection: close") {
-                let _ = sock.shutdown(std::net::Shutdown::Both);
-            } else {
-                std::thread::sleep(Duration::from_secs(30));
-            }
         });
 
         let (mut client, proxy_client) = UnixStream::pair().unwrap();
@@ -2531,20 +4326,92 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let mut buf = [0_u8; 256];
-        let n = client.read(&mut buf).unwrap();
+        let first_response = read_response(&mut client);
         assert!(
-            std::str::from_utf8(&buf[..n]).unwrap().contains("200 OK"),
+            std::str::from_utf8(&first_response)
+                .unwrap()
+                .contains("200 OK"),
             "guest should receive the ping response, got {}",
-            String::from_utf8_lossy(&buf[..n])
+            String::from_utf8_lossy(&first_response)
         );
-        // The proxy EOFs our read side (Engine closed after `Connection:
-        // close`); a real CLI then closes the socket. Do the same so the
-        // proxy's guest→host copy can finish.
+        client
+            .write_all(b"GET /version HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let second_response = read_response(&mut client);
+        assert!(
+            std::str::from_utf8(&second_response)
+                .unwrap()
+                .contains("200 OK"),
+            "guest should receive the version response, got {}",
+            String::from_utf8_lossy(&second_response)
+        );
         drop(client);
         rx.recv_timeout(Duration::from_secs(2))
-            .expect("handle_client must return after injecting Connection: close; keepalive io::copy deadlocks docker CLI")
+            .expect("keepalive proxy must finish after the client requests close")
             .unwrap();
+        engine_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_client_forwards_pipelined_requests_with_rewrite() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = unique_unix_dir("velnor-lease-pipeline");
+        let engine_path = dir.join("engine.sock");
+        let engine = UnixListener::bind(&engine_path).unwrap();
+        let (seen_tx, seen_rx) = mpsc::channel::<Vec<Vec<u8>>>();
+        let engine_thread = std::thread::spawn(move || {
+            let (mut sock, _) = engine.accept().unwrap();
+            let first = read_http_request(&mut sock).unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK",
+            )
+            .unwrap();
+            let second = read_http_request(&mut sock).unwrap();
+            seen_tx.send(vec![first.bytes, second.bytes]).unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+        });
+
+        let (mut client, proxy_client) = UnixStream::pair().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let engine_for_proxy = engine_path.clone();
+        std::thread::spawn(move || {
+            let result = handle_client(proxy_client, &engine_for_proxy, "job", "daemon");
+            let _ = done_tx.send(result);
+        });
+
+        client
+            .write_all(
+                b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\n\r\n\
+                  POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut responses = Vec::new();
+        client.read_to_end(&mut responses).unwrap();
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("ordinary keepalive proxy must finish after response close")
+            .unwrap();
+        let seen = seen_rx.recv().unwrap();
+        assert!(String::from_utf8_lossy(&seen[0]).contains("GET /_ping"));
+        let second = String::from_utf8_lossy(&seen[1]);
+        assert!(second.contains("/containers/create"));
+        assert!(second.contains("velnor.job-id"));
+        assert_eq!(
+            String::from_utf8_lossy(&responses)
+                .matches("200 OK")
+                .count(),
+            2
+        );
         engine_thread.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
