@@ -1620,17 +1620,28 @@ async fn reclaim_orphaned_jobs(
         let remote_acked =
             journal.has_remote_terminal_ack(&JobId(marker_job_id.clone()), slot.generation)?;
         if !remote_acked {
+            // A ready-slot waiter persists the in-flight marker before journal
+            // admission while its ownership pid is still keyed `wait-{slot}`;
+            // the `write_owned_pid(job_id)` marker appears only when the job
+            // worker spawns. Consult both markers independently: a live owner
+            // defers recovery, and only a genuinely dead worker and waiter
+            // make the marker safe to reclaim.
+            let waiter_id = format!("wait-{}", slot.slot_id.0);
             let worker_pid =
-                cleanup::read_owned_pid(&args.state_dir, &marker_job_id, slot.generation.0)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "marker-only in-flight job {} has no valid worker ownership pid",
-                            marker_job_id
-                        )
-                    })?;
-            if prove::pid_is_alive(worker_pid) {
+                cleanup::read_owned_pid(&args.state_dir, &marker_job_id, slot.generation.0);
+            let waiter_pid =
+                cleanup::read_owned_pid(&args.state_dir, &waiter_id, slot.generation.0);
+            if worker_pid.is_none() && waiter_pid.is_none() {
+                return Err(anyhow::anyhow!(
+                    "marker-only in-flight job {} has no valid worker or waiter ownership pid",
+                    marker_job_id
+                ));
+            }
+            if worker_pid.is_some_and(prove::pid_is_alive)
+                || waiter_pid.is_some_and(prove::pid_is_alive)
+            {
                 // The marker can legitimately exist between persistence and
-                // journal admission. Never terminalize a live worker in that
+                // journal admission. Never terminalize a live owner in that
                 // window; the next reconciliation tick will retry.
                 continue;
             }
@@ -2878,6 +2889,190 @@ mod tests {
             .unwrap();
         assert_eq!(job.phase, ActorPhase::Running);
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Journal with one `Ready` slot and no assigned job, plus an exec config
+    /// whose two-slot layout maps `velnor-1` to `slots/slot-1`.
+    fn ready_slot_journal(dir: &Path) -> Journal {
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+            Event::ReadyAttempt {
+                slot_id: SlotId("velnor-1".to_owned()),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        journal
+    }
+
+    fn marker_only_recovery_fixture(label: &str) -> (PathBuf, Journal, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-marker-only-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = ready_slot_journal(&dir);
+        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
+        let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        std::fs::write(
+            slot_dir.join("in-flight-job.json"),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": "job-9",
+                "run_service_url": "https://example.invalid/run-service",
+                "billing_owner_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        (dir, journal, slot_dir)
+    }
+
+    fn stale_pid() -> u32 {
+        let mut stale_worker = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = stale_worker.id();
+        assert!(stale_worker.wait().unwrap().success());
+        assert!(!prove::pid_is_alive(pid));
+        pid
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_defers_to_live_waiter_pid() {
+        let (dir, mut journal, slot_dir) = marker_only_recovery_fixture("live-waiter");
+        // Crash window: the waiter persisted the in-flight marker before
+        // journal admission, so ownership is still keyed `wait-{slot}` and no
+        // `job-9` worker marker exists yet. Recovery must defer to the live
+        // waiter instead of hard-erroring on the missing worker marker.
+        cleanup::write_owned_pid(
+            &dir,
+            "wait-velnor-1",
+            Generation::INITIAL.0,
+            std::process::id(),
+        )
+        .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            slot_dir.join("in-flight-job.json").exists(),
+            "live waiter must keep its in-flight marker for the next tick"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_reclaims_once_worker_and_waiter_are_dead() {
+        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("dead-waiter");
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
+            .unwrap();
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let error = reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap_err();
+        // Both ownership markers are dead, so recovery advances past the
+        // ownership gate and stops only at the missing runner credentials.
+        assert!(
+            error
+                .to_string()
+                .contains("runner credentials missing while recovering marker-only in-flight job job-9"),
+            "{error:#}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn marker_only_in_flight_job_without_any_ownership_marker_errors() {
+        let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("no-owner");
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        };
+        let error = reclaim_orphaned_jobs(
+            &args,
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no valid worker or waiter ownership pid"),
+            "{error:#}"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

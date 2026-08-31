@@ -1298,19 +1298,27 @@ mod tests {
         fs::write(compiler_cache.join("payload"), vec![0; 16]).unwrap();
 
         let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
-        // SAFETY: this synchronous test owns the process environment value
-        // while exercising the discovery path and restores it below.
-        unsafe { std::env::set_var("VELNOR_STORAGE_ROOT", &root) };
+        let previous_trust = std::env::var_os("VELNOR_TRUST_SCOPE");
+        // SAFETY: this synchronous test owns the process environment values
+        // while exercising the discovery path and restores them below. The
+        // canonical actions-cache path is trust-scoped, so pin the exact
+        // `trusted` scope the fixture directories use instead of relying on
+        // the process-global default.
+        unsafe {
+            std::env::set_var("VELNOR_STORAGE_ROOT", &root);
+            std::env::set_var("VELNOR_TRUST_SCOPE", "trusted");
+        }
         let report = reclaim_for_disk_pressure(32);
-        match previous {
-            Some(value) => unsafe {
-                // SAFETY: restore the value owned by this synchronous test.
-                std::env::set_var("VELNOR_STORAGE_ROOT", value)
-            },
-            None => unsafe {
-                // SAFETY: restore the value owned by this synchronous test.
-                std::env::remove_var("VELNOR_STORAGE_ROOT")
-            },
+        // SAFETY: restore the values owned by this synchronous test.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("VELNOR_STORAGE_ROOT", value),
+                None => std::env::remove_var("VELNOR_STORAGE_ROOT"),
+            }
+            match previous_trust {
+                Some(value) => std::env::set_var("VELNOR_TRUST_SCOPE", value),
+                None => std::env::remove_var("VELNOR_TRUST_SCOPE"),
+            }
         }
 
         assert_eq!(report.freed_bytes, 32);
