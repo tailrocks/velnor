@@ -786,6 +786,12 @@ fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
             entry.2 += 1;
         }
     }
+    if sums.is_empty() {
+        // No baseline sample produced a complete timing pair. A baseline with
+        // no job timings would silently skip every regression comparison and
+        // false-green the gate, so refuse the baseline instead.
+        return None;
+    }
     let jobs = sums
         .into_iter()
         .filter_map(|(job_class, (github, velnor, count))| {
@@ -1577,6 +1583,23 @@ mod tests {
         let verdict = is_regression(&baseline, &current, 0.0);
 
         assert!(!verdict.regression, "{:?}", verdict.reasons);
+    }
+
+    #[test]
+    fn baseline_from_samples_rejects_samples_without_usable_timing() {
+        let samples = vec![LaneStats::default(), LaneStats::default()];
+
+        assert!(baseline_from_samples(&samples).is_none());
+    }
+
+    #[test]
+    fn baseline_from_samples_accepts_partial_timing_coverage() {
+        let samples = vec![lane_stats(100.0, 110.0, 0), LaneStats::default()];
+
+        let baseline = baseline_from_samples(&samples).expect("baseline should be usable");
+
+        assert_eq!(baseline.baseline_runs, 2);
+        assert_eq!(baseline.jobs.len(), 1);
     }
 
     #[test]
