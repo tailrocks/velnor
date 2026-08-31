@@ -102,6 +102,15 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
    signature before carrying that pair forward. No state branch is used. Served
    at `https://velnor-apt.tailrocks.com/`.
 
+The Velnor source-side `release verify-record --publication` check can compare
+expected and served APT metadata claims for schema, paths, sizes, digests,
+architectures, self-row handling, signature bindings, and package provenance.
+These are preverified claims, not an authentication mechanism: the
+`velnor-apt` publisher remains responsible for hashing raw `Release`,
+`Packages`, and `.deb` bytes, verifying `InRelease`/`Release.gpg` with the
+trusted key, and authenticating the claim source. Equal forged JSON claims must
+never authorize publication or deployment.
+
 ### Where it lives (storage decision)
 
 - **Store = GitHub Pages.** apt fetches the signed tree over HTTPS directly.
