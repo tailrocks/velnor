@@ -1,3 +1,0 @@
-[[profile.default.overrides]]
-filter = "test(crash_recovery_reopen_fuzz_has_no_torn_records)"
-slow-timeout = "5m"

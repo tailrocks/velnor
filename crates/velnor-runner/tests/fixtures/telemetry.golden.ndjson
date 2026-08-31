@@ -1,3 +1,0 @@
-{"schema_version":"velnor.telemetry.v1","run_id":"1","lane":"velnor","repo":"tailrocks/velnor-actions-fixture","trust_domain":"unknown","event":"run_queued","ts_logical":1,"ts_wall":"2026-08-24T12:30:45Z","fields":{"queue_time_present":false,"queued_for_ms":0}}
-{"schema_version":"velnor.telemetry.v1","run_id":"1","lane":"velnor","repo":"tailrocks/velnor-actions-fixture","trust_domain":"unknown","event":"run_admitted","ts_logical":2,"ts_wall":"2026-08-24T12:30:45Z","fields":{}}
-{"schema_version":"velnor.telemetry.v1","run_id":"1","lane":"velnor","repo":"tailrocks/velnor-actions-fixture","trust_domain":"unknown","event":"cache_lookup","ts_logical":3,"ts_wall":"2026-08-24T12:30:45Z","fields":{"hit":false,"lookup_ms":0,"miss_reason":"key_absent","store":"probe"}}
