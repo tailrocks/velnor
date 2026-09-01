@@ -918,7 +918,6 @@ impl CacheError {
             self,
             Self::Journal(
                 JournalError::LeaseBusy { .. }
-                    | JournalError::LeaseAbandonable { .. }
                     | JournalError::LeaseExpired
             )
         )

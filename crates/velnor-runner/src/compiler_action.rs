@@ -31,6 +31,11 @@ use velnor_cache_service::ProductionCompilerCache;
 use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
 
 const MAX_INPUT_FILES: usize = 100_000;
+const MAX_INPUT_DIRECTORIES: usize = 100_000;
+const MAX_INPUT_NODES: usize = 200_000;
+const MAX_INPUT_DIRECTORY_ENTRIES: usize = 100_000;
+const MAX_INPUT_PATH_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_INPUT_PATH_DEPTH: usize = 256;
 const MAX_INPUT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_INPUT_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const CACHEABLE_TARGET_DIRECTORY: &str = "target";
@@ -132,6 +137,7 @@ pub(crate) struct CompilerActionSession {
     service: Arc<ProductionCompilerCache>,
     action: StructuredCompileAction,
     key: ActionKey,
+    input_directory: PathBuf,
     output_directory: PathBuf,
     timeout: Duration,
 }
@@ -187,6 +193,7 @@ impl CompilerActionSession {
             service,
             action,
             key,
+            input_directory: container.workspace_host.clone(),
             output_directory: container.workspace_host.join(CACHEABLE_TARGET_DIRECTORY),
             timeout,
         }))
@@ -245,23 +252,24 @@ impl CompilerActionSession {
         let command_result = runner
             .run_streaming_timeout_with_env("docker", args, env, self.timeout, on_output)
             .context("run structured compiler action");
-        let heartbeat_error = heartbeat.stop();
-
-        if let Some(error) = heartbeat_error {
+        let command_result = match command_result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = heartbeat.stop();
+                let cleanup = abandon_lease(&self.service, &lease_state);
+                return Err(with_cleanup_context(error, cleanup));
+            }
+        };
+        if let Some(error) = heartbeat.error() {
+            let _ = heartbeat.stop();
             let cleanup = abandon_lease(&self.service, &lease_state);
             return Err(with_cleanup_context(
                 anyhow::anyhow!("compiler-cache lease renewal failed: {error}"),
                 cleanup,
             ));
         }
-        let command_result = match command_result {
-            Ok(result) => result,
-            Err(error) => {
-                let cleanup = abandon_lease(&self.service, &lease_state);
-                return Err(with_cleanup_context(error, cleanup));
-            }
-        };
         if command_result.code != 0 {
+            let _ = heartbeat.stop();
             let cleanup = abandon_lease(&self.service, &lease_state);
             if let Err(cleanup) = cleanup {
                 return Err(cleanup.context("abandon failed compiler action"));
@@ -273,9 +281,16 @@ impl CompilerActionSession {
             });
         }
 
-        let output_root = match self.service.store_output_tree(&self.output_directory) {
+        let lease_snapshot = lease_snapshot(&lease_state)?.ok_or_else(|| {
+            anyhow::anyhow!("compiler-cache lease disappeared during output capture")
+        })?;
+        let output_root = match self
+            .service
+            .store_output_tree_for_lease(&lease_snapshot, &self.output_directory)
+        {
             Ok(root) => root,
             Err(error) => {
+                let _ = heartbeat.stop();
                 let cleanup = abandon_lease(&self.service, &lease_state);
                 return Err(with_cleanup_context(
                     anyhow::anyhow!(error).context("capture compiler output tree"),
@@ -283,6 +298,33 @@ impl CompilerActionSession {
                 ));
             }
         };
+        let current_input = match digest_input_tree(&self.input_directory) {
+            Ok(digest) => digest,
+            Err(error) => {
+                let _ = heartbeat.stop();
+                let cleanup = abandon_lease(&self.service, &lease_state);
+                return Err(with_cleanup_context(
+                    error.context("revalidate compiler-cache input identity"),
+                    cleanup,
+                ));
+            }
+        };
+        if current_input != self.key.input_root {
+            let _ = heartbeat.stop();
+            let cleanup = abandon_lease(&self.service, &lease_state);
+            return Err(with_cleanup_context(
+                anyhow::anyhow!("compiler-cache input changed during compilation"),
+                cleanup,
+            ));
+        }
+        if let Some(error) = heartbeat.error() {
+            let _ = heartbeat.stop();
+            let cleanup = abandon_lease(&self.service, &lease_state);
+            return Err(with_cleanup_context(
+                anyhow::anyhow!("compiler-cache lease renewal failed: {error}"),
+                cleanup,
+            ));
+        }
         let started_at_ms = unix_now_ms();
         let key = self.key;
         let source_digest = key.input_root.clone();
@@ -306,17 +348,22 @@ impl CompilerActionSession {
                 cpu_ms: None,
             },
         };
-        let lease = take_lease(&lease_state)?;
-        let Some(lease) = lease else {
-            bail!("compiler-cache lease disappeared before publication")
-        };
-        if let Err(error) = self.service.publish_with_accounting_blocking(lease, result) {
+        let lease = lease_snapshot(&lease_state)?.ok_or_else(|| {
+            anyhow::anyhow!("compiler-cache lease disappeared before publication")
+        })?;
+        if let Err(error) = self
+            .service
+            .publish_with_accounting_blocking(lease, result)
+        {
+            let _ = heartbeat.stop();
             let cleanup = abandon_lease(&self.service, &lease_state);
             return Err(with_cleanup_context(
                 anyhow::anyhow!(error).context("publish compiler action"),
                 cleanup,
             ));
         }
+        clear_lease(&lease_state)?;
+        let _ = heartbeat.stop();
         Ok(CompilerActionExecution {
             result: command_result,
             cache_hit: false,
@@ -416,10 +463,17 @@ fn heartbeat_interval(state: &Mutex<Option<ProducerLease>>) -> Duration {
         .unwrap_or(Duration::from_secs(1))
 }
 
-fn take_lease(state: &Mutex<Option<ProducerLease>>) -> Result<Option<ProducerLease>> {
+fn lease_snapshot(state: &Mutex<Option<ProducerLease>>) -> Result<Option<ProducerLease>> {
     state
         .lock()
-        .map(|mut state| state.take())
+        .map(|state| state.clone())
+        .map_err(|_| anyhow::anyhow!("compiler-cache lease mutex poisoned"))
+}
+
+fn clear_lease(state: &Mutex<Option<ProducerLease>>) -> Result<()> {
+    state
+        .lock()
+        .map(|mut state| *state = None)
         .map_err(|_| anyhow::anyhow!("compiler-cache lease mutex poisoned"))
 }
 
@@ -427,12 +481,19 @@ fn abandon_lease(
     service: &ProductionCompilerCache,
     state: &Mutex<Option<ProducerLease>>,
 ) -> Result<()> {
-    let Some(lease) = take_lease(state)? else {
+    let Some(lease) = lease_snapshot(state)? else {
         return Ok(());
     };
-    service
-        .abandon_blocking(&lease)
-        .map_err(|error| anyhow::anyhow!(error).context("abandon compiler action lease"))
+    clear_lease(state)?;
+    match service.abandon_blocking(&lease) {
+        Ok(()) => Ok(()),
+        Err(velnor_cache_service::CacheError::Journal(
+            velnor_action_journal::JournalError::LeaseFenced
+            | velnor_action_journal::JournalError::LeaseReleased { .. }
+            | velnor_action_journal::JournalError::LeaseNotFound { .. },
+        )) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(error).context("abandon compiler action lease")),
+    }
 }
 
 fn with_cleanup_context(primary: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
@@ -512,13 +573,20 @@ fn digest_input_tree(root: &Path) -> Result<Digest> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"velnor-compiler-input-v1\0");
         let mut files = 0_usize;
+        let mut directories = 0_usize;
+        let mut nodes = 0_usize;
+        let mut path_bytes = 0_u64;
         let mut total_bytes = 0_u64;
         digest_input_directory(
             &root,
             Path::new(""),
             &mut hasher,
             &mut files,
+            &mut directories,
+            &mut nodes,
+            &mut path_bytes,
             &mut total_bytes,
+            0,
         )?;
         Ok(Digest::from_hash(hasher.finalize()))
     }
@@ -619,9 +687,24 @@ fn digest_input_directory(
     relative_root: &Path,
     hasher: &mut blake3::Hasher,
     files: &mut usize,
+    directories: &mut usize,
+    nodes: &mut usize,
+    path_bytes: &mut u64,
     total_bytes: &mut u64,
+    depth: usize,
 ) -> Result<()> {
-    let names = read_input_names(&root.file, &root.display_path)?;
+    if depth > MAX_INPUT_PATH_DEPTH {
+        bail!("compiler input exceeds {MAX_INPUT_PATH_DEPTH}-component depth");
+    }
+    *directories = directories.saturating_add(1);
+    if *directories > MAX_INPUT_DIRECTORIES {
+        bail!("compiler input exceeds {MAX_INPUT_DIRECTORIES} directories");
+    }
+    let names = read_input_names(
+        &root.file,
+        &root.display_path,
+        MAX_INPUT_DIRECTORY_ENTRIES,
+    )?;
     for name in &names {
         if name == OsStr::new(".") || name == OsStr::new("..") {
             continue;
@@ -630,6 +713,16 @@ fn digest_input_directory(
         let relative_text = relative.to_str().ok_or_else(|| {
             anyhow::anyhow!("compiler input path is not UTF-8: {}", relative.display())
         })?;
+        *nodes = nodes.saturating_add(1);
+        if *nodes > MAX_INPUT_NODES {
+            bail!("compiler input exceeds {MAX_INPUT_NODES} nodes");
+        }
+        *path_bytes = path_bytes
+            .checked_add(relative_text.len() as u64)
+            .ok_or_else(|| anyhow::anyhow!("compiler input path byte count overflowed"))?;
+        if *path_bytes > MAX_INPUT_PATH_BYTES {
+            bail!("compiler input paths exceed {MAX_INPUT_PATH_BYTES} bytes");
+        }
         let display_path = root.display_path.join(name);
         let expected = stat_input_entry(&root.file, name, &display_path)?;
         let file_type = rustix::fs::FileType::from_raw_mode(expected.st_mode);
@@ -648,29 +741,41 @@ fn digest_input_directory(
         match file_type {
             rustix::fs::FileType::Directory => {
                 let child = root.open_directory(name, &display_path)?;
-                digest_input_directory(&child, &relative, hasher, files, total_bytes)?;
+                digest_input_directory(
+                    &child,
+                    &relative,
+                    hasher,
+                    files,
+                    directories,
+                    nodes,
+                    path_bytes,
+                    total_bytes,
+                    depth.saturating_add(1),
+                )?;
             }
             rustix::fs::FileType::RegularFile => {
                 *files = files.saturating_add(1);
                 if *files > MAX_INPUT_FILES {
                     bail!("compiler input exceeds {MAX_INPUT_FILES} files");
                 }
-                let bytes = read_input_file(&root.file, name, &expected, &display_path)?;
-                if bytes.len() as u64 > MAX_INPUT_FILE_BYTES {
-                    bail!(
-                        "compiler input file exceeds {MAX_INPUT_FILE_BYTES} bytes: {relative_text}"
-                    );
-                }
+                let file_size = opened_input_size(&expected, &relative_text)?;
                 *total_bytes = total_bytes
-                    .checked_add(bytes.len() as u64)
+                    .checked_add(file_size)
                     .ok_or_else(|| anyhow::anyhow!("compiler input byte count overflowed"))?;
                 if *total_bytes > MAX_INPUT_TOTAL_BYTES {
                     bail!("compiler input exceeds {MAX_INPUT_TOTAL_BYTES} bytes");
                 }
                 hasher.update(&(relative_text.len() as u64).to_be_bytes());
                 hasher.update(relative_text.as_bytes());
-                hasher.update(&(bytes.len() as u64).to_be_bytes());
-                hasher.update(&bytes);
+                hasher.update(&file_size.to_be_bytes());
+                hash_input_file(
+                    &root.file,
+                    name,
+                    &expected,
+                    &display_path,
+                    file_size,
+                    hasher,
+                )?;
             }
             rustix::fs::FileType::Symlink => {
                 bail!("compiler input contains symlink: {relative_text}")
@@ -680,7 +785,11 @@ fn digest_input_directory(
         verify_input_entry(&root.file, name, &expected, &display_path)?;
     }
 
-    let final_names = read_input_names(&root.file, &root.display_path)?;
+    let final_names = read_input_names(
+        &root.file,
+        &root.display_path,
+        MAX_INPUT_DIRECTORY_ENTRIES,
+    )?;
     if names != final_names {
         bail!(
             "compiler input directory changed during secure snapshot: {}",
@@ -691,7 +800,11 @@ fn digest_input_directory(
 }
 
 #[cfg(unix)]
-fn read_input_names(directory: &fs::File, display_path: &Path) -> Result<Vec<OsString>> {
+fn read_input_names(
+    directory: &fs::File,
+    display_path: &Path,
+    max_entries: usize,
+) -> Result<Vec<OsString>> {
     let mut names = rustix::fs::Dir::read_from(directory)
         .map_err(std::io::Error::from)
         .with_context(|| format!("read compiler input directory {}", display_path.display()))?
@@ -701,6 +814,12 @@ fn read_input_names(directory: &fs::File, display_path: &Path) -> Result<Vec<OsS
                 .map(|entry| OsString::from_vec(entry.file_name().to_bytes().to_vec()))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    if names.len() > max_entries {
+        bail!(
+            "compiler input directory {} exceeds {max_entries} entries",
+            display_path.display()
+        );
+    }
     names.sort();
     Ok(names)
 }
@@ -779,12 +898,26 @@ fn verify_input_entry(
 }
 
 #[cfg(unix)]
-fn read_input_file(
+fn opened_input_size(stat: &rustix::fs::Stat, relative: &str) -> Result<u64> {
+    let size = u64::try_from(stat.st_size)
+        .map_err(|_| anyhow::anyhow!("compiler input file has a negative size: {relative}"))?;
+    if size > MAX_INPUT_FILE_BYTES {
+        bail!(
+            "compiler input file exceeds {MAX_INPUT_FILE_BYTES} bytes: {relative}"
+        );
+    }
+    Ok(size)
+}
+
+#[cfg(unix)]
+fn hash_input_file(
     parent: &fs::File,
     name: &OsStr,
     expected: &rustix::fs::Stat,
     display_path: &Path,
-) -> Result<Vec<u8>> {
+    expected_size: u64,
+    hasher: &mut blake3::Hasher,
+) -> Result<()> {
     let file = rustix::fs::openat(
         parent,
         name,
@@ -812,16 +945,38 @@ fn read_input_file(
     }
     ensure_same_input_entry(expected, &opened, display_path)?;
     let mut file: fs::File = file.into();
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(MAX_INPUT_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| anyhow::anyhow!("compiler input byte count overflowed"))?;
+        if total > MAX_INPUT_FILE_BYTES {
+            bail!(
+                "compiler input file exceeds {MAX_INPUT_FILE_BYTES} bytes: {}",
+                display_path.display()
+            );
+        }
+        hasher.update(&buffer[..count]);
+    }
     let after = rustix::fs::fstat(&file)
         .map_err(std::io::Error::from)
         .with_context(|| format!("reinspect compiler input {}", display_path.display()))?;
     ensure_same_input_entry(expected, &after, display_path)?;
+    if total != expected_size
+        || u64::try_from(after.st_size).ok() != Some(expected_size)
+    {
+        bail!(
+            "compiler input file changed during secure snapshot: {}",
+            display_path.display()
+        );
+    }
     verify_input_entry(parent, name, expected, display_path)?;
-    Ok(bytes)
+    Ok(())
 }
 
 #[cfg(unix)]
