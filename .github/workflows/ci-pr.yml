@@ -21,7 +21,7 @@ env:
 
 jobs:
   plan:
-    name: "GitHub / Planning
+    name: "GitHub / Planning"
     runs-on: ubuntu-24.04
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
@@ -40,7 +40,7 @@ jobs:
         run: bash .github/ci/run.sh plan
 
   policy:
-    name: "GitHub / Policy
+    name: "GitHub / Policy"
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout workflow data
