@@ -747,7 +747,7 @@ fn is_directory(stat: &rustix::fs::Stat) -> bool {
 fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64, u32) {
     (
         stat.st_dev as u64,
-        stat.st_ino as u64,
+        stat.st_ino,
         u32::from(stat.st_mode & 0o170_000),
     )
 }
