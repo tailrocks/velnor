@@ -65,17 +65,134 @@ jobs:
             policy=.github/ci/policy.sh
           fi
           bash "$policy"
-  github-group-rust:
-    name: "GitHub / Rust / Crates"
+  group-rust:
+    name: Rust
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Admit Rust / Crates jobs
+      - name: Admit Rust jobs
         run: echo 'group ready'
 
-  github-group-bun:
-    name: "GitHub / Bun / Packages"
+  group-unit-rust-policy:
+    name: "Rust dependency policy"
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-unit-collector:
+    name: unit-collector
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-action-journal:
+    name: velnor-action-journal
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-action-model:
+    name: velnor-action-model
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-cache-service:
+    name: velnor-cache-service
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-cas:
+    name: velnor-cas
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-client:
+    name: velnor-client
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-control:
+    name: velnor-control
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-model:
+    name: velnor-model
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-render:
+    name: velnor-render
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-runner:
+    name: velnor-runner
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnor-tools:
+    name: velnor-tools
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-unit-rust-velnorctl:
+    name: velnorctl
+    needs: [group-rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-bun:
+    name: "Bun / Packages"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -83,8 +200,17 @@ jobs:
       - name: Admit Bun / Packages jobs
         run: echo 'group ready'
 
-  github-group-docker:
-    name: "GitHub / Docker / Images"
+  group-unit-bun-velnor:
+    name: "Bun package (velnor)"
+    needs: [group-bun]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-docker:
+    name: "Docker / Images"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -92,8 +218,17 @@ jobs:
       - name: Admit Docker / Images jobs
         run: echo 'group ready'
 
-  github-group-docs:
-    name: "GitHub / Documentation"
+  group-unit-docker:
+    name: Docker
+    needs: [group-docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
+  group-docs:
+    name: Documentation
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -101,9 +236,18 @@ jobs:
       - name: Admit Documentation jobs
         run: echo 'group ready'
 
+  group-unit-docs:
+    name: Documentation
+    needs: [group-docs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit runner jobs
+        run: echo 'crate group ready'
+
   github-bun-velnor:
     name: "GitHub / Bun / Packages / Bun package (velnor)"
-    needs: [plan, policy, github-group-bun]
+    needs: [plan, policy, group-unit-bun-velnor]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -133,7 +277,7 @@ jobs:
 
   github-docker:
     name: "GitHub / Docker / Images / Docker"
-    needs: [plan, policy, github-group-docker]
+    needs: [plan, policy, group-unit-docker]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -154,7 +298,7 @@ jobs:
 
   github-docs:
     name: "GitHub / Documentation / Documentation"
-    needs: [plan, policy, github-group-docs]
+    needs: [plan, policy, group-unit-docs]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -181,8 +325,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-policy:
-    name: "GitHub / Rust / Crates / Rust dependency policy"
-    needs: [plan, policy, github-group-rust]
+    name: "GitHub / Rust / Rust dependency policy"
+    needs: [plan, policy, group-unit-rust-policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -228,8 +372,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-unit-collector:
-    name: "GitHub / Rust / Crates / unit-collector"
-    needs: [plan, policy, github-group-rust]
+    name: "GitHub / Rust / unit-collector"
+    needs: [plan, policy, group-unit-rust-unit-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -275,8 +419,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-action-journal:
-    name: "GitHub / Rust / Crates / velnor-action-journal"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-action-model, github-rust-velnor-model]
+    name: "GitHub / Rust / velnor-action-journal"
+    needs: [plan, policy, group-unit-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -322,8 +466,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-action-model:
-    name: "GitHub / Rust / Crates / velnor-action-model"
-    needs: [plan, policy, github-group-rust]
+    name: "GitHub / Rust / velnor-action-model"
+    needs: [plan, policy, group-unit-rust-velnor-action-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -369,8 +513,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-cache-service:
-    name: "GitHub / Rust / Crates / velnor-cache-service"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-cas]
+    name: "GitHub / Rust / velnor-cache-service"
+    needs: [plan, policy, group-unit-rust-velnor-cache-service, github-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-cas]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -416,8 +560,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-cas:
-    name: "GitHub / Rust / Crates / velnor-cas"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-action-model]
+    name: "GitHub / Rust / velnor-cas"
+    needs: [plan, policy, group-unit-rust-velnor-cas, github-rust-velnor-action-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -463,8 +607,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-client:
-    name: "GitHub / Rust / Crates / velnor-client"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-model]
+    name: "GitHub / Rust / velnor-client"
+    needs: [plan, policy, group-unit-rust-velnor-client, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -510,8 +654,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-control:
-    name: "GitHub / Rust / Crates / velnor-control"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-action-journal, github-rust-velnor-model]
+    name: "GitHub / Rust / velnor-control"
+    needs: [plan, policy, group-unit-rust-velnor-control, github-rust-velnor-action-journal, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -557,8 +701,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-model:
-    name: "GitHub / Rust / Crates / velnor-model"
-    needs: [plan, policy, github-group-rust]
+    name: "GitHub / Rust / velnor-model"
+    needs: [plan, policy, group-unit-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -604,8 +748,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-render:
-    name: "GitHub / Rust / Crates / velnor-render"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-model]
+    name: "GitHub / Rust / velnor-render"
+    needs: [plan, policy, group-unit-rust-velnor-render, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -651,8 +795,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-runner:
-    name: "GitHub / Rust / Crates / velnor-runner"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-action-model, github-rust-velnor-cache-service, github-rust-velnor-control, github-rust-velnor-model]
+    name: "GitHub / Rust / velnor-runner"
+    needs: [plan, policy, group-unit-rust-velnor-runner, github-rust-velnor-action-model, github-rust-velnor-cache-service, github-rust-velnor-control, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -698,8 +842,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-tools:
-    name: "GitHub / Rust / Crates / velnor-tools"
-    needs: [plan, policy, github-group-rust]
+    name: "GitHub / Rust / velnor-tools"
+    needs: [plan, policy, group-unit-rust-velnor-tools]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -745,8 +889,8 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnorctl:
-    name: "GitHub / Rust / Crates / velnorctl"
-    needs: [plan, policy, github-group-rust, github-rust-velnor-client, github-rust-velnor-control, github-rust-velnor-model, github-rust-velnor-render, github-rust-velnor-runner]
+    name: "GitHub / Rust / velnorctl"
+    needs: [plan, policy, group-unit-rust-velnorctl, github-rust-velnor-client, github-rust-velnor-control, github-rust-velnor-model, github-rust-velnor-render, github-rust-velnor-runner]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -791,50 +935,10 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
-  velnor-group-rust:
-    name: "Velnor / Rust / Crates"
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
-    runs-on: [self-hosted, velnor]
-    timeout-minutes: 5
-    steps:
-      - name: Admit Rust / Crates jobs
-        run: echo 'group ready'
-
-  velnor-group-bun:
-    name: "Velnor / Bun / Packages"
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
-    runs-on: [self-hosted, velnor]
-    timeout-minutes: 5
-    steps:
-      - name: Admit Bun / Packages jobs
-        run: echo 'group ready'
-
-  velnor-group-docker:
-    name: "Velnor / Docker / Images"
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
-    runs-on: [self-hosted, velnor]
-    timeout-minutes: 5
-    steps:
-      - name: Admit Docker / Images jobs
-        run: echo 'group ready'
-
-  velnor-group-docs:
-    name: "Velnor / Documentation"
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
-    runs-on: [self-hosted, velnor]
-    timeout-minutes: 5
-    steps:
-      - name: Admit Documentation jobs
-        run: echo 'group ready'
-
   velnor-bun-velnor:
     name: "Velnor / Bun / Packages / Bun package (velnor)"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-bun]
+    needs: [plan, policy, group-unit-bun-velnor]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -865,7 +969,7 @@ jobs:
   velnor-docker:
     name: "Velnor / Docker / Images / Docker"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-docker]
+    needs: [plan, policy, group-unit-docker]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -887,7 +991,7 @@ jobs:
   velnor-docs:
     name: "Velnor / Documentation / Documentation"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-docs]
+    needs: [plan, policy, group-unit-docs]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -914,9 +1018,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-policy:
-    name: "Velnor / Rust / Crates / Rust dependency policy"
+    name: "Velnor / Rust / Rust dependency policy"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust]
+    needs: [plan, policy, group-unit-rust-policy]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -962,9 +1066,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-unit-collector:
-    name: "Velnor / Rust / Crates / unit-collector"
+    name: "Velnor / Rust / unit-collector"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust]
+    needs: [plan, policy, group-unit-rust-unit-collector]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1010,9 +1114,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-action-journal:
-    name: "Velnor / Rust / Crates / velnor-action-journal"
+    name: "Velnor / Rust / velnor-action-journal"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-action-model, velnor-rust-velnor-model]
+    needs: [plan, policy, group-unit-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1058,9 +1162,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-action-model:
-    name: "Velnor / Rust / Crates / velnor-action-model"
+    name: "Velnor / Rust / velnor-action-model"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust]
+    needs: [plan, policy, group-unit-rust-velnor-action-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1106,9 +1210,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-cache-service:
-    name: "Velnor / Rust / Crates / velnor-cache-service"
+    name: "Velnor / Rust / velnor-cache-service"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-cas]
+    needs: [plan, policy, group-unit-rust-velnor-cache-service, velnor-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-cas]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1154,9 +1258,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-cas:
-    name: "Velnor / Rust / Crates / velnor-cas"
+    name: "Velnor / Rust / velnor-cas"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-action-model]
+    needs: [plan, policy, group-unit-rust-velnor-cas, velnor-rust-velnor-action-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1202,9 +1306,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-client:
-    name: "Velnor / Rust / Crates / velnor-client"
+    name: "Velnor / Rust / velnor-client"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-model]
+    needs: [plan, policy, group-unit-rust-velnor-client, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1250,9 +1354,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-control:
-    name: "Velnor / Rust / Crates / velnor-control"
+    name: "Velnor / Rust / velnor-control"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-action-journal, velnor-rust-velnor-model]
+    needs: [plan, policy, group-unit-rust-velnor-control, velnor-rust-velnor-action-journal, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1298,9 +1402,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-model:
-    name: "Velnor / Rust / Crates / velnor-model"
+    name: "Velnor / Rust / velnor-model"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust]
+    needs: [plan, policy, group-unit-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1346,9 +1450,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-render:
-    name: "Velnor / Rust / Crates / velnor-render"
+    name: "Velnor / Rust / velnor-render"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-model]
+    needs: [plan, policy, group-unit-rust-velnor-render, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1394,9 +1498,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-runner:
-    name: "Velnor / Rust / Crates / velnor-runner"
+    name: "Velnor / Rust / velnor-runner"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-action-model, velnor-rust-velnor-cache-service, velnor-rust-velnor-control, velnor-rust-velnor-model]
+    needs: [plan, policy, group-unit-rust-velnor-runner, velnor-rust-velnor-action-model, velnor-rust-velnor-cache-service, velnor-rust-velnor-control, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1442,9 +1546,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-tools:
-    name: "Velnor / Rust / Crates / velnor-tools"
+    name: "Velnor / Rust / velnor-tools"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust]
+    needs: [plan, policy, group-unit-rust-velnor-tools]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1490,9 +1594,9 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnorctl:
-    name: "Velnor / Rust / Crates / velnorctl"
+    name: "Velnor / Rust / velnorctl"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-group-rust, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
+    needs: [plan, policy, group-unit-rust-velnorctl, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
