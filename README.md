@@ -21,6 +21,9 @@ bun run dev
 Documentation content lives under `content/docs/**/*.mdx`. Add route files
 under `src/routes`; TanStack Router updates `src/routeTree.gen.ts` for you.
 
+The Pages build uses `bun run build:static` to prerender the site and its
+Markdown and search endpoints into `.output/public`.
+
 Build the production app with:
 
 ```bash
