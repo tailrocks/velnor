@@ -1954,12 +1954,7 @@ fn regular_policy_file_identity_from_stat(stat: &libc::stat) -> io::Result<Polic
     let nlink = stat.st_nlink;
     #[cfg(not(target_os = "linux"))]
     let nlink = stat.st_nlink as u64;
-    Ok((
-        stat.st_dev as _,
-        stat.st_ino,
-        stat.st_mode as u64,
-        nlink,
-    ))
+    Ok((stat.st_dev as _, stat.st_ino, stat.st_mode as u64, nlink))
 }
 
 #[cfg(unix)]
