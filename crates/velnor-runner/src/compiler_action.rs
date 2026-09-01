@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 #[cfg(unix)]
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -33,6 +33,13 @@ use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
 const MAX_INPUT_FILES: usize = 100_000;
 const MAX_INPUT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_INPUT_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const MAX_INPUT_DIRECTORIES: usize = 100_000;
+const MAX_INPUT_ENTRIES: usize = 200_000;
+const MAX_INPUT_DIRECTORY_ENTRIES: usize = 100_000;
+const MAX_INPUT_DIRECTORY_NAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INPUT_DEPTH: usize = 128;
+const MAX_INPUT_PATH_BYTES: usize = 16 * 1024;
+const INPUT_HASH_BUFFER_BYTES: usize = 64 * 1024;
 const CACHEABLE_TARGET_DIRECTORY: &str = "target";
 const DEFAULT_EXECUTION_PATH: &str =
     "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -535,15 +542,7 @@ fn digest_input_tree(root: &Path) -> Result<Digest> {
         let root = SecureInputDirectory::open_absolute(root)?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"velnor-compiler-input-v1\0");
-        let mut files = 0_usize;
-        let mut total_bytes = 0_u64;
-        digest_input_directory(
-            &root,
-            Path::new(""),
-            &mut hasher,
-            &mut files,
-            &mut total_bytes,
-        )?;
+        digest_input_directory(&root, &mut hasher)?;
         Ok(Digest::from_hash(hasher.finalize()))
     }
     #[cfg(not(unix))]
@@ -638,24 +637,58 @@ impl SecureInputDirectory {
 }
 
 #[cfg(unix)]
-fn digest_input_directory(
-    root: &SecureInputDirectory,
-    relative_root: &Path,
-    hasher: &mut blake3::Hasher,
-    files: &mut usize,
-    total_bytes: &mut u64,
-) -> Result<()> {
-    let names = read_input_names(&root.file, &root.display_path)?;
-    for name in &names {
+fn digest_input_directory(root: &SecureInputDirectory, hasher: &mut blake3::Hasher) -> Result<()> {
+    let mut directories = 1_usize;
+    let mut entries = 0_usize;
+    let mut files = 0_usize;
+    let mut total_bytes = 0_u64;
+    let mut stack = vec![InputDirectoryFrame::new(root, Path::new(""))?];
+
+    loop {
+        let Some(frame_index) = stack.len().checked_sub(1) else {
+            break;
+        };
+        if stack[frame_index].next == stack[frame_index].names.len() {
+            let final_names = read_input_names(
+                &stack[frame_index].directory.file,
+                &stack[frame_index].directory.display_path,
+            )?;
+            if stack[frame_index].names != final_names {
+                bail!(
+                    "compiler input directory changed during secure snapshot: {}",
+                    stack[frame_index].directory.display_path.display()
+                );
+            }
+            stack.pop();
+            continue;
+        }
+
+        let name = stack[frame_index].names[stack[frame_index].next].clone();
+        stack[frame_index].next += 1;
+        entries = entries
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("compiler input entry count overflowed"))?;
+        if entries > MAX_INPUT_ENTRIES {
+            bail!("compiler input exceeds {MAX_INPUT_ENTRIES} entries");
+        }
+
+        let relative_root = stack[frame_index].relative_root.clone();
+        let display_root = stack[frame_index].directory.display_path.clone();
         if name == OsStr::new(".") || name == OsStr::new("..") {
             continue;
         }
-        let relative = relative_root.join(name);
+        let relative = relative_root.join(&name);
+        if relative.as_os_str().as_bytes().len() > MAX_INPUT_PATH_BYTES {
+            bail!(
+                "compiler input path exceeds {MAX_INPUT_PATH_BYTES} bytes: {}",
+                relative.display()
+            );
+        }
         let relative_text = relative.to_str().ok_or_else(|| {
             anyhow::anyhow!("compiler input path is not UTF-8: {}", relative.display())
         })?;
-        let display_path = root.display_path.join(name);
-        let expected = stat_input_entry(&root.file, name, &display_path)?;
+        let display_path = display_root.join(&name);
+        let expected = stat_input_entry(&stack[frame_index].directory.file, &name, &display_path)?;
         let file_type = rustix::fs::FileType::from_raw_mode(expected.st_mode);
         if relative_root.as_os_str().is_empty()
             && matches!(name.to_str(), Some("target" | ".git" | ".velnor"))
@@ -666,65 +699,124 @@ fn digest_input_directory(
             if file_type != rustix::fs::FileType::Directory {
                 bail!("compiler input contains unsupported entry: {relative_text}");
             }
-            verify_input_entry(&root.file, name, &expected, &display_path)?;
+            verify_input_entry(
+                &stack[frame_index].directory.file,
+                &name,
+                &expected,
+                &display_path,
+            )?;
             continue;
         }
         match file_type {
             rustix::fs::FileType::Directory => {
-                let child = root.open_directory(name, &display_path)?;
-                digest_input_directory(&child, &relative, hasher, files, total_bytes)?;
+                if frame_index + 1 >= MAX_INPUT_DEPTH {
+                    bail!("compiler input exceeds {MAX_INPUT_DEPTH} directory depth");
+                }
+                directories = directories
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("compiler input directory count overflowed"))?;
+                if directories > MAX_INPUT_DIRECTORIES {
+                    bail!("compiler input exceeds {MAX_INPUT_DIRECTORIES} directories");
+                }
+                let child = stack[frame_index]
+                    .directory
+                    .open_directory(&name, &display_path)?;
+                let child_names = read_input_names(&child.file, &child.display_path)?;
+                verify_input_entry(
+                    &stack[frame_index].directory.file,
+                    &name,
+                    &expected,
+                    &display_path,
+                )?;
+                stack.push(InputDirectoryFrame {
+                    directory: child,
+                    relative_root: relative,
+                    names: child_names,
+                    next: 0,
+                });
             }
             rustix::fs::FileType::RegularFile => {
-                *files = files.saturating_add(1);
-                if *files > MAX_INPUT_FILES {
+                files = files
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("compiler input file count overflowed"))?;
+                if files > MAX_INPUT_FILES {
                     bail!("compiler input exceeds {MAX_INPUT_FILES} files");
                 }
-                let bytes = read_input_file(&root.file, name, &expected, &display_path)?;
-                if bytes.len() as u64 > MAX_INPUT_FILE_BYTES {
-                    bail!(
-                        "compiler input file exceeds {MAX_INPUT_FILE_BYTES} bytes: {relative_text}"
-                    );
-                }
-                *total_bytes = total_bytes
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(|| anyhow::anyhow!("compiler input byte count overflowed"))?;
-                if *total_bytes > MAX_INPUT_TOTAL_BYTES {
-                    bail!("compiler input exceeds {MAX_INPUT_TOTAL_BYTES} bytes");
-                }
-                hasher.update(&(relative_text.len() as u64).to_be_bytes());
-                hasher.update(relative_text.as_bytes());
-                hasher.update(&(bytes.len() as u64).to_be_bytes());
-                hasher.update(&bytes);
+                digest_input_file(
+                    &stack[frame_index].directory.file,
+                    &name,
+                    &expected,
+                    &display_path,
+                    relative_text,
+                    hasher,
+                    &mut total_bytes,
+                )?;
+                verify_input_entry(
+                    &stack[frame_index].directory.file,
+                    &name,
+                    &expected,
+                    &display_path,
+                )?;
             }
             rustix::fs::FileType::Symlink => {
                 bail!("compiler input contains symlink: {relative_text}")
             }
             _ => bail!("compiler input contains unsupported entry: {relative_text}"),
         }
-        verify_input_entry(&root.file, name, &expected, &display_path)?;
-    }
-
-    let final_names = read_input_names(&root.file, &root.display_path)?;
-    if names != final_names {
-        bail!(
-            "compiler input directory changed during secure snapshot: {}",
-            root.display_path.display()
-        );
     }
     Ok(())
 }
 
 #[cfg(unix)]
+struct InputDirectoryFrame {
+    directory: SecureInputDirectory,
+    relative_root: PathBuf,
+    names: Vec<OsString>,
+    next: usize,
+}
+
+#[cfg(unix)]
+impl InputDirectoryFrame {
+    fn new(directory: &SecureInputDirectory, relative_root: &Path) -> Result<Self> {
+        Ok(Self {
+            directory: SecureInputDirectory {
+                file: directory.file.try_clone()?,
+                display_path: directory.display_path.clone(),
+            },
+            relative_root: relative_root.to_path_buf(),
+            names: read_input_names(&directory.file, &directory.display_path)?,
+            next: 0,
+        })
+    }
+}
+
+#[cfg(unix)]
 fn read_input_names(directory: &fs::File, display_path: &Path) -> Result<Vec<OsString>> {
-    let mut names = rustix::fs::Dir::read_from(directory)
+    let mut names = Vec::new();
+    let mut name_bytes = 0_usize;
+    for entry in rustix::fs::Dir::read_from(directory)
         .map_err(std::io::Error::from)
         .with_context(|| format!("read compiler input directory {}", display_path.display()))?
-        .map(|entry| {
-            entry
-                .map_err(std::io::Error::from)
-                .map(|entry| OsString::from_vec(entry.file_name().to_bytes().to_vec()))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    {
+        let entry = entry.map_err(std::io::Error::from)?;
+        if names.len() >= MAX_INPUT_DIRECTORY_ENTRIES {
+            bail!(
+                "compiler input directory exceeds {MAX_INPUT_DIRECTORY_ENTRIES} entries: {}",
+                display_path.display()
+            );
+        }
+        let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+        name_bytes = name_bytes
+            .checked_add(name.as_os_str().as_bytes().len())
+            .ok_or_else(|| anyhow::anyhow!("compiler input directory name bytes overflowed"))?;
+        if name_bytes > MAX_INPUT_DIRECTORY_NAME_BYTES {
+            bail!(
+                "compiler input directory names exceed {MAX_INPUT_DIRECTORY_NAME_BYTES} bytes: {}",
+                display_path.display()
+            );
+        }
+        names.push(name);
+    }
     names.sort();
     Ok(names)
 }
@@ -803,12 +895,26 @@ fn verify_input_entry(
 }
 
 #[cfg(unix)]
-fn read_input_file(
+fn digest_input_file(
     parent: &fs::File,
     name: &OsStr,
     expected: &rustix::fs::Stat,
     display_path: &Path,
-) -> Result<Vec<u8>> {
+    relative_text: &str,
+    hasher: &mut blake3::Hasher,
+    total_bytes: &mut u64,
+) -> Result<()> {
+    let expected_size = u64::try_from(expected.st_size)
+        .map_err(|_| anyhow::anyhow!("compiler input file size is negative: {display_path:?}"))?;
+    if expected_size > MAX_INPUT_FILE_BYTES {
+        bail!("compiler input file exceeds {MAX_INPUT_FILE_BYTES} bytes: {relative_text}");
+    }
+    let new_total_bytes = total_bytes
+        .checked_add(expected_size)
+        .ok_or_else(|| anyhow::anyhow!("compiler input byte count overflowed"))?;
+    if new_total_bytes > MAX_INPUT_TOTAL_BYTES {
+        bail!("compiler input exceeds {MAX_INPUT_TOTAL_BYTES} bytes");
+    }
     let file = rustix::fs::openat(
         parent,
         name,
@@ -835,17 +941,53 @@ fn read_input_file(
         );
     }
     ensure_same_input_entry(expected, &opened, display_path)?;
+    if u64::try_from(opened.st_size).ok() != Some(expected_size) {
+        bail!(
+            "compiler input file changed during secure snapshot: {}",
+            display_path.display()
+        );
+    }
     let mut file: fs::File = file.into();
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(MAX_INPUT_FILE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)?;
+    hasher.update(&(relative_text.len() as u64).to_be_bytes());
+    hasher.update(relative_text.as_bytes());
+    hasher.update(&expected_size.to_be_bytes());
+    let mut buffer = [0_u8; INPUT_HASH_BUFFER_BYTES];
+    let mut read_bytes = 0_u64;
+    while read_bytes < expected_size {
+        let remaining = expected_size - read_bytes;
+        let read_length = remaining.min(buffer.len() as u64) as usize;
+        let count = file.read(&mut buffer[..read_length])?;
+        if count == 0 {
+            bail!(
+                "compiler input file shrank during secure snapshot: {}",
+                display_path.display()
+            );
+        }
+        read_bytes = read_bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| anyhow::anyhow!("compiler input byte count overflowed"))?;
+        hasher.update(&buffer[..count]);
+    }
+    let mut trailing_byte = [0_u8; 1];
+    if file.read(&mut trailing_byte)? != 0 {
+        bail!(
+            "compiler input file grew during secure snapshot: {}",
+            display_path.display()
+        );
+    }
     let after = rustix::fs::fstat(&file)
         .map_err(std::io::Error::from)
         .with_context(|| format!("reinspect compiler input {}", display_path.display()))?;
     ensure_same_input_entry(expected, &after, display_path)?;
+    if u64::try_from(after.st_size).ok() != Some(expected_size) {
+        bail!(
+            "compiler input file changed during secure snapshot: {}",
+            display_path.display()
+        );
+    }
     verify_input_entry(parent, name, expected, display_path)?;
-    Ok(bytes)
+    *total_bytes = new_total_bytes;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1195,6 +1337,37 @@ mod tests {
 
         let error = digest_input_tree(&workspace).expect_err("symlink must fail closed");
         assert!(error.to_string().contains("symlink"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn input_snapshot_rejects_oversized_file_before_reading() {
+        let root = test_root("oversized-file");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let file = fs::File::create(workspace.join("large.bin")).expect("large input");
+        file.set_len(MAX_INPUT_FILE_BYTES + 1)
+            .expect("make sparse oversized input");
+
+        let error = digest_input_tree(&workspace).expect_err("oversized input must fail closed");
+        assert!(error.to_string().contains("compiler input file exceeds"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn input_snapshot_rejects_excessive_directory_depth() {
+        let root = test_root("directory-depth");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let mut current = workspace.clone();
+        for level in 0..=MAX_INPUT_DEPTH {
+            current.push(format!("d{level}"));
+            fs::create_dir(&current).expect("nested directory");
+        }
+        fs::write(current.join("input.txt"), b"input").expect("nested input");
+
+        let error = digest_input_tree(&workspace).expect_err("deep input must fail closed");
+        assert!(error.to_string().contains("directory depth"));
         let _ = fs::remove_dir_all(root);
     }
 
