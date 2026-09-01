@@ -58,7 +58,7 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
 }
 
 #[test]
-fn debian_preinst_supports_scoped_canary_drains() {
+fn debian_preinst_requires_whole_host_drain() {
     let preinst = include_str!("../../debian/preinst");
 
     assert!(preinst.contains("PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock"));
@@ -75,9 +75,11 @@ fn debian_preinst_supports_scoped_canary_drains() {
     ));
     assert!(preinst
         .contains("systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer'"));
-    assert!(preinst.contains("VELNOR_DRAINED_UNITS"));
-    assert!(preinst.contains("scoped_units_drained"));
-    assert!(preinst.contains("invalid scoped unit name"));
+    assert!(preinst.contains("all_velnor_units_drained"));
+    assert!(preinst.contains("guardian_inactive"));
+    assert!(!preinst.contains("VELNOR_DRAINED_UNITS"));
+    assert!(!preinst.contains("scoped_units_drained"));
+    assert!(!preinst.contains("refusing scoped"));
 }
 
 #[cfg(target_os = "linux")]
