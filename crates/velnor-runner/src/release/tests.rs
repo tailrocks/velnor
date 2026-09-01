@@ -51,7 +51,9 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
     );
     assert!(prerm.contains("'velnor-daemon@*.service'"));
     assert!(prerm.contains("systemctl stop \"$unit\""));
-    assert!(postrm.contains("'velnor-daemon@*.service'"));
+    // postrm enumerates every Velnor service and timer with the broad glob,
+    // which covers `velnor-daemon@*.service` instances.
+    assert!(postrm.contains("'velnor*.service' 'velnor*.timer'"));
     assert!(postrm.contains("systemctl disable \"$unit\""));
 }
 
