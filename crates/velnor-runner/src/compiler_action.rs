@@ -7,12 +7,16 @@
 use crate::{
     container::JobContainerSpec,
     executor::{CommandResult, CommandRunner, CommandStream},
+    script_step::COMPILER_ACTION_PATH_ENV,
 };
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
+    ffi::{OsStr, OsString},
+    fs,
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
@@ -30,6 +34,15 @@ const MAX_INPUT_FILES: usize = 100_000;
 const MAX_INPUT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_INPUT_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const CACHEABLE_TARGET_DIRECTORY: &str = "target";
+const DEFAULT_EXECUTION_PATH: &str =
+    "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const COMMAND_FILE_ENV_NAMES: [&str; 5] = [
+    "GITHUB_OUTPUT",
+    "GITHUB_ENV",
+    "GITHUB_PATH",
+    "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY",
+];
 
 /// One exact, shell-free compiler command admitted to the cache boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,19 +153,12 @@ impl CompilerActionSession {
         };
         let input_root = digest_input_tree(&container.workspace_host)
             .with_context(|| "compute compiler-cache input identity")?;
-        let environment = env.iter().cloned().collect::<BTreeMap<_, _>>();
+        let environment = canonical_compiler_environment(env)?;
         let environment_digest = digest_json(&environment)?;
-        let toolchain_inputs = environment
-            .iter()
-            .filter(|(name, _)| {
-                name.starts_with("CARGO")
-                    || name.starts_with("RUST")
-                    || name.starts_with("MISE")
-                    || name == &"PATH"
-            })
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let toolchain_digest = digest_json(&(image_digest.clone(), toolchain_inputs))?;
+        // The input tree includes workspace Cargo configuration and toolchain
+        // files. Bind the rest of compiler resolution to the immutable image
+        // and the complete effective execution environment, including PATH.
+        let toolchain_digest = digest_json(&(image_digest.clone(), &environment))?;
         let trust_class = trust_class(container.compiler_cache_trust_class);
         let key = ActionKey {
             command_digest: Digest::from_bytes(action.command.as_bytes()),
@@ -186,7 +192,10 @@ impl CompilerActionSession {
         }))
     }
 
-    /// Run the physical compiler command, or restore a validated hit.
+    /// Warm the workspace from a validated hit, then always run the physical
+    /// compiler command. A Cargo build can execute build scripts, proc macros,
+    /// linker wrappers, and other user-controlled side effects; a cache hit is
+    /// never permission to skip those effects.
     pub(crate) fn execute(
         self,
         runner: &mut impl CommandRunner,
@@ -202,12 +211,11 @@ impl CompilerActionSession {
             self.service
                 .materialize_output_tree(&entry.result().output_root, &self.output_directory)
                 .context("restore compiler-cache output")?;
+            let result = runner
+                .run_streaming_timeout_with_env("docker", args, env, self.timeout, on_output)
+                .context("run compiler after cache warm restore")?;
             return Ok(CompilerActionExecution {
-                result: CommandResult {
-                    code: 0,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
+                result,
                 cache_hit: true,
                 bypassed: false,
             });
@@ -458,6 +466,36 @@ fn digest_json<T: Serialize>(value: &T) -> Result<Digest> {
     Ok(Digest::from_bytes(&canonical_json_bytes(value)?))
 }
 
+fn canonical_compiler_environment(env: &[(String, String)]) -> Result<BTreeMap<String, String>> {
+    let mut environment = env.iter().cloned().collect::<BTreeMap<_, _>>();
+    let path_prepend = environment
+        .remove(COMPILER_ACTION_PATH_ENV)
+        .map(|value| {
+            serde_json::from_str::<Vec<String>>(&value)
+                .with_context(|| "parse effective GITHUB_PATH entries")
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    for name in COMMAND_FILE_ENV_NAMES {
+        environment.remove(name);
+    }
+
+    let base_path = environment
+        .get("PATH")
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_EXECUTION_PATH.to_owned());
+    let effective_path = if path_prepend.is_empty() {
+        base_path
+    } else if base_path.is_empty() {
+        path_prepend.join(":")
+    } else {
+        format!("{}:{base_path}", path_prepend.join(":"))
+    };
+    environment.insert("PATH".to_owned(), effective_path);
+    Ok(environment)
+}
+
 fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -468,92 +506,327 @@ fn unix_now_ms() -> u64 {
 }
 
 fn digest_input_tree(root: &Path) -> Result<Digest> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"velnor-compiler-input-v1\0");
-    let mut files = 0_usize;
-    let mut total_bytes = 0_u64;
-    digest_input_directory(
-        root,
-        Path::new(""),
-        &mut hasher,
-        &mut files,
-        &mut total_bytes,
-    )?;
-    Ok(Digest::from_hash(hasher.finalize()))
+    #[cfg(unix)]
+    {
+        let root = SecureInputDirectory::open_absolute(root)?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"velnor-compiler-input-v1\0");
+        let mut files = 0_usize;
+        let mut total_bytes = 0_u64;
+        digest_input_directory(
+            &root,
+            Path::new(""),
+            &mut hasher,
+            &mut files,
+            &mut total_bytes,
+        )?;
+        Ok(Digest::from_hash(hasher.finalize()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        bail!(
+            "structured compiler-cache input snapshots require descriptor-relative filesystem APIs"
+        )
+    }
 }
 
+#[cfg(unix)]
+#[derive(Debug)]
+struct SecureInputDirectory {
+    file: fs::File,
+    display_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl SecureInputDirectory {
+    fn open_absolute(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            bail!("compiler input root must be absolute: {}", path.display());
+        }
+        let path = normalized_secure_root_path(path);
+
+        let root = rustix::fs::openat(
+            rustix::fs::CWD,
+            Path::new("/"),
+            directory_flags(),
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)
+        .context("open filesystem root for compiler input")?;
+        let mut current = Self {
+            file: root.into(),
+            display_path: PathBuf::from("/"),
+        };
+
+        for component in path.components() {
+            let name = match component {
+                std::path::Component::RootDir | std::path::Component::CurDir => continue,
+                std::path::Component::Normal(name) => name,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
+                    bail!("compiler input root is not normalized: {}", path.display())
+                }
+            };
+            let display_path = current.display_path.join(name);
+            current = current.open_directory(name, &display_path)?;
+        }
+        Ok(current)
+    }
+
+    fn open_directory(&self, name: &OsStr, display_path: &Path) -> Result<Self> {
+        let expected = stat_input_entry(&self.file, name, display_path)?;
+        if rustix::fs::FileType::from_raw_mode(expected.st_mode) == rustix::fs::FileType::Symlink {
+            bail!(
+                "compiler input contains symlink: {}",
+                display_path.display()
+            );
+        }
+        if !is_directory(&expected) {
+            bail!(
+                "compiler input path has a non-directory ancestor: {}",
+                display_path.display()
+            );
+        }
+        let child = rustix::fs::openat(
+            &self.file,
+            name,
+            directory_flags(),
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)
+        .with_context(|| {
+            format!(
+                "open compiler input directory without following links: {}",
+                display_path.display()
+            )
+        })?;
+        let opened = rustix::fs::fstat(&child)
+            .map_err(std::io::Error::from)
+            .with_context(|| format!("inspect opened compiler input directory {display_path:?}"))?;
+        ensure_same_input_entry(&expected, &opened, display_path)?;
+        let directory: fs::File = child.into();
+        verify_input_entry(&self.file, name, &expected, display_path)?;
+        Ok(Self {
+            file: directory,
+            display_path: display_path.to_path_buf(),
+        })
+    }
+}
+
+#[cfg(unix)]
 fn digest_input_directory(
-    root: &Path,
+    root: &SecureInputDirectory,
     relative_root: &Path,
     hasher: &mut blake3::Hasher,
     files: &mut usize,
     total_bytes: &mut u64,
 ) -> Result<()> {
-    let mut entries = fs::read_dir(root)
-        .with_context(|| format!("read compiler input directory {}", root.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let name = entry.file_name();
-        if relative_root.as_os_str().is_empty()
-            && matches!(name.to_str(), Some("target" | ".git" | ".velnor"))
-        {
+    let names = read_input_names(&root.file, &root.display_path)?;
+    for name in &names {
+        if name == OsStr::new(".") || name == OsStr::new("..") {
             continue;
         }
-        let path = entry.path();
-        let relative = relative_root.join(&name);
+        let relative = relative_root.join(name);
         let relative_text = relative.to_str().ok_or_else(|| {
             anyhow::anyhow!("compiler input path is not UTF-8: {}", relative.display())
         })?;
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            bail!("compiler input contains symlink: {relative_text}");
-        }
-        if metadata.is_dir() {
-            digest_input_directory(&path, &relative, hasher, files, total_bytes)?;
+        let display_path = root.display_path.join(name);
+        let expected = stat_input_entry(&root.file, name, &display_path)?;
+        let file_type = rustix::fs::FileType::from_raw_mode(expected.st_mode);
+        if relative_root.as_os_str().is_empty()
+            && matches!(name.to_str(), Some("target" | ".git" | ".velnor"))
+        {
+            if file_type == rustix::fs::FileType::Symlink {
+                bail!("compiler input contains symlink: {relative_text}");
+            }
+            if file_type != rustix::fs::FileType::Directory {
+                bail!("compiler input contains unsupported entry: {relative_text}");
+            }
+            verify_input_entry(&root.file, name, &expected, &display_path)?;
             continue;
         }
-        if !metadata.is_file() {
-            bail!("compiler input contains unsupported entry: {relative_text}");
+        match file_type {
+            rustix::fs::FileType::Directory => {
+                let child = root.open_directory(name, &display_path)?;
+                digest_input_directory(&child, &relative, hasher, files, total_bytes)?;
+            }
+            rustix::fs::FileType::RegularFile => {
+                *files = files.saturating_add(1);
+                if *files > MAX_INPUT_FILES {
+                    bail!("compiler input exceeds {MAX_INPUT_FILES} files");
+                }
+                let bytes = read_input_file(&root.file, name, &expected, &display_path)?;
+                if bytes.len() as u64 > MAX_INPUT_FILE_BYTES {
+                    bail!(
+                        "compiler input file exceeds {MAX_INPUT_FILE_BYTES} bytes: {relative_text}"
+                    );
+                }
+                *total_bytes = total_bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| anyhow::anyhow!("compiler input byte count overflowed"))?;
+                if *total_bytes > MAX_INPUT_TOTAL_BYTES {
+                    bail!("compiler input exceeds {MAX_INPUT_TOTAL_BYTES} bytes");
+                }
+                hasher.update(&(relative_text.len() as u64).to_be_bytes());
+                hasher.update(relative_text.as_bytes());
+                hasher.update(&(bytes.len() as u64).to_be_bytes());
+                hasher.update(&bytes);
+            }
+            rustix::fs::FileType::Symlink => {
+                bail!("compiler input contains symlink: {relative_text}")
+            }
+            _ => bail!("compiler input contains unsupported entry: {relative_text}"),
         }
-        *files = files.saturating_add(1);
-        if *files > MAX_INPUT_FILES {
-            bail!("compiler input exceeds {MAX_INPUT_FILES} files");
-        }
-        let bytes = read_input_file(&path)?;
-        if bytes.len() as u64 > MAX_INPUT_FILE_BYTES {
-            bail!("compiler input file exceeds {MAX_INPUT_FILE_BYTES} bytes: {relative_text}");
-        }
-        *total_bytes = total_bytes
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| anyhow::anyhow!("compiler input byte count overflowed"))?;
-        if *total_bytes > MAX_INPUT_TOTAL_BYTES {
-            bail!("compiler input exceeds {MAX_INPUT_TOTAL_BYTES} bytes");
-        }
-        hasher.update(&(relative_text.len() as u64).to_be_bytes());
-        hasher.update(relative_text.as_bytes());
-        hasher.update(&(bytes.len() as u64).to_be_bytes());
-        hasher.update(&bytes);
+        verify_input_entry(&root.file, name, &expected, &display_path)?;
+    }
+
+    let final_names = read_input_names(&root.file, &root.display_path)?;
+    if names != final_names {
+        bail!(
+            "compiler input directory changed during secure snapshot: {}",
+            root.display_path.display()
+        );
     }
     Ok(())
 }
 
-fn read_input_file(path: &Path) -> Result<Vec<u8>> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
+#[cfg(unix)]
+fn read_input_names(directory: &fs::File, display_path: &Path) -> Result<Vec<OsString>> {
+    let mut names = rustix::fs::Dir::read_from(directory)
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("read compiler input directory {}", display_path.display()))?
+        .map(|entry| {
+            entry
+                .map_err(std::io::Error::from)
+                .map(|entry| OsString::from_vec(entry.file_name().to_bytes().to_vec()))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(unix)]
+fn directory_flags() -> rustix::fs::OFlags {
+    rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW
+}
+
+fn normalized_secure_root_path(path: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        for alias in [Path::new("/var"), Path::new("/tmp")] {
+            if let Ok(remainder) = path.strip_prefix(alias) {
+                return Path::new("/private")
+                    .join(alias.strip_prefix("/").unwrap_or(alias))
+                    .join(remainder);
+            }
+        }
     }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        bail!("compiler input changed to a non-file: {}", path.display());
+    path.to_path_buf()
+}
+
+#[cfg(unix)]
+fn stat_input_entry(
+    parent: &fs::File,
+    name: &OsStr,
+    display_path: &Path,
+) -> Result<rustix::fs::Stat> {
+    rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("inspect compiler input {}", display_path.display()))
+}
+
+#[cfg(unix)]
+fn is_directory(stat: &rustix::fs::Stat) -> bool {
+    rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory
+}
+
+#[cfg(unix)]
+fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64, u32) {
+    (
+        stat.st_dev as u64,
+        stat.st_ino as u64,
+        u32::from(stat.st_mode & 0o170_000),
+    )
+}
+
+#[cfg(unix)]
+fn ensure_same_input_entry(
+    expected: &rustix::fs::Stat,
+    actual: &rustix::fs::Stat,
+    display_path: &Path,
+) -> Result<()> {
+    if stat_identity(expected) != stat_identity(actual) {
+        bail!(
+            "compiler input entry was replaced during secure open: {}",
+            display_path.display()
+        );
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_input_entry(
+    parent: &fs::File,
+    name: &OsStr,
+    expected: &rustix::fs::Stat,
+    display_path: &Path,
+) -> Result<()> {
+    let current = stat_input_entry(parent, name, display_path)?;
+    ensure_same_input_entry(expected, &current, display_path)
+}
+
+#[cfg(unix)]
+fn read_input_file(
+    parent: &fs::File,
+    name: &OsStr,
+    expected: &rustix::fs::Stat,
+    display_path: &Path,
+) -> Result<Vec<u8>> {
+    let file = rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .with_context(|| {
+        format!(
+            "open compiler input without following links: {}",
+            display_path.display()
+        )
+    })?;
+    let opened = rustix::fs::fstat(&file)
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("inspect opened compiler input {}", display_path.display()))?;
+    if !is_regular_file(&opened) {
+        bail!(
+            "compiler input changed to a non-file: {}",
+            display_path.display()
+        );
+    }
+    ensure_same_input_entry(expected, &opened, display_path)?;
+    let mut file: fs::File = file.into();
     let mut bytes = Vec::new();
-    file.take(MAX_INPUT_FILE_BYTES.saturating_add(1))
+    file.by_ref()
+        .take(MAX_INPUT_FILE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
+    let after = rustix::fs::fstat(&file)
+        .map_err(std::io::Error::from)
+        .with_context(|| format!("reinspect compiler input {}", display_path.display()))?;
+    ensure_same_input_entry(expected, &after, display_path)?;
+    verify_input_entry(parent, name, expected, display_path)?;
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn is_regular_file(stat: &rustix::fs::Stat) -> bool {
+    rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile
 }
 
 #[cfg(test)]
@@ -701,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_miss_publishes_and_hit_restores_without_running_compiler() {
+    fn cache_miss_publishes_and_hit_warms_then_runs_compiler() {
         let root = test_root("hit-miss");
         let container = prepare(&root);
         let service = service(&root);
@@ -736,18 +1009,113 @@ mod tests {
         .expect("structured action");
         let mut consumer = TestRunner {
             target: container.workspace_host.join("target"),
-            code: 0,
+            code: 17,
             fail: false,
             calls: 0,
         };
         let hit = execute(session, &mut consumer);
         assert!(hit.cache_hit);
-        assert_eq!(consumer.calls, 0);
+        assert_eq!(consumer.calls, 1);
+        assert_eq!(hit.result.code, 17);
         assert_eq!(
             fs::read(container.workspace_host.join("target/libdemo.rlib"))
                 .expect("restored output"),
             b"compiler output"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn action_key_binds_effective_path_and_compiler_environment_canonically() {
+        let root = test_root("key-identity");
+        let container = prepare(&root);
+        let service = service(&root);
+        let path_a = serde_json::to_string(&["/opt/tool-a"]).expect("path metadata");
+        let path_b = serde_json::to_string(&["/opt/tool-b"]).expect("path metadata");
+        let first = CompilerActionSession::new(
+            Arc::clone(&service),
+            &container,
+            "cargo build --locked",
+            &[
+                ("CC".into(), "clang-a".into()),
+                ("GITHUB_PATH".into(), "/__t/first_path".into()),
+                (COMPILER_ACTION_PATH_ENV.into(), path_a.clone()),
+                ("GITHUB_ENV".into(), "/__t/first_env".into()),
+            ],
+            Duration::from_secs(5),
+        )
+        .expect("first session")
+        .expect("structured action");
+        let same_effective_environment = CompilerActionSession::new(
+            Arc::clone(&service),
+            &container,
+            "cargo build --locked",
+            &[
+                ("GITHUB_ENV".into(), "/__t/another_env".into()),
+                (COMPILER_ACTION_PATH_ENV.into(), path_a),
+                ("CC".into(), "clang-a".into()),
+                ("GITHUB_PATH".into(), "/__t/another_path".into()),
+            ],
+            Duration::from_secs(5),
+        )
+        .expect("same environment session")
+        .expect("structured action");
+        assert_eq!(
+            first.key().canonical_bytes().expect("first canonical key"),
+            same_effective_environment
+                .key()
+                .canonical_bytes()
+                .expect("same canonical key")
+        );
+
+        let different_path = CompilerActionSession::new(
+            Arc::clone(&service),
+            &container,
+            "cargo build --locked",
+            &[
+                ("CC".into(), "clang-a".into()),
+                (COMPILER_ACTION_PATH_ENV.into(), path_b),
+            ],
+            Duration::from_secs(5),
+        )
+        .expect("different path session")
+        .expect("structured action");
+        assert_ne!(
+            first.key().environment_digest,
+            different_path.key().environment_digest
+        );
+
+        let different_compiler = CompilerActionSession::new(
+            service,
+            &container,
+            "cargo build --locked",
+            &[("CC".into(), "clang-b".into())],
+            Duration::from_secs(5),
+        )
+        .expect("different compiler session")
+        .expect("structured action");
+        assert_ne!(
+            first.key().environment_digest,
+            different_compiler.key().environment_digest
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_snapshot_rejects_symlinked_parent_without_escaping_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("symlink-parent");
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::create_dir_all(&outside).expect("outside");
+        fs::write(outside.join("secret.txt"), b"must not be hashed").expect("outside input");
+        symlink(&outside, workspace.join("source")).expect("symlink parent");
+
+        let error = digest_input_tree(&workspace).expect_err("symlink must fail closed");
+        assert!(error.to_string().contains("symlink"));
         let _ = fs::remove_dir_all(root);
     }
 
