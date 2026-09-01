@@ -32,7 +32,7 @@ function pagePath(slug: string): string {
 
 function outputPath(path: string): string {
   if (path === '/') return join(outDir, 'index.html')
-  if (path.endsWith('.md') || path.endsWith('.txt') || path.endsWith('.xml') || path.endsWith('.webp')) {
+  if (path.endsWith('.md') || path.endsWith('.txt') || path.endsWith('.xml') || path.endsWith('.webp') || path.endsWith('.ico')) {
     return join(outDir, path.slice(1))
   }
   if (path === '/api/search') return join(outDir, 'api', 'search')
@@ -75,7 +75,7 @@ const pages = docsSlugs().flatMap((slug) => {
   const path = pagePath(slug)
   return [path, slug ? `${path}.md` : '/index.md']
 })
-const paths = [...new Set(['/', '/api/search', '/llms.txt', '/llms-full.txt', ...pages])]
+const paths = [...new Set(['/', '/favicon.ico', '/api/search', '/llms.txt', '/llms-full.txt', ...pages])]
 const child = Bun.spawn(['bun', '.output/server/index.mjs'], {
   cwd: root,
   env: { ...process.env, HOST: host, NITRO_HOST: host, NITRO_PORT: String(port) },
