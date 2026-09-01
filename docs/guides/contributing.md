@@ -2,9 +2,9 @@
 
 Audience: contributors changing Velnor code, interfaces, tests, packages, or
 operational behavior. This is the maintenance contract for the docs linked
-from [the index](../index.md).
+from [the index](../README.md).
 
-> Navigation: [← Development](development.md) · [Index](../index.md) · [Next: Start again →](../index.md)
+> Navigation: [← Development](development.md) · [Index](../README.md) · [Next: Start again →](../README.md)
 
 ## Choose the document type first
 
@@ -15,7 +15,7 @@ reference needed to execute them, and interface/protocol pages are reference.
 
 | Need | Velnor form | Example |
 | --- | --- | --- |
-| Learn the project | Tutorial/onboarding | [documentation index](../index.md) |
+| Learn the project | Tutorial/onboarding | [documentation index](../README.md) |
 | Understand the system | Explanation | [architecture](../concepts/architecture.md), [system](../concepts/system.md), [execution](execution.md), [security](../operations/security-and-data.md) |
 | Complete a task | How-to | [operator guide](operator.md), [development](development.md) |
 | Look up a contract | Reference | [interface reference](../reference/interface.md), [runner protocol](../reference/runner-protocol.md) |
@@ -39,7 +39,7 @@ essay.
    one interface.
 
 The evidence vocabulary and document ownership table are in
-[index.md](../index.md). Source dependency law is enforced by
+[README.md](../README.md). Source dependency law is enforced by
 `crates/velnor-client/tests/dependency_boundaries.rs`.
 
 ## Procedure and API checklist

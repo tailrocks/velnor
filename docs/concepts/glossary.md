@@ -3,7 +3,7 @@
 Short definitions for newcomers. The linked documents contain the full
 behavior and proof limits.
 
-> Navigation: [← Index](../index.md) · **Glossary** · [Next: Architecture →](architecture.md)
+> Navigation: [← Index](../README.md) · **Glossary** · [Next: Architecture →](architecture.md)
 
 | Term | Meaning in Velnor |
 | --- | --- |

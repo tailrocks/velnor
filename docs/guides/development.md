@@ -2,7 +2,7 @@
 
 This is the repository’s current development contract. Citations use `path:line`.
 
-> Navigation: [← Security and data](../operations/security-and-data.md) · [Index](../index.md) · [Next: Contributing →](contributing.md)
+> Navigation: [← Security and data](../operations/security-and-data.md) · [Index](../README.md) · [Next: Contributing →](contributing.md)
 
 ## Current: build, test, lint, format
 

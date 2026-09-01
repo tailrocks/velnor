@@ -6,7 +6,7 @@ selected execution backend, and reports their outcome. The system is organized
 around explicit ownership, durable control state, and fenced process
 boundaries.
 
-> Navigation: [← Architecture](architecture.md) · [Index](../index.md) · [Next: Execution →](../guides/execution.md)
+> Navigation: [← Architecture](architecture.md) · [Index](../README.md) · [Next: Execution →](../guides/execution.md)
 
 ## Responsibilities and ownership
 

@@ -5,7 +5,7 @@ handling. It is an evidence map, not a certification or a promise that every
 host, guest, dependency, or operator configuration is secure. “Design-only
 limit” means the reviewed implementation does not prove the stronger property.
 
-> Navigation: [← Observability](observability.md) · [Index](../index.md) · [Next: Development →](../guides/development.md)
+> Navigation: [← Observability](observability.md) · [Index](../README.md) · [Next: Development →](../guides/development.md)
 
 ## Security boundary
 

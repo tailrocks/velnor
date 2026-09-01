@@ -6,6 +6,6 @@ jobs before side effects, executes admitted work through an explicitly selected
 Docker or Firecracker backend, and keeps bounded operational evidence.
 
 Research project. Capability and proof status are documented in the
-[documentation](docs/index.md).
+[documentation](docs/README.md).
 
 Licensed under the [Apache License 2.0](LICENSE).

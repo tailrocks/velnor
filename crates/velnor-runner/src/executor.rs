@@ -15621,7 +15621,7 @@ esac
         }];
         let mut executor = DockerJobEngine::new(GitDiffRunner {
             calls: Vec::new(),
-            stdout: "docker/construct/Dockerfile\ndocs/index.md\nCargo.toml\n".into(),
+            stdout: "docker/construct/Dockerfile\ndocs/README.md\nCargo.toml\n".into(),
             missing_refs: true,
         });
 

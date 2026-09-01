@@ -4,7 +4,7 @@ This guide covers Debian installation, service operation, release changes, and
 the command surfaces currently available. Velnor is research software; use a
 dedicated host and test repository.
 
-> Navigation: [← Documentation index](../index.md) · [Observability →](../operations/observability.md)
+> Navigation: [← Documentation index](../README.md) · [Observability →](../operations/observability.md)
 
 ## Install a release on Debian
 

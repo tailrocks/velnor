@@ -4,7 +4,7 @@ Velnor exposes local, read-only operator views. They answer different questions
 and have different retention. A healthy local view does not prove that GitHub
 accepted a result.
 
-> Navigation: [← Operator guide](../guides/operator.md) · [Index](../index.md) · [Troubleshooting](../troubleshooting.md)
+> Navigation: [← Operator guide](../guides/operator.md) · [Index](../README.md) · [Troubleshooting](../troubleshooting.md)
 
 ## First checks
 
