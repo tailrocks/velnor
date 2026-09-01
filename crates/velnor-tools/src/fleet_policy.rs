@@ -3,11 +3,18 @@
 //! Deterministic generation surface: strict validation, canonical JSON,
 //! sha256 digests, and the release-ref ledger schema. `generate` is fully
 //! offline: it reads the release-ref ledger and emits byte-stable per-org
-//! policy JSON (see [`generate_policies_from_ledger`]). `plan` requires the
+//! policy JSON (see [`generate_policies_from_ledger`]). Mutation is supported
+//! only on Unix when a dedicated root publisher writes an absolute,
+//! root-owned, non-group/other-writable directory tree. This boundary protects
+//! against unprivileged/non-root writers subject to Unix DAC; the publisher,
+//! root, equivalent capabilities, ACL exceptions, and the filesystem are
+//! trusted. The descriptor walk and revalidation checks are defense in depth
+//! and detection; they are not a pathname compare-and-swap. `plan` requires the
 //! release-ref ledger, validates current approval, and reads live GitHub
-//! runner-group state without mutation. `audit` and `apply` also reach live
-//! state through [`crate::fleet_policy_client::FleetGateway`]
-//! (`ReqwestFleetHttp`); apply stays manual and digest-gated.
+//! runner-group state without mutation.
+//! `audit` and `apply` also reach live state through
+//! [`crate::fleet_policy_client::FleetGateway`] (`ReqwestFleetHttp`); apply
+//! stays manual and digest-gated.
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
@@ -18,10 +25,10 @@ use std::{
     collections::VecDeque,
     ffi::{CStr, CString, OsStr, OsString},
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
-        unix::ffi::{OsStrExt, OsStringExt},
+        unix::ffi::OsStrExt,
     },
 };
 use std::{
@@ -784,7 +791,9 @@ pub struct FleetGenerateArgs {
     /// Release-ref ledger to generate from (validated before any write).
     #[arg(long, default_value = "fleet/release-refs.toml")]
     pub ledger: PathBuf,
-    /// Directory receiving `<org>-desired-policy.json` files.
+    /// Absolute root-owned directory receiving `<org>-desired-policy.json`
+    /// files through the dedicated root publisher boundary. Protection is
+    /// against unprivileged/non-root writers subject to Unix DAC.
     #[arg(long, default_value = "fleet/policies")]
     pub out_dir: PathBuf,
 }
@@ -890,7 +899,7 @@ enum PolicyFileAction {
 type PlannedPolicyChange = (PolicyFileAction, Option<Vec<u8>>);
 
 #[cfg(unix)]
-type PolicyFileIdentity = (u64, u64, u64);
+type PolicyFileIdentity = (u64, u64, u64, u64);
 
 #[cfg(unix)]
 #[derive(Debug)]
@@ -921,6 +930,33 @@ impl PolicyFileExpectation {
             Self::Existing(identity) => Some(identity),
         }
     }
+}
+
+/// Validate canonical policy bytes and their digest before publication.
+fn validate_generated_policy_bytes(policy: &OrgPolicy, bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_POLICY_FILE_BYTES {
+        bail!(
+            "generated fleet policy for '{}' exceeds the {} MiB file limit",
+            policy.organization,
+            MAX_POLICY_FILE_BYTES / (1024 * 1024)
+        );
+    }
+    let canonical = policy.canonical_json()?;
+    let content = bytes.strip_suffix(b"\n").ok_or_else(|| {
+        anyhow::anyhow!(
+            "generated fleet policy for '{}' must end with one newline",
+            policy.organization
+        )
+    })?;
+    let actual_digest = format!("sha256:{}", hex_digest(content));
+    let expected_digest = policy.digest()?;
+    if actual_digest != expected_digest || content != canonical.as_bytes() {
+        bail!(
+            "generated fleet policy for '{}' failed canonical-byte or digest validation",
+            policy.organization
+        );
+    }
+    Ok(())
 }
 
 /// Pure decision core of [`fleet_generate`]: map every generated policy and
@@ -1003,27 +1039,18 @@ fn plan_policy_actions<T: AsRef<[u8]>>(
     let mut plan = BTreeMap::new();
     let mut ledger_orgs = BTreeSet::new();
     for policy in policies {
-        let bytes = format!("{}\n", policy.canonical_json()?);
-        if bytes.len() > MAX_POLICY_FILE_BYTES {
-            bail!(
-                "generated fleet policy for '{}' exceeds the {} MiB file limit",
-                policy.organization,
-                MAX_POLICY_FILE_BYTES / (1024 * 1024)
-            );
-        }
+        let bytes = format!("{}\n", policy.canonical_json()?).into_bytes();
+        validate_generated_policy_bytes(policy, &bytes)?;
         let action = if existing
             .get(&policy.organization)
-            .is_some_and(|on_disk| on_disk.as_ref() == bytes.as_bytes())
+            .is_some_and(|on_disk| on_disk.as_ref() == bytes.as_slice())
         {
             PolicyFileAction::Skipped
         } else {
             PolicyFileAction::Written
         };
         ledger_orgs.insert(policy.organization.clone());
-        plan.insert(
-            policy.organization.clone(),
-            (action, Some(bytes.into_bytes())),
-        );
+        plan.insert(policy.organization.clone(), (action, Some(bytes)));
     }
     for org in existing.keys() {
         if !ledger_orgs.contains(org) {
@@ -1033,7 +1060,7 @@ fn plan_policy_actions<T: AsRef<[u8]>>(
     Ok(plan)
 }
 
-/// Scan `out_dir` for files named exactly `<org>-desired-policy.json` and
+/// Scan `out_dir` for entries named exactly `<org>-desired-policy.json` and
 /// return stem → current bytes. Anything else in the directory (other names,
 /// subdirectories) is ignored entirely and never becomes a removal candidate.
 ///
@@ -1080,29 +1107,58 @@ fn read_existing_policy_files(out_dir: &Path) -> Result<BTreeMap<String, Vec<u8>
     Ok(existing)
 }
 
-/// Write one generated policy through a directory descriptor.
+/// Root-owned mutation boundary for generated policies.
 ///
-/// The output directory is opened with `O_NOFOLLOW`, then the temporary file
-/// and final rename are both relative to that descriptor. This prevents a
-/// parent-directory replacement from redirecting the write, avoids mutating a
-/// hardlink target, and makes a partial write invisible. Existing regular
-/// file modes are preserved; symlinks and non-regular final members fail
-/// closed.
+/// Production mutation is not safe merely because operations are relative to
+/// a descriptor or guarded by `flock`: Unix has no portable pathname
+/// compare-and-replace or compare-and-unlink primitive. The publisher must
+/// therefore run as root and use an absolute directory whose complete
+/// ancestor chain is root-owned and not writable by group or other users.
+/// This protects against unprivileged/non-root writers subject to Unix DAC;
+/// root, equivalent capabilities, ACL exceptions, and the publisher itself
+/// are trusted. Test-only instances retain the descriptor and detection checks
+/// without asserting root ownership.
 #[cfg(unix)]
 struct PolicyDirectory {
     path: PathBuf,
     file: File,
+    publisher_uid: Option<libc::uid_t>,
 }
 
 #[cfg(unix)]
 impl PolicyDirectory {
-    fn open_or_create(path: &Path) -> Result<Self> {
-        let directory_fd = open_policy_directory_fd(path, true)?;
+    fn open_publisher(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            bail!(
+                "fleet policy publisher requires an absolute output directory; refusing {}",
+                path.display()
+            );
+        }
+        if path == Path::new("/") {
+            bail!("fleet policy publisher refuses the filesystem root as output directory");
+        }
+        let effective_uid = unsafe { libc::geteuid() };
+        if effective_uid != 0 {
+            bail!(
+                "fleet policy publisher requires the dedicated root publisher (effective uid {effective_uid}); refusing mutation"
+            );
+        }
+        Self::open(path, Some(0))
+    }
+
+    #[cfg(test)]
+    fn open_for_tests(path: &Path) -> Result<Self> {
+        Self::open(path, None)
+    }
+
+    fn open(path: &Path, publisher_uid: Option<libc::uid_t>) -> Result<Self> {
+        let directory_fd = open_policy_directory_fd(path, true, publisher_uid)?;
         let file = unsafe { File::from_raw_fd(directory_fd) };
         lock_policy_directory(&file, path)?;
         Ok(Self {
             path: path.to_owned(),
             file,
+            publisher_uid,
         })
     }
 }
@@ -1128,12 +1184,17 @@ fn lock_policy_directory(file: &File, path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
+fn open_policy_directory_fd(
+    path: &Path,
+    create: bool,
+    publisher_uid: Option<libc::uid_t>,
+) -> Result<RawFd> {
     let pending = policy_directory_components(path)?;
 
     // Keep stable root and working-directory descriptors. Every component is
-    // opened relative to a descriptor; aliases are expanded only from a
-    // target captured by readlinkat, never by rebuilding a canonical path.
+    // opened relative to a descriptor and with O_NOFOLLOW. Symlink aliases
+    // are refused because resolving them would make the ownership and mode
+    // proof apply to a different path than the one the caller supplied.
     let root_c = CString::new("/").expect("static path has no NUL");
     let root_fd = unsafe {
         libc::open(
@@ -1145,6 +1206,10 @@ fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
         return Err(io::Error::last_os_error()).with_context(|| {
             format!("opening root for fleet policy directory {}", path.display())
         });
+    }
+    if let Err(error) = validate_policy_directory_fd(root_fd, path, "/", publisher_uid) {
+        unsafe { libc::close(root_fd) };
+        return Err(error);
     }
     let current = if path.is_absolute() {
         unsafe { libc::dup(root_fd) }
@@ -1168,7 +1233,7 @@ fn open_policy_directory_fd(path: &Path, create: bool) -> Result<RawFd> {
         });
     }
 
-    let result = open_policy_directory_components(current, root_fd, pending, create, path);
+    let result = open_policy_directory_components(current, pending, create, path, publisher_uid);
     let root_close = unsafe { libc::close(root_fd) };
     match result {
         Ok(directory_fd) if root_close == 0 => Ok(directory_fd),
@@ -1224,7 +1289,8 @@ fn open_policy_directory_component(
     if next >= 0 {
         return Ok(next);
     }
-    if create && io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+    let open_error = io::Error::last_os_error();
+    if create && open_error.raw_os_error() == Some(libc::ENOENT) {
         let mkdir_result =
             unsafe { libc::mkdirat(parent_fd, component_c.as_ptr(), 0o755 as libc::mode_t) };
         if mkdir_result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
@@ -1239,198 +1305,96 @@ fn open_policy_directory_component(
 }
 
 #[cfg(unix)]
-fn read_link_at(directory: RawFd, name: &OsStr) -> io::Result<OsString> {
-    // Capture once. A size-probing loop could observe a replacement on its
-    // second read and make the walk follow a different alias than the one
-    // that produced ELOOP.
-    const MAX_TARGET_BYTES: usize = 64 * 1024;
-    let name_c = CString::new(name.as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "fleet policy output directory contains NUL",
-        )
-    })?;
-    let before = policy_symlink_identity(directory, &name_c)?;
-    let mut buffer = vec![0_u8; MAX_TARGET_BYTES];
-    let length = unsafe {
-        libc::readlinkat(
-            directory,
-            name_c.as_ptr(),
-            buffer.as_mut_ptr().cast::<libc::c_char>(),
-            buffer.len(),
-        )
-    };
-    if length < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let length = length as usize;
-    if length == buffer.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "directory symlink target exceeds 64 KiB",
-        ));
-    }
-    let after = policy_symlink_identity(directory, &name_c)?;
-    if before != after {
-        return Err(io::Error::from_raw_os_error(libc::EAGAIN));
-    }
-    buffer.truncate(length);
-    if buffer.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "directory symlink target is empty",
-        ));
-    }
-    Ok(OsString::from_vec(buffer))
-}
-
-#[cfg(unix)]
-fn policy_symlink_identity(directory: RawFd, name: &CString) -> io::Result<(u64, u64, u64)> {
-    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let result = unsafe {
-        libc::fstatat(
-            directory,
-            name.as_ptr(),
-            stat.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let stat = unsafe { stat.assume_init() };
-    if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
-        return Err(io::Error::from_raw_os_error(libc::EINVAL));
-    }
-    Ok((stat.st_dev as _, stat.st_ino, stat.st_mode as u64))
-}
-
-#[cfg(unix)]
 fn open_policy_directory_components(
     mut current: RawFd,
-    root_fd: RawFd,
     mut pending: VecDeque<OsString>,
     create: bool,
     path: &Path,
+    publisher_uid: Option<libc::uid_t>,
 ) -> Result<RawFd> {
-    const MAX_SYMLINK_HOPS: usize = 40;
-    let mut symlink_hops = 0;
-
     while let Some(component) = pending.pop_front() {
-        let is_final = pending.is_empty();
         let next = match open_policy_directory_component(current, &component, create) {
             Ok(next) => next,
-            Err(error)
-                if !is_final
-                    && matches!(
-                        error.raw_os_error(),
-                        Some(libc::ELOOP) | Some(libc::ENOTDIR)
-                    ) =>
-            {
-                let component_c = match CString::new(component.as_bytes()) {
-                    Ok(component_c) => component_c,
-                    Err(error) => {
-                        unsafe { libc::close(current) };
-                        return Err(anyhow::Error::new(error));
-                    }
-                };
-                let is_symlink = match policy_symlink_identity(current, &component_c) {
-                    Ok(_) => true,
-                    Err(identity_error)
-                        if matches!(
-                            identity_error.raw_os_error(),
-                            Some(libc::EINVAL) | Some(libc::ENOENT)
-                        ) =>
-                    {
-                        false
-                    }
-                    Err(identity_error) => {
-                        unsafe { libc::close(current) };
-                        return Err(identity_error).with_context(|| {
-                            format!(
-                                "inspecting symlinked fleet policy directory component {}/{}",
-                                path.display(),
-                                component.to_string_lossy()
-                            )
-                        });
-                    }
-                };
-                if !is_symlink {
-                    unsafe { libc::close(current) };
-                    return Err(error).with_context(|| {
-                        format!(
-                            "opening component {} in fleet policy directory {}",
-                            component.to_string_lossy(),
-                            path.display()
-                        )
-                    });
-                }
-                if symlink_hops == MAX_SYMLINK_HOPS {
-                    unsafe { libc::close(current) };
-                    return Err(io::Error::from_raw_os_error(libc::ELOOP)).with_context(|| {
-                        format!("resolving fleet policy directory {}", path.display())
-                    });
-                }
-                let target = match read_link_at(current, &component) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        unsafe { libc::close(current) };
-                        return Err(error).with_context(|| {
-                            format!(
-                                "capturing symlinked fleet policy directory component {}/{}",
-                                path.display(),
-                                component.to_string_lossy()
-                            )
-                        });
-                    }
-                };
-                let target_path = Path::new(&target);
-                let mut target_components = match policy_directory_components(target_path) {
-                    Ok(components) => components,
-                    Err(error) => {
-                        unsafe { libc::close(current) };
-                        return Err(error);
-                    }
-                };
-                let replacement_base = unsafe {
-                    libc::dup(if target_path.is_absolute() {
-                        root_fd
-                    } else {
-                        current
-                    })
-                };
-                if replacement_base < 0 {
-                    let error = io::Error::last_os_error();
-                    unsafe { libc::close(current) };
-                    return Err(error).with_context(|| {
-                        format!(
-                            "duplicating symlink base for fleet policy directory {}",
-                            path.display()
-                        )
-                    });
-                }
-                unsafe { libc::close(current) };
-                target_components.append(&mut pending);
-                pending = target_components;
-                current = replacement_base;
-                symlink_hops += 1;
-                continue;
-            }
             Err(error) => {
                 unsafe { libc::close(current) };
-                return Err(error).with_context(|| {
-                    format!(
-                        "opening component {} in fleet policy directory {}",
-                        component.to_string_lossy(),
-                        path.display()
-                    )
-                });
+                return Err(anyhow::Error::new(error).context(format!(
+                    "opening component {} in fleet policy directory {}",
+                    component.to_string_lossy(),
+                    path.display()
+                )));
             }
+        };
+        if let Err(error) =
+            validate_policy_directory_fd(next, path, &component.to_string_lossy(), publisher_uid)
+        {
+            unsafe {
+                libc::close(next);
+                libc::close(current);
+            }
+            return Err(error);
         };
         unsafe { libc::close(current) };
         current = next;
     }
     Ok(current)
+}
+
+#[cfg(unix)]
+fn validate_policy_directory_fd(
+    fd: RawFd,
+    path: &Path,
+    component: &str,
+    publisher_uid: Option<libc::uid_t>,
+) -> Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe { libc::fstat(fd, stat.as_mut_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "inspecting fleet policy directory {}/{}",
+                path.display(),
+                component
+            )
+        });
+    }
+    let stat = unsafe { stat.assume_init() };
+    validate_policy_directory_stat(&stat, path, component, publisher_uid)
+}
+
+#[cfg(unix)]
+fn validate_policy_directory_stat(
+    stat: &libc::stat,
+    path: &Path,
+    component: &str,
+    publisher_uid: Option<libc::uid_t>,
+) -> Result<()> {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        bail!(
+            "fleet policy publisher requires directory component {}/{}; refusing non-directory",
+            path.display(),
+            component
+        );
+    }
+    if let Some(expected_uid) = publisher_uid
+        && stat.st_uid != expected_uid
+    {
+        bail!(
+            "fleet policy publisher requires root-owned directory component {}/{}; owner uid {} is not {}",
+            path.display(),
+            component,
+            stat.st_uid,
+            expected_uid
+        );
+    }
+    if stat.st_mode & 0o022 != 0 {
+        bail!(
+            "fleet policy publisher requires directory component {}/{} not writable by group or other; mode {:o} is unsafe",
+            path.display(),
+            component,
+            stat.st_mode & 0o7777
+        );
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1471,7 +1435,7 @@ fn clear_errno() {
 
 #[cfg(all(unix, test))]
 fn write_policy_file(directory: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
-    let directory = PolicyDirectory::open_or_create(directory)?;
+    let directory = PolicyDirectory::open_for_tests(directory)?;
     let file_name_c = CString::new(file_name)
         .map_err(|_| anyhow::anyhow!("fleet policy file name contains NUL"))?;
     let expected = policy_file_identity_at(directory.file.as_raw_fd(), &file_name_c)?.map_or(
@@ -1497,6 +1461,58 @@ fn write_policy_file(directory: &Path, file_name: &str, bytes: &[u8]) -> Result<
         expected,
         expected_bytes.as_deref(),
     )
+}
+
+#[cfg(unix)]
+struct TemporaryPolicyFile<'a> {
+    directory: &'a PolicyDirectory,
+    name: CString,
+    file: File,
+    identity: Option<PolicyFileIdentity>,
+    published: bool,
+}
+
+#[cfg(unix)]
+impl<'a> TemporaryPolicyFile<'a> {
+    fn new(directory: &'a PolicyDirectory, name: CString, fd: RawFd) -> Self {
+        Self {
+            directory,
+            name,
+            file: unsafe { File::from_raw_fd(fd) },
+            identity: None,
+            published: false,
+        }
+    }
+
+    fn capture_identity(&mut self) -> io::Result<PolicyFileIdentity> {
+        let identity = policy_file_identity_from_fd(self.file.as_raw_fd())?;
+        self.identity = Some(identity);
+        Ok(identity)
+    }
+
+    fn mark_published(&mut self) {
+        self.published = true;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TemporaryPolicyFile<'_> {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        // The guard is armed before fchmod, validation, and identity capture.
+        // If capture failed, retry from the still-open descriptor; if the
+        // inode still cannot be identified, leave the pathname in place rather
+        // than risking an unlink of a replacement.
+        let Some(identity) = self
+            .identity
+            .or_else(|| policy_file_identity_from_fd(self.file.as_raw_fd()).ok())
+        else {
+            return;
+        };
+        let _ = cleanup_temporary_policy_file(self.directory, &self.name, identity);
+    }
 }
 
 #[cfg(unix)]
@@ -1529,20 +1545,7 @@ fn write_policy_file_at(
     };
     if stat_result == 0 {
         let stat = unsafe { stat.assume_init() };
-        if stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            bail!(
-                "refusing symlinked fleet policy entry {}/{}",
-                directory.path.display(),
-                file_name
-            );
-        }
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
-            bail!(
-                "refusing non-regular fleet policy entry {}/{}",
-                directory.path.display(),
-                file_name
-            );
-        }
+        validate_policy_file_stat(&stat, &directory.path, file_name, directory.publisher_uid)?;
         let actual = regular_policy_file_identity_from_stat(&stat)?;
         match expected {
             PolicyFileExpectation::Absent => {
@@ -1590,8 +1593,8 @@ fn write_policy_file_at(
             libc::openat(
                 directory.file.as_raw_fd(),
                 temp_name_c.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                existing_mode.unwrap_or(0o644) as libc::c_uint,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o644 as libc::c_uint,
             )
         };
         if temp_fd < 0 {
@@ -1602,49 +1605,50 @@ fn write_policy_file_at(
             return Err(error)
                 .with_context(|| format!("creating fleet policy temporary file {temp_name}"));
         }
-        let mut temp_file = unsafe { std::fs::File::from_raw_fd(temp_fd) };
+        let mut temp_file = TemporaryPolicyFile::new(directory, temp_name_c, temp_fd);
         if let Some(existing_mode) = existing_mode {
             let chmod_result =
-                unsafe { libc::fchmod(temp_file.as_raw_fd(), existing_mode as libc::mode_t) };
+                unsafe { libc::fchmod(temp_file.file.as_raw_fd(), existing_mode as libc::mode_t) };
             if chmod_result < 0 {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
-                }
-                return Err(error).with_context(|| {
+                return Err(io::Error::last_os_error()).with_context(|| {
                     format!("setting mode on fleet policy temporary file {temp_name}")
                 });
             }
         }
-        // Keep the cleanup guard bound to the inode opened above. If this
-        // lookup fails, leave the temporary pathname in place rather than
-        // risking removal of an entry we cannot identify.
-        let temporary_identity = policy_file_identity_from_fd(temp_file.as_raw_fd())?;
-        let mut renamed = false;
+        validate_policy_file_fd(
+            temp_file.file.as_raw_fd(),
+            &directory.path,
+            &temp_name,
+            directory.publisher_uid,
+        )?;
+        let temporary_identity = temp_file
+            .capture_identity()
+            .with_context(|| format!("inspecting fleet policy temporary file {temp_name}"))?;
         let result = (|| -> io::Result<()> {
-            temp_file.write_all(bytes)?;
-            temp_file.sync_all()?;
+            temp_file.file.write_all(bytes)?;
+            temp_file.file.sync_all()?;
+            temp_file.file.seek(SeekFrom::Start(0))?;
+            let mut persisted = Vec::with_capacity(bytes.len());
+            temp_file.file.read_to_end(&mut persisted)?;
+            if persisted != bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "staged fleet policy bytes changed before publication",
+                ));
+            }
+            temp_file.file.seek(SeekFrom::End(0))?;
             rename_policy_file_at(
                 directory,
-                &temp_name_c,
+                temp_file.name.as_c_str(),
                 &file_name_c,
                 expected,
                 expected_bytes,
                 temporary_identity,
             )?;
-            renamed = true;
+            temp_file.mark_published();
             directory.file.sync_all()?;
             Ok(())
         })();
-        if !renamed {
-            let still_owned = policy_file_identity_at(directory.file.as_raw_fd(), &temp_name_c)
-                .is_ok_and(|actual| actual == Some(temporary_identity));
-            if still_owned {
-                unsafe {
-                    libc::unlinkat(directory.file.as_raw_fd(), temp_name_c.as_ptr(), 0);
-                }
-            }
-        }
         return result.with_context(|| {
             format!(
                 "writing fleet policy {}/{}",
@@ -1657,6 +1661,27 @@ fn write_policy_file_at(
         "could not allocate a unique temporary fleet policy file in {}",
         directory.path.display()
     )
+}
+
+#[cfg(unix)]
+fn cleanup_temporary_policy_file(
+    directory: &PolicyDirectory,
+    temporary_name: &CStr,
+    expected: PolicyFileIdentity,
+) -> io::Result<()> {
+    let still_owned = policy_file_identity_at(directory.file.as_raw_fd(), temporary_name)
+        .is_ok_and(|actual| actual == Some(expected));
+    if !still_owned {
+        return Ok(());
+    }
+    let result = unsafe { libc::unlinkat(directory.file.as_raw_fd(), temporary_name.as_ptr(), 0) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOENT) {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1761,22 +1786,7 @@ fn read_existing_policy_files(
                 .with_context(|| format!("inspecting {}/{}", directory.path.display(), name));
         }
         let stat = unsafe { stat.assume_init() };
-        match stat.st_mode & libc::S_IFMT {
-            libc::S_IFLNK => bail!(
-                "refusing symlinked fleet policy entry {}/{}; expected a regular file inside {}",
-                directory.path.display(),
-                name,
-                directory.path.display()
-            ),
-            libc::S_IFDIR => continue,
-            libc::S_IFREG => {}
-            _ => bail!(
-                "refusing non-regular fleet policy entry {}/{}; expected a regular file inside {}",
-                directory.path.display(),
-                name,
-                directory.path.display()
-            ),
-        }
+        validate_policy_file_stat(&stat, &directory.path, name, directory.publisher_uid)?;
         let identity = regular_policy_file_identity_from_stat(&stat).map_err(|error| {
             anyhow::Error::new(error).context(format!(
                 "inspecting {}/{}",
@@ -1860,11 +1870,88 @@ fn read_policy_file_bytes(file: &mut File) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
+fn validate_policy_file_stat(
+    stat: &libc::stat,
+    directory: &Path,
+    file_name: &str,
+    publisher_uid: Option<libc::uid_t>,
+) -> Result<()> {
+    match stat.st_mode & libc::S_IFMT {
+        libc::S_IFLNK => bail!(
+            "refusing symlinked fleet policy entry {}/{}",
+            directory.display(),
+            file_name
+        ),
+        libc::S_IFREG => {}
+        _ => bail!(
+            "refusing non-regular fleet policy entry {}/{}",
+            directory.display(),
+            file_name
+        ),
+    }
+    if let Some(expected_uid) = publisher_uid
+        && stat.st_uid != expected_uid
+    {
+        bail!(
+            "fleet policy publisher requires root-owned file {}/{}; owner uid {} is not {}",
+            directory.display(),
+            file_name,
+            stat.st_uid,
+            expected_uid
+        );
+    }
+    if stat.st_mode & 0o022 != 0 {
+        bail!(
+            "fleet policy publisher requires file {}/{} not writable by group or other; mode {:o} is unsafe",
+            directory.display(),
+            file_name,
+            stat.st_mode & 0o7777
+        );
+    }
+    if stat.st_nlink != 1 {
+        bail!(
+            "refusing hard-linked fleet policy entry {}/{}; link count is {}",
+            directory.display(),
+            file_name,
+            stat.st_nlink
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_policy_file_fd(
+    fd: RawFd,
+    directory: &Path,
+    file_name: &str,
+    publisher_uid: Option<libc::uid_t>,
+) -> Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe { libc::fstat(fd, stat.as_mut_ptr()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "inspecting fleet policy entry {}/{}",
+                directory.display(),
+                file_name
+            )
+        });
+    }
+    let stat = unsafe { stat.assume_init() };
+    validate_policy_file_stat(&stat, directory, file_name, publisher_uid)
+}
+
+#[cfg(unix)]
 fn regular_policy_file_identity_from_stat(stat: &libc::stat) -> io::Result<PolicyFileIdentity> {
     if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
-    Ok((stat.st_dev as _, stat.st_ino, stat.st_mode as u64))
+    Ok((
+        stat.st_dev as _,
+        stat.st_ino,
+        stat.st_mode as u64,
+        stat.st_nlink as u64,
+    ))
 }
 
 #[cfg(unix)]
@@ -2089,10 +2176,21 @@ fn write_policy_file(directory: &Path, file_name: &str, _bytes: &[u8]) -> Result
 }
 
 fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        bail!(
+            "fleet policy generation requires Unix no-follow descriptor primitives; refusing to mutate {}",
+            args.out_dir.display()
+        );
+    }
     let ledger = ReleaseRefLedger::load(&args.ledger)?;
     let policies = generate_policies_from_ledger(&ledger)?;
     #[cfg(unix)]
-    let policy_directory = PolicyDirectory::open_or_create(&args.out_dir)?;
+    #[cfg(test)]
+    let policy_directory = PolicyDirectory::open_for_tests(&args.out_dir)?;
+    #[cfg(unix)]
+    #[cfg(not(test))]
+    let policy_directory = PolicyDirectory::open_publisher(&args.out_dir)?;
     #[cfg(unix)]
     let existing_files = read_existing_policy_files(&policy_directory)?;
     #[cfg(unix)]
@@ -2110,6 +2208,7 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
     for (org, (action, bytes)) in &plan {
         let file_name = format!("{org}-desired-policy.json");
         let path = args.out_dir.join(&file_name);
+        let policy = by_org.get(org.as_str()).copied();
         #[cfg(unix)]
         let existing_file = existing_files.get(org);
         #[cfg(unix)]
@@ -2121,6 +2220,8 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
                 let bytes = bytes
                     .as_deref()
                     .expect("written actions always carry generated bytes");
+                let policy = policy.expect("written actions always have a generated policy");
+                validate_generated_policy_bytes(policy, bytes)?;
                 #[cfg(unix)]
                 write_policy_file_at(
                     &policy_directory,
@@ -2134,7 +2235,6 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
                 )?;
                 #[cfg(not(unix))]
                 write_policy_file(&args.out_dir, &file_name, bytes)?;
-                let policy = by_org[org.as_str()];
                 println!(
                     "{}: {} repos, {} workflows, {}",
                     path.display(),
@@ -2144,6 +2244,13 @@ fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
                 );
             }
             PolicyFileAction::Skipped => {
+                let policy = policy.expect("skipped actions always have a generated policy");
+                validate_generated_policy_bytes(
+                    policy,
+                    bytes
+                        .as_deref()
+                        .expect("skipped actions always carry generated bytes"),
+                )?;
                 #[cfg(unix)]
                 revalidate_policy_file_contents(
                     &policy_directory,
@@ -3019,7 +3126,8 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!("velnor-policy-gen-{tag}-{nonce}"));
+            let temp_root = fs::canonicalize(std::env::temp_dir()).expect("canonicalize temp dir");
+            let path = temp_root.join(format!("velnor-policy-gen-{tag}-{nonce}"));
             fs::create_dir_all(&path).expect("create policy dir");
             Self { path }
         }
@@ -3052,6 +3160,117 @@ mod tests {
                 libc::umask(self.previous);
             }
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn publisher_refuses_non_isolated_output_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = PolicyDir::new("publisher-boundary");
+        fs::set_permissions(&dir.path, fs::Permissions::from_mode(0o775))
+            .expect("make output directory group-writable");
+        let error = match PolicyDirectory::open_publisher(&dir.path) {
+            Ok(_) => panic!("unisolated publisher directory must be rejected"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("root publisher") || message.contains("not writable"),
+            "unexpected boundary error: {message}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn publisher_metadata_rejects_wrong_owner_and_writable_modes() {
+        let mut directory_stat: libc::stat = unsafe { std::mem::zeroed() };
+        directory_stat.st_mode = libc::S_IFDIR | 0o775;
+        directory_stat.st_uid = 42;
+        let owner_error = validate_policy_directory_stat(
+            &directory_stat,
+            Path::new("/publisher"),
+            "ancestor",
+            Some(0),
+        )
+        .expect_err("wrong owner and writable mode must be rejected");
+        assert!(
+            owner_error.to_string().contains("owner uid"),
+            "{owner_error}"
+        );
+
+        directory_stat.st_uid = 0;
+        let mode_error = validate_policy_directory_stat(
+            &directory_stat,
+            Path::new("/publisher"),
+            "ancestor",
+            Some(0),
+        )
+        .expect_err("writable ancestor must be rejected");
+        assert!(
+            mode_error.to_string().contains("not writable"),
+            "{mode_error}"
+        );
+
+        let mut file_stat: libc::stat = unsafe { std::mem::zeroed() };
+        file_stat.st_mode = libc::S_IFREG | 0o664;
+        file_stat.st_uid = 42;
+        file_stat.st_nlink = 1;
+        let file_error =
+            validate_policy_file_stat(&file_stat, Path::new("/publisher"), "policy.json", Some(0))
+                .expect_err("wrong owner and writable policy file must be rejected");
+        assert!(
+            file_error.to_string().contains("root-owned file"),
+            "{file_error}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_temporary_validation_is_cleaned_by_guard() {
+        let dir = PolicyDir::new("temporary-validation-cleanup");
+        let actual_uid = unsafe { libc::geteuid() };
+        let rejected_uid = if actual_uid == 0 { 1 } else { 0 };
+        let directory = PolicyDirectory {
+            path: dir.path.clone(),
+            file: fs::File::open(&dir.path).expect("open policy directory"),
+            publisher_uid: Some(rejected_uid),
+        };
+
+        let error = write_policy_file_at(
+            &directory,
+            "policy.json",
+            b"generated\n",
+            PolicyFileExpectation::Absent,
+            None,
+        )
+        .expect_err("temporary validation must fail for the wrong publisher uid");
+        assert!(error.to_string().contains("root-owned file"), "{error}");
+        assert_eq!(
+            fs::read_dir(&dir.path)
+                .expect("read policy directory")
+                .count(),
+            0,
+            "RAII cleanup must remove a temporary after validation failure"
+        );
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn generation_refuses_unsupported_platform_before_mutation() {
+        let output = std::env::temp_dir().join(format!(
+            "velnor-unsupported-fleet-output-{}",
+            std::process::id()
+        ));
+        assert!(!output.exists(), "test output path must start absent");
+        let error = fleet_generate(FleetGenerateArgs {
+            ledger: PathBuf::from("unused-ledger.toml"),
+            out_dir: output.clone(),
+        })
+        .expect_err("unsupported platform must refuse generation")
+        .to_string();
+        assert!(error.contains("Unix"), "{error}");
+        assert!(!output.exists(), "unsupported generation must not mutate");
     }
 
     #[test]
@@ -3135,6 +3354,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn generate_second_run_leaves_current_files_untouched() {
         let dir = PolicyDir::new("idempotent");
         let args = FleetGenerateArgs {
@@ -3171,7 +3391,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let expected = existing.get("ghost-org").expect("scanned policy").identity;
 
@@ -3199,7 +3419,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let expected = existing.get("ghost-org").expect("scanned policy").identity;
         let file_name_c = CString::new(file_name).expect("file name");
@@ -3227,7 +3447,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let expected = existing.get("ghost-org").expect("scanned policy").identity;
 
@@ -3266,7 +3486,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let expected = existing.get("ghost-org").expect("scanned policy").identity;
 
@@ -3301,7 +3521,7 @@ mod tests {
         let oversized = vec![b'x'; MAX_POLICY_FILE_BYTES + 1];
         fs::write(&path, &oversized).expect("seed oversized policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let error = read_existing_policy_files(&directory)
             .expect_err("oversized policy must abort generation scan");
         assert!(
@@ -3322,7 +3542,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let scanned = existing.get("ghost-org").expect("scanned policy");
         let expected = scanned.identity;
@@ -3378,7 +3598,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let scanned = existing.get("ghost-org").expect("scanned policy");
         let expected = scanned.identity;
@@ -3415,7 +3635,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let expected = existing.get("ghost-org").expect("scanned policy").identity;
         let temporary_name = ".ghost-org-desired-policy.json.tmp-test";
@@ -3423,9 +3643,20 @@ mod tests {
         fs::write(&temporary, b"generated\n").expect("seed generated policy");
         let temporary_c = CString::new(temporary_name).expect("temporary name");
         let file_name_c = CString::new(file_name).expect("file name");
-        let temporary_identity = policy_file_identity_at(directory.file.as_raw_fd(), &temporary_c)
-            .expect("temporary identity lookup")
-            .expect("temporary identity");
+        let temporary_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary)
+            .expect("open generated policy");
+        let temporary_identity = policy_file_identity_from_fd(temporary_file.as_raw_fd())
+            .expect("temporary identity lookup");
+        let temporary_guard = TemporaryPolicyFile {
+            directory: &directory,
+            name: temporary_c.clone(),
+            file: temporary_file,
+            identity: Some(temporary_identity),
+            published: false,
+        };
 
         let replacement = dir.path.join("replacement.tmp");
         fs::write(&replacement, b"attacker bytes\n").expect("seed replacement");
@@ -3441,12 +3672,19 @@ mod tests {
         )
         .expect_err("replaced temporary must abort final rename");
         assert!(error.to_string().contains("temporary"), "{error}");
+        cleanup_temporary_policy_file(&directory, &temporary_c, temporary_identity)
+            .expect("cleanup must tolerate a replaced temporary");
         assert_eq!(
             fs::read(&path).expect("original policy remains"),
             b"original\n"
         );
         assert_eq!(
             fs::read(&temporary).expect("replacement temporary remains"),
+            b"attacker bytes\n"
+        );
+        drop(temporary_guard);
+        assert_eq!(
+            fs::read(&temporary).expect("guard must leave replacement temporary"),
             b"attacker bytes\n"
         );
     }
@@ -3459,7 +3697,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let expected = existing.get("ghost-org").expect("scanned policy").identity;
         let temporary_name = ".ghost-org-desired-policy.json.tmp-test";
@@ -3492,7 +3730,7 @@ mod tests {
         let path = dir.path.join(file_name);
         fs::write(&path, b"original\n").expect("seed policy");
 
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let existing = read_existing_policy_files(&directory).expect("scan policy files");
         let expected = existing.get("ghost-org").expect("scanned policy").identity;
         let temporary_name = ".ghost-org-desired-policy.json.tmp-test";
@@ -3537,7 +3775,7 @@ mod tests {
         let dir = PolicyDir::new("appeared-final-rename-race");
         let file_name = "ghost-org-desired-policy.json";
         let path = dir.path.join(file_name);
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("open policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("open policy dir");
         let temporary_name = ".ghost-org-desired-policy.json.tmp-test";
         let temporary = dir.path.join(temporary_name);
         fs::write(&temporary, b"generated\n").expect("seed generated policy");
@@ -3573,6 +3811,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn generate_removes_stale_org_file() {
         let dir = PolicyDir::new("stale");
         let stale = dir.path.join("ghost-org-desired-policy.json");
@@ -3592,6 +3831,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn generate_never_touches_unrelated_directory_entries() {
         let dir = PolicyDir::new("unrelated");
         let unrelated: Vec<(PathBuf, &[u8])> = vec![
@@ -3608,8 +3848,7 @@ mod tests {
             // empty stem as an org file (review G3).
             (dir.path.join("-desired-policy.json"), b"empty stem\n"),
             (
-                dir.path
-                    .join("subdir-desired-policy.json/tailrocks-desired-policy.json"),
+                dir.path.join("subdir/tailrocks-desired-policy.json"),
                 b"inside directory\n",
             ),
         ];
@@ -3639,8 +3878,8 @@ mod tests {
             Some(b"empty stem\n".to_vec()),
             "empty-stem policy-named file must survive untouched"
         );
-        // The lookalike directory itself survives with its contents.
-        assert!(dir.path.join("subdir-desired-policy.json").is_dir());
+        // The unrelated directory itself survives with its contents.
+        assert!(dir.path.join("subdir").is_dir());
     }
 
     #[test]
@@ -3720,11 +3959,29 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn generate_fails_closed_on_directory_policy_names() {
+        let dir = PolicyDir::new("directory-policy-name");
+        let policy_directory = dir.path.join("ghost-desired-policy.json");
+        fs::create_dir(&policy_directory).expect("seed policy-named directory");
+
+        let args = FleetGenerateArgs {
+            ledger: repo_root().join("fleet/release-refs.toml"),
+            out_dir: dir.path.clone(),
+        };
+        let err = fleet_generate(args)
+            .expect_err("directory policy-named entries must abort generation")
+            .to_string();
+        assert!(err.contains("non-regular"), "{err}");
+        assert!(policy_directory.is_dir(), "rejected directory must remain");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn policy_directory_holds_exclusive_lock_until_file_close() {
         use std::os::fd::AsRawFd;
 
         let dir = PolicyDir::new("exclusive-lock");
-        let directory = PolicyDirectory::open_or_create(&dir.path).expect("lock policy dir");
+        let directory = PolicyDirectory::open_for_tests(&dir.path).expect("lock policy dir");
         let contender = fs::File::open(&dir.path).expect("open lock contender");
         let result = unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         let error = io::Error::last_os_error();
@@ -3799,11 +4056,12 @@ mod tests {
         fs::write(&target, b"protected\n").expect("seed symlink target");
         let hardlink = dir.path.join("hardlink.json");
         fs::hard_link(&target, &hardlink).expect("seed hardlink target");
-        write_policy_file(&dir.path, "hardlink.json", b"replacement\n")
-            .expect("replace hardlink atomically");
+        let err = write_policy_file(&dir.path, "hardlink.json", b"replacement\n")
+            .expect_err("hardlink must be rejected");
+        assert!(err.to_string().contains("hard-linked"), "{err}");
         assert_eq!(
             fs::read(&hardlink).expect("read replaced hardlink"),
-            b"replacement\n"
+            b"protected\n"
         );
         assert_eq!(
             fs::read(&target).expect("read preserved hardlink target"),
@@ -3829,7 +4087,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn policy_write_anchors_existing_symlinked_ancestor_directory() {
+    fn policy_write_rejects_symlinked_ancestor_directory() {
         let root = PolicyDir::new("nofollow-ancestor");
         let real = root.path.join("real");
         fs::create_dir(&real).expect("real directory");
@@ -3838,12 +4096,10 @@ mod tests {
         let alias = root.path.join("alias");
         std::os::unix::fs::symlink(&real, &alias).expect("ancestor symlink");
 
-        write_policy_file(&alias.join("child"), "policy.json", b"anchored")
-            .expect("stable ancestor alias resolves before descriptor walk");
-        assert_eq!(
-            fs::read(child.join("policy.json")).expect("anchored file"),
-            b"anchored"
-        );
+        let err = write_policy_file(&alias.join("child"), "policy.json", b"must not land")
+            .expect_err("symlinked ancestor must be rejected");
+        assert!(!err.to_string().is_empty(), "failure should be actionable");
+        assert!(!child.join("policy.json").exists());
     }
 
     #[test]
@@ -3901,6 +4157,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn generate_bails_on_intra_ledger_case_duplicate_before_any_mutation() {
         let dir = PolicyDir::new("case-dupe-ledger");
         let healthy = dir.path.join("ChainArgos-desired-policy.json");
