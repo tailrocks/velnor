@@ -15,7 +15,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use velnor_action_journal::{ActionRecord, JournalError, LeaseManager};
@@ -38,6 +38,7 @@ const MAX_ACCOUNTING_NODES: usize = 1_000_000;
 const MAX_ACCOUNTING_DEPTH: usize = 128;
 const MAX_ACCOUNTING_PATH_BYTES: usize = 16 * 1024;
 const MAX_ACCOUNTING_ENTRIES_PER_DIRECTORY: usize = 100_000;
+const MAX_DURABLE_CAS_ROOTS: usize = 1_000_000;
 const OUTPUT_ROOT_DIGEST: &str = "output_root";
 const RESULT_DIGEST: &str = "compiler_cache_result";
 const ACCOUNTING_DIGEST: &str = "compiler_cache_physical_byte_accounting";
@@ -606,66 +607,91 @@ impl<C: Clock> CompilerCacheService<C> {
             });
         }
         self.validate_output_tree(&result.output_root)?;
+        self.publish_after_validation(lease, result)
+    }
+
+    fn publish_after_validation(
+        &self,
+        lease: &ProducerLease,
+        result: CompilerResult,
+    ) -> Result<PhysicalByteAccounting, CacheError> {
         let result_bytes = serde_json::to_vec(&result)?;
-        let (result_digest, accounting, accounting_digest) = {
-            let mut metadata = self.lock_metadata()?;
-            let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let accounting_probe = serde_json::to_vec(&PhysicalByteAccounting::unknown())?;
-            let requested = u64::try_from(result_bytes.len())
-                .map_err(|_| CacheError::InvalidMetadata("result is too large".into()))?
-                .checked_add(
-                    u64::try_from(accounting_probe.len()).map_err(|_| {
+        self.reclaim_unreachable_cas()?;
+        let mut cas_attempted = false;
+        let outcome = (|| {
+            let (result_digest, accounting, accounting_digest) = {
+                let mut metadata = self.lock_metadata()?;
+                let transaction =
+                    metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let accounting_probe = serde_json::to_vec(&PhysicalByteAccounting::unknown())?;
+                let requested = u64::try_from(result_bytes.len())
+                    .map_err(|_| CacheError::InvalidMetadata("result is too large".into()))?
+                    .checked_add(u64::try_from(accounting_probe.len()).map_err(|_| {
                         CacheError::InvalidMetadata("accounting is too large".into())
-                    })?,
-                )
-                .ok_or_else(|| CacheError::InvalidMetadata("quota request overflowed".into()))?;
-            self.ensure_quota(requested)?;
-            let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
-            #[cfg(test)]
-            self.fail_if_injected(FailureBoundary::ResultCas)?;
-            let accounting_bytes = serde_json::to_vec(&accounting)?;
-            let accounting_digest = self.cas.put(&accounting_bytes)?;
-            #[cfg(test)]
-            self.fail_if_injected(FailureBoundary::AccountingCas)?;
-            self.ensure_storage_within_quota()?;
-            transaction.commit()?;
-            (result_digest, accounting, accounting_digest)
-        };
-        let complete = ActionRecord {
-            action_key: lease.action.clone(),
-            state: ActionState::Complete,
-            producer_lease_ref: Some(lease_reference(lease)),
-            consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::from([
-                (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
-                (RESULT_DIGEST.into(), result_digest.clone()),
-                (ACCOUNTING_DIGEST.into(), accounting_digest),
-            ]),
-            timing: result.timing,
-            worker_id: Some(lease.owner.clone()),
-            trust_class: lease.action.execution_policy.trust_class,
-        };
+                    })?)
+                    .ok_or_else(|| {
+                        CacheError::InvalidMetadata("quota request overflowed".into())
+                    })?;
+                self.ensure_quota(requested)?;
+                cas_attempted = true;
+                let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
+                #[cfg(test)]
+                self.fail_if_injected(FailureBoundary::ResultCas)?;
+                let accounting_bytes = serde_json::to_vec(&accounting)?;
+                let accounting_digest = self.cas.put(&accounting_bytes)?;
+                #[cfg(test)]
+                self.fail_if_injected(FailureBoundary::AccountingCas)?;
+                self.ensure_storage_within_quota()?;
+                transaction.commit()?;
+                (result_digest, accounting, accounting_digest)
+            };
+            let complete = ActionRecord {
+                action_key: lease.action.clone(),
+                state: ActionState::Complete,
+                producer_lease_ref: Some(lease_reference(lease)),
+                consumer_run_ids: BTreeSet::new(),
+                output_digests: BTreeMap::from([
+                    (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
+                    (RESULT_DIGEST.into(), result_digest.clone()),
+                    (ACCOUNTING_DIGEST.into(), accounting_digest),
+                ]),
+                timing: result.timing,
+                worker_id: Some(lease.owner.clone()),
+                trust_class: lease.action.execution_policy.trust_class,
+            };
 
-        // Journal completion remains the fencing point. The accounting digest
-        // is part of that durable record, so recovery never needs to infer
-        // whether the primary result object was new or deduplicated.
-        let mut journal = self.lock_journal()?;
-        journal.append_action_and_release(lease, &complete)?;
-        drop(journal);
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::JournalComplete)?;
+            // Journal completion remains the fencing point. The accounting
+            // digest is part of that durable record, so recovery never needs
+            // to infer whether the primary result object was new or reused.
+            let mut journal = self.lock_journal()?;
+            journal.append_action_and_release(lease, &complete)?;
+            drop(journal);
+            #[cfg(test)]
+            self.fail_if_injected(FailureBoundary::JournalComplete)?;
 
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::MetadataFinalization)?;
-        let mut metadata = self.lock_metadata()?;
-        finalize_metadata(
-            &mut metadata,
-            &lease.action,
-            &complete,
-            &result_digest,
-            &accounting,
-        )?;
-        Ok(accounting)
+            #[cfg(test)]
+            self.fail_if_injected(FailureBoundary::MetadataFinalization)?;
+            let mut metadata = self.lock_metadata()?;
+            finalize_metadata(
+                &mut metadata,
+                &lease.action,
+                &complete,
+                &result_digest,
+                &accounting,
+            )?;
+            Ok(accounting)
+        })();
+        match outcome {
+            Ok(accounting) => Ok(accounting),
+            Err(error) if cas_attempted => match self.reclaim_unreachable_cas() {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(CacheError::PublicationCleanup {
+                    publication: error.to_string(),
+                    cleanup: cleanup.to_string(),
+                }),
+            },
+            Err(error) => Err(error),
+        }
     }
 
     /// Acquire the single producer lease for an action miss.
@@ -679,6 +705,7 @@ impl<C: Clock> CompilerCacheService<C> {
             return Err(CacheError::Disabled);
         }
         self.ensure_trust_scope(key)?;
+        self.reclaim_unreachable_cas()?;
         self.ensure_quota(0)?;
         let mut journal = self.lock_journal()?;
         let lease = journal.acquire(
@@ -753,16 +780,33 @@ impl<C: Clock> CompilerCacheService<C> {
 
     /// Snapshot a compiler output directory into this service's immutable CAS.
     pub fn store_output_tree(&self, root: &Path) -> Result<Digest, CacheError> {
-        let mut metadata = self.lock_metadata()?;
-        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        self.ensure_quota(MAX_OUTPUT_CAPTURE_BYTES)?;
-        let digest = self
-            .cas
-            .put_directory_tree(root)
-            .map_err(CacheError::from)?;
-        self.ensure_storage_within_quota()?;
-        transaction.commit()?;
-        Ok(digest)
+        self.reclaim_unreachable_cas()?;
+        let mut cas_attempted = false;
+        let outcome = (|| {
+            let mut metadata = self.lock_metadata()?;
+            let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            self.ensure_quota(MAX_OUTPUT_CAPTURE_BYTES)?;
+            cas_attempted = true;
+            let digest = self
+                .cas
+                .put_directory_tree(root)
+                .map_err(CacheError::from)?;
+            insert_pending_root(&transaction, &digest, true)?;
+            self.ensure_storage_within_quota()?;
+            transaction.commit()?;
+            Ok(digest)
+        })();
+        match outcome {
+            Ok(digest) => Ok(digest),
+            Err(error) if cas_attempted => match self.reclaim_unreachable_cas() {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(CacheError::PublicationCleanup {
+                    publication: error.to_string(),
+                    cleanup: cleanup.to_string(),
+                }),
+            },
+            Err(error) => Err(error),
+        }
     }
 
     /// Validate an output tree and ensure every file belongs to the compiler
@@ -1030,6 +1074,14 @@ fn initialize_metadata(connection: &mut Connection) -> Result<(), CacheError> {
          )",
         [],
     )?;
+    transaction.execute(
+        "CREATE TABLE IF NOT EXISTS compiler_cache_pending_roots (
+             digest TEXT PRIMARY KEY NOT NULL,
+             is_tree INTEGER NOT NULL CHECK (is_tree IN (0, 1)),
+             ref_count INTEGER NOT NULL CHECK (ref_count > 0)
+         )",
+        [],
+    )?;
     let has_accounting_column = transaction
         .query_row(
             "SELECT 1 FROM pragma_table_info('compiler_cache_entries')
@@ -1197,6 +1249,22 @@ fn finalize_metadata(
     Ok(())
 }
 
+fn insert_pending_root(
+    transaction: &Transaction<'_>,
+    digest: &Digest,
+    is_tree: bool,
+) -> Result<(), CacheError> {
+    transaction.execute(
+        "INSERT INTO compiler_cache_pending_roots(digest, is_tree, ref_count)
+         VALUES (?1, ?2, 1)
+         ON CONFLICT(digest) DO UPDATE SET
+             is_tree = MAX(compiler_cache_pending_roots.is_tree, excluded.is_tree),
+             ref_count = compiler_cache_pending_roots.ref_count + 1",
+        params![digest.to_string(), i64::from(is_tree)],
+    )?;
+    Ok(())
+}
+
 fn verify_metadata(
     entry: &MetadataEntry,
     key: &ActionKey,
@@ -1357,6 +1425,76 @@ fn trust_namespace(trust_class: TrustClass) -> &'static str {
 }
 
 impl<C: Clock> CompilerCacheService<C> {
+    fn reclaim_unreachable_cas(&self) -> Result<u64, CacheError> {
+        let latest = {
+            let journal = self.lock_journal()?;
+            journal.journal().latest()?
+        };
+        let mut metadata = self.lock_metadata()?;
+        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut roots = DurableCasRoots::default();
+
+        for record in latest.values() {
+            if let Some(digest) = record.output_digests.get(OUTPUT_ROOT_DIGEST) {
+                roots.insert_tree(digest)?;
+            }
+            if let Some(digest) = record.output_digests.get(RESULT_DIGEST) {
+                roots.insert_blob(digest)?;
+            }
+            if let Some(digest) = record.output_digests.get(ACCOUNTING_DIGEST) {
+                roots.insert_blob(digest)?;
+            }
+        }
+
+        let mut entries = transaction.prepare(
+            "SELECT result_digest, output_digest
+             FROM compiler_cache_entries",
+        )?;
+        let rows = entries.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (result_digest, output_digest) = row?;
+            roots.insert_blob(&Digest::parse(result_digest)?)?;
+            roots.insert_tree(&Digest::parse(output_digest)?)?;
+        }
+        drop(entries);
+
+        let mut pending = transaction.prepare(
+            "SELECT digest, is_tree, ref_count
+             FROM compiler_cache_pending_roots",
+        )?;
+        let rows = pending.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (digest, is_tree, ref_count) = row?;
+            if ref_count <= 0 || !matches!(is_tree, 0 | 1) {
+                return Err(CacheError::InvalidMetadata(
+                    "compiler-cache pending CAS root has invalid state".into(),
+                ));
+            }
+            let digest = Digest::parse(digest)?;
+            if is_tree == 1 {
+                roots.insert_tree(&digest)?;
+            } else {
+                roots.insert_blob(&digest)?;
+            }
+        }
+        drop(pending);
+
+        let reclaimed = self.cas.reclaim_unreachable(
+            &roots.blobs.iter().cloned().collect::<Vec<_>>(),
+            &roots.trees.iter().cloned().collect::<Vec<_>>(),
+        )?;
+        transaction.commit()?;
+        Ok(reclaimed)
+    }
+
     fn ensure_trust_scope(&self, key: &CompilerActionKey) -> Result<(), CacheError> {
         if key.execution_policy.trust_class != self.trust_class {
             return Err(CacheError::TrustScopeMismatch);
@@ -1444,6 +1582,33 @@ impl<C: Clock> CompilerCacheService<C> {
         if *injected == Some(boundary) {
             *injected = None;
             return Err(CacheError::InjectedFailure);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct DurableCasRoots {
+    blobs: BTreeSet<Digest>,
+    trees: BTreeSet<Digest>,
+}
+
+impl DurableCasRoots {
+    fn insert_blob(&mut self, digest: &Digest) -> Result<(), CacheError> {
+        self.blobs.insert(digest.clone());
+        self.check_limit()
+    }
+
+    fn insert_tree(&mut self, digest: &Digest) -> Result<(), CacheError> {
+        self.trees.insert(digest.clone());
+        self.check_limit()
+    }
+
+    fn check_limit(&self) -> Result<(), CacheError> {
+        if self.blobs.len().saturating_add(self.trees.len()) > MAX_DURABLE_CAS_ROOTS {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache durable CAS roots exceed {MAX_DURABLE_CAS_ROOTS}"
+            )));
         }
         Ok(())
     }
@@ -1562,7 +1727,7 @@ mod tests {
             .cas
             .put(b"compiler-output")
             .expect("test output object");
-        cache
+        let root = cache
             .cas
             .put_tree(&velnor_cas::TreeManifest {
                 entries: vec![velnor_cas::TreeEntry {
@@ -1573,6 +1738,12 @@ mod tests {
                 }],
             })
             .expect("test output tree");
+        let mut metadata = cache.lock_metadata().expect("metadata lock");
+        let transaction = metadata
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("pending root transaction");
+        insert_pending_root(&transaction, &root, true).expect("pending output root");
+        transaction.commit().expect("pending root commit");
     }
 
     fn service(
@@ -1907,6 +2078,55 @@ mod tests {
                         Some(durable_accounting)
                     );
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_failures_reclaim_or_reserve_cas_bytes() {
+        for (seed, boundary) in [
+            (51, FailureBoundary::ResultCas),
+            (52, FailureBoundary::AccountingCas),
+            (53, FailureBoundary::MetadataFinalization),
+        ] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let cache = service(
+                &directory,
+                CompilerCachePolicy::Kache,
+                WrapperDeclaration::default(),
+            );
+            let action_key = key(seed);
+            let expected = result(action_key.clone());
+            let result_digest = Digest::from_bytes(&serde_json::to_vec(&expected).unwrap());
+            let before =
+                storage_size_bytes(&cache.storage_root().join("cas")).expect("CAS storage before");
+            let lease = cache.begin(&action_key).await.expect("lease");
+            cache.inject_failure(boundary);
+            assert!(matches!(
+                cache.publish_with_accounting(lease, expected.clone()).await,
+                Err(CacheError::InjectedFailure)
+            ));
+            let after =
+                storage_size_bytes(&cache.storage_root().join("cas")).expect("CAS storage after");
+
+            if boundary == FailureBoundary::MetadataFinalization {
+                assert!(after >= before);
+                assert_eq!(
+                    cache.lookup(&action_key).await.expect("late lookup"),
+                    Some(expected)
+                );
+                assert!(cache.cas.get(&result_digest).is_ok());
+            } else {
+                assert!(
+                    after <= before,
+                    "orphan bytes survived: {before} -> {after}"
+                );
+                assert!(matches!(
+                    cache.cas.get(&result_digest),
+                    Err(CasError::Absent { .. })
+                ));
+                let retry = cache.begin(&action_key).await.expect("retry lease");
+                cache.abandon(&retry).await.expect("abandon retry");
             }
         }
     }

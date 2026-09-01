@@ -37,6 +37,8 @@ const MAX_TREE_PATH_DEPTH: usize = 256;
 const MAX_TREE_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FULL_READ_BYTES: u64 = 64 * 1024 * 1024;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_RECLAIM_OBJECTS: usize = 1_000_000;
+const MAX_RECLAIM_PATH_BYTES: usize = 16 * 1024;
 
 /// Normalized reason for a cache miss or rejected object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1029,6 +1031,126 @@ impl CasStore {
         }
     }
 
+    /// Reclaim CAS objects that are not reachable from durable roots.
+    ///
+    /// Blob roots are retained as opaque objects. Tree roots are validated and
+    /// their file objects are retained as well. The complete object inventory
+    /// is validated before any deletion; malformed roots or storage entries
+    /// fail closed and leave the CAS unchanged.
+    pub fn reclaim_unreachable(
+        &self,
+        blob_roots: &[Digest],
+        tree_roots: &[Digest],
+    ) -> Result<u64, CasError> {
+        let root_count = blob_roots
+            .len()
+            .checked_add(tree_roots.len())
+            .ok_or_else(|| CasError::InvalidManifest("CAS root count overflowed".into()))?;
+        if root_count > MAX_RECLAIM_OBJECTS {
+            return Err(CasError::InvalidManifest(format!(
+                "CAS reclaim roots exceed the {MAX_RECLAIM_OBJECTS}-object limit"
+            )));
+        }
+
+        let mut reachable = std::collections::BTreeSet::new();
+        for digest in blob_roots {
+            mark_reachable_blob(self, digest, &mut reachable)?;
+        }
+        for digest in tree_roots {
+            mark_reachable_tree(self, digest, &mut reachable)?;
+        }
+
+        let objects = self.inventory_objects()?;
+        if objects.len() > MAX_RECLAIM_OBJECTS {
+            return Err(CasError::InvalidManifest(format!(
+                "CAS reclaim inventory exceeds the {MAX_RECLAIM_OBJECTS}-object limit"
+            )));
+        }
+        let mut reclaimed = 0_u64;
+        for (digest, path, bytes) in objects {
+            if reachable.contains(&digest) {
+                continue;
+            }
+            fs::remove_file(&path)?;
+            reclaimed = reclaimed.checked_add(bytes).ok_or_else(|| {
+                CasError::InvalidManifest("CAS reclaimed byte count overflowed".into())
+            })?;
+        }
+        Ok(reclaimed)
+    }
+
+    fn inventory_objects(&self) -> Result<Vec<(Digest, PathBuf, u64)>, CasError> {
+        let metadata = fs::symlink_metadata(&self.root)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CasError::UnsafePath(format!(
+                "CAS root is not a regular directory: {}",
+                self.root.display()
+            )));
+        }
+        let mut objects = Vec::new();
+        for bucket in fs::read_dir(&self.root)? {
+            let bucket = bucket?;
+            let bucket_path = bucket.path();
+            let bucket_name = bucket.file_name();
+            let bucket_name = bucket_name.to_str().ok_or_else(|| {
+                CasError::UnsafePath(format!(
+                    "CAS bucket name is not UTF-8: {}",
+                    bucket_path.display()
+                ))
+            })?;
+            if bucket_name.len() != 2 || !bucket_name.bytes().all(is_hex_byte) {
+                return Err(CasError::UnsafePath(format!(
+                    "CAS bucket name is invalid: {}",
+                    bucket_path.display()
+                )));
+            }
+            let bucket_metadata = fs::symlink_metadata(&bucket_path)?;
+            if bucket_metadata.file_type().is_symlink() || !bucket_metadata.is_dir() {
+                return Err(CasError::UnsafePath(format!(
+                    "CAS bucket is not a regular directory: {}",
+                    bucket_path.display()
+                )));
+            }
+            for object in fs::read_dir(&bucket_path)? {
+                let object = object?;
+                let object_path = object.path();
+                if object_path.to_string_lossy().len() > MAX_RECLAIM_PATH_BYTES {
+                    return Err(CasError::InvalidManifest(format!(
+                        "CAS reclaim path exceeds {MAX_RECLAIM_PATH_BYTES} bytes"
+                    )));
+                }
+                let object_name = object.file_name();
+                let object_name = object_name.to_str().ok_or_else(|| {
+                    CasError::UnsafePath(format!(
+                        "CAS object name is not UTF-8: {}",
+                        object_path.display()
+                    ))
+                })?;
+                if object_name.len() != 62 || !object_name.bytes().all(is_hex_byte) {
+                    return Err(CasError::UnsafePath(format!(
+                        "CAS object name is invalid: {}",
+                        object_path.display()
+                    )));
+                }
+                let object_metadata = fs::symlink_metadata(&object_path)?;
+                if object_metadata.file_type().is_symlink() || !object_metadata.is_file() {
+                    return Err(CasError::UnsafePath(format!(
+                        "CAS object is not a regular file: {}",
+                        object_path.display()
+                    )));
+                }
+                let digest = Digest::parse(format!("{bucket_name}{object_name}"))?;
+                if objects.len() >= MAX_RECLAIM_OBJECTS {
+                    return Err(CasError::InvalidManifest(format!(
+                        "CAS reclaim inventory exceeds the {MAX_RECLAIM_OBJECTS}-object limit"
+                    )));
+                }
+                objects.push((digest, object_path, object_metadata.len()));
+            }
+        }
+        Ok(objects)
+    }
+
     #[cfg(unix)]
     fn open_bucket(&self, digest: &Digest, create: bool) -> Result<File, CasError> {
         let bucket_name = &digest.as_str()[..2];
@@ -1100,6 +1222,38 @@ impl CasStore {
             metadata_accounting(&metadata, shared)
         }
     }
+}
+
+fn is_hex_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+fn mark_reachable_blob(
+    store: &CasStore,
+    digest: &Digest,
+    reachable: &mut std::collections::BTreeSet<Digest>,
+) -> Result<(), CasError> {
+    if reachable.insert(digest.clone()) {
+        store.open_object(digest)?;
+    }
+    Ok(())
+}
+
+fn mark_reachable_tree(
+    store: &CasStore,
+    digest: &Digest,
+    reachable: &mut std::collections::BTreeSet<Digest>,
+) -> Result<(), CasError> {
+    if !reachable.insert(digest.clone()) {
+        return Ok(());
+    }
+    let manifest = store.read_tree_manifest(digest)?;
+    for entry in manifest.entries {
+        if reachable.insert(entry.digest.clone()) {
+            store.verify_object_bounded(&entry.digest, MAX_TREE_FILE_BYTES)?;
+        }
+    }
+    Ok(())
 }
 
 fn digest_reader<R: Read>(reader: &mut R, max_bytes: u64) -> Result<(Digest, u64), CasError> {
@@ -2425,6 +2579,47 @@ mod tests {
         let (duplicate_digest, duplicate) = store.put_with_accounting(&bytes).unwrap();
         assert_eq!(duplicate_digest, digest);
         assert_eq!(duplicate, PhysicalByteAccounting::known(allocated, 0));
+    }
+
+    #[test]
+    fn reclaim_keeps_reachable_and_deduplicated_objects() {
+        let (_temp, store) = store();
+        let live = store.put(b"live").unwrap();
+        let shared = store.put(b"shared").unwrap();
+        let orphan = store.put(b"orphan").unwrap();
+        let root = store
+            .put_tree(&TreeManifest {
+                entries: vec![TreeEntry {
+                    path: "file".into(),
+                    digest: shared.clone(),
+                    class: FileClass::Runtime,
+                    mode: 0o644,
+                }],
+            })
+            .unwrap();
+
+        let reclaimed = store
+            .reclaim_unreachable(std::slice::from_ref(&live), std::slice::from_ref(&root))
+            .unwrap();
+
+        assert!(reclaimed > 0);
+        assert!(store.get(&live).is_ok());
+        assert!(store.get(&shared).is_ok());
+        assert!(store.get(&root).is_ok());
+        assert!(matches!(store.get(&orphan), Err(CasError::Absent { .. })));
+    }
+
+    #[test]
+    fn reclaim_fails_closed_on_missing_root() {
+        let (_temp, store) = store();
+        let orphan = store.put(b"orphan").unwrap();
+        let missing = Digest::from_bytes(b"missing-root");
+
+        assert!(matches!(
+            store.reclaim_unreachable(&[missing], &[]),
+            Err(CasError::Absent { .. })
+        ));
+        assert!(store.get(&orphan).is_ok());
     }
 
     #[cfg(unix)]
