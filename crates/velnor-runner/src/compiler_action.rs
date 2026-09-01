@@ -644,10 +644,7 @@ fn digest_input_directory(root: &SecureInputDirectory, hasher: &mut blake3::Hash
     let mut total_bytes = 0_u64;
     let mut stack = vec![InputDirectoryFrame::new(root, Path::new(""))?];
 
-    loop {
-        let Some(frame_index) = stack.len().checked_sub(1) else {
-            break;
-        };
+    while let Some(frame_index) = stack.len().checked_sub(1) {
         if stack[frame_index].next == stack[frame_index].names.len() {
             let final_names = read_input_names(
                 &stack[frame_index].directory.file,
