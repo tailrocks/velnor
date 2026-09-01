@@ -1,9 +1,29 @@
 # Generated ownership state; do not edit.
 schema = 1
-.github/ci/policy.sh	70597ddcea5af8ca
-.github/ci/project.toml	b46d4a8cc5b426e6
+.github/ci/policy.sh	ee8f1b4b6edb6e7c
+.github/ci/project.toml	120278bacf2fb941
 .github/ci/run.sh	9511d2962df87cfa
-.github/workflows/ci-main.yml	ab91acb20ba77c9b
-.github/workflows/ci-pr.yml	3c2a65cf927620ec
+.github/workflows/ci-bun-velnor.yml	9f9d0d8fcf28b388
+.github/workflows/ci-bun.yml	52137f29b43d3baa
+.github/workflows/ci-docker-docker.yml	078065552aff507f
+.github/workflows/ci-docker.yml	ba0fdf15ce27fd2b
+.github/workflows/ci-docs-docs.yml	a1c41baec8227297
+.github/workflows/ci-docs.yml	d4dcd7d9f9a77a15
+.github/workflows/ci-main.yml	6d9772c737c04f08
+.github/workflows/ci-pr.yml	5b3b459fe3bb88d8
+.github/workflows/ci-rust-policy.yml	a7f0ffb6cb5cd86b
+.github/workflows/ci-rust-unit-collector.yml	4d2c83df27dfacb2
+.github/workflows/ci-rust-velnor-action-journal.yml	e8478421e397f0a7
+.github/workflows/ci-rust-velnor-action-model.yml	385cf2cf3e296f67
+.github/workflows/ci-rust-velnor-cache-service.yml	91a0205c31456a41
+.github/workflows/ci-rust-velnor-cas.yml	cf9fabbb75c3b115
+.github/workflows/ci-rust-velnor-client.yml	a4c5166d3bcdd483
+.github/workflows/ci-rust-velnor-control.yml	bd44976a98d26f55
+.github/workflows/ci-rust-velnor-model.yml	f3a3324586def5b1
+.github/workflows/ci-rust-velnor-render.yml	1914dc8016616383
+.github/workflows/ci-rust-velnor-runner.yml	4d5df1f61bb0bc07
+.github/workflows/ci-rust-velnor-tools.yml	045a8a153cf01bdd
+.github/workflows/ci-rust-velnorctl.yml	43dba3aae982730f
+.github/workflows/ci-rust.yml	4cb024dcbe728b15
 .github/workflows/maintenance.yml	05934a71a8bbe286
-.github/workflows/nightly.yml	5e49388b5f5ade90
+.github/workflows/nightly.yml	73447267200b5a2f

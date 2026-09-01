@@ -13,7 +13,7 @@ limitations = ["Cargo deny license checks are skipped because deny.toml declares
 [workflow]
 github_runner = "ubuntu-24.04"
 velnor_labels = ["self-hosted", "velnor"]
-files = ["ci-pr.yml", "ci-main.yml", "nightly.yml", "maintenance.yml"]
+files = ["ci-pr.yml", "ci-main.yml", "nightly.yml", "maintenance.yml", "ci-rust.yml", "ci-rust-policy.yml", "ci-rust-unit-collector.yml", "ci-rust-velnor-action-journal.yml", "ci-rust-velnor-action-model.yml", "ci-rust-velnor-cache-service.yml", "ci-rust-velnor-cas.yml", "ci-rust-velnor-client.yml", "ci-rust-velnor-control.yml", "ci-rust-velnor-model.yml", "ci-rust-velnor-render.yml", "ci-rust-velnor-runner.yml", "ci-rust-velnor-tools.yml", "ci-rust-velnorctl.yml", "ci-bun.yml", "ci-bun-velnor.yml", "ci-docker.yml", "ci-docker-docker.yml", "ci-docs.yml", "ci-docs-docs.yml"]
 
 [release]
 enabled = false

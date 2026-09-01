@@ -24,8 +24,10 @@ verify_action() {
     action="${action#"$single_quote"}"
     action="${action%"$single_quote"}"
   fi
-  if [[ "$action" == */.github/workflows/* ]]; then
-    printf '%s: reusable workflows are forbidden: %s\n' "$current_workflow" "$action" >&2
+  if [[ "$action" =~ ^\./\.github/workflows/ci-[A-Za-z0-9._-]+\.yml$ ]]; then
+    : # Only generator-owned local reusable workflows are allowed.
+  elif [[ "$action" == */.github/workflows/* ]]; then
+    printf '%s: reusable workflow must be an approved local generated workflow: %s\n' "$current_workflow" "$action" >&2
     status=1
   elif ! [[ "$action" =~ ^[-_./A-Za-z0-9]+@[0-9a-f]{40}$ ]]; then
     printf '%s: action is not a full SHA pin: %s\n' "$current_workflow" "$action" >&2
