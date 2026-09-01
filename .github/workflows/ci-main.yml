@@ -41,7 +41,7 @@ jobs:
         run: bash .github/ci/run.sh plan
 
   policy:
-    name: Policy
+    name: GitHub / Policy · Runner: ubuntu-24.04
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout workflow data
