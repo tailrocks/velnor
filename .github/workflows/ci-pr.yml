@@ -21,7 +21,7 @@ env:
 
 jobs:
   plan:
-    name: Plan
+    name: GitHub / Planning · Runner: ubuntu-24.04
     runs-on: ubuntu-24.04
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
@@ -66,7 +66,7 @@ jobs:
           fi
           bash "$policy"
   github-bun-velnor:
-    name: "GitHub / Bun package (velnor)"
+    name: "GitHub / Bun / Packages / Bun package (velnor) · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -96,7 +96,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-docker:
-    name: "GitHub / Docker"
+    name: "GitHub / Docker / Images / Docker · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -117,7 +117,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-docs:
-    name: "GitHub / Documentation"
+    name: "GitHub / Documentation / Documentation · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -145,7 +145,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-policy:
-    name: "GitHub / Rust dependency policy"
+    name: "GitHub / Rust / Crates / Rust dependency policy · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -192,7 +192,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-unit-collector:
-    name: "GitHub / Rust crate (unit-collector)"
+    name: "GitHub / Rust / Crates / unit-collector · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -239,7 +239,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-action-journal:
-    name: "GitHub / Rust crate (velnor-action-journal)"
+    name: "GitHub / Rust / Crates / velnor-action-journal · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-action-model, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -286,7 +286,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-action-model:
-    name: "GitHub / Rust crate (velnor-action-model)"
+    name: "GitHub / Rust / Crates / velnor-action-model · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -333,7 +333,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-cache-service:
-    name: "GitHub / Rust crate (velnor-cache-service)"
+    name: "GitHub / Rust / Crates / velnor-cache-service · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-cas]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -380,7 +380,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-cas:
-    name: "GitHub / Rust crate (velnor-cas)"
+    name: "GitHub / Rust / Crates / velnor-cas · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-action-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -427,7 +427,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-client:
-    name: "GitHub / Rust crate (velnor-client)"
+    name: "GitHub / Rust / Crates / velnor-client · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -474,7 +474,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-control:
-    name: "GitHub / Rust crate (velnor-control)"
+    name: "GitHub / Rust / Crates / velnor-control · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-action-journal, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -521,7 +521,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-model:
-    name: "GitHub / Rust crate (velnor-model)"
+    name: "GitHub / Rust / Crates / velnor-model · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -568,7 +568,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-render:
-    name: "GitHub / Rust crate (velnor-render)"
+    name: "GitHub / Rust / Crates / velnor-render · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -615,7 +615,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-runner:
-    name: "GitHub / Rust crate (velnor-runner)"
+    name: "GitHub / Rust / Crates / velnor-runner · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-action-model, github-rust-velnor-cache-service, github-rust-velnor-control, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -662,7 +662,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnor-tools:
-    name: "GitHub / Rust crate (velnor-tools)"
+    name: "GitHub / Rust / Crates / velnor-tools · Runner: ubuntu-24.04"
     needs: [plan, policy]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -709,7 +709,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   github-rust-velnorctl:
-    name: "GitHub / Rust crate (velnorctl)"
+    name: "GitHub / Rust / Crates / velnorctl · Runner: ubuntu-24.04"
     needs: [plan, policy, github-rust-velnor-client, github-rust-velnor-control, github-rust-velnor-model, github-rust-velnor-render, github-rust-velnor-runner]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -756,7 +756,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-bun-velnor:
-    name: "Velnor / Bun package (velnor)"
+    name: "Velnor / Bun / Packages / Bun package (velnor) · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -787,7 +787,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-docker:
-    name: "Velnor / Docker"
+    name: "Velnor / Docker / Images / Docker · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -809,7 +809,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-docs:
-    name: "Velnor / Documentation"
+    name: "Velnor / Documentation / Documentation · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -838,7 +838,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-policy:
-    name: "Velnor / Rust dependency policy"
+    name: "Velnor / Rust / Crates / Rust dependency policy · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -886,7 +886,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-unit-collector:
-    name: "Velnor / Rust crate (unit-collector)"
+    name: "Velnor / Rust / Crates / unit-collector · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -934,7 +934,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-action-journal:
-    name: "Velnor / Rust crate (velnor-action-journal)"
+    name: "Velnor / Rust / Crates / velnor-action-journal · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-action-model, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
@@ -982,7 +982,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-action-model:
-    name: "Velnor / Rust crate (velnor-action-model)"
+    name: "Velnor / Rust / Crates / velnor-action-model · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -1030,7 +1030,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-cache-service:
-    name: "Velnor / Rust crate (velnor-cache-service)"
+    name: "Velnor / Rust / Crates / velnor-cache-service · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-cas]
     runs-on: [self-hosted, velnor]
@@ -1078,7 +1078,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-cas:
-    name: "Velnor / Rust crate (velnor-cas)"
+    name: "Velnor / Rust / Crates / velnor-cas · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-action-model]
     runs-on: [self-hosted, velnor]
@@ -1126,7 +1126,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-client:
-    name: "Velnor / Rust crate (velnor-client)"
+    name: "Velnor / Rust / Crates / velnor-client · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
@@ -1174,7 +1174,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-control:
-    name: "Velnor / Rust crate (velnor-control)"
+    name: "Velnor / Rust / Crates / velnor-control · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-action-journal, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
@@ -1222,7 +1222,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-model:
-    name: "Velnor / Rust crate (velnor-model)"
+    name: "Velnor / Rust / Crates / velnor-model · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -1270,7 +1270,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-render:
-    name: "Velnor / Rust crate (velnor-render)"
+    name: "Velnor / Rust / Crates / velnor-render · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
@@ -1318,7 +1318,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-runner:
-    name: "Velnor / Rust crate (velnor-runner)"
+    name: "Velnor / Rust / Crates / velnor-runner · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-action-model, velnor-rust-velnor-cache-service, velnor-rust-velnor-control, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
@@ -1366,7 +1366,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnor-tools:
-    name: "Velnor / Rust crate (velnor-tools)"
+    name: "Velnor / Rust / Crates / velnor-tools · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy]
     runs-on: [self-hosted, velnor]
@@ -1414,7 +1414,7 @@ jobs:
         run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
 
   velnor-rust-velnorctl:
-    name: "Velnor / Rust crate (velnorctl)"
+    name: "Velnor / Rust / Crates / velnorctl · Runner: [self-hosted, velnor]"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor]
