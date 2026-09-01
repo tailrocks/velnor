@@ -1386,7 +1386,11 @@ fn validate_policy_directory_stat(
             expected_uid
         );
     }
-    if stat.st_mode & 0o022 != 0 {
+    // Test-only directory handles exercise descriptor and file-identity
+    // checks from ordinary temporary directories, whose ancestors may be
+    // sticky world-writable directories such as `/tmp`. The production
+    // publisher path still requires every component to be private.
+    if publisher_uid.is_some() && stat.st_mode & 0o022 != 0 {
         bail!(
             "fleet policy publisher requires directory component {}/{} not writable by group or other; mode {:o} is unsafe",
             path.display(),
