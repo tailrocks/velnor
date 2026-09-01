@@ -27,7 +27,7 @@ function docsSlugs(dir = contentRoot): string[] {
 }
 
 function pagePath(slug: string): string {
-  return `/docs/${slug}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/docs'
+  return `/${slug}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/'
 }
 
 function outputPath(path: string): string {
@@ -73,9 +73,9 @@ async function copySsrAssets() {
 
 const pages = docsSlugs().flatMap((slug) => {
   const path = pagePath(slug)
-  return [path, slug ? `${path}.md` : '/docs/index.md']
+  return [path, slug ? `${path}.md` : '/index.md']
 })
-const paths = ['/', '/api/search', '/llms.txt', '/llms-full.txt', ...pages]
+const paths = [...new Set(['/', '/api/search', '/llms.txt', '/llms-full.txt', ...pages])]
 const child = Bun.spawn(['bun', '.output/server/index.mjs'], {
   cwd: root,
   env: { ...process.env, HOST: host, NITRO_HOST: host, NITRO_PORT: String(port) },

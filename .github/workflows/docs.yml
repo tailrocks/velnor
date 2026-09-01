@@ -43,6 +43,26 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run build:static
+      - name: Verify static docs migration
+        run: |
+          set -euo pipefail
+          public=.output/public
+
+          test -s "$public/index.html"
+          test -s "$public/operations/security-and-data/index.html"
+          test -s "$public/index.md"
+          test -s "$public/operations/security-and-data.md"
+          test -s "$public/llms.txt"
+          test -s "$public/llms-full.txt"
+          grep -q '<title>Velnor Documentation</title>' "$public/index.html"
+          grep -q 'Security and data contract' "$public/operations/security-and-data/index.html"
+          jq -e 'type == "array" and all(.[]; (type == "object" and (.id | type == "string") and (.url | type == "string") and (.title | type == "string") and (.structuredData | type == "object")))' "$public/api/search"
+
+          test ! -e "$public/docs"
+          if find "$public" -type f ! -path "$public/assets/*" -print0 | xargs -0 grep -nE '(^|["( ])(/docs([/?#" )]|$)|%2[Ff]docs)' >/tmp/velnor-docs-links; then
+            cat /tmp/velnor-docs-links
+            exit 1
+          fi
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
@@ -73,4 +93,4 @@ jobs:
     runs-on: ${{ 'ubuntu-26.04' }}
     timeout-minutes: 10
     steps:
-      - run: /usr/bin/curl --fail --silent --show-error --location "$DOCS_SITE_URL/docs" | /usr/bin/grep -q 'Velnor'
+      - run: /usr/bin/curl --fail --silent --show-error --location "$DOCS_SITE_URL/" | /usr/bin/grep -q 'Velnor'
