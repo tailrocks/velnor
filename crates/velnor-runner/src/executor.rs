@@ -78,6 +78,8 @@ const PERSISTENT_TARGET_MAX_NODES: usize = 1_000_000;
 const PERSISTENT_TARGET_MAX_DIRECTORIES: usize = 100_000;
 const PERSISTENT_TARGET_MAX_DEPTH: usize = 256;
 const PERSISTENT_TARGET_MAX_PATH_BYTES: u64 = 64 * 1024 * 1024;
+const PERSISTENT_TARGET_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const PERSISTENT_TARGET_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 static DOCKER_TIMEOUT_CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -10479,6 +10481,8 @@ struct PersistentTargetTraversalLimits {
     max_directories: usize,
     max_depth: usize,
     max_path_bytes: u64,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
 }
 
 impl PersistentTargetTraversalLimits {
@@ -10488,6 +10492,8 @@ impl PersistentTargetTraversalLimits {
             max_directories: PERSISTENT_TARGET_MAX_DIRECTORIES,
             max_depth: PERSISTENT_TARGET_MAX_DEPTH,
             max_path_bytes: PERSISTENT_TARGET_MAX_PATH_BYTES,
+            max_file_bytes: PERSISTENT_TARGET_MAX_FILE_BYTES,
+            max_total_bytes: PERSISTENT_TARGET_MAX_TOTAL_BYTES,
         }
     }
 }
@@ -10498,6 +10504,7 @@ struct PersistentTargetTraversalBudget {
     nodes: usize,
     directories: usize,
     path_bytes: u64,
+    total_bytes: u64,
 }
 
 impl PersistentTargetTraversalBudget {
@@ -10549,6 +10556,40 @@ impl PersistentTargetTraversalBudget {
                     limits.max_directories
                 );
             }
+        }
+        Ok(())
+    }
+
+    fn account_file(&mut self, relative: &Path, file: &fs::File) -> Result<()> {
+        let Some(limits) = self.limits else {
+            return Ok(());
+        };
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("inspect persistent target file {}", relative.display()))?;
+        if !metadata.is_file() {
+            bail!(
+                "persistent target source is not a regular file: {}",
+                relative.display()
+            );
+        }
+        let file_bytes = metadata.len();
+        if file_bytes > limits.max_file_bytes {
+            bail!(
+                "persistent target file {} exceeds the {}-byte limit",
+                relative.display(),
+                limits.max_file_bytes
+            );
+        }
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(file_bytes)
+            .context("persistent target byte count overflowed")?;
+        if self.total_bytes > limits.max_total_bytes {
+            bail!(
+                "persistent target files exceed the {}-byte total limit",
+                limits.max_total_bytes
+            );
         }
         Ok(())
     }
@@ -10664,6 +10705,7 @@ fn copy_dir_contents_filtered_in_open_directory(
                     )?;
                 }
                 crate::fs_copy::NoFollowSource::File(file) => {
+                    budget.account_file(&target_relative, &file)?;
                     destination_directory
                         .clone_or_copy_file(&file, Path::new(&entry.name))
                         .with_context(|| {
@@ -17189,6 +17231,8 @@ esac
                     max_directories: 1,
                     max_depth: 16,
                     max_path_bytes: 1024,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
                 },
                 "directory limit",
             ),
@@ -17199,6 +17243,8 @@ esac
                     max_directories: 16,
                     max_depth: 16,
                     max_path_bytes: 1024,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
                 },
                 "node limit",
             ),
@@ -17209,6 +17255,8 @@ esac
                     max_directories: 16,
                     max_depth: 1,
                     max_path_bytes: 1024,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
                 },
                 "depth limit",
             ),
@@ -17219,6 +17267,8 @@ esac
                     max_directories: 16,
                     max_depth: 16,
                     max_path_bytes: 4,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
                 },
                 "byte limit",
             ),
@@ -17247,6 +17297,65 @@ esac
             .unwrap_err();
             assert!(error.to_string().contains(expected_error), "{error:#}");
             assert!(!destination.join("nested/deeper/output").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_target_copy_enforces_per_file_and_total_byte_budgets() {
+        let cases = [
+            (
+                "file",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                    max_file_bytes: 3,
+                    max_total_bytes: 1024,
+                },
+                "exceeds the 3-byte limit",
+            ),
+            (
+                "total",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                    max_file_bytes: 4,
+                    max_total_bytes: 5,
+                },
+                "files exceed the 5-byte total limit",
+            ),
+        ];
+
+        for (name, limits, expected_error) in cases {
+            let root = temp_dir().join(format!("target-byte-budget-{name}"));
+            let source = root.join("source");
+            let destination = root.join("destination");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(source.join("nested-output"), b"four").unwrap();
+            fs::write(source.join("second-output"), b"four").unwrap();
+
+            let source_directory = crate::fs_copy::NoFollowDir::open_absolute(&source).unwrap();
+            let destination_directory =
+                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&destination)
+                    .unwrap();
+            let error = copy_persistent_target_contents_with_limits(
+                &source_directory,
+                &source,
+                &destination_directory,
+                Path::new(""),
+                true,
+                limits,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error:#}");
+            let copied_files = fs::read_dir(&destination).unwrap().count();
+            assert_eq!(copied_files, usize::from(name == "total"));
             fs::remove_dir_all(root).unwrap();
         }
     }
