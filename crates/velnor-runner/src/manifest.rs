@@ -2066,8 +2066,10 @@ mod tests {
         let build_binary =
             unique_position(r#"build_binary="target/${{ matrix.target }}/release/velnor-runner""#);
         let recorded_binary_sha = unique_position(
-            r#"recorded_binary_sha="$(tr -d '\n' < "velnor-runner-${{ matrix.arch }}.bin.sha256")""#,
+            r#"recorded_binary_sha="$(read_sha "velnor-runner-${{ matrix.arch }}.bin.sha256")""#,
         );
+        assert!(guard.contains("stat -c%s"));
+        assert!(guard.contains("token_count != 1"));
         let build_binary_sha = unique_position(
             r#"build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')""#,
         );
@@ -2111,6 +2113,47 @@ mod tests {
                 && package_sidecar_check < copy,
             "all package provenance checks must precede copying the package"
         );
+    }
+
+    #[test]
+    fn release_creation_binds_packaged_runner_to_recorded_binary() {
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
+                .expect("release workflow must parse");
+        let steps = workflow["jobs"]["release"]["steps"]
+            .as_sequence()
+            .expect("release job steps");
+        let verify_index = steps
+            .iter()
+            .position(|step| {
+                step.get("name")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|name| {
+                        name == "Verify packaged runner identity before release creation"
+                    })
+            })
+            .expect("release job must verify packaged runner identity");
+        let create_index = steps
+            .iter()
+            .position(|step| {
+                step.get("run")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|run| run.contains("gh release create"))
+            })
+            .expect("release job must create the release");
+        let verify = steps[verify_index]
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("identity verification must be a shell step");
+
+        assert!(verify.contains("for arch in amd64 arm64"));
+        assert!(verify.contains("jq -er --arg arch \"$arch\""));
+        assert!(verify.contains("release-record.json"));
+        assert!(verify.contains("dpkg-deb --fsys-tarfile \"$deb\""));
+        assert!(verify.contains("tar -xOf - ./usr/bin/velnor-runner"));
+        assert!(verify.contains("packaged_binary_sha"));
+        assert!(verify.contains("[ \"$packaged_binary_sha\" = \"$record_bin\" ]"));
+        assert!(verify_index < create_index);
     }
 
     #[test]

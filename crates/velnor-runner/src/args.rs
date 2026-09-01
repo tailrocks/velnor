@@ -58,7 +58,7 @@ pub struct ReleaseEmitArgs {
 #[derive(Debug)]
 pub struct ReleaseAssembleArgs {
     pub record: PathBuf,
-    pub artifacts: Option<PathBuf>,
+    pub artifacts: PathBuf,
     pub out: Option<PathBuf>,
 }
 

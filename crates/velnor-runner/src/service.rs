@@ -300,10 +300,10 @@ pub struct ReleaseAssembleArgs {
     /// Candidate record JSON.
     #[arg(long)]
     pub record: PathBuf,
-    /// Directory of downloaded artifacts (per-arch `*.bin.sha256` sidecars) to
-    /// cross-check the record's digests against.
+    /// Required directory of downloaded artifacts (per-arch binary/Debian
+    /// sidecars and Debian payloads) to cross-check the record's digests against.
     #[arg(long)]
-    pub artifacts: Option<PathBuf>,
+    pub artifacts: PathBuf,
     /// Write the re-verified canonical record + checksum here.
     #[arg(long)]
     pub out: Option<PathBuf>,
@@ -617,6 +617,39 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
         assert!(error.to_string().contains("--generation"));
+    }
+
+    #[test]
+    fn service_release_assemble_requires_artifacts() {
+        let error = ServiceCli::try_parse_from([
+            "velnor-runner",
+            "release",
+            "assemble",
+            "--record",
+            "/tmp/record.json",
+        ])
+        .expect_err("release assembly should require downloaded artifacts");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--artifacts"));
+
+        let parsed = ServiceCli::try_parse_from([
+            "velnor-runner",
+            "release",
+            "assemble",
+            "--record",
+            "/tmp/record.json",
+            "--artifacts",
+            "/tmp/artifacts",
+        ])
+        .expect("release assembly arguments should parse");
+        let ServiceCommand::Release(ReleaseArgs {
+            command: ReleaseCommand::Assemble(args),
+        }) = parsed.command
+        else {
+            panic!("expected release assemble command");
+        };
+        assert_eq!(args.artifacts, PathBuf::from("/tmp/artifacts"));
     }
 
     #[test]

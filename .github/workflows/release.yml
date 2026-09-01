@@ -117,6 +117,12 @@ jobs:
             exit 1
           }
           version="${TAG#v}"
+          case "$version" in
+            ''|.|..|*\\*|*[![:print:]])
+              echo "::error::release version is not a safe artifact path component" >&2
+              exit 1
+              ;;
+          esac
 
           # Peel annotated OR lightweight tags to exactly one commit object.
           tag_commit="$(git rev-list -n 1 "$tag_ref")"
@@ -777,11 +783,30 @@ jobs:
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           build_binary="target/${{ matrix.target }}/release/velnor-runner"
-          recorded_binary_sha="$(tr -d '\n' < "velnor-runner-${{ matrix.arch }}.bin.sha256")"
-          [ "${#recorded_binary_sha}" -eq 64 ] || { echo "::error::invalid recorded runner binary sha256" >&2; exit 1; }
-          case "$recorded_binary_sha" in
-            *[!0-9a-f]*) echo "::error::invalid recorded runner binary sha256" >&2; exit 1 ;;
-          esac
+          read_sha() {
+            local path="$1" size token
+            [ -f "$path" ] || { echo "::error::missing checksum sidecar: $path" >&2; return 1; }
+            size="$(stat -c%s "$path")"
+            [ "$size" -le 4096 ] || { echo "::error::checksum sidecar exceeds 4096 bytes: $path" >&2; return 1; }
+            token="$(awk '
+              {
+                for (field = 1; field <= NF; field++) {
+                  token_count++
+                  if (token_count == 1) token = $field
+                }
+              }
+              END {
+                if (token_count != 1) exit 1
+                print token
+              }
+            ' "$path")" || { echo "::error::checksum sidecar must contain one token: $path" >&2; return 1; }
+            [ "${#token}" -eq 64 ] || { echo "::error::invalid checksum sidecar: $path" >&2; return 1; }
+            case "$token" in
+              *[!0-9a-f]*) echo "::error::invalid checksum sidecar: $path" >&2; return 1 ;;
+            esac
+            printf '%s\n' "$token"
+          }
+          recorded_binary_sha="$(read_sha "velnor-runner-${{ matrix.arch }}.bin.sha256")"
           build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')"
           [ "$build_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::runner binary sidecar does not match target build" >&2; exit 1; }
           packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
@@ -842,7 +867,29 @@ jobs:
       - name: Assemble the release record from downloaded artifacts
         run: |
           set -euo pipefail
-          read_sha() { awk '{print $1}' "artifacts/$1"; }
+          read_sha() {
+            local path="artifacts/$1" size token
+            [ -f "$path" ] || { echo "::error::missing checksum sidecar: $path" >&2; return 1; }
+            size="$(stat -c%s "$path")"
+            [ "$size" -le 4096 ] || { echo "::error::checksum sidecar exceeds 4096 bytes: $path" >&2; return 1; }
+            token="$(awk '
+              {
+                for (field = 1; field <= NF; field++) {
+                  token_count++
+                  if (token_count == 1) token = $field
+                }
+              }
+              END {
+                if (token_count != 1) exit 1
+                print token
+              }
+            ' "$path")" || { echo "::error::checksum sidecar must contain one token: $path" >&2; return 1; }
+            [ "${#token}" -eq 64 ] || { echo "::error::invalid checksum sidecar: $path" >&2; return 1; }
+            case "$token" in
+              *[!0-9a-f]*) echo "::error::invalid checksum sidecar: $path" >&2; return 1 ;;
+            esac
+            printf '%s\n' "$token"
+          }
           bin_amd64="$(read_sha "velnor-runner-amd64.bin.sha256")"
           bin_arm64="$(read_sha "velnor-runner-arm64.bin.sha256")"
           deb_amd64="$(read_sha "velnor-runner-${VERSION}-amd64.deb.sha256")"
@@ -929,6 +976,26 @@ jobs:
           mkdir signer-input
           cp artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.deb signer-input/
 
+      - name: Verify packaged runner identity before release creation
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            deb="artifacts/velnor-runner-${VERSION}-${arch}.deb"
+            record_bin="$(jq -er --arg arch "$arch" '
+              [.architectures[] | select(.arch == $arch)]
+              | if length == 1 then .[0].binary_sha256 else error("record must contain exactly one architecture") end
+            ' release-record.json)"
+            case "$record_bin" in
+              *[!0-9a-f]*|'') echo "::error::record has invalid runner binary sha256 ($arch)" >&2; exit 1 ;;
+            esac
+            [ "${#record_bin}" -eq 64 ] || { echo "::error::record has invalid runner binary sha256 ($arch)" >&2; exit 1; }
+            packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$deb" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
+            [ "$packaged_binary_sha" = "$record_bin" ] || {
+              echo "::error::packaged /usr/bin/velnor-runner digest != release record ($arch)" >&2
+              exit 1
+            }
+          done
+
       - name: Create release once — no clobber, record-verified idempotency
         env:
           GH_TOKEN: ${{ github.token }}
@@ -955,9 +1022,32 @@ jobs:
                 || { echo "::error::release $tag exists but is missing $name — refusing partial overwrite" >&2; exit 1; }
             done
             # Sidecar checksums must match their payloads.
-            [ "$(awk '{print $1}' "$tmp/release-record.json.sha256")" = "$(sha256sum "$tmp/release-record.json" | awk '{print $1}')" ] \
+            read_sha() {
+              local path="$1" size token
+              [ -f "$path" ] || { echo "::error::missing checksum sidecar: $path" >&2; return 1; }
+              size="$(stat -c%s "$path")"
+              [ "$size" -le 4096 ] || { echo "::error::checksum sidecar exceeds 4096 bytes: $path" >&2; return 1; }
+              token="$(awk '
+                {
+                  for (field = 1; field <= NF; field++) {
+                    token_count++
+                    if (token_count == 1) token = $field
+                  }
+                }
+                END {
+                  if (token_count != 1) exit 1
+                  print token
+                }
+              ' "$path")" || { echo "::error::checksum sidecar must contain one token: $path" >&2; return 1; }
+              [ "${#token}" -eq 64 ] || { echo "::error::invalid checksum sidecar: $path" >&2; return 1; }
+              case "$token" in
+                *[!0-9a-f]*) echo "::error::invalid checksum sidecar: $path" >&2; return 1 ;;
+              esac
+              printf '%s\n' "$token"
+            }
+            [ "$(read_sha "$tmp/release-record.json.sha256")" = "$(sha256sum "$tmp/release-record.json" | awk '{print $1}')" ] \
               || { echo "::error::published release-record.json fails its sidecar checksum" >&2; exit 1; }
-            [ "$(awk '{print $1}' "$tmp/manifest.json.sha256")" = "$(sha256sum "$tmp/manifest.json" | awk '{print $1}')" ] \
+            [ "$(read_sha "$tmp/manifest.json.sha256")" = "$(sha256sum "$tmp/manifest.json" | awk '{print $1}')" ] \
               || { echo "::error::published manifest.json fails its sidecar checksum" >&2; exit 1; }
             # The record must name this exact tag, source commit, crate version
             # and the manifest this source tree compiles to (the compiled
@@ -979,9 +1069,9 @@ jobs:
               deb="velnor-runner-${VERSION}-${arch}.deb"
               record_deb="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .deb_sha256' "$tmp/release-record.json")"
               record_bin="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .binary_sha256' "$tmp/release-record.json")"
-              [ "$(awk '{print $1}' "$tmp/${tarball}.sha256")" = "$(sha256sum "$tmp/$tarball" | awk '{print $1}')" ] \
+              [ "$(read_sha "$tmp/${tarball}.sha256")" = "$(sha256sum "$tmp/$tarball" | awk '{print $1}')" ] \
                 || { echo "::error::published tarball fails its sidecar checksum ($arch)" >&2; exit 1; }
-              [ "$(awk '{print $1}' "$tmp/${deb}.sha256")" = "$(sha256sum "$tmp/$deb" | awk '{print $1}')" ] \
+              [ "$(read_sha "$tmp/${deb}.sha256")" = "$(sha256sum "$tmp/$deb" | awk '{print $1}')" ] \
                 || { echo "::error::published deb fails its sidecar checksum ($arch)" >&2; exit 1; }
               [ "$(sha256sum "$tmp/$deb" | awk '{print $1}')" = "$record_deb" ] \
                 || { echo "::error::published deb digest != record ($arch)" >&2; exit 1; }
