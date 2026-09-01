@@ -17,7 +17,7 @@ use std::{
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use velnor_action_journal::{ActionRecord, JournalError, LeaseManager};
+use velnor_action_journal::{ActionRecord, JournalError, LeaseManager, LeaseStatus};
 use velnor_action_model::{
     canonical_json_bytes, ActionKey, ActionResult, ActionState, Clock, Digest, ProducerLease,
     TrustClass,
@@ -506,6 +506,17 @@ impl<C: Clock> CompilerCacheService<C> {
         }))
     }
 
+    /// Look up a validated result without acquiring a producer lease.
+    pub async fn lookup(
+        &self,
+        key: &CompilerActionKey,
+    ) -> Result<Option<CompilerResult>, CacheError> {
+        Ok(self
+            .lookup_with_publication_accounting(key)
+            .await?
+            .map(|entry| entry.result))
+    }
+
     /// Publish a result and return physical-byte evidence for its durable
     /// result-envelope CAS object publication. The separate accounting sidecar
     /// is durable and recoverable but is not folded into these components.
@@ -526,6 +537,7 @@ impl<C: Clock> CompilerCacheService<C> {
         {
             return Err(CacheError::TrustMismatch);
         }
+        self.ensure_active_lease(&lease)?;
         if result.exit_code != 0 {
             return Err(CacheError::FailedResult {
                 exit_code: result.exit_code,
@@ -573,6 +585,73 @@ impl<C: Clock> CompilerCacheService<C> {
             &accounting,
         )?;
         Ok(accounting)
+    }
+
+    /// Acquire the single producer lease for an action miss.
+    pub async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(key)?;
+        let mut journal = self.lock_journal()?;
+        let lease = journal.acquire(
+            key,
+            self.owner.clone(),
+            self.lease_duration_ms,
+            self.heartbeat_every_ms,
+        )?;
+        let record = ActionRecord {
+            action_key: key.clone(),
+            state: ActionState::Leased,
+            producer_lease_ref: Some(lease_reference(&lease)),
+            consumer_run_ids: BTreeSet::new(),
+            output_digests: BTreeMap::new(),
+            timing: Default::default(),
+            worker_id: Some(self.owner.clone()),
+            trust_class: key.execution_policy.trust_class,
+        };
+        if let Err(error) = journal.append_action(&record) {
+            let _ = journal.abandon(&lease);
+            return Err(error.into());
+        }
+        Ok(lease)
+    }
+
+    /// Renew a producer lease before its persisted deadline.
+    pub async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.renew(lease)?;
+        Ok(())
+    }
+
+    /// Explicitly abandon a failed, cancelled, or timed-out producer lease.
+    ///
+    /// The lease is fenced immediately. Callers must invoke this operation on
+    /// every path that does not publish successfully; cleanup is deliberately
+    /// not hidden in a destructor because the durable transition can fail.
+    pub async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.abandon(lease)?;
+        Ok(())
+    }
+
+    /// Publish one successful result under its still-valid producer lease.
+    pub async fn publish(
+        &self,
+        lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<(), CacheError> {
+        self.publish_with_accounting(lease, result)
+            .await
+            .map(|_| ())
     }
 
     /// Return daemon-owned wrapper variables for one job.
@@ -641,59 +720,19 @@ impl CompilerCacheService<velnor_action_journal::TokioClock> {
 
 impl<C: Clock> CompilerCache for CompilerCacheService<C> {
     async fn lookup(&self, key: &CompilerActionKey) -> Result<Option<CompilerResult>, CacheError> {
-        Ok(self
-            .lookup_with_publication_accounting(key)
-            .await?
-            .map(|entry| entry.result))
+        CompilerCacheService::lookup(self, key).await
     }
 
     async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(key)?;
-        let mut journal = self.lock_journal()?;
-        let lease = journal.acquire(
-            key,
-            self.owner.clone(),
-            self.lease_duration_ms,
-            self.heartbeat_every_ms,
-        )?;
-        let record = ActionRecord {
-            action_key: key.clone(),
-            state: ActionState::Leased,
-            producer_lease_ref: Some(lease_reference(&lease)),
-            consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::new(),
-            timing: Default::default(),
-            worker_id: Some(self.owner.clone()),
-            trust_class: key.execution_policy.trust_class,
-        };
-        if let Err(error) = journal.append_action(&record) {
-            let _ = journal.abandon(&lease);
-            return Err(error.into());
-        }
-        Ok(lease)
+        CompilerCacheService::begin(self, key).await
     }
 
     async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(&lease.action)?;
-        let mut journal = self.lock_journal()?;
-        journal.renew(lease)?;
-        Ok(())
+        CompilerCacheService::renew(self, lease).await
     }
 
     async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(&lease.action)?;
-        let mut journal = self.lock_journal()?;
-        journal.abandon(lease)?;
-        Ok(())
+        CompilerCacheService::abandon(self, lease).await
     }
 
     async fn publish(
@@ -701,8 +740,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<(), CacheError> {
-        self.publish_with_accounting(lease, result).await?;
-        Ok(())
+        CompilerCacheService::publish(self, lease, result).await
     }
 }
 
@@ -1025,6 +1063,19 @@ impl<C: Clock> CompilerCacheService<C> {
         Ok(())
     }
 
+    fn ensure_active_lease(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        let mut journal = self.lock_journal()?;
+        // Expire persisted deadlines before checking state. This rejects an
+        // obviously stale producer before it can allocate an orphan CAS
+        // object; append_action_and_release remains the atomic final fence.
+        journal.expire_due()?;
+        if journal.lease_status(&lease.action)? == Some(LeaseStatus::Active) {
+            Ok(())
+        } else {
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        }
+    }
+
     fn lock_journal(&self) -> Result<MutexGuard<'_, LeaseManager<C>>, CacheError> {
         self.journal.lock().map_err(|_| CacheError::LockPoisoned)
     }
@@ -1080,7 +1131,7 @@ mod tests {
         sync::{Arc, Barrier, Mutex},
     };
     use tempfile::TempDir;
-    use velnor_action_journal::TokioClock;
+    use velnor_action_journal::{LeaseStatus, TokioClock};
     use velnor_action_model::{
         ActionTiming, Clock, ExecutionPolicy, LogicalInstant, PlatformIdentity, Provenance,
     };
@@ -1151,14 +1202,23 @@ mod tests {
         }
     }
 
+    fn service_with_owner(
+        directory: &TempDir,
+        policy: CompilerCachePolicy,
+        declaration: WrapperDeclaration,
+        owner: &str,
+    ) -> CompilerCacheService<TokioClock> {
+        let mut config = CompilerCacheConfig::new(directory.path(), owner);
+        config.policy = policy;
+        CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service")
+    }
+
     fn service(
         directory: &TempDir,
         policy: CompilerCachePolicy,
         declaration: WrapperDeclaration,
     ) -> CompilerCacheService<TokioClock> {
-        let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
-        config.policy = policy;
-        CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service")
+        service_with_owner(directory, policy, declaration, "test-worker")
     }
 
     #[test]
@@ -1244,7 +1304,26 @@ mod tests {
             CompilerCachePolicy::Kache,
             WrapperDeclaration::default(),
         );
-        assert!(cache.lookup(&key(1)).await.expect("lookup").is_none());
+        let action_key = key(1);
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            None
+        );
+        let lease = cache.begin(&action_key).await.expect("begin after miss");
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            Some(LeaseStatus::Active)
+        );
+        cache.abandon(&lease).await.expect("abandon test lease");
         assert_eq!(
             cache.telemetry(),
             CompilerCacheTelemetry {
@@ -1283,6 +1362,44 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn hit_lookup_does_not_acquire_a_producer_lease() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(25);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        let expected = result(action_key.clone());
+        cache
+            .publish(lease, expected.clone())
+            .await
+            .expect("publish");
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            Some(LeaseStatus::Released)
+        );
+
+        assert_eq!(
+            cache.lookup(&action_key).await.expect("lookup"),
+            Some(expected)
+        );
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status after hit"),
+            Some(LeaseStatus::Released)
+        );
     }
 
     #[tokio::test]
@@ -1708,6 +1825,67 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn concurrent_service_instances_have_one_producer_lease() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let first = Arc::new(service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-a",
+        ));
+        let second = Arc::new(service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-b",
+        ));
+        let action_key = key(26);
+        let barrier = Arc::new(Barrier::new(2));
+
+        let outcomes = std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let first_action = action_key.clone();
+            let first_service = Arc::clone(&first);
+            let first_handle = scope.spawn(move || {
+                first_barrier.wait();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("first runtime");
+                runtime
+                    .block_on(first_service.begin(&first_action))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+
+            let second_barrier = Arc::clone(&barrier);
+            let second_action = action_key;
+            let second_service = Arc::clone(&second);
+            let second_handle = scope.spawn(move || {
+                second_barrier.wait();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("second runtime");
+                runtime
+                    .block_on(second_service.begin(&second_action))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+
+            [
+                first_handle.join().expect("first producer thread"),
+                second_handle.join().expect("second producer thread"),
+            ]
+        });
+
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert!(outcomes.iter().any(|outcome| {
+            matches!(outcome, Err(error) if error.contains("lease is already held"))
+        }));
+    }
+
     #[tokio::test]
     async fn renewed_lease_can_publish_after_original_deadline() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -1741,8 +1919,22 @@ mod tests {
         );
         let action_key = key(12);
         let lease = cache.begin(&action_key).await.expect("lease");
+        let mut stale_lease = lease.clone();
 
         cache.abandon(&lease).await.expect("abandon");
+
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert!(matches!(
+            cache.renew(&mut stale_lease).await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
 
         assert!(matches!(
             cache.publish(lease, result(action_key.clone())).await,
@@ -1834,9 +2026,26 @@ mod tests {
         let mut failed = result(action_key.clone());
         failed.exit_code = 1;
         assert!(matches!(
-            cache.publish(lease, failed).await,
+            cache.publish(lease.clone(), failed).await,
             Err(CacheError::FailedResult { exit_code: 1 })
         ));
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("live failed lease"),
+            Some(LeaseStatus::Active)
+        );
+        cache.abandon(&lease).await.expect("abandon failed result");
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("abandoned failed lease"),
+            Some(LeaseStatus::Abandoned)
+        );
         assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
     }
 
