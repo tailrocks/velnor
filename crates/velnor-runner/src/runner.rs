@@ -99,7 +99,7 @@ struct PendingJitRegistration {
     runner_id: Option<i64>,
 }
 
-// Idle-slot health (master-plan P1.9, 2026-06-11 zombie-fleet incident).
+// Idle-slot health protects against broker/registry split-brain and stale slots.
 // Broker poll success alone is NOT health: GitHub's runner registry can drop
 // or offline a runner while its broker session still answers 204. Idle slots
 // therefore (a) proactively refresh OAuth credentials well inside the ~1h
@@ -6859,7 +6859,7 @@ fn start_step_log_publisher(
 
                     // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
                     // Upload for every non-skipped step — even empty — so it is expandable.
-                    // LOG FORMAT CONTRACT (docs/log-format-contract.md): blob lines
+                    // LOG FORMAT CONTRACT (docs/reference/interface.md): blob lines
                     // MUST carry the 7-digit timestamp prefix — the UI strips it
                     // into the "Show timestamps" toggle column.
                     if !log.skipped {
@@ -6972,7 +6972,7 @@ async fn send_live_feed_batch(
         return;
     };
 
-    // LOG FORMAT CONTRACT (docs/log-format-contract.md): live feed frames are
+    // LOG FORMAT CONTRACT (docs/reference/interface.md): live feed frames are
     // rendered VERBATIM by the GitHub UI, which adds its own timestamp column.
     let feed_lines = live_feed_lines(&batch.lines);
     if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
@@ -9709,7 +9709,7 @@ fn append_job_console(writer: &mut BufWriter<fs::File>, display_name: &str, line
 
 fn unix_now_iso8601() -> String {
     use time::{format_description, OffsetDateTime};
-    // LOG FORMAT CONTRACT — read docs/log-format-contract.md before touching
+    // LOG FORMAT CONTRACT — read docs/reference/interface.md before touching
     // ANY of this. This timestamp prefixes lines in the UPLOADED LOG BLOB
     // only. GitHub's UI strips a leading per-line timestamp from blob lines
     // ONLY when it matches the runner's .NET "o" round-trip format with 7
@@ -9730,7 +9730,7 @@ fn unix_now_iso8601() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00.0000000Z".to_string())
 }
 
-/// LOG FORMAT CONTRACT (docs/log-format-contract.md): lines for the LIVE
+/// LOG FORMAT CONTRACT (docs/reference/interface.md): lines for the LIVE
 /// WebSocket feed. The GitHub UI renders feed frames verbatim and supplies
 /// its own timestamp column — embedding a timestamp here doubles it on
 /// screen (2026-06-11 regression). Lines pass through unchanged.
@@ -9738,7 +9738,7 @@ fn live_feed_lines(lines: &[String]) -> Vec<String> {
     lines.to_vec()
 }
 
-/// LOG FORMAT CONTRACT (docs/log-format-contract.md): lines for the UPLOADED
+/// LOG FORMAT CONTRACT (docs/reference/interface.md): lines for the UPLOADED
 /// log blob (Results Service / data-log-url). Every line MUST be prefixed
 /// with the .NET-style 7-digit timestamp — the UI strips it into the
 /// "Show timestamps" toggle; without it the toggle is empty, and with the
@@ -9980,7 +9980,7 @@ fn post_step_display_name(display_name: &str) -> String {
 /// Build one masked, GitHub-style text blob of the whole job — each step wrapped
 /// in `##[group]<name>` … `##[endgroup]` — for the downloadable `job-log.txt`.
 /// Lines carry the same 7-digit timestamp prefix as GitHub's raw log download
-/// (docs/log-format-contract.md), stamped with the step's completion time.
+/// (docs/reference/interface.md), stamped with the step's completion time.
 fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> String {
     let secret_masks = MaskPatterns::new(job_secret_mask_values(job));
     let mut out = String::new();
@@ -10098,7 +10098,7 @@ async fn upload_results_job_log_with_client(
 /// Upload one step's log blob through an explicit Results Service client, for
 /// the pre-execution failure path that bypasses the live step publisher. Lines
 /// are masked and stamped with the 7-digit timestamp prefix exactly like the
-/// publisher path (docs/log-format-contract.md).
+/// publisher path (docs/reference/interface.md).
 async fn upload_results_step_log_with_client(
     client: &crate::protocol::TwirpResultsClient,
     job: &AgentJobRequestMessage,
@@ -11535,7 +11535,8 @@ fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
 
 /// Fleet health probe: list this daemon's registered runners on GitHub and
 /// fail (non-zero exit) when none are healthy, so a systemd timer surfaces a
-/// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
+/// dead fleet loudly instead of jobs queueing in silence (see
+/// content/docs/guides/operator.mdx).
 fn doctor_host_docker_reclaim(
     backend: Option<velnor_model::ExecutionBackendKind>,
     mut docker: impl FnMut(&[String]) -> Result<String>,
@@ -17628,7 +17629,7 @@ runs:
 
     #[test]
     fn live_feed_lines_are_raw_and_blob_lines_are_timestamped() {
-        // REGRESSION GUARD (do not weaken) — docs/log-format-contract.md.
+        // REGRESSION GUARD (do not weaken) — docs/reference/interface.md.
         //
         // 2026-06-11 incident (jm run 27319096003): the LIVE WebSocket feed
         // sent timestamp-prefixed lines. The GitHub UI renders live frames

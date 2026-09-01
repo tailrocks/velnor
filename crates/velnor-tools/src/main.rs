@@ -546,7 +546,7 @@ async fn check_runner_reference(root: &Path) -> Result<()> {
     }
     if reference != latest {
         bail!(
-            "actions/runner reference drift: pinned {reference}, latest {latest}\nRefresh docs/reference/latest-runner-v2-refresh-2026-06-01.md and re-audit V2 source anchors."
+            "actions/runner reference drift: pinned {reference}, latest {latest}\nRefresh docs/reference/runner-protocol.md and re-audit V2 source anchors."
         );
     }
 
@@ -555,7 +555,7 @@ async fn check_runner_reference(root: &Path) -> Result<()> {
 }
 
 fn pinned_reference(root: &Path) -> Result<String> {
-    let path = root.join("docs/reference/latest-runner-v2-refresh-2026-06-01.md");
+    let path = root.join("docs/reference/runner-protocol.md");
     let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let regex = Regex::new(r"latest release checked:\s*`(v[0-9]+\.[0-9]+\.[0-9]+)`")?;
     let captures = regex.captures(&text).ok_or_else(|| {

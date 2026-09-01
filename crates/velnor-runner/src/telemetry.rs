@@ -1,4 +1,4 @@
-//! Tracing subscriber wiring (master-plan P1.9).
+//! Tracing subscriber wiring (see content/docs/operations/security-and-data.mdx).
 //!
 //! Performance and incident analysis must be possible from on-disk data:
 //! every `tracing` span and event is appended as JSON lines (with span

@@ -2040,10 +2040,20 @@ fn jailer_failure_does_not_touch_host_docker_socket() {
 }
 
 #[test]
-fn fixture_parity_yaml_keeps_lanes_choice() {
-    let yaml = include_str!("../../../../docs/fixture-backend-parity.yml");
-    assert!(yaml.contains("lanes:"), "{yaml}");
-    assert!(yaml.contains("options: [velnor, github, both]"), "{yaml}");
+fn fixture_parity_yaml_keeps_both_lanes() {
+    let yaml = include_str!("../../tests/fixtures/backend-parity.yml");
+    assert!(
+        !yaml.contains("lanes:"),
+        "fixture must not expose an unused lanes input: {yaml}"
+    );
+    assert!(
+        yaml.contains("- { lane: GitHub, runner: ubuntu-26.04 }"),
+        "{yaml}"
+    );
+    assert!(
+        yaml.contains("- { lane: Velnor, runner: [self-hosted, velnor] }"),
+        "{yaml}"
+    );
     assert!(yaml.contains("GITHUB_OUTPUT"), "{yaml}");
     assert!(yaml.contains("GITHUB_ENV"), "{yaml}");
     assert!(

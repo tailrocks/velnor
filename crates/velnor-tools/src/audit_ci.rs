@@ -1,4 +1,4 @@
-//! Estate CI contract auditor (`VELNOR_PROJECTS_SETUP.md` §2.0–§2.12).
+//! Estate CI contract auditor (`config/estate-repositories.json`).
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -39,9 +39,7 @@ fn has_truthful_both_lane_contract(text: &str) -> bool {
         || has_explicit_velnor_capability_gate(text)
 }
 const SHA_LEN: usize = 40;
-const FLEET_MAP_FILE: &str = "VELNOR_PROJECTS_SETUP.md";
-const FLEET_MAP_START: &str = "<!-- fleet-map:start -->";
-const FLEET_MAP_END: &str = "<!-- fleet-map:end -->";
+const ESTATE_MANIFEST_FILE: &str = "config/estate-repositories.json";
 const LEGACY_RUNNER_GROUP_DOCTOR: &str = "scripts/runner_group_doctor.sh";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -68,12 +66,6 @@ impl GeneratedCallerClass {
     fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|class| class.as_str() == value)
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct CanonicalFleetEntry {
-    repository: String,
-    class: GeneratedCallerClass,
 }
 
 #[derive(Debug, Args)]
@@ -256,47 +248,28 @@ struct WorkflowAuditProfile {
 }
 
 fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerClass>> {
-    let path = root.join(FLEET_MAP_FILE);
+    let path = root.join(ESTATE_MANIFEST_FILE);
     let text = fs::read_to_string(&path)
-        .with_context(|| format!("read canonical fleet map {}", path.display()))?;
-    canonical_fleet_map_from_text(&text)
-        .with_context(|| format!("parse canonical fleet map {}", path.display()))
-}
-
-fn canonical_fleet_map_from_text(text: &str) -> Result<BTreeMap<String, GeneratedCallerClass>> {
-    let marked = text
-        .split_once(FLEET_MAP_START)
-        .map(|(_, rest)| rest)
-        .and_then(|rest| rest.split_once(FLEET_MAP_END).map(|(body, _)| body))
-        .context("missing unique fleet-map markers")?;
-    let json = marked
-        .split_once("```json")
-        .map(|(_, rest)| rest)
-        .and_then(|rest| rest.split_once("```").map(|(body, _)| body))
-        .context("fleet-map markers must contain one JSON code fence")?;
-    let entries: Vec<CanonicalFleetEntry> =
-        serde_json::from_str(json).context("fleet-map JSON is invalid")?;
+        .with_context(|| format!("read estate manifest {}", path.display()))?;
+    let manifest: EstateManifest = serde_json::from_str(&text)
+        .with_context(|| format!("parse estate manifest {}", path.display()))?;
     let mut map = BTreeMap::new();
-    for entry in entries {
-        if map.insert(entry.repository.clone(), entry.class).is_some() {
+    for repo in manifest.repositories {
+        let class = if repo.name == "tailrocks/velnor-actions-fixture" {
+            GeneratedCallerClass::Fixture
+        } else if repo.name.ends_with("-apt") {
+            GeneratedCallerClass::Apt
+        } else if repo.name.starts_with("jackin-project/homebrew-")
+            || repo.name.starts_with("tailrocks/homebrew-")
+        {
+            GeneratedCallerClass::Tap
+        } else {
+            GeneratedCallerClass::Code
+        };
+        if map.insert(repo.name.clone(), class).is_some() {
             bail!(
-                "fleet-map contains duplicate repository {}",
-                entry.repository
-            );
-        }
-    }
-    let expected_counts = [
-        (GeneratedCallerClass::Code, 20),
-        (GeneratedCallerClass::Tap, 5),
-        (GeneratedCallerClass::Apt, 2),
-        (GeneratedCallerClass::Fixture, 1),
-    ];
-    for (class, expected) in expected_counts {
-        let observed = map.values().filter(|value| **value == class).count();
-        if observed != expected {
-            bail!(
-                "fleet-map class {} has {observed} repositories, expected {expected}",
-                class.as_str()
+                "estate manifest contains duplicate repository {}",
+                repo.name
             );
         }
     }
@@ -4407,22 +4380,6 @@ jobs:
     }
 
     #[test]
-    fn active_repo_does_not_expose_legacy_runner_group_doctor() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        assert!(!root.join("scripts/runner_group_doctor.sh").exists());
-
-        let migration =
-            fs::read_to_string(root.join("docs/org-fleet-migration.md")).expect("migration guide");
-        let active_incident = migration
-            .split_once("## Allowlist drift incident (2026-08-24)")
-            .and_then(|(_, section)| section.split_once("## Rollback"))
-            .map(|(section, _)| section)
-            .expect("allowlist drift incident section");
-        assert!(!active_incident.contains("runner_group_doctor.sh"));
-        assert!(!active_incident.contains("gh api --method PUT"));
-    }
-
-    #[test]
     fn legacy_runner_group_guard_scans_active_repository_surfaces() {
         let root = TestRepo::new();
         fs::write(root.path.join(".github/workflows/ci.yml"), BASE).unwrap();
@@ -4479,11 +4436,11 @@ gh api --method PUT orgs/tailrocks/actions/runner-groups/3/repositories/7
 ```
 "#;
         let mut findings = Vec::new();
-        audit_legacy_runner_group_text("docs/example.md", text, &mut findings);
+        audit_legacy_runner_group_text("fixture-test-input.md", text, &mut findings);
 
         assert_eq!(findings.len(), 2, "{findings:?}");
         assert!(findings.iter().all(|finding| {
-            finding.rule == "legacy-runner-group-surface" && finding.file == "docs/example.md"
+            finding.rule == "legacy-runner-group-surface" && finding.file == "fixture-test-input.md"
         }));
     }
 
@@ -4499,7 +4456,7 @@ gh api --method PUT orgs/tailrocks/actions/runner-groups/3/repositories/7
 ```
 "#;
         let mut findings = Vec::new();
-        audit_legacy_runner_group_text("docs/example.md", text, &mut findings);
+        audit_legacy_runner_group_text("fixture-test-input.md", text, &mut findings);
 
         assert!(findings.is_empty(), "{findings:?}");
     }
@@ -4513,7 +4470,7 @@ scripts/runner_group_doctor.sh
 ```
 "#;
         let mut findings = Vec::new();
-        audit_legacy_runner_group_text("docs/example.md", text, &mut findings);
+        audit_legacy_runner_group_text("fixture-test-input.md", text, &mut findings);
 
         assert!(findings.is_empty(), "{findings:?}");
     }

@@ -3595,7 +3595,7 @@ mod tests {
     fn generate_never_touches_unrelated_directory_entries() {
         let dir = PolicyDir::new("unrelated");
         let unrelated: Vec<(PathBuf, &[u8])> = vec![
-            (dir.path.join("README.md"), b"docs\n"),
+            (dir.path.join("Cargo.toml"), b"docs\n"),
             (dir.path.join(".gitkeep"), b""),
             (dir.path.join("notes.txt"), b"keep me\n"),
             (
