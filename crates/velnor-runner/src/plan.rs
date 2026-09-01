@@ -119,6 +119,8 @@ mod tests {
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
             compiler_cache_trust_class:
                 velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release,
+            compiler_cache_service: false,
+            compiler_cache_service_root: None,
         }
     }
 

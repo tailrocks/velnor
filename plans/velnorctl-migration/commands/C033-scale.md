@@ -51,7 +51,7 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 
 ## Mandatory fixture integration
 
-Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
+Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel only older pending/in-progress validation runs owned by this iteration; never cancel protected `Release`, `Package update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs. Delete only stale validation-owned registrations, prove both sets clean, and monitor only the new run ID.
 Use Plan 063 concurrent scenario with two simultaneous held jobs. Prove scale up
 and 2→1 scale-down defer busy excess work, then converge after release without
 duplicate registration or lost desired generation.

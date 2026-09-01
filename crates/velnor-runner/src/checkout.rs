@@ -786,16 +786,17 @@ fn checkout_version(
         return None;
     }
 
-    // GitHub's pull_request `github.sha` is an ephemeral merge commit that is
-    // not advertised as a fetchable object. The merge ref is the stable remote
-    // ref for the same checkout and is required for shallow fetches.
-    self_repository
-        .git_ref
-        .as_deref()
-        .or_else(|| job_string(job, "github.ref"))
-        .filter(|reference| is_pull_request_ref(reference))
-        .map(ToOwned::to_owned)
-        .or_else(|| self_repository.version.clone())
+    // RepositoryResource.version is the server-selected immutable revision.
+    // PR merge/head refs are mutable pointers and remain only as a fallback
+    // for incomplete job messages that lack the immutable version.
+    self_repository.version.clone().or_else(|| {
+        self_repository
+            .git_ref
+            .as_deref()
+            .or_else(|| job_string(job, "github.ref"))
+            .filter(|reference| is_pull_request_ref(reference))
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn is_pull_request_ref(reference: &str) -> bool {
@@ -1757,7 +1758,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_self_pull_request_checkout_from_remote_ref() {
+    fn plans_self_pull_request_checkout_from_immutable_repository_version() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -1773,7 +1774,35 @@ mod tests {
                     "alias": "self",
                     "name": "acme/repo",
                     "ref": "refs/pull/408/merge",
-                    "version": "ephemeral-merge-sha",
+                    "version": "immutable-merge-sha",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].version.as_deref(), Some("immutable-merge-sha"));
+    }
+
+    #[test]
+    fn plans_self_pull_request_checkout_from_remote_ref_without_version() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "PR",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "ref": "refs/pull/408/merge",
                     "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
                 }]
             },

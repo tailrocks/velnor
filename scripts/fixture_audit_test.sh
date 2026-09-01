@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 FIXTURE_AUDIT=(cargo run -q -p velnor-tools -- fixture-audit)
 
 tmp_dir="$(mktemp -d)"

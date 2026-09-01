@@ -7,6 +7,7 @@ use crate::{
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
+    compiler_action::CompilerActionSession,
     container::{JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
@@ -73,6 +74,12 @@ const PAGES_ARCHIVE_MAX_PATH_DEPTH: usize = 256;
 const PAGES_ARCHIVE_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const PERSISTENT_TARGET_MAX_NODES: usize = 1_000_000;
+const PERSISTENT_TARGET_MAX_DIRECTORIES: usize = 100_000;
+const PERSISTENT_TARGET_MAX_DEPTH: usize = 256;
+const PERSISTENT_TARGET_MAX_PATH_BYTES: u64 = 64 * 1024 * 1024;
+const PERSISTENT_TARGET_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const PERSISTENT_TARGET_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 static DOCKER_TIMEOUT_CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -1361,6 +1368,7 @@ pub(crate) struct DockerJobEngine<R> {
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
+    compiler_cache: Option<Arc<velnor_cache_service::ProductionCompilerCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1391,6 +1399,7 @@ where
             docker_lease: None,
             job_network_guard: None,
             lifecycle_telemetry: None,
+            compiler_cache: None,
         }
     }
 
@@ -1436,6 +1445,14 @@ where
 
     pub fn with_job_environment_started(mut self, started: bool) -> Self {
         self.job_environment_started = started;
+        self
+    }
+
+    pub(crate) fn with_compiler_cache_service(
+        mut self,
+        service: velnor_cache_service::ProductionCompilerCache,
+    ) -> Self {
+        self.compiler_cache = Some(Arc::new(service));
         self
     }
 
@@ -2060,13 +2077,40 @@ where
                         (Some(_), Some(_)) => Some(Instant::now()),
                         _ => None,
                     };
-                    let step_result = self.runner.run_streaming_timeout_with_env(
-                        "docker",
-                        exec_args.args(),
-                        exec_args.process_env(),
-                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
-                        &mut on_output,
-                    )?;
+                    let step_timeout =
+                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
+                    let cache_execution = self
+                        .compiler_cache
+                        .as_ref()
+                        .and_then(|service| {
+                            CompilerActionSession::new(
+                                Arc::clone(service),
+                                container,
+                                &step.script,
+                                &env,
+                                step_timeout,
+                            )
+                            .transpose()
+                        })
+                        .transpose()?;
+                    let step_result = if let Some(session) = cache_execution {
+                        session
+                            .execute(
+                                &mut self.runner,
+                                exec_args.args(),
+                                exec_args.process_env(),
+                                &mut on_output,
+                            )?
+                            .result
+                    } else {
+                        self.runner.run_streaming_timeout_with_env(
+                            "docker",
+                            exec_args.args(),
+                            exec_args.process_env(),
+                            step_timeout,
+                            &mut on_output,
+                        )?
+                    };
                     if let (Some(compiler), Some(compile_started), Some(telemetry)) =
                         (compiler, compile_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -6312,6 +6356,162 @@ fn cache_entry_complete(path: &Path) -> bool {
 }
 
 const TARGET_SOURCE_REVISION_MARKER: &str = ".velnor-source-revision-v1";
+const TARGET_COMPLETE_MARKER: &str = ".velnor-target-complete-v1";
+const TARGET_CURRENT_POINTER: &str = "current";
+const TARGET_POINTER_MAX_BYTES: u64 = 128;
+
+fn target_identifier(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn target_identifier_file(value: &str) -> Option<String> {
+    let mut lines = value.lines();
+    let identifier = lines.next().and_then(target_identifier)?;
+    (lines.next().is_none() && value.ends_with('\n')).then_some(identifier)
+}
+
+fn read_target_file(file: &mut fs::File, maximum: u64, label: &str) -> Result<String> {
+    let mut bytes = Vec::new();
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {label}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
+        bail!("{label} exceeds the {maximum}-byte limit");
+    }
+    String::from_utf8(bytes).with_context(|| format!("{label} is not valid UTF-8"))
+}
+
+fn open_target_store_source(store: &Path) -> Result<Option<crate::fs_copy::NoFollowDir>> {
+    match fs::symlink_metadata(store) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "persistent target store root is a symlink: {}",
+                store.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!(
+                "persistent target store root is not a directory: {}",
+                store.display()
+            )
+        }
+        Ok(_) => crate::fs_copy::NoFollowDir::open_absolute(store).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect target store root {}", store.display()))
+        }
+    }
+}
+
+fn open_target_store_destination(store: &Path) -> Result<crate::fs_copy::NoFollowDestinationDir> {
+    match fs::symlink_metadata(store) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "persistent target store root is a symlink: {}",
+                store.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!(
+                "persistent target store root is not a directory: {}",
+                store.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(store).with_context(|| {
+                format!("create persistent target store root {}", store.display())
+            })?;
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect target store root {}", store.display()))
+        }
+    }
+    crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(store)
+}
+
+fn read_current_target_generation(
+    store: &crate::fs_copy::NoFollowDir,
+    store_path: &Path,
+) -> Result<Option<String>> {
+    let Some(source) = store.open_source(Path::new(TARGET_CURRENT_POINTER))? else {
+        return Ok(None);
+    };
+    let crate::fs_copy::NoFollowSource::File(mut file) = source else {
+        bail!(
+            "persistent target current pointer is not a regular file: {}",
+            store_path.join(TARGET_CURRENT_POINTER).display()
+        );
+    };
+    let value = read_target_file(
+        &mut file,
+        TARGET_POINTER_MAX_BYTES,
+        &format!(
+            "target current pointer {}",
+            store_path.join(TARGET_CURRENT_POINTER).display()
+        ),
+    )?;
+    let mut lines = value.lines();
+    let generation = lines.next().and_then(target_identifier);
+    if generation.is_none() || lines.next().is_some() || !value.ends_with('\n') {
+        bail!(
+            "persistent target current pointer is malformed: {}",
+            store_path.join(TARGET_CURRENT_POINTER).display()
+        );
+    }
+    Ok(generation)
+}
+
+fn complete_target_generation(
+    generation: &crate::fs_copy::NoFollowDir,
+    generation_path: &Path,
+) -> Result<Option<crate::fs_copy::NoFollowDir>> {
+    let Some(marker) = generation.open_source(Path::new(TARGET_COMPLETE_MARKER))? else {
+        return Ok(None);
+    };
+    if !matches!(marker, crate::fs_copy::NoFollowSource::File(_)) {
+        bail!(
+            "target generation completion marker is not a regular file: {}",
+            generation_path.join(TARGET_COMPLETE_MARKER).display()
+        );
+    }
+    let Some(data) = generation.open_source(Path::new("data"))? else {
+        return Ok(None);
+    };
+    let crate::fs_copy::NoFollowSource::Directory(data) = data else {
+        bail!(
+            "target generation data is not a directory: {}",
+            generation_path.join("data").display()
+        );
+    };
+    Ok(Some(data))
+}
+
+fn write_target_file(
+    directory: &crate::fs_copy::NoFollowDestinationDir,
+    name: &str,
+    value: &[u8],
+) -> Result<()> {
+    directory
+        .write_file_from_reader(
+            &mut &value[..],
+            Path::new(name),
+            u64::try_from(value.len()).unwrap_or(u64::MAX),
+            0o644,
+        )
+        .with_context(|| format!("write target metadata {name}"))?;
+    Ok(())
+}
 
 fn materialize_persistent_target(
     container: &JobContainerSpec,
@@ -6321,41 +6521,93 @@ fn materialize_persistent_target(
         return Ok(());
     };
     let _lock = CacheEntryLock::shared(store)?;
-    let payload = store.join("data");
-    if !store.join(".velnor-target-complete-v1").is_file() || !payload.is_dir() {
+    let Some(store_source) = open_target_store_source(store)? else {
         return Ok(());
-    }
-    let stored_revision = fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER))
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let source_revision = workspace_source_revision(&container.workspace_host, source_revision);
+    };
+    let Some(generation_name) = read_current_target_generation(&store_source, store)? else {
+        return Ok(());
+    };
+    let Some(crate::fs_copy::NoFollowSource::Directory(generation)) =
+        store_source.open_source(Path::new(&generation_name))?
+    else {
+        return Ok(());
+    };
+    let generation_path = store.join(&generation_name);
+    let Some(payload) = complete_target_generation(&generation, &generation_path)? else {
+        return Ok(());
+    };
+    let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision)
+        .and_then(|value| target_identifier(&value))
+    else {
+        eprintln!(
+            "forensics.lifecycle: persistent target restore skipped: invalid source revision"
+        );
+        return Ok(());
+    };
+    let Some(source_file) = generation.open_source(Path::new(TARGET_SOURCE_REVISION_MARKER))?
+    else {
+        return Ok(());
+    };
+    let crate::fs_copy::NoFollowSource::File(mut source_file) = source_file else {
+        bail!(
+            "target source revision marker is not a regular file: {}",
+            generation_path
+                .join(TARGET_SOURCE_REVISION_MARKER)
+                .display()
+        );
+    };
+    let stored_revision = target_identifier_file(&read_target_file(
+        &mut source_file,
+        TARGET_POINTER_MAX_BYTES,
+        &format!("target source revision {}", generation_path.display()),
+    )?);
     let target = container.workspace_host.join("target");
-    if source_revision
-        .as_deref()
-        .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
-    {
+    if stored_revision.as_deref() != Some(revision.as_str()) {
         // Checkout pins source mtimes to the commit timestamp. Restoring a
         // different revision and then touching sources would poison the
         // published fingerprints for every later unchanged run.
         eprintln!(
             "forensics.lifecycle: persistent target generation invalidated (stored={}, current={})",
             stored_revision.as_deref().unwrap_or("unknown"),
-            source_revision.as_deref().unwrap_or("unknown")
+            revision
         );
-        if target.exists() {
+        if fs::symlink_metadata(&target)
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_symlink())
+        {
+            bail!("job-local target root is a symlink: {}", target.display());
+        }
+        if target.is_dir() {
             fs::remove_dir_all(&target)
                 .with_context(|| format!("clear stale job-local target {}", target.display()))?;
         }
         return Ok(());
     }
-    if target.exists() {
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() {
+            bail!("job-local target root is a symlink: {}", target.display());
+        }
+        if !metadata.is_dir() {
+            bail!(
+                "job-local target root is not a directory: {}",
+                target.display()
+            );
+        }
         fs::remove_dir_all(&target)
             .with_context(|| format!("clear job-local target {}", target.display()))?;
     }
-    fs::create_dir_all(&target)
-        .with_context(|| format!("create job-local target {}", target.display()))?;
-    copy_dir_contents(&payload, &target)?;
+    let destination = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+        &container.workspace_host,
+        Path::new("target"),
+    )
+    .with_context(|| format!("open job-local target {}", target.display()))?;
+    copy_persistent_target_contents(
+        &payload,
+        &generation_path.join("data"),
+        &destination,
+        Path::new(""),
+        true,
+    )?;
     Ok(())
 }
 
@@ -6381,40 +6633,52 @@ fn publish_persistent_target(
         return Ok(());
     };
     let target = container.workspace_host.join("target");
-    if !target.is_dir() {
+    let Ok(target_metadata) = fs::symlink_metadata(&target) else {
         return Ok(());
+    };
+    if target_metadata.file_type().is_symlink() {
+        bail!("job-local target root is a symlink: {}", target.display());
     }
-    let name = store
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("target");
-    let staging = store.with_file_name(cache_staging_name(name));
-    fs::remove_dir_all(&staging).ok();
-    let payload = staging.join("data");
-    fs::create_dir_all(&payload)
-        .with_context(|| format!("create target staging directory {}", payload.display()))?;
-    if let Err(error) = copy_dir_contents(&target, &payload) {
-        fs::remove_dir_all(&staging).ok();
-        return Err(error).context("stage persistent target generation");
+    if !target_metadata.is_dir() {
+        bail!(
+            "job-local target root is not a directory: {}",
+            target.display()
+        );
     }
-    fs::write(staging.join(".velnor-target-complete-v1"), b"complete\n")
-        .with_context(|| format!("write target completion marker {}", staging.display()))?;
-    if let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision) {
-        fs::write(
-            staging.join(TARGET_SOURCE_REVISION_MARKER),
-            format!("{revision}\n"),
-        )
-        .with_context(|| format!("write target source revision {}", staging.display()))?;
-    }
+    let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision)
+        .and_then(|value| target_identifier(&value))
+    else {
+        eprintln!(
+            "forensics.lifecycle: persistent target publish skipped: invalid source revision"
+        );
+        return Ok(());
+    };
 
     let _lock = CacheEntryLock::exclusive(store)?;
-    fs::remove_dir_all(store).ok();
-    if let Err(error) = fs::rename(&staging, store)
-        .with_context(|| format!("publish persistent target {}", store.display()))
-    {
-        fs::remove_dir_all(&staging).ok();
-        return Err(error);
-    }
+    let store_directory = open_target_store_destination(store)?;
+    let (generation, generation_name) =
+        store_directory.create_unique_directory("target-generation")?;
+    let payload = generation.open_relative_directory(Path::new("data"))?;
+    let source = crate::fs_copy::NoFollowDir::open_absolute(&target)
+        .with_context(|| format!("securely open job-local target {}", target.display()))?;
+    copy_persistent_target_contents(&source, &target, &payload, Path::new(""), true)
+        .context("stage persistent target generation")?;
+    write_target_file(&generation, TARGET_COMPLETE_MARKER, b"complete\n")?;
+    write_target_file(
+        &generation,
+        TARGET_SOURCE_REVISION_MARKER,
+        format!("{revision}\n").as_bytes(),
+    )?;
+
+    let pointer_value = format!("{}\n", generation_name.to_string_lossy());
+    let (mut pointer, pointer_name) = store_directory.create_temporary_file(".current")?;
+    pointer.write_all(pointer_value.as_bytes())?;
+    pointer.flush()?;
+    pointer.sync_all()?;
+    drop(pointer);
+    store_directory
+        .publish_temporary_file(&pointer_name, std::ffi::OsStr::new(TARGET_CURRENT_POINTER))
+        .context("atomically replace persistent target current pointer")?;
     Ok(())
 }
 
@@ -10211,6 +10475,126 @@ fn normalize_artifact_file_permissions(file: &fs::File, destination: &Path) -> R
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PersistentTargetTraversalLimits {
+    max_nodes: usize,
+    max_directories: usize,
+    max_depth: usize,
+    max_path_bytes: u64,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+}
+
+impl PersistentTargetTraversalLimits {
+    fn bounded() -> Self {
+        Self {
+            max_nodes: PERSISTENT_TARGET_MAX_NODES,
+            max_directories: PERSISTENT_TARGET_MAX_DIRECTORIES,
+            max_depth: PERSISTENT_TARGET_MAX_DEPTH,
+            max_path_bytes: PERSISTENT_TARGET_MAX_PATH_BYTES,
+            max_file_bytes: PERSISTENT_TARGET_MAX_FILE_BYTES,
+            max_total_bytes: PERSISTENT_TARGET_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PersistentTargetTraversalBudget {
+    limits: Option<PersistentTargetTraversalLimits>,
+    nodes: usize,
+    directories: usize,
+    path_bytes: u64,
+    total_bytes: u64,
+}
+
+impl PersistentTargetTraversalBudget {
+    fn unbounded() -> Self {
+        Self::default()
+    }
+
+    fn visit(&mut self, relative: &Path, directory: bool) -> Result<()> {
+        let Some(limits) = self.limits else {
+            return Ok(());
+        };
+        let depth = relative.components().count();
+        if depth > limits.max_depth {
+            bail!(
+                "persistent target path exceeds the {}-component depth limit",
+                limits.max_depth
+            );
+        }
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .context("persistent target node count overflowed")?;
+        if self.nodes > limits.max_nodes {
+            bail!(
+                "persistent target traversal visited more than the {}-node limit",
+                limits.max_nodes
+            );
+        }
+        self.path_bytes = self
+            .path_bytes
+            .checked_add(
+                u64::try_from(relative.as_os_str().as_encoded_bytes().len()).unwrap_or(u64::MAX),
+            )
+            .context("persistent target path byte count overflowed")?;
+        if self.path_bytes > limits.max_path_bytes {
+            bail!(
+                "persistent target paths exceed the {}-byte limit",
+                limits.max_path_bytes
+            );
+        }
+        if directory {
+            self.directories = self
+                .directories
+                .checked_add(1)
+                .context("persistent target directory count overflowed")?;
+            if self.directories > limits.max_directories {
+                bail!(
+                    "persistent target traversal visited more than the {}-directory limit",
+                    limits.max_directories
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn account_file(&mut self, relative: &Path, file: &fs::File) -> Result<()> {
+        let Some(limits) = self.limits else {
+            return Ok(());
+        };
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("inspect persistent target file {}", relative.display()))?;
+        if !metadata.is_file() {
+            bail!(
+                "persistent target source is not a regular file: {}",
+                relative.display()
+            );
+        }
+        let file_bytes = metadata.len();
+        if file_bytes > limits.max_file_bytes {
+            bail!(
+                "persistent target file {} exceeds the {}-byte limit",
+                relative.display(),
+                limits.max_file_bytes
+            );
+        }
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(file_bytes)
+            .context("persistent target byte count overflowed")?;
+        if self.total_bytes > limits.max_total_bytes {
+            bail!(
+                "persistent target files exceed the {}-byte total limit",
+                limits.max_total_bytes
+            );
+        }
+        Ok(())
+    }
+}
+
 fn copy_dir_contents_filtered(
     source: &crate::fs_copy::NoFollowDir,
     source_path: &Path,
@@ -10218,11 +10602,92 @@ fn copy_dir_contents_filtered(
     destination_relative: &Path,
     include_hidden: bool,
 ) -> Result<()> {
+    let mut budget = PersistentTargetTraversalBudget::unbounded();
+    copy_dir_contents_filtered_with_budget(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        &mut budget,
+    )
+}
+
+fn copy_persistent_target_contents(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+) -> Result<()> {
+    copy_persistent_target_contents_with_limits(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        PersistentTargetTraversalLimits::bounded(),
+    )
+}
+
+fn copy_persistent_target_contents_with_limits(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+    limits: PersistentTargetTraversalLimits,
+) -> Result<()> {
+    let mut budget = PersistentTargetTraversalBudget {
+        limits: Some(limits),
+        ..PersistentTargetTraversalBudget::default()
+    };
+    copy_dir_contents_filtered_with_budget(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        &mut budget,
+    )
+}
+
+fn copy_dir_contents_filtered_with_budget(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+    budget: &mut PersistentTargetTraversalBudget,
+) -> Result<()> {
+    budget.visit(destination_relative, true)?;
+    copy_dir_contents_filtered_in_open_directory(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        budget,
+    )
+}
+
+fn copy_dir_contents_filtered_in_open_directory(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+    budget: &mut PersistentTargetTraversalBudget,
+) -> Result<()> {
     source.for_each_entry_filtered(
         |name| include_hidden || !hidden_file_name(name),
         |entry| {
             let path = source_path.join(&entry.name);
             let target_relative = destination_relative.join(&entry.name);
+            budget.visit(
+                &target_relative,
+                matches!(&entry.source, crate::fs_copy::NoFollowSource::Directory(_)),
+            )?;
             match entry.source {
                 crate::fs_copy::NoFollowSource::Directory(directory) => {
                     let child_destination = destination_directory
@@ -10230,15 +10695,17 @@ fn copy_dir_contents_filtered(
                         .with_context(|| {
                             format!("create directory {}", target_relative.display())
                         })?;
-                    copy_dir_contents_filtered(
+                    copy_dir_contents_filtered_in_open_directory(
                         &directory,
                         &path,
                         &child_destination,
                         &target_relative,
                         include_hidden,
+                        budget,
                     )?;
                 }
                 crate::fs_copy::NoFollowSource::File(file) => {
+                    budget.account_file(&target_relative, &file)?;
                     destination_directory
                         .clone_or_copy_file(&file, Path::new(&entry.name))
                         .with_context(|| {
@@ -14289,6 +14756,8 @@ esac
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
             compiler_cache_trust_class:
                 velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
+            compiler_cache_service: false,
+            compiler_cache_service_root: None,
         }
     }
 
@@ -16715,13 +17184,19 @@ esac
         fs::write(target.join("new-output"), "compiled\n").unwrap();
         publish_persistent_target(&spec, Some("new-revision")).unwrap();
 
-        assert!(store.join(".velnor-target-complete-v1").is_file());
+        let generation = fs::read_to_string(store.join(TARGET_CURRENT_POINTER))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(target_identifier(&generation).is_some());
+        let generation_path = store.join(&generation);
+        assert!(generation_path.join(TARGET_COMPLETE_MARKER).is_file());
         assert_eq!(
-            fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER)).unwrap(),
+            fs::read_to_string(generation_path.join(TARGET_SOURCE_REVISION_MARKER)).unwrap(),
             "new-revision\n"
         );
         assert_eq!(
-            fs::read_to_string(store.join("data/new-output")).unwrap(),
+            fs::read_to_string(generation_path.join("data/new-output")).unwrap(),
             "compiled\n"
         );
         fs::File::options()
@@ -16732,11 +17207,256 @@ esac
             .unwrap();
         materialize_persistent_target(&spec, Some("new-revision")).unwrap();
         assert_eq!(
+            fs::read_to_string(target.join("new-output")).unwrap(),
+            "compiled\n"
+        );
+        assert_eq!(
             fs::metadata(spec.workspace_host.join("Cargo.toml"))
                 .unwrap()
                 .modified()
                 .unwrap(),
             stale_time
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_target_copy_enforces_traversal_budgets_before_recursion() {
+        let cases = [
+            (
+                "directory",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 1,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
+                },
+                "directory limit",
+            ),
+            (
+                "node",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 1,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
+                },
+                "node limit",
+            ),
+            (
+                "depth",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 1,
+                    max_path_bytes: 1024,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
+                },
+                "depth limit",
+            ),
+            (
+                "path",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 4,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 1024,
+                },
+                "byte limit",
+            ),
+        ];
+
+        for (name, limits, expected_error) in cases {
+            let root = temp_dir().join(format!("target-budget-{name}"));
+            let source = root.join("source");
+            let destination = root.join("destination");
+            fs::create_dir_all(source.join("nested/deeper")).unwrap();
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(source.join("nested/deeper/output"), b"output").unwrap();
+
+            let source_directory = crate::fs_copy::NoFollowDir::open_absolute(&source).unwrap();
+            let destination_directory =
+                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&destination)
+                    .unwrap();
+            let error = copy_persistent_target_contents_with_limits(
+                &source_directory,
+                &source,
+                &destination_directory,
+                Path::new(""),
+                true,
+                limits,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error:#}");
+            assert!(!destination.join("nested/deeper/output").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_target_copy_enforces_per_file_and_total_byte_budgets() {
+        let cases = [
+            (
+                "file",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                    max_file_bytes: 3,
+                    max_total_bytes: 1024,
+                },
+                "exceeds the 3-byte limit",
+            ),
+            (
+                "total",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                    max_file_bytes: 4,
+                    max_total_bytes: 5,
+                },
+                "files exceed the 5-byte total limit",
+            ),
+        ];
+
+        for (name, limits, expected_error) in cases {
+            let root = temp_dir().join(format!("target-byte-budget-{name}"));
+            let source = root.join("source");
+            let destination = root.join("destination");
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(source.join("nested-output"), b"four").unwrap();
+            fs::write(source.join("second-output"), b"four").unwrap();
+
+            let source_directory = crate::fs_copy::NoFollowDir::open_absolute(&source).unwrap();
+            let destination_directory =
+                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&destination)
+                    .unwrap();
+            let error = copy_persistent_target_contents_with_limits(
+                &source_directory,
+                &source,
+                &destination_directory,
+                Path::new(""),
+                true,
+                limits,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error:#}");
+            let copied_files = fs::read_dir(&destination).unwrap().count();
+            assert_eq!(copied_files, usize::from(name == "total"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn incomplete_target_generation_is_not_restored() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        let store = root.join("target-store");
+        let generation = store.join("target-generation-incomplete");
+        fs::create_dir_all(generation.join("data")).unwrap();
+        fs::write(generation.join("data/poison"), "must-not-restore\n").unwrap();
+        fs::write(store.join(TARGET_CURRENT_POINTER), "../outside\n").unwrap();
+        fs::write(
+            generation.join(TARGET_SOURCE_REVISION_MARKER),
+            "new-revision\n",
+        )
+        .unwrap();
+        fs::create_dir_all(&spec.workspace_host).unwrap();
+        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
+        spec.cargo_target_host = Some(store);
+
+        assert!(materialize_persistent_target(&spec, Some("new-revision")).is_err());
+        fs::write(
+            spec.cargo_target_host
+                .as_ref()
+                .unwrap()
+                .join(TARGET_CURRENT_POINTER),
+            "target-generation-incomplete\n",
+        )
+        .unwrap();
+        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
+        assert!(!spec.workspace_host.join("target").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_target_rejects_symlinked_store_root_and_current_pointer() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        fs::create_dir_all(&spec.workspace_host).unwrap();
+        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
+
+        let real_store = root.join("real-store");
+        fs::create_dir_all(&real_store).unwrap();
+        let linked_store = root.join("linked-store");
+        std::os::unix::fs::symlink(&real_store, &linked_store).unwrap();
+        spec.cargo_target_host = Some(linked_store);
+        assert!(materialize_persistent_target(&spec, Some("revision")).is_err());
+        fs::create_dir_all(spec.workspace_host.join("target")).unwrap();
+        assert!(publish_persistent_target(&spec, Some("revision")).is_err());
+
+        spec.cargo_target_host = Some(real_store.clone());
+        let outside = root.join("outside-pointer");
+        fs::write(&outside, "target-generation-1\n").unwrap();
+        std::os::unix::fs::symlink(&outside, real_store.join(TARGET_CURRENT_POINTER)).unwrap();
+        assert!(materialize_persistent_target(&spec, Some("revision")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_target_publication_keeps_previous_current_generation() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        let store = root.join("target-store");
+        let previous = store.join("target-generation-previous");
+        fs::create_dir_all(previous.join("data")).unwrap();
+        fs::write(previous.join(TARGET_COMPLETE_MARKER), "complete\n").unwrap();
+        fs::write(previous.join(TARGET_SOURCE_REVISION_MARKER), "revision\n").unwrap();
+        fs::write(previous.join("data/previous"), "old\n").unwrap();
+        fs::write(
+            store.join(TARGET_CURRENT_POINTER),
+            "target-generation-previous\n",
+        )
+        .unwrap();
+        fs::create_dir_all(&spec.workspace_host).unwrap();
+        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let target = spec.workspace_host.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("new"), "new\n").unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, target.join("escape")).unwrap();
+        spec.cargo_target_host = Some(store.clone());
+
+        assert!(publish_persistent_target(&spec, Some("revision")).is_err());
+        assert_eq!(
+            fs::read_to_string(store.join(TARGET_CURRENT_POINTER)).unwrap(),
+            "target-generation-previous\n"
+        );
+        assert_eq!(
+            fs::read_to_string(previous.join("data/previous")).unwrap(),
+            "old\n"
         );
         fs::remove_dir_all(root).unwrap();
     }

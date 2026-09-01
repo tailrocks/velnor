@@ -36,6 +36,7 @@ pub(crate) async fn github_http_transport_env() -> GithubHttpTransportEnvGuard {
 
 #[cfg(test)]
 impl GithubHttpTransportEnvGuard {
+    #[cfg(feature = "test-support")]
     pub(crate) fn set_native(&self) {
         // SAFETY: the guard holds the process-wide environment lock.
         unsafe {

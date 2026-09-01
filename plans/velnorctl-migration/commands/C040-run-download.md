@@ -51,7 +51,7 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 
 ## Mandatory fixture integration
 
-Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all pending/in-progress old fixture runs, delete only stale validation-owned registrations, and prove clean before dispatch.
+Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel only older pending/in-progress validation runs owned by this iteration; never cancel protected `Release`, `Package update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs. Delete only stale validation-owned registrations, prove both sets clean, and monitor only the new run ID.
 Download Plan 063 multiple artifacts. Fake-API/local archive tests additionally
 cover ZIP bomb, too many entries, symlink ancestor, normalized/case collision,
 digest mismatch, interrupted transfer, unsupported type, and zero partial output.

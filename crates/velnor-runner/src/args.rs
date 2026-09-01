@@ -58,7 +58,7 @@ pub struct ReleaseEmitArgs {
 #[derive(Debug)]
 pub struct ReleaseAssembleArgs {
     pub record: PathBuf,
-    pub artifacts: Option<PathBuf>,
+    pub artifacts: PathBuf,
     pub out: Option<PathBuf>,
 }
 
@@ -210,6 +210,10 @@ pub struct RunArgs {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonArgs {
+    /// Explicit operational store path. Kept in the typed daemon context so
+    /// callers never need to mutate the process environment after startup.
+    #[serde(default)]
+    pub state_db: Option<PathBuf>,
     pub config_dir: Option<PathBuf>,
     pub url: Option<String>,
     #[serde(default, skip_serializing)]

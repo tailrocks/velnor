@@ -119,8 +119,11 @@ versions, reconnect, timeout, and stream closure.
 
 ### 6. Mandatory fixture integration
 
-Against `tailrocks/velnor-actions-fixture`, cancel old fixture runs and delete
-only stale validation registrations; prove
+Against `tailrocks/velnor-actions-fixture`, cancel only older
+pending/in-progress validation runs owned by this iteration; never cancel
+protected `Release`, `Package update`, `Publish apt repo`, or
+`workflow_dispatch` release workflows/runs, or unrelated runs. Delete only
+stale validation registrations; prove
 clean state. Start daemon with temporary socket/state paths, dispatch a fresh
 hold scenario, and query `/v1/info`, slots, jobs, and watch while active. Cancel
 through GitHub; check only the new run every at most 60 seconds until terminal.

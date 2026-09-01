@@ -268,9 +268,11 @@ selection.
 
 ### 4. Mandatory fixture integration: establish clean live baseline
 
-Before dispatch, cancel all non-completed fixture runs. Delete only stale GitHub
-runner registrations with the dedicated validation-name prefix; confirm no such
-registration remains. Dispatch existing `compat.yml` with `lane=both`, capture
+Before dispatch, cancel only older pending/in-progress validation runs owned by
+this iteration; never cancel protected `Release`, `Package update`, `Publish
+apt repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs.
+Delete only stale GitHub runner registrations with the dedicated validation-name
+prefix; confirm no such registration remains. Dispatch existing `compat.yml` with `lane=both`, capture
 the new run ID, and inspect only it every at most 60 seconds. If queued or
 unchanged for two minutes, inspect runner group/label, daemon registration, and
 broker/registry logs immediately.

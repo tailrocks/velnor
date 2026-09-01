@@ -7,6 +7,19 @@ and bake logs of completed runs fetched 2026-08-24/25, or from live sentry
 inspection. Non-normative research; the unified-CI contract and strict
 capability contract still govern execution.
 
+## Status correction — 2026-09-01
+
+The Velnor-native GitHub Actions cache service landed in Velnor #378, with
+daemon-lifecycle and host-gateway wiring in #387. It is operator-enabled via
+`VELNOR_ACTIONS_CACHE_URL`; v1 artifactcache and v2 CacheService support are
+present. Remaining proof is fixture roundtrip, signed deployment, and a
+controlled A/B canary. The Java registry-primary cache change
+`chainargos/java-monorepo#1976` is merged and measured at **188 s** versus
+**504 s** for the preceding no-registry-primary run: a **316 s / 62.7%**
+reduction. Queue timing, lifecycle, JIT, and journal fixes are on current main.
+PR #352 is closed/nested; its historical measurements remain below, but it is
+not a pending implementation target.
+
 ## 1. Measured baselines (successful runs, main/dispatch)
 
 | Repo / run | Dominant job | Job wall | Queue | Notes |
@@ -27,17 +40,18 @@ service images with:
 *.cache-to=type=gha,scope=rust-workspace,mode=max
 ```
 
-`type=gha` is a **GitHub-hosted-only backend** (needs
+At the time of the original measurements, `type=gha` was a
+**GitHub-hosted-only backend** (needs
 `ACTIONS_CACHE_URL`/`ACTIONS_RESULTS_URL` + `ACTIONS_RUNTIME_TOKEN`). On
-Velnor it is absent, so every bake is fully cold: crates.io re-download plus a
-~1200 s workspace dependency compile inside one builder stage, repeated per
-run. The same class of bug exists in jackin `construct-ci-e2e` (gha scope),
+Velnor it was absent, so every bake was fully cold: crates.io re-download plus
+a ~1200 s workspace dependency compile inside one builder stage, repeated per
+run. The same class of bug existed in jackin `construct-ci-e2e` (gha scope),
 tablerock's native trio and parallax's `cargo-target` tarball caches
 (sha-keyed, per-commit upload).
 
-**Program P1 — Velnor-native BuildKit cache service.** Implement the GitHub
-cache contract natively in velnor-runner so `type=gha` works on every lane with
-byte-identical YAML:
+**Program P1 — Velnor-native BuildKit cache service (landed in #378; lifecycle
+and host-gateway wiring in #387).** Velnor now hosts the GitHub cache contract
+in velnor-runner so `type=gha` can work on every lane with byte-identical YAML:
 
 - v1 Twirp `_apis/artifactcache` (reserve/PUT/GET) and v2 Results-Service
   CacheService (CreateCacheEntry/FinalizeCacheEntryUpload/GetCachedContentURL),
@@ -50,8 +64,9 @@ byte-identical YAML:
 
 Effect estimate from the pre-registry baseline was java-monorepo Velnor bake
 28 → ~5 min warm (dep-tree layers hit). That estimate is superseded for the
-current workflow by the measured 188-second run above; native CacheService is
-still a separate research track, not a claimed present bottleneck.
+current workflow by the measured 188-second run above. The landed native
+CacheService remains operator-enabled and needs the proof listed above before
+claiming a measured estate-wide gain.
 
 ### Measurement correction — 2026-08-25
 
@@ -62,9 +77,10 @@ and registry manifests and completed its Docker job in **188 s**; the
 preceding no-registry-primary run `32830746424` took **504 s**. That is a
 316-second (**62.7%**) reduction, before any native Velnor CacheService work.
 
-Velnor still does not implement a CacheService/Twirp backend; it forwards the
-workflow endpoint and token. Native cache service remains a separate research
-track, not the current Java bottleneck. Do not claim the old 23–28 minute cold
+Velnor's native CacheService/Twirp backend is now landed but operator-enabled;
+this run used the GitHub endpoint passthrough and token. The native service is
+not the current Java bottleneck, and its fixture roundtrip, signed deployment,
+and controlled A/B proof remain open. Do not claim the old 23–28 minute cold
 result for the post-PR #1976 workflow.
 
 ### Measurement — 2026-08-26 runner warm-path copy
@@ -91,19 +107,19 @@ proven cache bottleneck and is excluded from the ranking below.
    JIT registrations per slot instead of discard-per-cycle, measure pickup SLO
    from forensics `job-timing` records, and expose a fleet saturation signal so
    capacity grows before queues form.
-2. **Conditional native BuildKit CacheService**: Velnor currently forwards
-   GitHub's cache endpoint and the Java registry-primary workflow is fast, but
-   workflows without a registry cache still depend on GitHub's remote service.
-   Implement only after a scoped protocol canary proves a material win.
+2. **Conditional native BuildKit CacheService**: Velnor now hosts the v1/v2
+   service, enabled by `VELNOR_ACTIONS_CACHE_URL`. The Java registry-primary
+   workflow is fast; prove fixture roundtrip, signed deployment, and a scoped
+   protocol canary before claiming a material native-service win.
 3. **kestra-build-publish.yml (java-monorepo)** builds four images with bare
    `docker buildx` and no `cache-from/to`; only an exists-check skips them.
    Give it the registry-buildcache pattern below.
 4. **Registry-primary docker caching everywhere** (shipped pattern): jackin
    `construct.yml` already does `type=registry,ref=<image>:buildcache-<arch>`
-   written by main, restored by both lanes. Ported to java-monorepo
-   `rust-docker.yml` this cycle (PR chainargos/java-monorepo#1976) as the
-   immediate fix while P1 lands; expected 28 → ~5 min warm without any runner
-   change.
+   written by main, restored by both lanes. The same pattern is merged in
+   java-monorepo `rust-docker.yml` (PR chainargos/java-monorepo#1976) and is
+   measured at 188 s versus 504 s without registry-primary caching. Keep the
+   historical 28 → ~5 min warm estimate separate from that measured result.
 5. **Redundant target-layer caches**: parallax keys `target/` archives with
    `github.sha` (new archive per commit), tablerock native trio archives whole
    `target/`, jackin release stacks Swatinem/rust-cache on top of sccache.
@@ -137,9 +153,10 @@ This removes the upgrade/drain queue without weakening in-flight job safety;
 live proof requires the corrected binary and the same exact runner-group
 policy admission used by the JIT test.
 
-### Live policy gate — 2026-08-26
+### Historical live policy gate snapshot — 2026-08-26
 
-Read-only `velnor-tools fleet-policy audit` confirmed the admission blocker:
+The 2026-08-26 read-only `velnor-tools fleet-policy audit` confirmed the
+admission blocker at that time:
 
 - Tailrocks: **80** mismatch classes; two unexpected repositories.
 - ChainArgos: **23** mismatch classes; two unexpected repositories.
@@ -164,8 +181,9 @@ Both research passes agree with the marked contract; the deltas are:
     registry composite; never raw `target/` archives; never rust-cache beside
     sccache.
   - Docker lanes: registry-primary buildcache written by main writer
-    (`mode=max`); `type=gha` permitted only as `ignore-error` secondary until
-    P1 makes it real everywhere.
+    (`mode=max`); `type=gha` may remain an `ignore-error` secondary, while the
+    operator-enabled Velnor-native service is available for lanes configured
+    with `VELNOR_ACTIONS_CACHE_URL`.
 - Bump java-monorepo's `velnor-actions` pins 2026.8.30 → current mirrored
   release (last byte-level divergence).
 - Fix jackin `.github/AGENTS.md` default-lane contradiction (contract:
@@ -219,8 +237,9 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
 
 ## 7. Immediate actions shipped by this research
 
-1. chainargos/java-monorepo#1976 — registry-primary bake cache (expected
-   −23 min/run on the estate's biggest pipeline once main seeds the cache).
+1. chainargos/java-monorepo#1976 — registry-primary bake cache, measured at
+   188 s versus 504 s for the preceding no-registry-primary run (−316 s /
+   62.7%).
 2. Velnor #365/#370 — queue timing records plus daemon-bound doctor probes;
    Sentry now reports 73 samples instead of a false empty result.
 3. Velnor — Docker lifecycle gate: cross-daemon create/start/teardown control
@@ -241,7 +260,8 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
    each readiness/read-only phase and reacquires it only for network/container
    mutations; stale-resource cleanup remains gated. This preserves the
    cross-job mutation bound while removing readiness from the critical section.
-5. This document + adoption roadmap (P1 next implementation target).
+5. This document + adoption roadmap; P1 cache service landed, with fixture,
+   signed-deployment, and controlled A/B proof still required.
 
 ### 2026-08-26 teardown root cause
 

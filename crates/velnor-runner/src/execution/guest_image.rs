@@ -580,58 +580,37 @@ fn build_rootfs(
         ],
         "guest.rootfs",
     )?;
-    let tarball = work_dir.join("rootfs.tar");
-    run(
-        runner,
-        "tar",
-        &[
-            "--create".into(),
-            format!("--file={}", tarball.display()),
-            "--directory".into(),
-            tree.display().to_string(),
-            "--sort=name".into(),
-            "--numeric-owner".into(),
-            "--owner=0".into(),
-            "--group=0".into(),
-            "--mtime=@0".into(),
-            "--format=posix".into(),
-            "--pax-option=delete=atime,delete=ctime".into(),
-            "--no-xattrs".into(),
-            ".".into(),
-        ],
-        "guest.rootfs",
-    )?;
-    run(
-        runner,
-        "env",
-        &[
-            "LC_ALL=C.UTF-8".into(),
-            "TZ=UTC".into(),
-            "SOURCE_DATE_EPOCH=0".into(),
-            "E2FSPROGS_FAKE_TIME=0".into(),
-            "mke2fs".into(),
-            "-t".into(),
-            "ext4".into(),
-            "-b".into(),
-            "4096".into(),
-            "-I".into(),
-            "256".into(),
-            "-m".into(),
-            "0".into(),
-            "-U".into(),
-            "00000000-0000-0000-0000-000000000001".into(),
-            "-L".into(),
-            "velnor-guest".into(),
-            "-E".into(),
-            "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,root_perms=0755,lazy_itable_init=0,lazy_journal_init=0,nodiscard,no_copy_xattrs".into(),
-            "-d".into(),
-            tarball.display().to_string(),
-            output.display().to_string(),
-            "1024m".into(),
-        ],
-        "guest.rootfs",
-    )?;
+    let args = rootfs_image_args(&tree, output);
+    run(runner, "env", &args, "guest.rootfs")?;
     Ok(())
+}
+
+fn rootfs_image_args(tree: &Path, output: &Path) -> Vec<String> {
+    vec![
+        "LC_ALL=C.UTF-8".into(),
+        "TZ=UTC".into(),
+        "SOURCE_DATE_EPOCH=0".into(),
+        "E2FSPROGS_FAKE_TIME=0".into(),
+        "mke2fs".into(),
+        "-t".into(),
+        "ext4".into(),
+        "-b".into(),
+        "4096".into(),
+        "-I".into(),
+        "256".into(),
+        "-m".into(),
+        "0".into(),
+        "-U".into(),
+        "00000000-0000-0000-0000-000000000001".into(),
+        "-L".into(),
+        "velnor-guest".into(),
+        "-E".into(),
+        "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,root_perms=0755,lazy_itable_init=0,lazy_journal_init=0,nodiscard,no_copy_xattrs".into(),
+        "-d".into(),
+        tree.display().to_string(),
+        output.display().to_string(),
+        "1024m".into(),
+    ]
 }
 
 fn install_guest_agent(tree: &Path, bytes: &[u8]) -> Result<(), MicroVmPreflightFailure> {
@@ -754,6 +733,25 @@ mod tests {
         assert_eq!(debian_package("buildkit"), "docker-buildx");
         assert_eq!(debian_package("containerd"), "containerd");
         assert_eq!(debian_package("runc"), "runc");
+    }
+
+    #[test]
+    fn rootfs_image_population_uses_the_staged_directory() {
+        let root = Path::new("/work/rootfs-tree");
+        let output = Path::new("/out/rootfs.ext4");
+        let args = rootfs_image_args(root, output);
+        let mke2fs_index = args
+            .iter()
+            .position(|arg| arg == "mke2fs")
+            .expect("mke2fs command");
+        assert_eq!(args[mke2fs_index + 1], "-t");
+        let directory = args
+            .iter()
+            .position(|arg| arg == "-d")
+            .and_then(|index| args.get(index + 1))
+            .expect("mke2fs -d directory");
+        assert_eq!(directory, "/work/rootfs-tree");
+        assert!(!directory.ends_with(".tar"));
     }
 
     #[test]

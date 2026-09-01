@@ -91,9 +91,7 @@ impl RecoveryCoordinator {
     pub fn observe(&mut self, signal: RecoverySignal, now: Duration) -> RecoveryAction {
         match signal {
             RecoverySignal::Empty | RecoverySignal::Message => {
-                if self.state != RecoveryState::Quarantined {
-                    self.recovered(now);
-                }
+                self.recovered(now);
                 RecoveryAction::None
             }
             RecoverySignal::Error(BrokerPollErrorClass::Authentication) => {
@@ -143,7 +141,11 @@ impl RecoveryCoordinator {
 
     /// Record successful session/credential recovery.
     pub fn recovered(&mut self, now: Duration) {
-        if self.state == RecoveryState::Quarantined {
+        if self.state == RecoveryState::Quarantined
+            && !self
+                .quarantine_until
+                .is_some_and(|deadline| now >= deadline)
+        {
             return;
         }
         self.state = RecoveryState::Healthy;
@@ -226,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_is_not_cleared_by_another_idle_signal() {
+    fn quarantine_is_not_cleared_by_another_idle_signal_before_deadline() {
         let mut coordinator = RecoveryCoordinator::default();
         for attempt in 0..=RETRY_BUDGET {
             coordinator.observe(
@@ -235,11 +237,35 @@ mod tests {
             );
         }
         assert_eq!(coordinator.state(), RecoveryState::Quarantined);
+        let before_deadline = coordinator
+            .quarantine_until()
+            .expect("quarantine deadline")
+            .saturating_sub(Duration::from_secs(1));
         assert_eq!(
-            coordinator.observe(RecoverySignal::Empty, Duration::from_secs(99_999)),
+            coordinator.observe(RecoverySignal::Empty, before_deadline),
             RecoveryAction::None
         );
         assert_eq!(coordinator.state(), RecoveryState::Quarantined);
+    }
+
+    #[test]
+    fn successful_recovery_clears_quarantine_after_deadline() {
+        let mut coordinator = RecoveryCoordinator::default();
+        for attempt in 0..=RETRY_BUDGET {
+            coordinator.observe(
+                RecoverySignal::Error(BrokerPollErrorClass::Server),
+                Duration::from_secs(1_000 + u64::from(attempt) * 600),
+            );
+        }
+        let deadline = coordinator.quarantine_until().expect("quarantine deadline");
+
+        assert_eq!(
+            coordinator.observe(RecoverySignal::Empty, deadline),
+            RecoveryAction::None
+        );
+        assert_eq!(coordinator.state(), RecoveryState::Healthy);
+        assert_eq!(coordinator.quarantine_until(), None);
+        assert_eq!(coordinator.retry_budget_used(), 0);
     }
 
     #[test]

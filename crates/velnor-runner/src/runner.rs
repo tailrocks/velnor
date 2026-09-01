@@ -2159,7 +2159,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // retries transient filesystem/database failures with the same bounded
     // loop as registration failures. No pass may preflight or register
     // without durable lifecycle state.
-    crate::ops::init(instance_slug_for_store())
+    crate::ops::init_at(instance_slug_for_store(), args.state_db.as_deref())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
     let _storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
@@ -8055,6 +8055,33 @@ fn execute_script_job_inner(
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
         .with_trust_scope(trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
+    if container.compiler_cache_service {
+        let root = container
+            .compiler_cache_service_root
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("compiler-cache service is enabled without a root"))?;
+        let mut config = velnor_cache_service::CompilerCacheConfig::new(
+            root,
+            format!("{}:{}", container.daemon_id, container.name),
+        );
+        config.trust_class = match container.compiler_cache_trust_class {
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted => {
+                velnor_action_model::TrustClass::Untrusted
+            }
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted => {
+                velnor_action_model::TrustClass::Trusted
+            }
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release => {
+                velnor_action_model::TrustClass::Release
+            }
+        };
+        let service = velnor_cache_service::CompilerCacheService::open_production(
+            config,
+            velnor_cache_service::WrapperDeclaration::default(),
+        )
+        .context("open structured compiler-cache service")?;
+        executor = executor.with_compiler_cache_service(service);
+    }
     // Adopt the pre-create thread's lease guard so the in-container docker
     // socket stays proxied until THIS executor's job cleanup drops it.
     if let Some(lease) = environment_lease {
@@ -13408,6 +13435,7 @@ jobs:
 
     fn daemon_args(slots: usize) -> DaemonArgs {
         DaemonArgs {
+            state_db: None,
             config_dir: None,
             url: None,
             pat: None,
@@ -18070,6 +18098,8 @@ runs:
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
             compiler_cache_trust_class:
                 velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
+            compiler_cache_service: false,
+            compiler_cache_service_root: None,
         }
     }
 

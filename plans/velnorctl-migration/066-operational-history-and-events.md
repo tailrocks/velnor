@@ -152,8 +152,11 @@ and reopen tests prove deterministic retention and valid referential history.
 
 ### 6. Mandatory fixture integration
 
-Use `tailrocks/velnor-actions-fixture` and the clean-run sequence: cancel old
-runs, delete only stale validation runner
+Use `tailrocks/velnor-actions-fixture` and the clean-run sequence: cancel only
+older pending/in-progress validation runs owned by this iteration; never cancel
+protected `Release`, `Package update`, `Publish apt repo`, or
+`workflow_dispatch` release workflows/runs, or unrelated runs. Delete only stale
+validation runner
 registrations, prove clean, start validation daemon with a temporary state DB,
 dispatch one new `control-plane` hold run, and inspect DB through the store API
 while active. Cancel through GitHub, monitor only that run ID at intervals of at

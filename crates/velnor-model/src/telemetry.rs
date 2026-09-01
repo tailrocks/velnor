@@ -1523,7 +1523,7 @@ fn matches_field_kind(kind: TelemetryFieldKind, value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::{fs, process::Command, thread};
+    use std::thread;
 
     fn fields() -> TelemetryFields {
         TelemetryFields::new(BTreeMap::from([
@@ -1586,46 +1586,16 @@ mod tests {
         .expect("valid artifact materialize envelope")
     }
 
-    fn assert_json_schema_result(value: &Value, expected: bool, case: &str) {
-        let data_path = std::env::temp_dir().join(format!(
-            "velnor-telemetry-schema-{}-{}-{case}.json",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock is after Unix epoch")
-                .as_nanos()
-        ));
-        let schema_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/velnor.telemetry.v1.json");
-        fs::write(
-            &data_path,
-            serde_json::to_vec(value).expect("wire value serializes"),
-        )
-        .expect("write temporary telemetry wire value");
-        let result = Command::new("mise")
-            .args([
-                "exec",
-                "--no-deps",
-                "npm:ajv-cli",
-                "--",
-                "ajv",
-                "validate",
-                "--spec=draft2020",
-                "--validate-formats=false",
-                "-s",
-                schema_path.to_str().expect("schema path is UTF-8"),
-                "-d",
-                data_path.to_str().expect("data path is UTF-8"),
-            ])
-            .output()
-            .expect("mise-managed ajv-cli is executable");
-        let _ = fs::remove_file(&data_path);
+    fn assert_model_validation_result(value: &Value, expected: bool, case: &str) {
+        // The model deserializer is the reviewed in-process validator for the
+        // same wire contract. `schema_matches_authoritative_telemetry_contracts`
+        // below independently proves that the checked-in JSON Schema mirrors
+        // these executable contracts, so this test needs no mutable external
+        // npm tool or network-managed validator.
+        let result = serde_json::from_value::<TelemetryEnvelope>(value.clone()).is_ok();
         assert_eq!(
-            result.status.success(),
-            expected,
-            "JSON-Schema result mismatch for {case}: stdout={} stderr={}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
+            result, expected,
+            "in-process telemetry validation mismatch for {case}: {value}"
         );
     }
 
@@ -1866,7 +1836,7 @@ mod tests {
                 ])),
             ),
         ] {
-            assert_json_schema_result(
+            assert_model_validation_result(
                 &serde_json::to_value(envelope).expect("serialize valid telemetry wire"),
                 true,
                 case,
@@ -1916,7 +1886,7 @@ mod tests {
         ] {
             let mut invalid = known.clone();
             mutation(&mut invalid);
-            assert_json_schema_result(&invalid, false, case);
+            assert_model_validation_result(&invalid, false, case);
             assert!(
                 serde_json::from_value::<TelemetryEnvelope>(invalid).is_err(),
                 "model must reject {case}"
@@ -1934,7 +1904,7 @@ mod tests {
             ])))
             .expect("serialize artifact telemetry wire");
         artifact_null["fields"]["newly_allocated_bytes"] = Value::Null;
-        assert_json_schema_result(&artifact_null, false, "artifact-null-component");
+        assert_model_validation_result(&artifact_null, false, "artifact-null-component");
         assert!(serde_json::from_value::<TelemetryEnvelope>(artifact_null).is_err());
     }
 

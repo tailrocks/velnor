@@ -51,7 +51,7 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 
 ## Mandatory fixture integration
 
-Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all old active runs, delete only stale validation-owned registrations, and prove clean before dispatch.
+Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel only older pending/in-progress validation runs owned by this iteration; never cancel protected `Release`, `Package update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs. Delete only stale validation-owned registrations, prove both sets clean, and monitor only the new run ID.
 After fresh fixture success, prove active-job and ambiguous-ownership refusal,
 then delete the drained dedicated instance. Prove exact registrations/unit/live
 state gone, tombstone retained, credentials/shared caches/other instance

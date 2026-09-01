@@ -1378,6 +1378,61 @@ pub fn compiler_cache_backend(
     resolve_backend(CompilerCachePolicy::Auto, &compiler_cache_declaration(job))
 }
 
+/// Reject compiler-cache ownership that cannot cross the MicroVM guest boundary.
+///
+/// The broker can represent environment variables in several shapes. All
+/// supported job, job-container, variable, and step locations are collected by
+/// the same recursive walker before this decision is made. Docker does not call
+/// this validator and retains its existing compiler-cache behavior.
+pub(crate) fn validate_microvm_compiler_cache(
+    job: &AgentJobRequestMessage,
+) -> Result<(), CacheAdmissionError> {
+    let declaration = compiler_cache_declaration(job);
+    if declaration.sccache && declaration.kache {
+        return Err(CacheAdmissionError::ConflictingWrappers);
+    }
+
+    if let Some(name) = compiler_cache_environment_names(job)
+        .into_iter()
+        .find(|name| is_compiler_cache_environment(name))
+    {
+        return Err(CacheAdmissionError::MicroVmEnvironmentUnsupported { name });
+    }
+
+    if declaration.sccache || declaration.kache {
+        let declared = if declaration.sccache {
+            CompilerCacheBackend::Sccache
+        } else {
+            CompilerCacheBackend::Kache
+        };
+        return Err(CacheAdmissionError::MicroVmTransportUnavailable { declared });
+    }
+
+    Ok(())
+}
+
+fn compiler_cache_environment_names(job: &AgentJobRequestMessage) -> Vec<String> {
+    let mut names = Vec::new();
+    for value in &job.environment_variables {
+        collect_environment_names(value, &mut names);
+    }
+    if let Some(container) = &job.job_container {
+        collect_environment_names(container, &mut names);
+    }
+    names.extend(job.variables.keys().cloned());
+    for step in job.steps.iter().filter(|step| step.enabled) {
+        if let Some(environment) = &step.environment {
+            collect_environment_names(environment, &mut names);
+        }
+    }
+    names
+}
+
+fn is_compiler_cache_environment(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase().replace('-', "_");
+    upper == "RUSTC_WRAPPER" || upper.starts_with("SCCACHE_") || upper.starts_with("KACHE_")
+}
+
 fn validate_compiler_cache_topology(
     job: &AgentJobRequestMessage,
     violations: &mut Vec<CapabilityViolation>,
@@ -1413,16 +1468,7 @@ fn validate_compiler_cache_topology(
         ));
     }
 
-    let mut environment = Vec::new();
-    for value in &job.environment_variables {
-        collect_environment_names(value, &mut environment);
-    }
-    for step in job.steps.iter().filter(|step| step.enabled) {
-        if let Some(value) = &step.environment {
-            collect_environment_names(value, &mut environment);
-        }
-    }
-    environment.extend(job.variables.keys().cloned());
+    let mut environment = compiler_cache_environment_names(job);
     environment.sort_unstable();
     environment.dedup();
     for name in environment {
@@ -1458,21 +1504,51 @@ fn collect_environment_names(value: &serde_json::Value, names: &mut Vec<String>)
     match value {
         serde_json::Value::Object(object) => {
             if let Some(name) = object
-                .get("Key")
+                .get("name")
+                .or_else(|| object.get("Name"))
+                .or_else(|| object.get("Key"))
                 .or_else(|| object.get("key"))
                 .and_then(template_literal)
             {
                 names.push(name.to_string());
-            } else {
-                names.extend(
-                    object
-                        .keys()
-                        .filter(|key| !matches!(key.as_str(), "type" | "Type" | "map" | "Map"))
-                        .cloned(),
-                );
             }
-            for nested in object.get("map").or_else(|| object.get("Map")).into_iter() {
-                collect_environment_names(nested, names);
+            names.extend(
+                object
+                    .keys()
+                    .filter(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "type"
+                                | "Type"
+                                | "name"
+                                | "Name"
+                                | "key"
+                                | "Key"
+                                | "value"
+                                | "Value"
+                                | "map"
+                                | "Map"
+                                | "pairs"
+                                | "Pairs"
+                                | "mapping"
+                                | "Mapping"
+                                | "environmentVariables"
+                                | "EnvironmentVariables"
+                                | "env"
+                                | "Env"
+                        )
+                    })
+                    .cloned(),
+            );
+            for key in ["map", "Map", "pairs", "Pairs", "mapping", "Mapping"] {
+                if let Some(nested) = object.get(key) {
+                    collect_environment_names(nested, names);
+                }
+            }
+            for key in ["environmentVariables", "EnvironmentVariables", "env", "Env"] {
+                if let Some(nested) = object.get(key) {
+                    collect_environment_names(nested, names);
+                }
             }
         }
         serde_json::Value::Array(values) => {
@@ -2066,8 +2142,10 @@ mod tests {
         let build_binary =
             unique_position(r#"build_binary="target/${{ matrix.target }}/release/velnor-runner""#);
         let recorded_binary_sha = unique_position(
-            r#"recorded_binary_sha="$(tr -d '\n' < "velnor-runner-${{ matrix.arch }}.bin.sha256")""#,
+            r#"recorded_binary_sha="$(read_sha "velnor-runner-${{ matrix.arch }}.bin.sha256")""#,
         );
+        assert!(guard.contains("stat -c%s"));
+        assert!(guard.contains("token_count != 1"));
         let build_binary_sha = unique_position(
             r#"build_binary_sha="$(sha256sum "$build_binary" | awk '{print $1}')""#,
         );
@@ -2111,6 +2189,47 @@ mod tests {
                 && package_sidecar_check < copy,
             "all package provenance checks must precede copying the package"
         );
+    }
+
+    #[test]
+    fn release_creation_binds_packaged_runner_to_recorded_binary() {
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
+                .expect("release workflow must parse");
+        let steps = workflow["jobs"]["release"]["steps"]
+            .as_sequence()
+            .expect("release job steps");
+        let verify_index = steps
+            .iter()
+            .position(|step| {
+                step.get("name")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|name| {
+                        name == "Verify packaged runner identity before release creation"
+                    })
+            })
+            .expect("release job must verify packaged runner identity");
+        let create_index = steps
+            .iter()
+            .position(|step| {
+                step.get("run")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|run| run.contains("gh release create"))
+            })
+            .expect("release job must create the release");
+        let verify = steps[verify_index]
+            .get("run")
+            .and_then(serde_yaml::Value::as_str)
+            .expect("identity verification must be a shell step");
+
+        assert!(verify.contains("for arch in amd64 arm64"));
+        assert!(verify.contains("jq -er --arg arch \"$arch\""));
+        assert!(verify.contains("release-record.json"));
+        assert!(verify.contains("dpkg-deb --fsys-tarfile \"$deb\""));
+        assert!(verify.contains("tar -xOf - ./usr/bin/velnor-runner"));
+        assert!(verify.contains("packaged_binary_sha"));
+        assert!(verify.contains("[ \"$packaged_binary_sha\" = \"$record_bin\" ]"));
+        assert!(verify_index < create_index);
     }
 
     #[test]

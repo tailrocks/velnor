@@ -291,8 +291,11 @@ mechanism:
    health/readiness; runner registration and lease state; the original
    reproducer; rollback to the retained signed predecessor; forward recovery;
    and fresh `velnor`, `github`, and `both` lane results. Before retrying,
-   cancel stale pending/running validation and remove only validation-owned
-   stale registrations, prove both are clear, and monitor only the new runs.
+   cancel only older pending/in-progress validation runs owned by this
+   iteration; never cancel protected `Release`, `Package update`, `Publish apt
+   repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs.
+   Remove only validation-owned stale registrations, prove both are clear, and
+   monitor only the new runs.
 6. Record authorization, commands, provenance, signed source-record digest and
    bindings, both transfer hashes, package and signing identities, health, lane,
    predecessor, rollback, and recovery evidence in the incident ledger. Retire

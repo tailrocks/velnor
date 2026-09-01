@@ -2425,7 +2425,9 @@ mod tests {
     use crate::node::exec::write_exec_config;
     use serde_json::json;
     use velnor_control::journal::FleetState;
+    #[cfg(feature = "test-support")]
     use wiremock::matchers::{method, path};
+    #[cfg(feature = "test-support")]
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Serializes tests that mutate `GITHUB_TOKEN` (process-global env):
@@ -3235,6 +3237,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(feature = "test-support")]
     async fn reconcile_with_runner_config_fixture(
         prepare_runner_config: impl FnOnce(&Path),
     ) -> anyhow::Result<SlotRecord> {
@@ -3544,6 +3547,7 @@ mod tests {
         assert!(matches!(result, Ok(Ok(()))));
     }
 
+    #[cfg(feature = "test-support")]
     async fn reconciliation_lookup_error_pacing(
         status: u16,
         headers: &[(&'static str, String)],

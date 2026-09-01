@@ -181,10 +181,13 @@ delete healthy registrations for convenience.
 
 ### 5. Prove routing, denial, and warmth
 
-Before every fixture/workflow smoke, cancel all older pending/in-progress runs,
-remove only stale validation registrations, then dispatch. Record and monitor
-only the new run id. Check within 60 seconds; diagnose no assignment or no state
-change before two minutes.
+Before every fixture/workflow smoke, cancel only older pending/in-progress
+validation runs owned by this iteration; never cancel protected `Release`,
+`Package update`, `Publish apt repo`, or `workflow_dispatch` release
+workflows/runs, or unrelated runs. Remove only stale validation-owned
+registrations, prove both sets clean, then dispatch and monitor only the new run
+id. Check within 60 seconds; diagnose no assignment or no state change before
+two minutes.
 
 Required proof:
 

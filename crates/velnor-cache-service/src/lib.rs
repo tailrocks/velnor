@@ -12,9 +12,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use velnor_action_journal::{ActionRecord, JournalError, LeaseManager};
@@ -30,6 +31,14 @@ pub const KACHE_VERSION: &str = "0.14.2";
 pub const SCCACHE_VERSION: &str = "0.16.0";
 const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
+const DEFAULT_CACHE_QUOTA_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const MAX_OUTPUT_CAPTURE_BYTES: u64 = 5 * 1024 * 1024 * 1024 + 16 * 1024 * 1024;
+const QUOTA_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ACCOUNTING_NODES: usize = 1_000_000;
+const MAX_ACCOUNTING_DEPTH: usize = 128;
+const MAX_ACCOUNTING_PATH_BYTES: usize = 16 * 1024;
+const MAX_ACCOUNTING_ENTRIES_PER_DIRECTORY: usize = 100_000;
+const MAX_DURABLE_CAS_ROOTS: usize = 1_000_000;
 const OUTPUT_ROOT_DIGEST: &str = "output_root";
 const RESULT_DIGEST: &str = "compiler_cache_result";
 const ACCOUNTING_DIGEST: &str = "compiler_cache_physical_byte_accounting";
@@ -103,7 +112,7 @@ pub fn resolve_backend(
     Ok(backend)
 }
 
-/// Exact admission failures for conflicting cache ownership.
+/// Exact cache admission failures.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CacheAdmissionError {
     #[error(
@@ -115,6 +124,14 @@ pub enum CacheAdmissionError {
         policy: CompilerCachePolicy,
         declared: CompilerCacheBackend,
     },
+    #[error(
+        "compiler-cache backend {declared:?} is unsupported for MicroVM: guest transport is not admitted"
+    )]
+    MicroVmTransportUnavailable { declared: CompilerCacheBackend },
+    #[error(
+        "compiler-cache environment '{name}' is unsupported for MicroVM: guest transport is not admitted"
+    )]
+    MicroVmEnvironmentUnsupported { name: String },
 }
 
 /// Service configuration. The root must be a daemon-owned persistent path.
@@ -126,6 +143,8 @@ pub struct CompilerCacheConfig {
     pub policy: CompilerCachePolicy,
     pub lease_duration_ms: u64,
     pub heartbeat_every_ms: u64,
+    /// Durable logical-byte ceiling for the service-owned CAS and metadata.
+    pub max_storage_bytes: u64,
 }
 
 impl CompilerCacheConfig {
@@ -139,6 +158,7 @@ impl CompilerCacheConfig {
             policy: CompilerCachePolicy::Auto,
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             heartbeat_every_ms: DEFAULT_HEARTBEAT_MS,
+            max_storage_bytes: DEFAULT_CACHE_QUOTA_BYTES,
         }
     }
 
@@ -154,6 +174,11 @@ impl CompilerCacheConfig {
         {
             return Err(CacheError::InvalidConfig(
                 "compiler-cache lease duration and heartbeat must be positive and heartbeat must be strictly less than lease duration".into(),
+            ));
+        }
+        if self.max_storage_bytes == 0 {
+            return Err(CacheError::InvalidConfig(
+                "compiler-cache storage quota must be positive".into(),
             ));
         }
         Ok(())
@@ -330,6 +355,7 @@ pub struct CompilerCacheService<C: Clock> {
     trust_class: TrustClass,
     lease_duration_ms: u64,
     heartbeat_every_ms: u64,
+    max_storage_bytes: u64,
     cas: CasStore,
     metadata: Mutex<Connection>,
     journal: Mutex<LeaseManager<C>>,
@@ -337,6 +363,9 @@ pub struct CompilerCacheService<C: Clock> {
     #[cfg(test)]
     failure_boundary: Mutex<Option<FailureBoundary>>,
 }
+
+/// Production service type used by the synchronous Docker executor.
+pub type ProductionCompilerCache = CompilerCacheService<velnor_action_journal::TokioClock>;
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +403,7 @@ impl<C: Clock> CompilerCacheService<C> {
             trust_class: config.trust_class,
             lease_duration_ms: config.lease_duration_ms,
             heartbeat_every_ms: config.heartbeat_every_ms,
+            max_storage_bytes: config.max_storage_bytes,
             cas,
             metadata: Mutex::new(metadata),
             journal: Mutex::new(journal),
@@ -405,6 +435,19 @@ impl<C: Clock> CompilerCacheService<C> {
     /// evidence. This does not attribute publication allocation to the lookup
     /// operation itself.
     pub async fn lookup_with_publication_accounting(
+        &self,
+        key: &CompilerActionKey,
+    ) -> Result<Option<CompilerCacheEntry>, CacheError> {
+        self.lookup_with_publication_accounting_blocking(key)
+    }
+
+    /// Synchronous adapter for the runner's blocking Docker executor.
+    ///
+    /// The cache state machine is already synchronous at its I/O boundary; the
+    /// async trait method above exists for service callers. Keeping this
+    /// adapter on the same implementation avoids nested runtimes and a second
+    /// ownership path.
+    pub fn lookup_with_publication_accounting_blocking(
         &self,
         key: &CompilerActionKey,
     ) -> Result<Option<CompilerCacheEntry>, CacheError> {
@@ -491,11 +534,23 @@ impl<C: Clock> CompilerCacheService<C> {
                 "published compiler result does not match its metadata".into(),
             ));
         }
+        self.validate_output_tree(&result.output_root)?;
         self.record_hit();
         Ok(Some(CompilerCacheEntry {
             result,
             publication_accounting: accounting,
         }))
+    }
+
+    /// Look up a validated result without acquiring a producer lease.
+    pub async fn lookup(
+        &self,
+        key: &CompilerActionKey,
+    ) -> Result<Option<CompilerResult>, CacheError> {
+        Ok(self
+            .lookup_with_publication_accounting(key)
+            .await?
+            .map(|entry| entry.result))
     }
 
     /// Publish a result and return physical-byte evidence for its durable
@@ -504,6 +559,33 @@ impl<C: Clock> CompilerCacheService<C> {
     pub async fn publish_with_accounting(
         &self,
         lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<PhysicalByteAccounting, CacheError> {
+        self.publish_with_accounting_blocking(lease, result)
+    }
+
+    /// Synchronous adapter for publication from the blocking Docker executor.
+    pub fn publish_with_accounting_blocking(
+        &self,
+        lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<PhysicalByteAccounting, CacheError> {
+        let outcome = self.publish_with_accounting_inner(&lease, result);
+        match outcome {
+            Ok(accounting) => Ok(accounting),
+            Err(error) => match self.abandon_blocking(&lease) {
+                Ok(()) | Err(CacheError::Journal(JournalError::LeaseFenced)) => Err(error),
+                Err(cleanup) => Err(CacheError::PublicationCleanup {
+                    publication: error.to_string(),
+                    cleanup: cleanup.to_string(),
+                }),
+            },
+        }
+    }
+
+    fn publish_with_accounting_inner(
+        &self,
+        lease: &ProducerLease,
         result: CompilerResult,
     ) -> Result<PhysicalByteAccounting, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
@@ -518,53 +600,286 @@ impl<C: Clock> CompilerCacheService<C> {
         {
             return Err(CacheError::TrustMismatch);
         }
+        self.ensure_active_lease(lease)?;
         if result.exit_code != 0 {
             return Err(CacheError::FailedResult {
                 exit_code: result.exit_code,
             });
         }
+        self.validate_output_tree(&result.output_root)?;
+        self.publish_after_validation(lease, result)
+    }
+
+    fn publish_after_validation(
+        &self,
+        lease: &ProducerLease,
+        result: CompilerResult,
+    ) -> Result<PhysicalByteAccounting, CacheError> {
         let result_bytes = serde_json::to_vec(&result)?;
-        let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::ResultCas)?;
-        let accounting_digest = self.cas.put(&serde_json::to_vec(&accounting)?)?;
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::AccountingCas)?;
-        let complete = ActionRecord {
-            action_key: lease.action.clone(),
-            state: ActionState::Complete,
+        self.reclaim_unreachable_cas()?;
+        let mut cas_attempted = false;
+        let outcome = (|| {
+            let (result_digest, accounting, accounting_digest) = {
+                let mut metadata = self.lock_metadata()?;
+                let transaction =
+                    metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let accounting_probe = serde_json::to_vec(&PhysicalByteAccounting::unknown())?;
+                let requested = u64::try_from(result_bytes.len())
+                    .map_err(|_| CacheError::InvalidMetadata("result is too large".into()))?
+                    .checked_add(u64::try_from(accounting_probe.len()).map_err(|_| {
+                        CacheError::InvalidMetadata("accounting is too large".into())
+                    })?)
+                    .ok_or_else(|| {
+                        CacheError::InvalidMetadata("quota request overflowed".into())
+                    })?;
+                self.ensure_quota(requested)?;
+                cas_attempted = true;
+                let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
+                #[cfg(test)]
+                self.fail_if_injected(FailureBoundary::ResultCas)?;
+                let accounting_bytes = serde_json::to_vec(&accounting)?;
+                let accounting_digest = self.cas.put(&accounting_bytes)?;
+                #[cfg(test)]
+                self.fail_if_injected(FailureBoundary::AccountingCas)?;
+                self.ensure_storage_within_quota()?;
+                transaction.commit()?;
+                (result_digest, accounting, accounting_digest)
+            };
+            let complete = ActionRecord {
+                action_key: lease.action.clone(),
+                state: ActionState::Complete,
+                producer_lease_ref: Some(lease_reference(lease)),
+                consumer_run_ids: BTreeSet::new(),
+                output_digests: BTreeMap::from([
+                    (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
+                    (RESULT_DIGEST.into(), result_digest.clone()),
+                    (ACCOUNTING_DIGEST.into(), accounting_digest),
+                ]),
+                timing: result.timing,
+                worker_id: Some(lease.owner.clone()),
+                trust_class: lease.action.execution_policy.trust_class,
+            };
+
+            // Journal completion remains the fencing point. The accounting
+            // digest is part of that durable record, so recovery never needs
+            // to infer whether the primary result object was new or reused.
+            let mut journal = self.lock_journal()?;
+            journal.append_action_and_release(lease, &complete)?;
+            drop(journal);
+            #[cfg(test)]
+            self.fail_if_injected(FailureBoundary::JournalComplete)?;
+
+            #[cfg(test)]
+            self.fail_if_injected(FailureBoundary::MetadataFinalization)?;
+            let mut metadata = self.lock_metadata()?;
+            finalize_metadata(
+                &mut metadata,
+                &lease.action,
+                &complete,
+                &result_digest,
+                &accounting,
+            )?;
+            Ok(accounting)
+        })();
+        match outcome {
+            Ok(accounting) => Ok(accounting),
+            Err(error) if cas_attempted => match self.reclaim_unreachable_cas() {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(CacheError::PublicationCleanup {
+                    publication: error.to_string(),
+                    cleanup: cleanup.to_string(),
+                }),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Acquire the single producer lease for an action miss.
+    pub async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
+        self.begin_blocking(key)
+    }
+
+    /// Synchronous producer-lease adapter for the blocking Docker executor.
+    pub fn begin_blocking(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(key)?;
+        self.reclaim_unreachable_cas()?;
+        self.ensure_quota(0)?;
+        let mut journal = self.lock_journal()?;
+        let lease = journal.acquire(
+            key,
+            self.owner.clone(),
+            self.lease_duration_ms,
+            self.heartbeat_every_ms,
+        )?;
+        let record = ActionRecord {
+            action_key: key.clone(),
+            state: ActionState::Leased,
             producer_lease_ref: Some(lease_reference(&lease)),
             consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::from([
-                (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
-                (RESULT_DIGEST.into(), result_digest.clone()),
-                (ACCOUNTING_DIGEST.into(), accounting_digest),
-            ]),
-            timing: result.timing,
-            worker_id: Some(lease.owner.clone()),
-            trust_class: lease.action.execution_policy.trust_class,
+            output_digests: BTreeMap::new(),
+            timing: Default::default(),
+            worker_id: Some(self.owner.clone()),
+            trust_class: key.execution_policy.trust_class,
         };
+        if let Err(error) = journal.append_action(&record) {
+            let _ = journal.abandon(&lease);
+            return Err(error.into());
+        }
+        Ok(lease)
+    }
 
-        // Journal completion remains the fencing point. The accounting digest
-        // is part of that durable record, so recovery never needs to infer
-        // whether the primary result object was new or deduplicated.
+    /// Renew a producer lease before its persisted deadline.
+    pub async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        self.renew_blocking(lease)
+    }
+
+    /// Synchronous lease-renewal adapter for the heartbeat thread.
+    pub fn renew_blocking(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
         let mut journal = self.lock_journal()?;
-        journal.append_action_and_release(&lease, &complete)?;
-        drop(journal);
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::JournalComplete)?;
+        journal.renew(lease)?;
+        Ok(())
+    }
 
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::MetadataFinalization)?;
-        let mut metadata = self.lock_metadata()?;
-        finalize_metadata(
-            &mut metadata,
-            &lease.action,
-            &complete,
-            &result_digest,
-            &accounting,
-        )?;
-        Ok(accounting)
+    /// Explicitly abandon a failed, cancelled, or timed-out producer lease.
+    ///
+    /// The lease is fenced immediately. Callers must invoke this operation on
+    /// every path that does not publish successfully; cleanup is deliberately
+    /// not hidden in a destructor because the durable transition can fail.
+    pub async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        self.abandon_blocking(lease)
+    }
+
+    /// Synchronous explicit cleanup adapter for the blocking Docker executor.
+    pub fn abandon_blocking(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        if self.backend == CompilerCacheBackend::Off {
+            return Err(CacheError::Disabled);
+        }
+        self.ensure_trust_scope(&lease.action)?;
+        let mut journal = self.lock_journal()?;
+        journal.abandon(lease)?;
+        Ok(())
+    }
+
+    /// Publish one successful result under its still-valid producer lease.
+    pub async fn publish(
+        &self,
+        lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<(), CacheError> {
+        self.publish_with_accounting(lease, result)
+            .await
+            .map(|_| ())
+    }
+
+    /// Snapshot a compiler output directory into this service's immutable CAS.
+    pub fn store_output_tree(&self, root: &Path) -> Result<Digest, CacheError> {
+        self.reclaim_unreachable_cas()?;
+        let mut cas_attempted = false;
+        let outcome = (|| {
+            let mut metadata = self.lock_metadata()?;
+            let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            self.ensure_quota(MAX_OUTPUT_CAPTURE_BYTES)?;
+            cas_attempted = true;
+            let digest = self
+                .cas
+                .put_directory_tree(root)
+                .map_err(CacheError::from)?;
+            insert_pending_root(&transaction, &digest, true)?;
+            self.ensure_storage_within_quota()?;
+            transaction.commit()?;
+            Ok(digest)
+        })();
+        match outcome {
+            Ok(digest) => Ok(digest),
+            Err(error) if cas_attempted => match self.reclaim_unreachable_cas() {
+                Ok(_) => Err(error),
+                Err(cleanup) => Err(CacheError::PublicationCleanup {
+                    publication: error.to_string(),
+                    cleanup: cleanup.to_string(),
+                }),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Validate an output tree and ensure every file belongs to the compiler
+    /// runtime subset. Publication and lookup both use this fence.
+    pub fn validate_output_tree(&self, root: &Digest) -> Result<(), CacheError> {
+        let manifest = self.cas.validate_tree(root)?;
+        if manifest.entries.iter().any(|entry| {
+            !matches!(
+                entry.class,
+                velnor_cas::FileClass::Executable | velnor_cas::FileClass::Runtime
+            )
+        }) {
+            return Err(CacheError::InvalidOutput(
+                "compiler output tree contains a non-runtime entry".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Restore an immutable output tree through a private staging directory.
+    pub fn materialize_output_tree(
+        &self,
+        root: &Digest,
+        destination: &Path,
+    ) -> Result<(), CacheError> {
+        self.validate_output_tree(root)?;
+        let parent = destination.parent().ok_or_else(|| {
+            CacheError::InvalidOutput(format!(
+                "compiler output destination has no parent: {}",
+                destination.display()
+            ))
+        })?;
+        fs::create_dir_all(parent)?;
+        if let Ok(metadata) = fs::symlink_metadata(destination)
+            && (metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output destination is not a regular directory: {}",
+                destination.display()
+            )));
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let staging = parent.join(format!(".compiler-restore-{nonce}"));
+        let backup = parent.join(format!(".compiler-backup-{nonce}"));
+        let result = (|| {
+            fs::create_dir(&staging)?;
+            self.cas.materialize_subset(
+                root,
+                velnor_cas::SubsetSelector::RuntimeFiles,
+                &staging,
+            )?;
+            let had_destination = fs::symlink_metadata(destination).is_ok();
+            if had_destination {
+                fs::rename(destination, &backup)?;
+            }
+            if let Err(error) = fs::rename(&staging, destination) {
+                if had_destination {
+                    let _ = fs::rename(&backup, destination);
+                }
+                return Err(CacheError::Io(error));
+            }
+            if had_destination {
+                fs::remove_dir_all(&backup)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
     }
 
     /// Return daemon-owned wrapper variables for one job.
@@ -633,59 +948,19 @@ impl CompilerCacheService<velnor_action_journal::TokioClock> {
 
 impl<C: Clock> CompilerCache for CompilerCacheService<C> {
     async fn lookup(&self, key: &CompilerActionKey) -> Result<Option<CompilerResult>, CacheError> {
-        Ok(self
-            .lookup_with_publication_accounting(key)
-            .await?
-            .map(|entry| entry.result))
+        CompilerCacheService::lookup(self, key).await
     }
 
     async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(key)?;
-        let mut journal = self.lock_journal()?;
-        let lease = journal.acquire(
-            key,
-            self.owner.clone(),
-            self.lease_duration_ms,
-            self.heartbeat_every_ms,
-        )?;
-        let record = ActionRecord {
-            action_key: key.clone(),
-            state: ActionState::Leased,
-            producer_lease_ref: Some(lease_reference(&lease)),
-            consumer_run_ids: BTreeSet::new(),
-            output_digests: BTreeMap::new(),
-            timing: Default::default(),
-            worker_id: Some(self.owner.clone()),
-            trust_class: key.execution_policy.trust_class,
-        };
-        if let Err(error) = journal.append_action(&record) {
-            let _ = journal.abandon(&lease);
-            return Err(error.into());
-        }
-        Ok(lease)
+        CompilerCacheService::begin(self, key).await
     }
 
     async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(&lease.action)?;
-        let mut journal = self.lock_journal()?;
-        journal.renew(lease)?;
-        Ok(())
+        CompilerCacheService::renew(self, lease).await
     }
 
     async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
-        if self.backend == CompilerCacheBackend::Off {
-            return Err(CacheError::Disabled);
-        }
-        self.ensure_trust_scope(&lease.action)?;
-        let mut journal = self.lock_journal()?;
-        journal.abandon(lease)?;
-        Ok(())
+        CompilerCacheService::abandon(self, lease).await
     }
 
     async fn publish(
@@ -693,8 +968,7 @@ impl<C: Clock> CompilerCache for CompilerCacheService<C> {
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<(), CacheError> {
-        self.publish_with_accounting(lease, result).await?;
-        Ok(())
+        CompilerCacheService::publish(self, lease, result).await
     }
 }
 
@@ -730,13 +1004,43 @@ pub enum CacheError {
     FailedResult { exit_code: i32 },
     #[error("invalid compiler-cache metadata: {0}")]
     InvalidMetadata(String),
+    #[error("invalid compiler-cache output: {0}")]
+    InvalidOutput(String),
     #[error("invalid compiler-cache configuration: {0}")]
     InvalidConfig(String),
     #[error("compiler-cache mutex is poisoned")]
     LockPoisoned,
+    #[error(
+        "compiler-cache publication failed ({publication}); lease cleanup also failed ({cleanup})"
+    )]
+    PublicationCleanup {
+        publication: String,
+        cleanup: String,
+    },
+    #[error(
+        "compiler-cache storage quota exceeded: limit={limit} current={current} requested={requested}"
+    )]
+    QuotaExceeded {
+        limit: u64,
+        current: u64,
+        requested: u64,
+    },
     #[cfg(test)]
     #[error("injected compiler-cache failure")]
     InjectedFailure,
+}
+
+impl CacheError {
+    /// Whether a producer could not start because another generation owns or
+    /// has just abandoned this action. The executor may safely bypass
+    /// publication in these cases; all other admission failures remain fatal.
+    #[must_use]
+    pub fn is_lease_contention(&self) -> bool {
+        matches!(
+            self,
+            Self::Journal(JournalError::LeaseBusy { .. } | JournalError::LeaseExpired)
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -767,6 +1071,14 @@ fn initialize_metadata(connection: &mut Connection) -> Result<(), CacheError> {
              schema_version INTEGER NOT NULL,
              lease_generation INTEGER NOT NULL,
              physical_byte_accounting_json TEXT
+         )",
+        [],
+    )?;
+    transaction.execute(
+        "CREATE TABLE IF NOT EXISTS compiler_cache_pending_roots (
+             digest TEXT PRIMARY KEY NOT NULL,
+             is_tree INTEGER NOT NULL CHECK (is_tree IN (0, 1)),
+             ref_count INTEGER NOT NULL CHECK (ref_count > 0)
          )",
         [],
     )?;
@@ -937,6 +1249,22 @@ fn finalize_metadata(
     Ok(())
 }
 
+fn insert_pending_root(
+    transaction: &Transaction<'_>,
+    digest: &Digest,
+    is_tree: bool,
+) -> Result<(), CacheError> {
+    transaction.execute(
+        "INSERT INTO compiler_cache_pending_roots(digest, is_tree, ref_count)
+         VALUES (?1, ?2, 1)
+         ON CONFLICT(digest) DO UPDATE SET
+             is_tree = MAX(compiler_cache_pending_roots.is_tree, excluded.is_tree),
+             ref_count = compiler_cache_pending_roots.ref_count + 1",
+        params![digest.to_string(), i64::from(is_tree)],
+    )?;
+    Ok(())
+}
+
 fn verify_metadata(
     entry: &MetadataEntry,
     key: &ActionKey,
@@ -1001,6 +1329,93 @@ fn lease_reference(lease: &ProducerLease) -> String {
     format!("compiler-cache/{}", lease.generation)
 }
 
+fn storage_size_bytes(root: &Path) -> Result<u64, CacheError> {
+    let root_path_bytes = root.to_string_lossy().len();
+    if root_path_bytes > MAX_ACCOUNTING_PATH_BYTES {
+        return Err(CacheError::InvalidMetadata(format!(
+            "compiler-cache accounting path exceeds {} bytes",
+            MAX_ACCOUNTING_PATH_BYTES
+        )));
+    }
+    let mut pending = vec![(root.to_path_buf(), 0_usize)];
+    let mut nodes = 1_usize;
+    let mut total = 0_u64;
+    while let Some((path, depth)) = pending.pop() {
+        if nodes > MAX_ACCOUNTING_NODES {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache accounting exceeded {} nodes",
+                MAX_ACCOUNTING_NODES
+            )));
+        }
+        if depth > MAX_ACCOUNTING_DEPTH {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache accounting exceeded depth limit {}",
+                MAX_ACCOUNTING_DEPTH
+            )));
+        }
+        if path.to_string_lossy().len() > MAX_ACCOUNTING_PATH_BYTES {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache accounting path exceeds {} bytes",
+                MAX_ACCOUNTING_PATH_BYTES
+            )));
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache storage contains symlink: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_file() {
+            total = total.checked_add(metadata.len()).ok_or_else(|| {
+                CacheError::InvalidMetadata("storage byte count overflowed".into())
+            })?;
+        } else if metadata.is_dir() {
+            if depth == MAX_ACCOUNTING_DEPTH {
+                return Err(CacheError::InvalidMetadata(format!(
+                    "compiler-cache accounting reached directory depth limit {}",
+                    MAX_ACCOUNTING_DEPTH
+                )));
+            }
+            let mut entries = 0_usize;
+            for entry in fs::read_dir(&path)? {
+                entries = entries.checked_add(1).ok_or_else(|| {
+                    CacheError::InvalidMetadata("compiler-cache entry count overflowed".into())
+                })?;
+                if entries > MAX_ACCOUNTING_ENTRIES_PER_DIRECTORY {
+                    return Err(CacheError::InvalidMetadata(format!(
+                        "compiler-cache directory exceeds {} entries",
+                        MAX_ACCOUNTING_ENTRIES_PER_DIRECTORY
+                    )));
+                }
+                let child = entry?.path();
+                if child.to_string_lossy().len() > MAX_ACCOUNTING_PATH_BYTES {
+                    return Err(CacheError::InvalidMetadata(format!(
+                        "compiler-cache accounting path exceeds {} bytes",
+                        MAX_ACCOUNTING_PATH_BYTES
+                    )));
+                }
+                nodes = nodes.checked_add(1).ok_or_else(|| {
+                    CacheError::InvalidMetadata("compiler-cache node count overflowed".into())
+                })?;
+                if nodes > MAX_ACCOUNTING_NODES {
+                    return Err(CacheError::InvalidMetadata(format!(
+                        "compiler-cache accounting exceeded {} nodes",
+                        MAX_ACCOUNTING_NODES
+                    )));
+                }
+                pending.push((child, depth + 1));
+            }
+        } else {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache storage contains unsupported entry: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(total)
+}
+
 fn trust_namespace(trust_class: TrustClass) -> &'static str {
     match trust_class {
         TrustClass::Untrusted => "untrusted",
@@ -1010,9 +1425,119 @@ fn trust_namespace(trust_class: TrustClass) -> &'static str {
 }
 
 impl<C: Clock> CompilerCacheService<C> {
+    fn reclaim_unreachable_cas(&self) -> Result<u64, CacheError> {
+        let latest = {
+            let journal = self.lock_journal()?;
+            journal.journal().latest()?
+        };
+        let mut metadata = self.lock_metadata()?;
+        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut roots = DurableCasRoots::default();
+
+        for record in latest.values() {
+            if let Some(digest) = record.output_digests.get(OUTPUT_ROOT_DIGEST) {
+                roots.insert_tree(digest)?;
+            }
+            if let Some(digest) = record.output_digests.get(RESULT_DIGEST) {
+                roots.insert_blob(digest)?;
+            }
+            if let Some(digest) = record.output_digests.get(ACCOUNTING_DIGEST) {
+                roots.insert_blob(digest)?;
+            }
+        }
+
+        let mut entries = transaction.prepare(
+            "SELECT result_digest, output_digest
+             FROM compiler_cache_entries",
+        )?;
+        let rows = entries.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (result_digest, output_digest) = row?;
+            roots.insert_blob(&Digest::parse(result_digest)?)?;
+            roots.insert_tree(&Digest::parse(output_digest)?)?;
+        }
+        drop(entries);
+
+        let mut pending = transaction.prepare(
+            "SELECT digest, is_tree, ref_count
+             FROM compiler_cache_pending_roots",
+        )?;
+        let rows = pending.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (digest, is_tree, ref_count) = row?;
+            if ref_count <= 0 || !matches!(is_tree, 0 | 1) {
+                return Err(CacheError::InvalidMetadata(
+                    "compiler-cache pending CAS root has invalid state".into(),
+                ));
+            }
+            let digest = Digest::parse(digest)?;
+            if is_tree == 1 {
+                roots.insert_tree(&digest)?;
+            } else {
+                roots.insert_blob(&digest)?;
+            }
+        }
+        drop(pending);
+
+        let reclaimed = self.cas.reclaim_unreachable(
+            &roots.blobs.iter().cloned().collect::<Vec<_>>(),
+            &roots.trees.iter().cloned().collect::<Vec<_>>(),
+        )?;
+        transaction.commit()?;
+        Ok(reclaimed)
+    }
+
     fn ensure_trust_scope(&self, key: &CompilerActionKey) -> Result<(), CacheError> {
         if key.execution_policy.trust_class != self.trust_class {
             return Err(CacheError::TrustScopeMismatch);
+        }
+        Ok(())
+    }
+
+    fn ensure_active_lease(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        let mut journal = self.lock_journal()?;
+        // Expire persisted deadlines before checking state. This rejects an
+        // obviously stale producer before it can allocate an orphan CAS
+        // object; append_action_and_release remains the atomic final fence.
+        journal.expire_due()?;
+        journal.validate_active_lease(lease)?;
+        Ok(())
+    }
+
+    fn ensure_quota(&self, requested: u64) -> Result<(), CacheError> {
+        let current = storage_size_bytes(&self.storage_root)?;
+        let requested = requested
+            .checked_add(QUOTA_HEADROOM_BYTES)
+            .ok_or_else(|| CacheError::InvalidMetadata("quota request overflowed".into()))?;
+        let projected = current
+            .checked_add(requested)
+            .ok_or_else(|| CacheError::InvalidMetadata("quota projection overflowed".into()))?;
+        if projected > self.max_storage_bytes {
+            return Err(CacheError::QuotaExceeded {
+                limit: self.max_storage_bytes,
+                current,
+                requested,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_storage_within_quota(&self) -> Result<(), CacheError> {
+        let current = storage_size_bytes(&self.storage_root)?;
+        if current > self.max_storage_bytes {
+            return Err(CacheError::QuotaExceeded {
+                limit: self.max_storage_bytes,
+                current,
+                requested: 0,
+            });
         }
         Ok(())
     }
@@ -1062,6 +1587,33 @@ impl<C: Clock> CompilerCacheService<C> {
     }
 }
 
+#[derive(Default)]
+struct DurableCasRoots {
+    blobs: BTreeSet<Digest>,
+    trees: BTreeSet<Digest>,
+}
+
+impl DurableCasRoots {
+    fn insert_blob(&mut self, digest: &Digest) -> Result<(), CacheError> {
+        self.blobs.insert(digest.clone());
+        self.check_limit()
+    }
+
+    fn insert_tree(&mut self, digest: &Digest) -> Result<(), CacheError> {
+        self.trees.insert(digest.clone());
+        self.check_limit()
+    }
+
+    fn check_limit(&self) -> Result<(), CacheError> {
+        if self.blobs.len().saturating_add(self.trees.len()) > MAX_DURABLE_CAS_ROOTS {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache durable CAS roots exceed {MAX_DURABLE_CAS_ROOTS}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,7 +1624,7 @@ mod tests {
         sync::{Arc, Barrier, Mutex},
     };
     use tempfile::TempDir;
-    use velnor_action_journal::TokioClock;
+    use velnor_action_journal::{LeaseStatus, TokioClock};
     use velnor_action_model::{
         ActionTiming, Clock, ExecutionPolicy, LogicalInstant, PlatformIdentity, Provenance,
     };
@@ -1130,7 +1682,7 @@ mod tests {
         let digest = Digest::from_bytes(b"compiler-output");
         CompilerResult {
             action_key,
-            output_root: digest.clone(),
+            output_root: test_output_root(),
             stdout_digest: digest.clone(),
             stderr_digest: digest.clone(),
             exit_code: 0,
@@ -1143,14 +1695,63 @@ mod tests {
         }
     }
 
+    fn test_output_root() -> Digest {
+        let manifest = velnor_cas::TreeManifest {
+            entries: vec![velnor_cas::TreeEntry {
+                path: "libdemo.rlib".into(),
+                digest: Digest::from_bytes(b"compiler-output"),
+                class: velnor_cas::FileClass::Runtime,
+                mode: 0o644,
+            }],
+        };
+        let bytes = canonical_json_bytes(&manifest).expect("test output manifest");
+        Digest::from_bytes(&bytes)
+    }
+
+    fn service_with_owner(
+        directory: &TempDir,
+        policy: CompilerCachePolicy,
+        declaration: WrapperDeclaration,
+        owner: &str,
+    ) -> CompilerCacheService<TokioClock> {
+        let mut config = CompilerCacheConfig::new(directory.path(), owner);
+        config.policy = policy;
+        let cache =
+            CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service");
+        seed_test_output(&cache);
+        cache
+    }
+
+    fn seed_test_output<C: Clock>(cache: &CompilerCacheService<C>) {
+        cache
+            .cas
+            .put(b"compiler-output")
+            .expect("test output object");
+        let root = cache
+            .cas
+            .put_tree(&velnor_cas::TreeManifest {
+                entries: vec![velnor_cas::TreeEntry {
+                    path: "libdemo.rlib".into(),
+                    digest: Digest::from_bytes(b"compiler-output"),
+                    class: velnor_cas::FileClass::Runtime,
+                    mode: 0o644,
+                }],
+            })
+            .expect("test output tree");
+        let mut metadata = cache.lock_metadata().expect("metadata lock");
+        let transaction = metadata
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("pending root transaction");
+        insert_pending_root(&transaction, &root, true).expect("pending output root");
+        transaction.commit().expect("pending root commit");
+    }
+
     fn service(
         directory: &TempDir,
         policy: CompilerCachePolicy,
         declaration: WrapperDeclaration,
     ) -> CompilerCacheService<TokioClock> {
-        let mut config = CompilerCacheConfig::new(directory.path(), "test-worker");
-        config.policy = policy;
-        CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service")
+        service_with_owner(directory, policy, declaration, "test-worker")
     }
 
     #[test]
@@ -1236,7 +1837,26 @@ mod tests {
             CompilerCachePolicy::Kache,
             WrapperDeclaration::default(),
         );
-        assert!(cache.lookup(&key(1)).await.expect("lookup").is_none());
+        let action_key = key(1);
+        assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            None
+        );
+        let lease = cache.begin(&action_key).await.expect("begin after miss");
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            Some(LeaseStatus::Active)
+        );
+        cache.abandon(&lease).await.expect("abandon test lease");
         assert_eq!(
             cache.telemetry(),
             CompilerCacheTelemetry {
@@ -1275,6 +1895,44 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn hit_lookup_does_not_acquire_a_producer_lease() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cache = service(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+        );
+        let action_key = key(25);
+        let lease = cache.begin(&action_key).await.expect("lease");
+        let expected = result(action_key.clone());
+        cache
+            .publish(lease, expected.clone())
+            .await
+            .expect("publish");
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            Some(LeaseStatus::Released)
+        );
+
+        assert_eq!(
+            cache.lookup(&action_key).await.expect("lookup"),
+            Some(expected)
+        );
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status after hit"),
+            Some(LeaseStatus::Released)
+        );
     }
 
     #[tokio::test]
@@ -1371,15 +2029,28 @@ mod tests {
             match boundary {
                 FailureBoundary::ResultCas | FailureBoundary::AccountingCas => {
                     assert_eq!(latest.state, ActionState::Leased);
+                    assert_eq!(
+                        cache
+                            .lock_journal()
+                            .expect("journal lock")
+                            .lease_status(&action_key)
+                            .expect("lease status"),
+                        Some(LeaseStatus::Abandoned)
+                    );
                     assert!(cache
                         .lookup_with_publication_accounting(&action_key)
                         .await
                         .expect("partial publication lookup")
                         .is_none());
-                    let metadata = cache.lock_metadata().expect("metadata lock");
-                    assert!(read_metadata(&metadata, &key_digest)
-                        .expect("partial metadata read")
-                        .is_none());
+                    {
+                        let metadata = cache.lock_metadata().expect("metadata lock");
+                        assert!(read_metadata(&metadata, &key_digest)
+                            .expect("partial metadata read")
+                            .is_none());
+                    }
+                    let retry = cache.begin(&action_key).await.expect("lease takeover");
+                    assert!(retry.generation > 1);
+                    cache.abandon(&retry).await.expect("abandon retry lease");
                 }
                 FailureBoundary::JournalComplete | FailureBoundary::MetadataFinalization => {
                     assert_eq!(latest.state, ActionState::Complete);
@@ -1409,6 +2080,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn publication_failures_reclaim_or_reserve_cas_bytes() {
+        for (seed, boundary) in [
+            (51, FailureBoundary::ResultCas),
+            (52, FailureBoundary::AccountingCas),
+            (53, FailureBoundary::MetadataFinalization),
+        ] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let cache = service(
+                &directory,
+                CompilerCachePolicy::Kache,
+                WrapperDeclaration::default(),
+            );
+            let action_key = key(seed);
+            let expected = result(action_key.clone());
+            let result_digest = Digest::from_bytes(&serde_json::to_vec(&expected).unwrap());
+            let before =
+                storage_size_bytes(&cache.storage_root().join("cas")).expect("CAS storage before");
+            let lease = cache.begin(&action_key).await.expect("lease");
+            cache.inject_failure(boundary);
+            assert!(matches!(
+                cache.publish_with_accounting(lease, expected.clone()).await,
+                Err(CacheError::InjectedFailure)
+            ));
+            let after =
+                storage_size_bytes(&cache.storage_root().join("cas")).expect("CAS storage after");
+
+            if boundary == FailureBoundary::MetadataFinalization {
+                assert!(after >= before);
+                assert_eq!(
+                    cache.lookup(&action_key).await.expect("late lookup"),
+                    Some(expected)
+                );
+                assert!(cache.cas.get(&result_digest).is_ok());
+            } else {
+                assert!(
+                    after <= before,
+                    "orphan bytes survived: {before} -> {after}"
+                );
+                assert!(matches!(
+                    cache.cas.get(&result_digest),
+                    Err(CasError::Absent { .. })
+                ));
+                let retry = cache.begin(&action_key).await.expect("retry lease");
+                cache.abandon(&retry).await.expect("abandon retry");
+            }
+        }
+    }
+
+    #[test]
+    fn storage_quota_rejects_unbounded_compiler_output_growth() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let output = directory.path().join("target");
+        fs::create_dir_all(&output).expect("output directory");
+        fs::write(output.join("libdemo.rlib"), b"output").expect("output file");
+
+        let mut config = CompilerCacheConfig::new(directory.path().join("cache"), "test-worker");
+        config.policy = CompilerCachePolicy::Kache;
+        config.max_storage_bytes = 1;
+        let cache =
+            CompilerCacheService::open(config, WrapperDeclaration::default(), TokioClock::new())
+                .expect("service");
+        assert!(matches!(
+            cache.store_output_tree(&output),
+            Err(CacheError::QuotaExceeded { .. })
+        ));
     }
 
     #[tokio::test]
@@ -1700,6 +2439,67 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn concurrent_service_instances_have_one_producer_lease() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let first = Arc::new(service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-a",
+        ));
+        let second = Arc::new(service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-b",
+        ));
+        let action_key = key(26);
+        let barrier = Arc::new(Barrier::new(2));
+
+        let outcomes = std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let first_action = action_key.clone();
+            let first_service = Arc::clone(&first);
+            let first_handle = scope.spawn(move || {
+                first_barrier.wait();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("first runtime");
+                runtime
+                    .block_on(first_service.begin(&first_action))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+
+            let second_barrier = Arc::clone(&barrier);
+            let second_action = action_key;
+            let second_service = Arc::clone(&second);
+            let second_handle = scope.spawn(move || {
+                second_barrier.wait();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("second runtime");
+                runtime
+                    .block_on(second_service.begin(&second_action))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+
+            [
+                first_handle.join().expect("first producer thread"),
+                second_handle.join().expect("second producer thread"),
+            ]
+        });
+
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert!(outcomes.iter().any(|outcome| {
+            matches!(outcome, Err(error) if error.contains("lease is already held"))
+        }));
+    }
+
     #[tokio::test]
     async fn renewed_lease_can_publish_after_original_deadline() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -1709,6 +2509,7 @@ mod tests {
         let cache =
             CompilerCacheService::open(config, WrapperDeclaration::default(), clock.clone())
                 .expect("service");
+        seed_test_output(&cache);
         let action_key = key(11);
         let mut lease = cache.begin(&action_key).await.expect("lease");
 
@@ -1733,14 +2534,83 @@ mod tests {
         );
         let action_key = key(12);
         let lease = cache.begin(&action_key).await.expect("lease");
+        let mut stale_lease = lease.clone();
 
         cache.abandon(&lease).await.expect("abandon");
+
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("lease status"),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert!(matches!(
+            cache.renew(&mut stale_lease).await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
 
         assert!(matches!(
             cache.publish(lease, result(action_key.clone())).await,
             Err(CacheError::Journal(JournalError::LeaseFenced))
         ));
         assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_owner_and_generation_cannot_write_cas() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let stale_cache = service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-a",
+        );
+        let current_cache = service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-b",
+        );
+        let action_key = key(49);
+        let stale_lease = stale_cache.begin(&action_key).await.expect("stale lease");
+        stale_cache
+            .abandon(&stale_lease)
+            .await
+            .expect("abandon stale lease");
+        let current_lease = current_cache
+            .begin(&action_key)
+            .await
+            .expect("current lease");
+        assert_eq!(current_lease.owner, "worker-b");
+        assert!(current_lease.generation > stale_lease.generation);
+
+        let size_before = storage_size_bytes(stale_cache.storage_root()).expect("storage size");
+        assert!(matches!(
+            stale_cache
+                .publish(stale_lease, result(action_key.clone()))
+                .await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
+        assert_eq!(
+            storage_size_bytes(stale_cache.storage_root()).expect("storage size after fence"),
+            size_before
+        );
+
+        current_cache
+            .abandon(&current_lease)
+            .await
+            .expect("abandon current lease");
+    }
+
+    #[test]
+    fn storage_accounting_rejects_overlong_root_path() {
+        let root = PathBuf::from("x".repeat(MAX_ACCOUNTING_PATH_BYTES + 1));
+        assert!(matches!(
+            storage_size_bytes(&root),
+            Err(CacheError::InvalidMetadata(message)) if message.contains("path exceeds")
+        ));
     }
 
     #[tokio::test]
@@ -1826,9 +2696,23 @@ mod tests {
         let mut failed = result(action_key.clone());
         failed.exit_code = 1;
         assert!(matches!(
-            cache.publish(lease, failed).await,
+            cache.publish(lease.clone(), failed).await,
             Err(CacheError::FailedResult { exit_code: 1 })
         ));
+        assert_eq!(
+            cache
+                .lock_journal()
+                .expect("journal lock")
+                .lease_status(&action_key)
+                .expect("failed lease status"),
+            Some(LeaseStatus::Abandoned)
+        );
+        assert!(matches!(
+            cache.abandon(&lease).await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
+        let retry = cache.begin(&action_key).await.expect("lease takeover");
+        cache.abandon(&retry).await.expect("abandon retry lease");
         assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
     }
 
@@ -1848,6 +2732,7 @@ mod tests {
             TokioClock::new(),
         )
         .expect("trusted service");
+        seed_test_output(&trusted);
         assert_ne!(untrusted.storage_root(), trusted.storage_root());
         assert!(untrusted
             .storage_root()

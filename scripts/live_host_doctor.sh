@@ -24,7 +24,8 @@ cd "$ROOT"
 echo "==> Planning live host doctor"
 cargo run -q -p velnor-tools -- live-host-doctor-plan \
   --host-os "$(uname -s)" \
-  --host-arch "$(uname -m)"
+  --host-arch "$(uname -m)" \
+  --target-mvp-arm-label "$TARGET_MVP_ARM_LABEL"
 
 echo "==> Checking required host tools"
 tools=(git cargo)
