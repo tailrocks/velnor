@@ -66,9 +66,45 @@ jobs:
             policy=.github/ci/policy.sh
           fi
           bash "$policy"
+  github-group-rust---crates:
+    name: "GitHub / Rust / Crates"
+    needs: [plan, policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit Rust / Crates jobs
+        run: echo 'group ready'
+
+  github-group-bun---packages:
+    name: "GitHub / Bun / Packages"
+    needs: [plan, policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit Bun / Packages jobs
+        run: echo 'group ready'
+
+  github-group-docker---images:
+    name: "GitHub / Docker / Images"
+    needs: [plan, policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit Docker / Images jobs
+        run: echo 'group ready'
+
+  github-group-documentation:
+    name: "GitHub / Documentation"
+    needs: [plan, policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit Documentation jobs
+        run: echo 'group ready'
+
   github-bun-velnor:
     name: "GitHub / Bun / Packages / Bun package (velnor)"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-bun---packages]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -105,7 +141,7 @@ jobs:
 
   github-docker:
     name: "GitHub / Docker / Images / Docker"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-docker---images]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -126,7 +162,7 @@ jobs:
 
   github-docs:
     name: "GitHub / Documentation / Documentation"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-documentation]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -161,7 +197,7 @@ jobs:
 
   github-rust-policy:
     name: "GitHub / Rust / Crates / Rust dependency policy"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-rust---crates]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -216,7 +252,7 @@ jobs:
 
   github-rust-unit-collector:
     name: "GitHub / Rust / Crates / unit-collector"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-rust---crates]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -271,7 +307,7 @@ jobs:
 
   github-rust-velnor-action-journal:
     name: "GitHub / Rust / Crates / velnor-action-journal"
-    needs: [plan, policy, github-rust-velnor-action-model, github-rust-velnor-model]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-action-model, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -326,7 +362,7 @@ jobs:
 
   github-rust-velnor-action-model:
     name: "GitHub / Rust / Crates / velnor-action-model"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-rust---crates]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -381,7 +417,7 @@ jobs:
 
   github-rust-velnor-cache-service:
     name: "GitHub / Rust / Crates / velnor-cache-service"
-    needs: [plan, policy, github-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-cas]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-cas]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -436,7 +472,7 @@ jobs:
 
   github-rust-velnor-cas:
     name: "GitHub / Rust / Crates / velnor-cas"
-    needs: [plan, policy, github-rust-velnor-action-model]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-action-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -491,7 +527,7 @@ jobs:
 
   github-rust-velnor-client:
     name: "GitHub / Rust / Crates / velnor-client"
-    needs: [plan, policy, github-rust-velnor-model]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -546,7 +582,7 @@ jobs:
 
   github-rust-velnor-control:
     name: "GitHub / Rust / Crates / velnor-control"
-    needs: [plan, policy, github-rust-velnor-action-journal, github-rust-velnor-model]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-action-journal, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -601,7 +637,7 @@ jobs:
 
   github-rust-velnor-model:
     name: "GitHub / Rust / Crates / velnor-model"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-rust---crates]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -656,7 +692,7 @@ jobs:
 
   github-rust-velnor-render:
     name: "GitHub / Rust / Crates / velnor-render"
-    needs: [plan, policy, github-rust-velnor-model]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -711,7 +747,7 @@ jobs:
 
   github-rust-velnor-runner:
     name: "GitHub / Rust / Crates / velnor-runner"
-    needs: [plan, policy, github-rust-velnor-action-model, github-rust-velnor-cache-service, github-rust-velnor-control, github-rust-velnor-model]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-action-model, github-rust-velnor-cache-service, github-rust-velnor-control, github-rust-velnor-model]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -766,7 +802,7 @@ jobs:
 
   github-rust-velnor-tools:
     name: "GitHub / Rust / Crates / velnor-tools"
-    needs: [plan, policy]
+    needs: [plan, policy, github-group-rust---crates]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -821,7 +857,7 @@ jobs:
 
   github-rust-velnorctl:
     name: "GitHub / Rust / Crates / velnorctl"
-    needs: [plan, policy, github-rust-velnor-client, github-rust-velnor-control, github-rust-velnor-model, github-rust-velnor-render, github-rust-velnor-runner]
+    needs: [plan, policy, github-group-rust---crates, github-rust-velnor-client, github-rust-velnor-control, github-rust-velnor-model, github-rust-velnor-render, github-rust-velnor-runner]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -874,10 +910,50 @@ jobs:
             ~/.cargo/git
           key: ci-${{ runner.os }}-rust-velnorctl-${{ hashFiles('crates/velnorctl/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
 
+  velnor-group-rust---crates:
+    name: "Velnor / Rust / Crates"
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: [plan, policy]
+    runs-on: [self-hosted, velnor]
+    timeout-minutes: 5
+    steps:
+      - name: Admit Rust / Crates jobs
+        run: echo 'group ready'
+
+  velnor-group-bun---packages:
+    name: "Velnor / Bun / Packages"
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: [plan, policy]
+    runs-on: [self-hosted, velnor]
+    timeout-minutes: 5
+    steps:
+      - name: Admit Bun / Packages jobs
+        run: echo 'group ready'
+
+  velnor-group-docker---images:
+    name: "Velnor / Docker / Images"
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: [plan, policy]
+    runs-on: [self-hosted, velnor]
+    timeout-minutes: 5
+    steps:
+      - name: Admit Docker / Images jobs
+        run: echo 'group ready'
+
+  velnor-group-documentation:
+    name: "Velnor / Documentation"
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: [plan, policy]
+    runs-on: [self-hosted, velnor]
+    timeout-minutes: 5
+    steps:
+      - name: Admit Documentation jobs
+        run: echo 'group ready'
+
   velnor-bun-velnor:
     name: "Velnor / Bun / Packages / Bun package (velnor)"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-bun---packages]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -908,7 +984,7 @@ jobs:
   velnor-docker:
     name: "Velnor / Docker / Images / Docker"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-docker---images]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -930,7 +1006,7 @@ jobs:
   velnor-docs:
     name: "Velnor / Documentation / Documentation"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-documentation]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -959,7 +1035,7 @@ jobs:
   velnor-rust-policy:
     name: "Velnor / Rust / Crates / Rust dependency policy"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-rust---crates]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1007,7 +1083,7 @@ jobs:
   velnor-rust-unit-collector:
     name: "Velnor / Rust / Crates / unit-collector"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-rust---crates]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1055,7 +1131,7 @@ jobs:
   velnor-rust-velnor-action-journal:
     name: "Velnor / Rust / Crates / velnor-action-journal"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-action-model, velnor-rust-velnor-model]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-action-model, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1103,7 +1179,7 @@ jobs:
   velnor-rust-velnor-action-model:
     name: "Velnor / Rust / Crates / velnor-action-model"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-rust---crates]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1151,7 +1227,7 @@ jobs:
   velnor-rust-velnor-cache-service:
     name: "Velnor / Rust / Crates / velnor-cache-service"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-cas]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-cas]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1199,7 +1275,7 @@ jobs:
   velnor-rust-velnor-cas:
     name: "Velnor / Rust / Crates / velnor-cas"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-action-model]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-action-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1247,7 +1323,7 @@ jobs:
   velnor-rust-velnor-client:
     name: "Velnor / Rust / Crates / velnor-client"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-model]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1295,7 +1371,7 @@ jobs:
   velnor-rust-velnor-control:
     name: "Velnor / Rust / Crates / velnor-control"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-action-journal, velnor-rust-velnor-model]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-action-journal, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1343,7 +1419,7 @@ jobs:
   velnor-rust-velnor-model:
     name: "Velnor / Rust / Crates / velnor-model"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-rust---crates]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1391,7 +1467,7 @@ jobs:
   velnor-rust-velnor-render:
     name: "Velnor / Rust / Crates / velnor-render"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-model]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1439,7 +1515,7 @@ jobs:
   velnor-rust-velnor-runner:
     name: "Velnor / Rust / Crates / velnor-runner"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-action-model, velnor-rust-velnor-cache-service, velnor-rust-velnor-control, velnor-rust-velnor-model]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-action-model, velnor-rust-velnor-cache-service, velnor-rust-velnor-control, velnor-rust-velnor-model]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1487,7 +1563,7 @@ jobs:
   velnor-rust-velnor-tools:
     name: "Velnor / Rust / Crates / velnor-tools"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
+    needs: [plan, policy, velnor-group-rust---crates]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
@@ -1535,7 +1611,7 @@ jobs:
   velnor-rust-velnorctl:
     name: "Velnor / Rust / Crates / velnorctl"
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
+    needs: [plan, policy, velnor-group-rust---crates, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner]
     runs-on: [self-hosted, velnor]
     timeout-minutes: 45
     steps:
