@@ -7,8 +7,8 @@ runners = "both"
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"
-detected = ["cargo-deny-policy", "cargo-lockfile", "cargo-nextest-policy", "package-manager:bun:.", "package-manager:bun:.output/server", "package-script:.:build", "package-script:.:typecheck", "renovate-configuration", "rust-binaries:unit-collector:1", "rust-binaries:velnor-runner:3", "rust-binaries:velnor-tools:1", "rust-binaries:velnorctl:1", "rust-build-script:velnor-runner", "rust-features:velnor-action-journal:1", "rust-features:velnor-runner:4", "rust-features:velnorctl:2", "rust-test-targets:unit-collector:1", "rust-test-targets:velnor-client:1", "rust-test-targets:velnor-control:1", "rust-test-targets:velnor-model:1", "rust-test-targets:velnor-render:1", "rust-test-targets:velnor-runner:1", "rust-test-targets:velnorctl:1", "rust-workspace-members:12"]
-limitations = ["Mise files are present but intentionally ignored; generated commands use native project tools and checked-in manifests only.", "No test script is declared in .output/server/package.json; no package test command was invented.", "No test script is declared in package.json; no package test command was invented.", "Project code, build scripts, task runners, and commands are never executed during analysis.", "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.", "Renovate credentials, runner placement, and write permissions cannot be inferred from repository files.", "Rust build scripts are watched but their system dependencies and generated outputs are not inferred."]
+detected = ["cargo-deny-policy", "cargo-lockfile", "cargo-nextest-policy", "package-manager:bun:.", "package-script:.:build", "package-script:.:typecheck", "renovate-configuration", "rust-binaries:unit-collector:1", "rust-binaries:velnor-runner:3", "rust-binaries:velnor-tools:1", "rust-binaries:velnorctl:1", "rust-build-script:velnor-runner", "rust-features:velnor-action-journal:1", "rust-features:velnor-runner:4", "rust-features:velnorctl:2", "rust-test-targets:unit-collector:1", "rust-test-targets:velnor-client:1", "rust-test-targets:velnor-control:1", "rust-test-targets:velnor-model:1", "rust-test-targets:velnor-render:1", "rust-test-targets:velnor-runner:1", "rust-test-targets:velnorctl:1", "rust-workspace-members:12"]
+limitations = ["Cargo deny license checks are skipped because deny.toml declares no [licenses] policy.", "Mise files are present but intentionally ignored; generated commands use native project tools and checked-in manifests only.", "No test script is declared in package.json; no package test command was invented.", "Project code, build scripts, task runners, and commands are never executed during analysis.", "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.", "Renovate credentials, runner placement, and write permissions cannot be inferred from repository files.", "Rust build scripts are watched but their system dependencies and generated outputs are not inferred."]
 
 [workflow]
 github_runner = "ubuntu-24.04"
@@ -18,18 +18,6 @@ files = ["ci-pr.yml", "ci-main.yml", "nightly.yml", "maintenance.yml"]
 [release]
 enabled = false
 reason = "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy."
-
-[[unit]]
-id = "bun-traced-node-modules"
-label = "Bun package (traced-node-modules)"
-kind = "bun"
-root = ".output/server"
-watch = [".output/server/package.json", ".output/server/**/*.js", ".output/server/**/*.jsx", ".output/server/**/*.ts", ".output/server/**/*.tsx", ".output/server/**/*.json", ".output/server/bun.lock", ".output/server/bun.lockb", ".output/server/package-lock.json", "bun.lock"]
-pr_commands = ["cd -- '.output/server' && bun install --frozen-lockfile"]
-full_commands = ["cd -- '.output/server' && bun install --frozen-lockfile"]
-[unit.cache]
-key_files = [".output/server/package.json", "bun.lock"]
-paths = ["~/.bun/install/cache"]
 
 [[unit]]
 id = "bun-velnor"
@@ -58,8 +46,8 @@ label = "Documentation"
 kind = "docs"
 root = "."
 watch = ["**/*.md", "mkdocs.yml", "docs/**"]
-pr_commands = ["npx --yes markdownlint-cli2@0.20.0"]
-full_commands = ["npx --yes markdownlint-cli2@0.20.0"]
+pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
 [unit.cache]
 key_files = ["package-lock.json", "bun.lock"]
 paths = ["~/.npm"]
@@ -70,8 +58,8 @@ label = "Rust dependency policy"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml", "Cargo.lock", "deny.toml", ".cargo/deny.toml", "audit.toml", ".cargo/audit.toml"]
-pr_commands = ["cargo deny check"]
-full_commands = ["cargo deny check"]
+pr_commands = ["cargo deny check advisories bans sources"]
+full_commands = ["cargo deny check advisories bans sources"]
 [unit.cache]
 key_files = ["Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]

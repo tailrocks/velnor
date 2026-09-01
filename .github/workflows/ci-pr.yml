@@ -65,36 +65,6 @@ jobs:
             policy=.github/ci/policy.sh
           fi
           bash "$policy"
-  github-bun-traced-node-modules:
-    name: "GitHub / Bun package (traced-node-modules)"
-    needs: [plan, policy]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-      - name: Restore "Bun package (traced-node-modules)" cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.bun/install/cache
-          key: ci-${{ runner.os }}-bun-traced-node-modules-${{ hashFiles('.output/server/package.json', 'bun.lock') }}
-          restore-keys: |
-            ci-${{ runner.os }}-bun-traced-node-modules-
-      - name: Run "Bun package (traced-node-modules)" checks
-        env:
-          CI_SCOPE: ${{ needs.plan.outputs.scope }}
-          CI_UNIT_ID: bun-traced-node-modules
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-        run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
-
   github-bun-velnor:
     name: "GitHub / Bun package (velnor)"
     needs: [plan, policy]
@@ -715,37 +685,6 @@ jobs:
         env:
           CI_SCOPE: ${{ needs.plan.outputs.scope }}
           CI_UNIT_ID: rust-velnorctl
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-        run: bash .github/ci/run.sh run --scope "$CI_SCOPE"
-
-  velnor-bun-traced-node-modules:
-    name: "Velnor / Bun package (traced-node-modules)"
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    needs: [plan, policy]
-    runs-on: [self-hosted, velnor]
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-      - name: Restore "Bun package (traced-node-modules)" cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.bun/install/cache
-          key: ci-${{ runner.os }}-bun-traced-node-modules-${{ hashFiles('.output/server/package.json', 'bun.lock') }}
-          restore-keys: |
-            ci-${{ runner.os }}-bun-traced-node-modules-
-      - name: Run "Bun package (traced-node-modules)" checks
-        env:
-          CI_SCOPE: ${{ needs.plan.outputs.scope }}
-          CI_UNIT_ID: bun-traced-node-modules
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
@@ -1394,8 +1333,8 @@ jobs:
 
   required:
     name: required
-    if: ${{ always() && needs['github-bun-traced-node-modules'].result == 'success' && needs['github-bun-velnor'].result == 'success' && needs['github-docker'].result == 'success' && needs['github-docs'].result == 'success' && needs['github-rust-policy'].result == 'success' && needs['github-rust-unit-collector'].result == 'success' && needs['github-rust-velnor-action-journal'].result == 'success' && needs['github-rust-velnor-action-model'].result == 'success' && needs['github-rust-velnor-cache-service'].result == 'success' && needs['github-rust-velnor-cas'].result == 'success' && needs['github-rust-velnor-client'].result == 'success' && needs['github-rust-velnor-control'].result == 'success' && needs['github-rust-velnor-model'].result == 'success' && needs['github-rust-velnor-render'].result == 'success' && needs['github-rust-velnor-runner'].result == 'success' && needs['github-rust-velnor-tools'].result == 'success' && needs['github-rust-velnorctl'].result == 'success' && (needs['velnor-bun-traced-node-modules'].result == 'success' || needs['velnor-bun-traced-node-modules'].result == 'skipped') && (needs['velnor-bun-velnor'].result == 'success' || needs['velnor-bun-velnor'].result == 'skipped') && (needs['velnor-docker'].result == 'success' || needs['velnor-docker'].result == 'skipped') && (needs['velnor-docs'].result == 'success' || needs['velnor-docs'].result == 'skipped') && (needs['velnor-rust-policy'].result == 'success' || needs['velnor-rust-policy'].result == 'skipped') && (needs['velnor-rust-unit-collector'].result == 'success' || needs['velnor-rust-unit-collector'].result == 'skipped') && (needs['velnor-rust-velnor-action-journal'].result == 'success' || needs['velnor-rust-velnor-action-journal'].result == 'skipped') && (needs['velnor-rust-velnor-action-model'].result == 'success' || needs['velnor-rust-velnor-action-model'].result == 'skipped') && (needs['velnor-rust-velnor-cache-service'].result == 'success' || needs['velnor-rust-velnor-cache-service'].result == 'skipped') && (needs['velnor-rust-velnor-cas'].result == 'success' || needs['velnor-rust-velnor-cas'].result == 'skipped') && (needs['velnor-rust-velnor-client'].result == 'success' || needs['velnor-rust-velnor-client'].result == 'skipped') && (needs['velnor-rust-velnor-control'].result == 'success' || needs['velnor-rust-velnor-control'].result == 'skipped') && (needs['velnor-rust-velnor-model'].result == 'success' || needs['velnor-rust-velnor-model'].result == 'skipped') && (needs['velnor-rust-velnor-render'].result == 'success' || needs['velnor-rust-velnor-render'].result == 'skipped') && (needs['velnor-rust-velnor-runner'].result == 'success' || needs['velnor-rust-velnor-runner'].result == 'skipped') && (needs['velnor-rust-velnor-tools'].result == 'success' || needs['velnor-rust-velnor-tools'].result == 'skipped') && (needs['velnor-rust-velnorctl'].result == 'success' || needs['velnor-rust-velnorctl'].result == 'skipped') }}
-    needs: [plan, policy, github-bun-traced-node-modules, github-bun-velnor, github-docker, github-docs, github-rust-policy, github-rust-unit-collector, github-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-cache-service, github-rust-velnor-cas, github-rust-velnor-client, github-rust-velnor-control, github-rust-velnor-model, github-rust-velnor-render, github-rust-velnor-runner, github-rust-velnor-tools, github-rust-velnorctl, velnor-bun-traced-node-modules, velnor-bun-velnor, velnor-docker, velnor-docs, velnor-rust-policy, velnor-rust-unit-collector, velnor-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-cache-service, velnor-rust-velnor-cas, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner, velnor-rust-velnor-tools, velnor-rust-velnorctl]
+    if: ${{ always() && needs['github-bun-velnor'].result == 'success' && needs['github-docker'].result == 'success' && needs['github-docs'].result == 'success' && needs['github-rust-policy'].result == 'success' && needs['github-rust-unit-collector'].result == 'success' && needs['github-rust-velnor-action-journal'].result == 'success' && needs['github-rust-velnor-action-model'].result == 'success' && needs['github-rust-velnor-cache-service'].result == 'success' && needs['github-rust-velnor-cas'].result == 'success' && needs['github-rust-velnor-client'].result == 'success' && needs['github-rust-velnor-control'].result == 'success' && needs['github-rust-velnor-model'].result == 'success' && needs['github-rust-velnor-render'].result == 'success' && needs['github-rust-velnor-runner'].result == 'success' && needs['github-rust-velnor-tools'].result == 'success' && needs['github-rust-velnorctl'].result == 'success' && (needs['velnor-bun-velnor'].result == 'success' || needs['velnor-bun-velnor'].result == 'skipped') && (needs['velnor-docker'].result == 'success' || needs['velnor-docker'].result == 'skipped') && (needs['velnor-docs'].result == 'success' || needs['velnor-docs'].result == 'skipped') && (needs['velnor-rust-policy'].result == 'success' || needs['velnor-rust-policy'].result == 'skipped') && (needs['velnor-rust-unit-collector'].result == 'success' || needs['velnor-rust-unit-collector'].result == 'skipped') && (needs['velnor-rust-velnor-action-journal'].result == 'success' || needs['velnor-rust-velnor-action-journal'].result == 'skipped') && (needs['velnor-rust-velnor-action-model'].result == 'success' || needs['velnor-rust-velnor-action-model'].result == 'skipped') && (needs['velnor-rust-velnor-cache-service'].result == 'success' || needs['velnor-rust-velnor-cache-service'].result == 'skipped') && (needs['velnor-rust-velnor-cas'].result == 'success' || needs['velnor-rust-velnor-cas'].result == 'skipped') && (needs['velnor-rust-velnor-client'].result == 'success' || needs['velnor-rust-velnor-client'].result == 'skipped') && (needs['velnor-rust-velnor-control'].result == 'success' || needs['velnor-rust-velnor-control'].result == 'skipped') && (needs['velnor-rust-velnor-model'].result == 'success' || needs['velnor-rust-velnor-model'].result == 'skipped') && (needs['velnor-rust-velnor-render'].result == 'success' || needs['velnor-rust-velnor-render'].result == 'skipped') && (needs['velnor-rust-velnor-runner'].result == 'success' || needs['velnor-rust-velnor-runner'].result == 'skipped') && (needs['velnor-rust-velnor-tools'].result == 'success' || needs['velnor-rust-velnor-tools'].result == 'skipped') && (needs['velnor-rust-velnorctl'].result == 'success' || needs['velnor-rust-velnorctl'].result == 'skipped') }}
+    needs: [plan, policy, github-bun-velnor, github-docker, github-docs, github-rust-policy, github-rust-unit-collector, github-rust-velnor-action-journal, github-rust-velnor-action-model, github-rust-velnor-cache-service, github-rust-velnor-cas, github-rust-velnor-client, github-rust-velnor-control, github-rust-velnor-model, github-rust-velnor-render, github-rust-velnor-runner, github-rust-velnor-tools, github-rust-velnorctl, velnor-bun-velnor, velnor-docker, velnor-docs, velnor-rust-policy, velnor-rust-unit-collector, velnor-rust-velnor-action-journal, velnor-rust-velnor-action-model, velnor-rust-velnor-cache-service, velnor-rust-velnor-cas, velnor-rust-velnor-client, velnor-rust-velnor-control, velnor-rust-velnor-model, velnor-rust-velnor-render, velnor-rust-velnor-runner, velnor-rust-velnor-tools, velnor-rust-velnorctl]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
