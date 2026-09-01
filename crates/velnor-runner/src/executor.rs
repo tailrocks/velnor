@@ -7,6 +7,7 @@ use crate::{
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
+    compiler_action::CompilerActionSession,
     container::{JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
@@ -1361,6 +1362,7 @@ pub(crate) struct DockerJobEngine<R> {
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
+    compiler_cache: Option<Arc<velnor_cache_service::ProductionCompilerCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1391,6 +1393,7 @@ where
             docker_lease: None,
             job_network_guard: None,
             lifecycle_telemetry: None,
+            compiler_cache: None,
         }
     }
 
@@ -1436,6 +1439,14 @@ where
 
     pub fn with_job_environment_started(mut self, started: bool) -> Self {
         self.job_environment_started = started;
+        self
+    }
+
+    pub(crate) fn with_compiler_cache_service(
+        mut self,
+        service: velnor_cache_service::ProductionCompilerCache,
+    ) -> Self {
+        self.compiler_cache = Some(Arc::new(service));
         self
     }
 
@@ -2060,13 +2071,40 @@ where
                         (Some(_), Some(_)) => Some(Instant::now()),
                         _ => None,
                     };
-                    let step_result = self.runner.run_streaming_timeout_with_env(
-                        "docker",
-                        exec_args.args(),
-                        exec_args.process_env(),
-                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
-                        &mut on_output,
-                    )?;
+                    let step_timeout =
+                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
+                    let cache_execution = self
+                        .compiler_cache
+                        .as_ref()
+                        .and_then(|service| {
+                            CompilerActionSession::new(
+                                Arc::clone(service),
+                                container,
+                                &step.script,
+                                &env,
+                                step_timeout,
+                            )
+                            .transpose()
+                        })
+                        .transpose()?;
+                    let step_result = if let Some(session) = cache_execution {
+                        session
+                            .execute(
+                                &mut self.runner,
+                                exec_args.args(),
+                                exec_args.process_env(),
+                                &mut on_output,
+                            )?
+                            .result
+                    } else {
+                        self.runner.run_streaming_timeout_with_env(
+                            "docker",
+                            exec_args.args(),
+                            exec_args.process_env(),
+                            step_timeout,
+                            &mut on_output,
+                        )?
+                    };
                     if let (Some(compiler), Some(compile_started), Some(telemetry)) =
                         (compiler, compile_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -14509,6 +14547,8 @@ esac
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
             compiler_cache_trust_class:
                 velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
+            compiler_cache_service: false,
+            compiler_cache_service_root: None,
         }
     }
 

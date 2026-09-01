@@ -12,6 +12,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -346,6 +347,9 @@ pub struct CompilerCacheService<C: Clock> {
     failure_boundary: Mutex<Option<FailureBoundary>>,
 }
 
+/// Production service type used by the synchronous Docker executor.
+pub type ProductionCompilerCache = CompilerCacheService<velnor_action_journal::TokioClock>;
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FailureBoundary {
@@ -413,6 +417,19 @@ impl<C: Clock> CompilerCacheService<C> {
     /// evidence. This does not attribute publication allocation to the lookup
     /// operation itself.
     pub async fn lookup_with_publication_accounting(
+        &self,
+        key: &CompilerActionKey,
+    ) -> Result<Option<CompilerCacheEntry>, CacheError> {
+        self.lookup_with_publication_accounting_blocking(key)
+    }
+
+    /// Synchronous adapter for the runner's blocking Docker executor.
+    ///
+    /// The cache state machine is already synchronous at its I/O boundary; the
+    /// async trait method above exists for service callers. Keeping this
+    /// adapter on the same implementation avoids nested runtimes and a second
+    /// ownership path.
+    pub fn lookup_with_publication_accounting_blocking(
         &self,
         key: &CompilerActionKey,
     ) -> Result<Option<CompilerCacheEntry>, CacheError> {
@@ -499,6 +516,7 @@ impl<C: Clock> CompilerCacheService<C> {
                 "published compiler result does not match its metadata".into(),
             ));
         }
+        self.validate_output_tree(&result.output_root)?;
         self.record_hit();
         Ok(Some(CompilerCacheEntry {
             result,
@@ -525,6 +543,15 @@ impl<C: Clock> CompilerCacheService<C> {
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<PhysicalByteAccounting, CacheError> {
+        self.publish_with_accounting_blocking(lease, result)
+    }
+
+    /// Synchronous adapter for publication from the blocking Docker executor.
+    pub fn publish_with_accounting_blocking(
+        &self,
+        lease: ProducerLease,
+        result: CompilerResult,
+    ) -> Result<PhysicalByteAccounting, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
@@ -543,6 +570,7 @@ impl<C: Clock> CompilerCacheService<C> {
                 exit_code: result.exit_code,
             });
         }
+        self.validate_output_tree(&result.output_root)?;
         let result_bytes = serde_json::to_vec(&result)?;
         let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
         #[cfg(test)]
@@ -589,6 +617,11 @@ impl<C: Clock> CompilerCacheService<C> {
 
     /// Acquire the single producer lease for an action miss.
     pub async fn begin(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
+        self.begin_blocking(key)
+    }
+
+    /// Synchronous producer-lease adapter for the blocking Docker executor.
+    pub fn begin_blocking(&self, key: &CompilerActionKey) -> Result<ProducerLease, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
@@ -619,6 +652,11 @@ impl<C: Clock> CompilerCacheService<C> {
 
     /// Renew a producer lease before its persisted deadline.
     pub async fn renew(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
+        self.renew_blocking(lease)
+    }
+
+    /// Synchronous lease-renewal adapter for the heartbeat thread.
+    pub fn renew_blocking(&self, lease: &mut ProducerLease) -> Result<(), CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
@@ -634,6 +672,11 @@ impl<C: Clock> CompilerCacheService<C> {
     /// every path that does not publish successfully; cleanup is deliberately
     /// not hidden in a destructor because the durable transition can fail.
     pub async fn abandon(&self, lease: &ProducerLease) -> Result<(), CacheError> {
+        self.abandon_blocking(lease)
+    }
+
+    /// Synchronous explicit cleanup adapter for the blocking Docker executor.
+    pub fn abandon_blocking(&self, lease: &ProducerLease) -> Result<(), CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
@@ -652,6 +695,84 @@ impl<C: Clock> CompilerCacheService<C> {
         self.publish_with_accounting(lease, result)
             .await
             .map(|_| ())
+    }
+
+    /// Snapshot a compiler output directory into this service's immutable CAS.
+    pub fn store_output_tree(&self, root: &Path) -> Result<Digest, CacheError> {
+        self.cas.put_directory_tree(root).map_err(CacheError::from)
+    }
+
+    /// Validate an output tree and ensure every file belongs to the compiler
+    /// runtime subset. Publication and lookup both use this fence.
+    pub fn validate_output_tree(&self, root: &Digest) -> Result<(), CacheError> {
+        let manifest = self.cas.validate_tree(root)?;
+        if manifest.entries.iter().any(|entry| {
+            !matches!(
+                entry.class,
+                velnor_cas::FileClass::Executable | velnor_cas::FileClass::Runtime
+            )
+        }) {
+            return Err(CacheError::InvalidOutput(
+                "compiler output tree contains a non-runtime entry".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Restore an immutable output tree through a private staging directory.
+    pub fn materialize_output_tree(
+        &self,
+        root: &Digest,
+        destination: &Path,
+    ) -> Result<(), CacheError> {
+        self.validate_output_tree(root)?;
+        let parent = destination.parent().ok_or_else(|| {
+            CacheError::InvalidOutput(format!(
+                "compiler output destination has no parent: {}",
+                destination.display()
+            ))
+        })?;
+        fs::create_dir_all(parent)?;
+        if let Ok(metadata) = fs::symlink_metadata(destination) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(CacheError::InvalidOutput(format!(
+                    "compiler output destination is not a regular directory: {}",
+                    destination.display()
+                )));
+            }
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let staging = parent.join(format!(".compiler-restore-{nonce}"));
+        let backup = parent.join(format!(".compiler-backup-{nonce}"));
+        let result = (|| {
+            fs::create_dir(&staging)?;
+            self.cas.materialize_subset(
+                root,
+                velnor_cas::SubsetSelector::RuntimeFiles,
+                &staging,
+            )?;
+            let had_destination = fs::symlink_metadata(destination).is_ok();
+            if had_destination {
+                fs::rename(destination, &backup)?;
+            }
+            if let Err(error) = fs::rename(&staging, destination) {
+                if had_destination {
+                    let _ = fs::rename(&backup, destination);
+                }
+                return Err(CacheError::Io(error));
+            }
+            if had_destination {
+                fs::remove_dir_all(&backup)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
     }
 
     /// Return daemon-owned wrapper variables for one job.
@@ -776,6 +897,8 @@ pub enum CacheError {
     FailedResult { exit_code: i32 },
     #[error("invalid compiler-cache metadata: {0}")]
     InvalidMetadata(String),
+    #[error("invalid compiler-cache output: {0}")]
+    InvalidOutput(String),
     #[error("invalid compiler-cache configuration: {0}")]
     InvalidConfig(String),
     #[error("compiler-cache mutex is poisoned")]
@@ -783,6 +906,23 @@ pub enum CacheError {
     #[cfg(test)]
     #[error("injected compiler-cache failure")]
     InjectedFailure,
+}
+
+impl CacheError {
+    /// Whether a producer could not start because another generation owns or
+    /// has just abandoned this action. The executor may safely bypass
+    /// publication in these cases; all other admission failures remain fatal.
+    #[must_use]
+    pub fn is_lease_contention(&self) -> bool {
+        matches!(
+            self,
+            Self::Journal(
+                JournalError::LeaseBusy { .. }
+                    | JournalError::LeaseAbandonable { .. }
+                    | JournalError::LeaseExpired
+            )
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -1189,7 +1329,7 @@ mod tests {
         let digest = Digest::from_bytes(b"compiler-output");
         CompilerResult {
             action_key,
-            output_root: digest.clone(),
+            output_root: test_output_root(),
             stdout_digest: digest.clone(),
             stderr_digest: digest.clone(),
             exit_code: 0,
@@ -1202,6 +1342,19 @@ mod tests {
         }
     }
 
+    fn test_output_root() -> Digest {
+        let manifest = velnor_cas::TreeManifest {
+            entries: vec![velnor_cas::TreeEntry {
+                path: "libdemo.rlib".into(),
+                digest: Digest::from_bytes(b"compiler-output"),
+                class: velnor_cas::FileClass::Runtime,
+                mode: 0o644,
+            }],
+        };
+        let bytes = canonical_json_bytes(&manifest).expect("test output manifest");
+        Digest::from_bytes(&bytes)
+    }
+
     fn service_with_owner(
         directory: &TempDir,
         policy: CompilerCachePolicy,
@@ -1210,7 +1363,28 @@ mod tests {
     ) -> CompilerCacheService<TokioClock> {
         let mut config = CompilerCacheConfig::new(directory.path(), owner);
         config.policy = policy;
-        CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service")
+        let cache =
+            CompilerCacheService::open(config, declaration, TokioClock::new()).expect("service");
+        seed_test_output(&cache);
+        cache
+    }
+
+    fn seed_test_output<C: Clock>(cache: &CompilerCacheService<C>) {
+        cache
+            .cas
+            .put(b"compiler-output")
+            .expect("test output object");
+        cache
+            .cas
+            .put_tree(&velnor_cas::TreeManifest {
+                entries: vec![velnor_cas::TreeEntry {
+                    path: "libdemo.rlib".into(),
+                    digest: Digest::from_bytes(b"compiler-output"),
+                    class: velnor_cas::FileClass::Runtime,
+                    mode: 0o644,
+                }],
+            })
+            .expect("test output tree");
     }
 
     fn service(
@@ -1895,6 +2069,7 @@ mod tests {
         let cache =
             CompilerCacheService::open(config, WrapperDeclaration::default(), clock.clone())
                 .expect("service");
+        seed_test_output(&cache);
         let action_key = key(11);
         let mut lease = cache.begin(&action_key).await.expect("lease");
 
@@ -2065,6 +2240,7 @@ mod tests {
             TokioClock::new(),
         )
         .expect("trusted service");
+        seed_test_output(&trusted);
         assert_ne!(untrusted.storage_root(), trusted.storage_root());
         assert!(untrusted
             .storage_root()

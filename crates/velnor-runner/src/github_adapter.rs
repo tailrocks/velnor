@@ -36,6 +36,19 @@ pub fn github_job_container_spec(
     daemon_id: String,
     trust_scope: &str,
 ) -> Result<JobContainerSpec, CacheAdmissionError> {
+    let compiler_cache_service = paths.execution_backend
+        == velnor_model::ExecutionBackendKind::Docker
+        && std::env::var("VELNOR_COMPILER_CACHE_SERVICE").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+    let compiler_cache_service_root = compiler_cache_service.then(|| {
+        crate::storage::StorageLayout::resolve()
+            .map(|layout| layout.cache_root.join("compiler-service"))
+            .unwrap_or_else(|| paths.temp_host.join("_velnor/ephemeral/compiler-service"))
+    });
     // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
@@ -81,6 +94,8 @@ pub fn github_job_container_spec(
             }
         },
         compiler_cache_trust_class: compiler_cache_trust_class(trust_scope),
+        compiler_cache_service,
+        compiler_cache_service_root,
     })
 }
 
@@ -1045,6 +1060,8 @@ mod tests {
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
             compiler_cache_trust_class:
                 velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
+            compiler_cache_service: false,
+            compiler_cache_service_root: None,
         };
         let plan = github_normalized_job_plan(
             &job,

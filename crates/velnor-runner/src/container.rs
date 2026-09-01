@@ -61,10 +61,17 @@ pub struct JobContainerSpec {
     /// namespace remains below the daemon-shared Plan 066 cache root, so slots
     /// share warm entries without crossing trust boundaries.
     pub compiler_cache_trust_class: GuestCompilerCacheTrustClass,
+    /// Host-operator opt-in for the structured service-owned compiler path.
+    /// Existing wrapper backends remain unchanged when this is false.
+    pub compiler_cache_service: bool,
+    pub compiler_cache_service_root: Option<PathBuf>,
 }
 
 impl JobContainerSpec {
     pub(crate) fn compiler_cache_runtime(&self) -> CompilerCacheRuntime {
+        if self.compiler_cache_service {
+            return CompilerCacheRuntime::off();
+        }
         match self.compiler_cache_backend {
             CompilerCacheBackend::Sccache => CompilerCacheRuntime::new(
                 CompilerCacheBackend::Sccache,
@@ -1382,6 +1389,8 @@ mod tests {
             cargo_target_host: None,
             compiler_cache_backend: CompilerCacheBackend::Sccache,
             compiler_cache_trust_class: GuestCompilerCacheTrustClass::Trusted,
+            compiler_cache_service: false,
+            compiler_cache_service_root: None,
         }
     }
 

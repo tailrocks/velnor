@@ -6,19 +6,19 @@
 //! mutable reference to stored content.
 
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(not(unix))]
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::{
     ffi::{OsStr, OsString},
-    fs,
     io::{Seek, SeekFrom},
+    os::unix::ffi::OsStringExt,
     sync::Arc,
 };
 
@@ -647,6 +647,50 @@ impl CasStore {
         self.put_with_accounting(&bytes)
     }
 
+    /// Store a regular directory as an immutable, digest-addressed tree.
+    ///
+    /// Every source component is opened without following symlinks. The
+    /// resulting manifest contains only regular files; directories are
+    /// represented by their file paths and the manifest itself is the tree
+    /// root. This is the only filesystem-to-tree boundary used by compiler
+    /// output publication.
+    pub fn put_directory_tree(&self, root: &Path) -> Result<Digest, CasError> {
+        let metadata = fs::symlink_metadata(root)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CasError::UnsafePath(format!(
+                "tree source is not a regular directory: {}",
+                root.display()
+            )));
+        }
+
+        let mut entries = Vec::new();
+        let mut total_bytes = 0_u64;
+        #[cfg(unix)]
+        {
+            let root_dir = open_existing_secure_directory(root)?;
+            collect_directory_tree(
+                &root_dir,
+                Path::new(""),
+                self,
+                &mut entries,
+                &mut total_bytes,
+            )?;
+        }
+        #[cfg(not(unix))]
+        collect_directory_tree_path(root, root, self, &mut entries, &mut total_bytes)?;
+
+        self.put_tree(&TreeManifest { entries })
+    }
+
+    /// Validate a tree root and every referenced file object.
+    pub fn validate_tree(&self, root_digest: &Digest) -> Result<TreeManifest, CasError> {
+        let manifest = self.read_tree_manifest(root_digest)?;
+        for entry in &manifest.entries {
+            self.get(&entry.digest)?;
+        }
+        Ok(manifest)
+    }
+
     /// Materialize only the selected file classes from a tree manifest.
     pub fn materialize_subset(
         &self,
@@ -1099,6 +1143,191 @@ fn open_secure_directory(path: &Path) -> io::Result<File> {
         }
     }
     Ok(current)
+}
+
+#[cfg(unix)]
+fn open_existing_secure_directory(path: &Path) -> io::Result<File> {
+    let path = secure_path(path);
+    let mut current = if path.is_absolute() {
+        let descriptor =
+            rustix::fs::open(Path::new("/"), directory_flags(), rustix::fs::Mode::empty())
+                .map_err(io::Error::from)?;
+        File::from(descriptor)
+    } else {
+        let descriptor =
+            rustix::fs::open(Path::new("."), directory_flags(), rustix::fs::Mode::empty())
+                .map_err(io::Error::from)?;
+        File::from(descriptor)
+    };
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                current = open_directory_child(&current, name)?;
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "secure directory path contains a non-normal component",
+                ));
+            }
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn collect_directory_tree(
+    directory: &File,
+    relative_root: &Path,
+    cas: &CasStore,
+    entries: &mut Vec<TreeEntry>,
+    total_bytes: &mut u64,
+) -> Result<(), CasError> {
+    let mut names = Vec::new();
+    for entry in rustix::fs::Dir::read_from(directory).map_err(io::Error::from)? {
+        let entry = entry.map_err(io::Error::from)?;
+        names.push(OsString::from_vec(entry.file_name().to_bytes().to_vec()));
+    }
+    names.sort();
+
+    for name in names {
+        if name == OsStr::new(".") || name == OsStr::new("..") {
+            continue;
+        }
+        let stat = rustix::fs::statat(directory, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(io::Error::from)?;
+        let relative = relative_root.join(&name);
+        let relative = relative.to_str().ok_or_else(|| {
+            CasError::InvalidManifest(format!(
+                "tree source path is not valid UTF-8: {}",
+                relative.display()
+            ))
+        })?;
+        match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::Directory => {
+                let child = open_directory_child(directory, &name).map_err(|error| {
+                    CasError::UnsafePath(format!(
+                        "tree source directory could not be opened without following links: {} ({error})",
+                        relative
+                    ))
+                })?;
+                collect_directory_tree(&child, Path::new(relative), cas, entries, total_bytes)?;
+            }
+            rustix::fs::FileType::RegularFile => {
+                if entries.len() >= MAX_TREE_ENTRIES {
+                    return Err(CasError::InvalidManifest(format!(
+                        "tree contains too many entries (limit {MAX_TREE_ENTRIES})"
+                    )));
+                }
+                let file = rustix::fs::openat(
+                    directory,
+                    &name,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::CLOEXEC
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::NONBLOCK,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(io::Error::from)?;
+                let file: File = file.into();
+                let mut bytes = Vec::new();
+                file.take(MAX_TREE_FILE_BYTES.saturating_add(1))
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > MAX_TREE_FILE_BYTES {
+                    return Err(CasError::InvalidManifest(format!(
+                        "tree file {relative} exceeds the {MAX_TREE_FILE_BYTES}-byte limit"
+                    )));
+                }
+                *total_bytes = total_bytes.checked_add(bytes.len() as u64).ok_or_else(|| {
+                    CasError::InvalidManifest("tree file byte count overflowed".into())
+                })?;
+                if *total_bytes > MAX_TREE_TOTAL_BYTES {
+                    return Err(CasError::InvalidManifest(format!(
+                        "tree files exceed the {MAX_TREE_TOTAL_BYTES}-byte limit"
+                    )));
+                }
+                let mode = stat.st_mode & 0o777;
+                entries.push(TreeEntry {
+                    path: relative.to_owned(),
+                    digest: cas.put(&bytes)?,
+                    class: if mode & 0o111 != 0 {
+                        FileClass::Executable
+                    } else {
+                        FileClass::Runtime
+                    },
+                    mode: u32::from(mode),
+                });
+            }
+            _ => {
+                return Err(CasError::UnsafePath(format!(
+                    "tree source contains unsupported entry: {relative}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn collect_directory_tree_path(
+    root: &Path,
+    current: &Path,
+    cas: &CasStore,
+    entries: &mut Vec<TreeEntry>,
+    total_bytes: &mut u64,
+) -> Result<(), CasError> {
+    let mut names = fs::read_dir(current)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    for name in names {
+        let path = current.join(&name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CasError::UnsafePath(format!(
+                "tree source contains a symlink: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            collect_directory_tree_path(root, &path, cas, entries, total_bytes)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(CasError::UnsafePath(format!(
+                "tree source contains unsupported entry: {}",
+                path.display()
+            )));
+        }
+        if entries.len() >= MAX_TREE_ENTRIES {
+            return Err(CasError::InvalidManifest(format!(
+                "tree contains too many entries (limit {MAX_TREE_ENTRIES})"
+            )));
+        }
+        let bytes = fs::read(&path)?;
+        *total_bytes = total_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| CasError::InvalidManifest("tree file byte count overflowed".into()))?;
+        if *total_bytes > MAX_TREE_TOTAL_BYTES {
+            return Err(CasError::InvalidManifest(format!(
+                "tree files exceed the {MAX_TREE_TOTAL_BYTES}-byte limit"
+            )));
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| CasError::InvalidManifest(error.to_string()))?
+            .to_str()
+            .ok_or_else(|| CasError::InvalidManifest("tree source path is not UTF-8".into()))?
+            .replace('\\', "/");
+        entries.push(TreeEntry {
+            path: relative,
+            digest: cas.put(&bytes)?,
+            class: FileClass::Runtime,
+            mode: 0o644,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
