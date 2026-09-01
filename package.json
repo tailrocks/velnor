@@ -9,6 +9,7 @@
     "dev": "vite dev --port 3000",
     "generate-routes": "tsr generate",
     "build": "vite build",
+    "build:static": "bun run build && bun run scripts/prerender-static.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "start": "bun .output/server/index.mjs"
