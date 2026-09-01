@@ -440,10 +440,11 @@ pub fn policy_from_github_url(
     fields_complete(&fields).then_some(fields)
 }
 
-/// Directory of generated `<org>-desired-policy.json` files.
+/// Directory of generated `<org>-desired-policy.json` files. The publisher,
+/// audit, planner, and runtime share `VELNOR_FLEET_POLICY_OUT_DIR`.
 #[must_use]
 pub fn generated_policy_dir() -> PathBuf {
-    std::env::var_os("VELNOR_FLEET_POLICY_DIR")
+    std::env::var_os("VELNOR_FLEET_POLICY_OUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/lib/velnor/fleet-policy"))
 }

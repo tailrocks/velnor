@@ -3735,7 +3735,7 @@ mod tests {
         )
         .unwrap();
         // SAFETY: the test holds the process-wide environment lock.
-        unsafe { std::env::set_var("VELNOR_FLEET_POLICY_DIR", policy_dir.as_os_str()) };
+        unsafe { std::env::set_var("VELNOR_FLEET_POLICY_OUT_DIR", policy_dir.as_os_str()) };
         let url = format!("{}/tailrocks", server.uri());
         write_exec_config(&dir, &dummy_exec(&url), 1).unwrap();
         // Stale live-membership snapshot must not win over generated JSON.
@@ -3798,7 +3798,7 @@ mod tests {
         // SAFETY: the test holds the process-wide environment lock.
         unsafe {
             std::env::remove_var("GITHUB_TOKEN");
-            std::env::remove_var("VELNOR_FLEET_POLICY_DIR");
+            std::env::remove_var("VELNOR_FLEET_POLICY_OUT_DIR");
         }
         std::fs::remove_dir_all(dir).ok();
     }
