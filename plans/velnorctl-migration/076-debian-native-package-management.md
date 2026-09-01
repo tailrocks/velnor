@@ -133,8 +133,11 @@ write, or Velnor-owned rollback call.
 ### 6. Mandatory non-regression integration
 
 Pin the exact `tailrocks/velnor-actions-fixture` commit. Before dispatch,
-cancel every pending/in-progress old run, delete only stale validation-owned
-registrations, prove clean, and capture only the new run ID.
+cancel only older pending/in-progress validation runs owned by this iteration;
+never cancel protected `Release`, `Package update`, `Publish apt repo`, or
+`workflow_dispatch` release workflows/runs, or unrelated runs. Delete only
+stale validation-owned registrations, prove clean, and capture only the new
+run ID.
 
 Run the full required fixture surface once through the unchanged installed
 daemon after package-production separation. Check progress within 60 seconds

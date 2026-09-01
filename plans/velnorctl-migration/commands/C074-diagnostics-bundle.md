@@ -65,7 +65,7 @@ Apply explicit authorization/reason/timeout, audit, safe rollback, and destructi
 
 ## Mandatory fixture integration
 
-Pin exact `tailrocks/velnor-actions-fixture` commit. Before every dispatch, cancel all old pending/in-progress runs, delete only stale validation-owned registrations, and prove clean.
+Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel only older pending/in-progress validation runs owned by this iteration; never cancel protected `Release`, `Package update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs. Delete only stale validation-owned registrations, prove both sets clean, and monitor only the new run ID.
 Run fixture masked-canary success/failure, collect active/completed bundles, verify expected evidence and byte-scan zero canaries/HTML; execution remains unaffected.
 Monitor only new run IDs every at most 60 seconds; diagnose stasis before two minutes. Store sanitized non-HTML evidence only.
 

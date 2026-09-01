@@ -110,7 +110,11 @@ resource-id)`; host-local names remain display fields only.
    dispatch one fresh fixture run and observe GitHub assign it; then restore A,
    cordon all but host B, and repeat. Velnor never routes a matrix or chooses a
    host.
-3. Cancel all old active fixture runs and delete stale runner registrations before dispatch. Monitor only the newly returned run ID.
+3. Cancel only older pending/in-progress validation runs owned by this
+   iteration; never cancel protected `Release`, `Package update`, `Publish apt
+   repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs.
+   Delete only stale validation-owned runner registrations before dispatch.
+   Monitor only the newly returned run ID.
 4. While jobs run, prove fleet `get`, `describe`, `logs --follow`, `events --watch`, `top`, and `wait` identify the correct host, instance, stable slot, ephemeral runner, job, and source.
 5. Disconnect one remote endpoint during a controlled fixture execution. Prove partial results are explicit, stream resumption is ordered, the job remains safe, and the reconnected view converges.
 6. Prove a read-only remote identity can inspect but cannot cordon, drain,

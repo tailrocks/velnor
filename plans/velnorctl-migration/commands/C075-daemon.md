@@ -58,7 +58,7 @@ durable lifecycle audit, and Plan 073 recovery semantics.
 
 ## Mandatory fixture integration
 
-Pin exact `tailrocks/velnor-actions-fixture` commit. Before every dispatch, cancel all old pending/in-progress runs, delete only stale validation-owned registrations, and prove clean.
+Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel only older pending/in-progress validation runs owned by this iteration; never cancel protected `Release`, `Package update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs. Delete only stale validation-owned registrations, prove both sets clean, and monitor only the new run ID.
 Run full pinned fixture cold/warm/unchanged, hold/cancel, lifecycle,
 artifact/log/cache/service/container cases through source-built daemon and
 `--once`; prove signals/watchdog with fake `sd_notify` and process tests. Plan

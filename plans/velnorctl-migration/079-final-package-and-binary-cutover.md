@@ -146,8 +146,10 @@ No old spelling is kept as a hidden alias.
 
 1. Pin an exact `tailrocks/velnor-actions-fixture` commit and record the prior
    apt candidate and dpkg-installed package/version.
-2. Before dispatch, cancel all pending/in-progress fixture runs and delete only
-   stale validation-owned registrations. Confirm the new packaged
+2. Before dispatch, cancel only older pending/in-progress validation runs owned
+   by this iteration; never cancel protected `Release`, `Package update`,
+   `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or
+   unrelated runs. Delete only stale validation-owned registrations. Confirm the new packaged
    `velnorctl` service alone owns registrations.
 3. From the signed apt-installed package, run cold, warm, and unchanged
    executions of every canonical fixture lane required by the estate contract.

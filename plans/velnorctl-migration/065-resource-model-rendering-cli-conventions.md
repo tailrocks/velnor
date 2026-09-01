@@ -118,7 +118,10 @@ or success.
 
 ### 5. Mandatory fixture integration
 
-Against `tailrocks/velnor-actions-fixture`, cancel old fixture runs, remove only
+Against `tailrocks/velnor-actions-fixture`, cancel only older
+pending/in-progress validation runs owned by this iteration; never cancel
+protected `Release`, `Package update`, `Publish apt repo`, or
+`workflow_dispatch` release workflows/runs, or unrelated runs. Remove only
 validation-prefix stale registrations,
 prove clean state, dispatch a new control-plane success run, and monitor only
 its run ID at intervals no longer than 60 seconds. Serialize a sanitized model

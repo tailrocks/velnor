@@ -69,8 +69,11 @@ pass. Final gate: `rtk mise run check` exits 0.
 
 ## Mandatory fixture integration
 
-Against pinned `tailrocks/velnor-actions-fixture`, cancel old active runs and
-remove only stale validation registrations. Produce and repeat a dedicated
+Against pinned `tailrocks/velnor-actions-fixture`, cancel only older
+pending/in-progress validation runs owned by this iteration; never cancel
+protected `Release`, `Package update`, `Publish apt repo`, or
+`workflow_dispatch` release workflows/runs, or unrelated runs. Remove only stale
+validation registrations. Produce and repeat a dedicated
 instance plan through the new service, then run a fresh success through the
 unchanged existing daemon and monitor only its ID at intervals no longer than
 60 seconds. Prove effective config/provenance is redacted and stable. End-to-end

@@ -50,7 +50,7 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
 
 ## Mandatory fixture integration
 
-Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
+Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel only older pending/in-progress validation runs owned by this iteration; never cancel protected `Release`, `Package update`, `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or unrelated runs. Delete only stale validation-owned registrations, prove both sets clean, and monitor only the new run ID.
 Use Plan 063's bounded `load` scenario and ready marker. Correlate CPU/memory/
 storage with exact job/slot/instance and reservation IDs within declared
 tolerance/safety ceilings; prove teardown and clean terminal stop.

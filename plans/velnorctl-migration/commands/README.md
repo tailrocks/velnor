@@ -20,9 +20,12 @@ Every task must:
   `velnor-runner`;
 - run `rtk cargo nextest run` and `rtk mise run check`;
 - validate on an exact pinned `tailrocks/velnor-actions-fixture` commit;
-- cancel old runs and remove stale validation-owned registrations before each
-  dispatch, monitor only the new run ID, check within 60 seconds, and diagnose
-  unchanged/queued state before two minutes;
+- cancel only older pending/in-progress validation runs owned by this iteration
+  before each dispatch; never cancel protected `Release`, `Package update`,
+  `Publish apt repo`, or `workflow_dispatch` release workflows/runs, or
+  unrelated runs. Remove only stale validation-owned registrations, monitor
+  only the new run ID, check within 60 seconds, and diagnose unchanged/queued
+  state before two minutes;
 - preserve sanitized non-HTML evidence only;
 - retain no backward-compatible alias after command migration.
 
