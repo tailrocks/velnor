@@ -36,7 +36,6 @@ pub fn github_job_container_spec(
     daemon_id: String,
     trust_scope: &str,
 ) -> Result<JobContainerSpec, CacheAdmissionError> {
-    let trust_scope = crate::container::normalize_compiler_cache_trust_scope(trust_scope);
     // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
@@ -49,8 +48,7 @@ pub fn github_job_container_spec(
             )
         })
         .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
-    let mut env = backend_advertising_env(job_container_env(job), paths.execution_backend);
-    env.push(("VELNOR_TRUST_SCOPE".into(), trust_scope.into()));
+    let compiler_cache_declaration = crate::manifest::compiler_cache_declaration(job);
     Ok(JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -62,10 +60,10 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
-        env,
+        env: backend_advertising_env(job_container_env(job), paths.execution_backend),
         resource_options,
-        options: job_container_options(job),
-        services: service_containers(job),
+        options: job_container_options(job, trust_scope),
+        services: service_containers(job, trust_scope),
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: None,
         docker_cli_plugin_host_dir: None,
@@ -74,103 +72,19 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        compiler_cache_backend: github_compiler_cache_backend(job, paths.execution_backend)?,
-    })
-}
-
-fn github_compiler_cache_backend(
-    job: &AgentJobRequestMessage,
-    execution_backend: velnor_model::ExecutionBackendKind,
-) -> Result<velnor_cache_service::CompilerCacheBackend, CacheAdmissionError> {
-    if matches!(
-        execution_backend,
-        velnor_model::ExecutionBackendKind::MicroVm
-    ) {
-        let declaration = crate::manifest::compiler_cache_declaration(job);
-        if declaration.sccache && declaration.kache {
-            return Err(CacheAdmissionError::ConflictingWrappers);
-        }
-        reject_microvm_compiler_cache_environment(job)?;
-        if declaration.sccache || declaration.kache {
-            let declared = if declaration.sccache {
-                velnor_cache_service::CompilerCacheBackend::Sccache
-            } else {
-                velnor_cache_service::CompilerCacheBackend::Kache
-            };
-            return Err(CacheAdmissionError::MicroVmTransportUnavailable { declared });
-        }
-        return Ok(velnor_cache_service::CompilerCacheBackend::Off);
-    }
-    crate::manifest::compiler_cache_backend(job)
-}
-
-fn reject_microvm_compiler_cache_environment(
-    job: &AgentJobRequestMessage,
-) -> Result<(), CacheAdmissionError> {
-    let mut names = crate::runtime_env::job_environment_variables(job)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect::<Vec<_>>();
-    names.extend(job_container_env(job).into_iter().map(|(name, _)| name));
-    names.extend(job.variables.keys().cloned());
-    for step in job.steps.iter().filter(|step| step.enabled) {
-        if let Some(environment) = &step.environment {
-            collect_environment_names(environment, &mut names);
-        }
-    }
-    if let Some(name) = names.into_iter().find(|name| is_compiler_cache_env(name)) {
-        return Err(CacheAdmissionError::MicroVmEnvironmentUnsupported { name });
-    }
-    Ok(())
-}
-
-fn is_compiler_cache_env(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase().replace('-', "_");
-    upper == "RUSTC_WRAPPER"
-        || upper == "SCCACHE_DIR"
-        || upper.starts_with("SCCACHE_")
-        || upper == "KACHE_CACHE_DIR"
-        || upper.starts_with("KACHE_")
-}
-
-fn collect_environment_names(value: &Value, names: &mut Vec<String>) {
-    match value {
-        Value::Object(object) => {
-            if let Some(name) = object
-                .get("name")
-                .or_else(|| object.get("Name"))
-                .or_else(|| object.get("Key"))
-                .or_else(|| object.get("key"))
-                .and_then(environment_name)
-            {
-                names.push(name.to_string());
-            } else {
-                names.extend(
-                    object
-                        .keys()
-                        .filter(|key| !matches!(key.as_str(), "type" | "Type" | "map" | "Map"))
-                        .cloned(),
-                );
+        compiler_cache_backend: match paths.execution_backend {
+            velnor_model::ExecutionBackendKind::Docker => {
+                crate::manifest::compiler_cache_backend(job)?
             }
-            for nested in object.get("map").or_else(|| object.get("Map")).into_iter() {
-                collect_environment_names(nested, names);
+            velnor_model::ExecutionBackendKind::MicroVm => {
+                if compiler_cache_declaration.sccache || compiler_cache_declaration.kache {
+                    crate::manifest::compiler_cache_backend(job)?
+                } else {
+                    velnor_cache_service::CompilerCacheBackend::Off
+                }
             }
-        }
-        Value::Array(values) => {
-            for nested in values {
-                collect_environment_names(nested, names);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn environment_name(value: &Value) -> Option<&str> {
-    value.as_str().or_else(|| {
-        value
-            .as_object()
-            .and_then(|object| object.get("lit").or_else(|| object.get("Lit")))
-            .and_then(Value::as_str)
+        },
+        compiler_cache_trust_class: compiler_cache_trust_class(trust_scope),
     })
 }
 
@@ -219,12 +133,24 @@ fn cargo_target_trust_scope_from(value: Option<&str>) -> String {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("trusted")
+        .unwrap_or("untrusted")
         .to_string()
 }
 
 pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
-    cargo_target_trust_scope_from(Some(trust_scope)).eq_ignore_ascii_case("trusted")
+    trust_scope.trim().eq_ignore_ascii_case("trusted")
+}
+
+pub(crate) fn compiler_cache_trust_class(
+    trust_scope: &str,
+) -> velnor_model::guest_plan::GuestCompilerCacheTrustClass {
+    if trust_scope.trim().eq_ignore_ascii_case("trusted") {
+        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
+    } else if trust_scope.trim().eq_ignore_ascii_case("release") {
+        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
+    } else {
+        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
+    }
 }
 
 pub fn github_normalized_job_plan(
@@ -478,7 +404,7 @@ fn backend_advertising_env(
     mut env: Vec<(String, String)>,
     backend: velnor_model::ExecutionBackendKind,
 ) -> Vec<(String, String)> {
-    env.retain(|(name, _)| name != "VELNOR_EXECUTION_BACKEND");
+    env.retain(|(name, _)| name != "VELNOR_EXECUTION_BACKEND" && !is_docker_control_env(name));
     env.push((
         "VELNOR_EXECUTION_BACKEND".to_string(),
         backend.as_str().to_string(),
@@ -486,17 +412,26 @@ fn backend_advertising_env(
     env
 }
 
-fn job_container_options(job: &AgentJobRequestMessage) -> Vec<String> {
+fn job_container_options(job: &AgentJobRequestMessage, trust_scope: &str) -> Vec<String> {
     let options = job
         .job_container
         .as_ref()
         .and_then(container_options)
         .unwrap_or_default();
-    filter_privileged_container_options(options, privileged_container_options_allowed_from_env())
+    filter_privileged_container_options(
+        options,
+        github_trust_scope_allows_host_docker(trust_scope)
+            && privileged_container_options_allowed_from_env(),
+    )
 }
 
-fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec> {
+fn service_containers(
+    job: &AgentJobRequestMessage,
+    trust_scope: &str,
+) -> Vec<ServiceContainerSpec> {
     let network = job_network_name(job);
+    let allow_privileged = github_trust_scope_allows_host_docker(trust_scope)
+        && privileged_container_options_allowed_from_env();
     if let Some(services) = job
         .job_service_containers
         .as_ref()
@@ -517,8 +452,15 @@ fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec>
                     network_alias: alias,
                     network: network.clone(),
                     env: container_env(&container),
-                    ports: container_ports(&container),
-                    options: container_options(&container).unwrap_or_default(),
+                    ports: if github_trust_scope_allows_host_docker(trust_scope) {
+                        container_ports(&container)
+                    } else {
+                        Vec::new()
+                    },
+                    options: filter_privileged_container_options(
+                        container_options(&container).unwrap_or_default(),
+                        allow_privileged,
+                    ),
                 })
             })
             .collect();
@@ -542,12 +484,19 @@ fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec>
                 network_alias: alias.to_string(),
                 network: network.clone(),
                 env: service_env(container),
-                ports: service_ports(container),
-                options: container
-                    .options
-                    .as_deref()
-                    .map(split_container_options)
-                    .unwrap_or_default(),
+                ports: if github_trust_scope_allows_host_docker(trust_scope) {
+                    service_ports(container)
+                } else {
+                    Vec::new()
+                },
+                options: filter_privileged_container_options(
+                    container
+                        .options
+                        .as_deref()
+                        .map(split_container_options)
+                        .unwrap_or_default(),
+                    allow_privileged,
+                ),
             })
         })
         .collect()
@@ -700,130 +649,143 @@ fn filter_privileged_container_options(
     allow_privileged: bool,
 ) -> Vec<String> {
     if allow_privileged {
-        return options;
+        let mut filtered = Vec::with_capacity(options.len());
+        let mut options = options.into_iter().peekable();
+        while let Some(option) = options.next() {
+            let option_name = option.as_str();
+            if option_name == "--" {
+                log_dropped_container_option(
+                    option_name,
+                    "Docker option terminator is runner-owned",
+                );
+            } else if option_name == "--name" {
+                log_dropped_container_option(option_name, "container name is runner-owned");
+                if options.peek().is_some_and(|value| !value.starts_with('-')) {
+                    options.next();
+                }
+            } else if option_name.starts_with("--name=") {
+                log_dropped_container_option(option_name, "container name is runner-owned");
+            } else if matches!(option_name, "-e" | "--env") {
+                let Some(value) = options.peek() else {
+                    log_dropped_container_option(option_name, "missing Docker option value");
+                    continue;
+                };
+                if value.starts_with('-') {
+                    log_dropped_container_option(option_name, "missing Docker option value");
+                } else if container_env_option_is_control(value) {
+                    log_dropped_container_option(
+                        option_name,
+                        "Docker endpoint environment is runner-owned",
+                    );
+                    options.next();
+                } else {
+                    filtered.push(option);
+                    if let Some(value) = options.next() {
+                        filtered.push(value);
+                    }
+                }
+            } else if option_name.starts_with("--env=")
+                || option_name.starts_with("-e") && option_name.len() > 2
+            {
+                if option_name
+                    .split_once('=')
+                    .is_some_and(|(_, value)| container_env_option_is_control(value))
+                    || option_name
+                        .strip_prefix("-e")
+                        .is_some_and(container_env_option_is_control)
+                {
+                    log_dropped_container_option(
+                        option_name,
+                        "Docker endpoint environment is runner-owned",
+                    );
+                } else {
+                    filtered.push(option);
+                }
+            } else {
+                filtered.push(option);
+            }
+        }
+        return filtered;
     }
 
     let mut filtered = Vec::with_capacity(options.len());
     let mut index = 0;
     while index < options.len() {
         let option = options[index].as_str();
-        match option {
-            "--privileged" => {
-                log_dropped_container_option(option, "privileged container");
-                index += 1;
-            }
-            "--cap-add" | "--device" | "--security-opt" => {
-                let consumed = option_with_optional_value(&options, index);
-                log_dropped_container_option(&consumed, "host privilege or security relaxation");
-                index += consumed_option_count(&options, index);
-            }
-            "--pid" => {
-                if option_value_is(&options, index, "host") {
-                    log_dropped_container_option(
-                        &format!("{} {}", options[index], options[index + 1]),
-                        "host PID namespace",
-                    );
-                    index += 2;
-                } else {
-                    filtered.push(options[index].clone());
+        let name = option.split_once('=').map_or(option, |(name, _)| name);
+        if safe_container_option(name) {
+            if container_option_takes_value(name) && !option.contains('=') {
+                let Some(value) = options.get(index + 1) else {
+                    log_dropped_container_option(option, "missing Docker option value");
                     index += 1;
-                }
-            }
-            "--network" | "--net" => {
-                if option_value_is(&options, index, "host") {
-                    log_dropped_container_option(
-                        &format!("{} {}", options[index], options[index + 1]),
-                        "host network namespace",
-                    );
-                    index += 2;
-                } else {
-                    filtered.push(options[index].clone());
-                    index += 1;
-                }
-            }
-            "-v" | "--volume" => {
-                if let Some(value) = options.get(index + 1) {
-                    if volume_mount_has_host_source(value) {
-                        log_dropped_container_option(
-                            &format!("{} {}", options[index], value),
-                            "host bind mount",
-                        );
-                        index += 2;
-                    } else {
-                        filtered.push(options[index].clone());
-                        index += 1;
-                    }
-                } else {
-                    filtered.push(options[index].clone());
-                    index += 1;
-                }
-            }
-            "--mount" => {
-                if let Some(value) = options.get(index + 1) {
-                    if mount_option_has_host_source(value) {
-                        log_dropped_container_option(
-                            &format!("{} {}", options[index], value),
-                            "host bind mount",
-                        );
-                        index += 2;
-                    } else {
-                        filtered.push(options[index].clone());
-                        index += 1;
-                    }
-                } else {
-                    filtered.push(options[index].clone());
-                    index += 1;
-                }
-            }
-            _ if option.starts_with("--cap-add=")
-                || option.starts_with("--device=")
-                || option.starts_with("--security-opt=") =>
-            {
-                log_dropped_container_option(option, "host privilege or security relaxation");
-                index += 1;
-            }
-            _ if option == "--pid=host" => {
-                log_dropped_container_option(option, "host PID namespace");
-                index += 1;
-            }
-            _ if option == "--network=host" || option == "--net=host" => {
-                log_dropped_container_option(option, "host network namespace");
-                index += 1;
-            }
-            _ if option.starts_with("--volume=") => {
-                let value = option.trim_start_matches("--volume=");
-                if volume_mount_has_host_source(value) {
-                    log_dropped_container_option(option, "host bind mount");
-                } else {
-                    filtered.push(options[index].clone());
-                }
-                index += 1;
-            }
-            _ if option.starts_with("-v") && option.len() > 2 => {
-                let value = option.trim_start_matches("-v").trim_start_matches('=');
-                if volume_mount_has_host_source(value) {
-                    log_dropped_container_option(option, "host bind mount");
-                } else {
-                    filtered.push(options[index].clone());
-                }
-                index += 1;
-            }
-            _ if option.starts_with("--mount=") => {
-                let value = option.trim_start_matches("--mount=");
-                if mount_option_has_host_source(value) {
-                    log_dropped_container_option(option, "host bind mount");
-                } else {
-                    filtered.push(options[index].clone());
-                }
-                index += 1;
-            }
-            _ => {
+                    continue;
+                };
+                filtered.push(options[index].clone());
+                filtered.push(value.clone());
+                index += 2;
+            } else {
                 filtered.push(options[index].clone());
                 index += 1;
             }
+        } else {
+            let consumed = option_with_optional_value(&options, index);
+            log_dropped_container_option(
+                &consumed,
+                "Docker option is not in the untrusted allowlist",
+            );
+            index += consumed_option_count(&options, index);
         }
     }
     filtered
+}
+
+fn safe_container_option(name: &str) -> bool {
+    matches!(
+        name,
+        "--cpus"
+            | "--cpu-period"
+            | "--cpu-quota"
+            | "--cpu-shares"
+            | "--cpuset-cpus"
+            | "--cpuset-mems"
+            | "--dns"
+            | "--dns-option"
+            | "--dns-search"
+            | "--domainname"
+            | "--entrypoint"
+            | "--expose"
+            | "--health-cmd"
+            | "--health-interval"
+            | "--health-retries"
+            | "--health-start-interval"
+            | "--health-start-period"
+            | "--health-timeout"
+            | "--hostname"
+            | "--init"
+            | "--memory"
+            | "--memory-reservation"
+            | "--memory-swap"
+            | "--memory-swappiness"
+            | "--no-healthcheck"
+            | "--pids-limit"
+            | "--read-only"
+            | "--shm-size"
+            | "--stop-signal"
+            | "--stop-timeout"
+            | "--ulimit"
+            | "--user"
+            | "-u"
+            | "--workdir"
+            | "-w"
+    )
+}
+
+fn container_option_takes_value(name: &str) -> bool {
+    !matches!(name, "--init" | "--no-healthcheck" | "--read-only")
+}
+
+fn container_env_option_is_control(value: &str) -> bool {
+    is_docker_control_env(value.split_once('=').map_or(value, |(name, _)| name))
 }
 
 fn option_with_optional_value(options: &[String], index: usize) -> String {
@@ -843,28 +805,6 @@ fn consumed_option_count(options: &[String], index: usize) -> usize {
     } else {
         1
     }
-}
-
-fn option_value_is(options: &[String], index: usize, expected: &str) -> bool {
-    options
-        .get(index + 1)
-        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
-}
-
-fn volume_mount_has_host_source(value: &str) -> bool {
-    value
-        .split_once(':')
-        .map(|(source, _)| source.trim().starts_with('/'))
-        .unwrap_or(false)
-}
-
-fn mount_option_has_host_source(value: &str) -> bool {
-    value.split(',').any(|part| {
-        let Some((key, source)) = part.split_once('=') else {
-            return false;
-        };
-        matches!(key.trim(), "source" | "src") && source.trim().starts_with('/')
-    })
 }
 
 fn log_dropped_container_option(option: &str, reason: &str) {
@@ -890,6 +830,7 @@ fn container_env_value(environment: &Value) -> Vec<(String, String)> {
     match environment {
         Value::Object(object) => object
             .iter()
+            .filter(|(name, _)| !is_docker_control_env(name))
             .map(|(name, value)| (name.clone(), scalar_env_value(value)))
             .collect(),
         Value::Array(values) => values
@@ -900,12 +841,21 @@ fn container_env_value(environment: &Value) -> Vec<(String, String)> {
                     .get("name")
                     .or_else(|| object.get("Name"))
                     .and_then(Value::as_str)?;
+                if is_docker_control_env(name) {
+                    return None;
+                }
                 let value = object.get("value").or_else(|| object.get("Value"))?;
                 Some((name.to_string(), scalar_env_value(value)))
             })
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn is_docker_control_env(name: &str) -> bool {
+    name.eq_ignore_ascii_case("DOCKER_HOST")
+        || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
+        || name.eq_ignore_ascii_case("DOCKER_CONFIG")
 }
 
 fn scalar_env_value(value: &Value) -> String {
@@ -1024,6 +974,8 @@ mod tests {
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
             compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
+            compiler_cache_trust_class:
+                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
         };
         let plan = github_normalized_job_plan(
             &job,
@@ -1125,11 +1077,36 @@ mod tests {
 
     #[test]
     fn cargo_target_trust_scope_defaults_and_trims() {
-        assert_eq!(cargo_target_trust_scope_from(None), "trusted");
-        assert_eq!(cargo_target_trust_scope_from(Some("   ")), "trusted");
+        assert_eq!(cargo_target_trust_scope_from(None), "untrusted");
+        assert_eq!(cargo_target_trust_scope_from(Some("   ")), "untrusted");
         assert_eq!(
             cargo_target_trust_scope_from(Some(" public-forks ")),
             "public-forks"
+        );
+    }
+
+    #[test]
+    fn host_docker_requires_explicit_trusted_scope() {
+        assert!(github_trust_scope_allows_host_docker("trusted"));
+        assert!(github_trust_scope_allows_host_docker(" Trusted "));
+        assert!(!github_trust_scope_allows_host_docker(""));
+        assert!(!github_trust_scope_allows_host_docker("   "));
+        assert!(!github_trust_scope_allows_host_docker("unknown"));
+    }
+
+    #[test]
+    fn compiler_cache_trust_class_mapping_is_explicit_and_fail_closed() {
+        assert_eq!(
+            compiler_cache_trust_class("trusted"),
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
+        );
+        assert_eq!(
+            compiler_cache_trust_class(" release "),
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
+        );
+        assert_eq!(
+            compiler_cache_trust_class("public-forks"),
+            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
         );
     }
 
@@ -1168,10 +1145,6 @@ mod tests {
             spec.compiler_cache_backend,
             velnor_cache_service::CompilerCacheBackend::Kache
         );
-        let args = spec.start_args();
-        assert!(args.iter().any(|arg| arg.contains("/var/cache/kache")));
-        assert!(args.contains(&"RUSTC_WRAPPER=kache".into()));
-        assert!(!args.contains(&"RUSTC_WRAPPER=sccache".into()));
     }
 
     #[test]
@@ -1208,77 +1181,33 @@ mod tests {
             spec.compiler_cache_backend,
             velnor_cache_service::CompilerCacheBackend::Off
         );
-        let args = spec.start_args();
-        assert!(!args
-            .iter()
-            .any(|arg| { arg.contains("/var/cache/sccache") || arg.contains("/var/cache/kache") }));
-        assert!(!args.iter().any(|arg| {
-            arg.starts_with("RUSTC_WRAPPER=")
-                || arg.starts_with("SCCACHE_")
-                || arg.starts_with("KACHE_")
-        }));
+        assert!(spec
+            .compiler_cache_runtime()
+            .environment()
+            .variables
+            .is_empty());
     }
 
     #[test]
-    fn microvm_backend_rejects_raw_compiler_cache_environment() {
+    fn microvm_backend_preserves_explicit_compiler_cache_wrapper() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
             "timeline": { "id": "timeline" },
             "jobId": "job",
-            "jobDisplayName": "Trusted",
-            "requestId": 1,
-            "environmentVariables": [{ "name": "RUSTC_WRAPPER", "value": "sccache" }]
-        }))
-        .unwrap();
-
-        assert!(matches!(
-            github_compiler_cache_backend(
-                &job,
-                velnor_model::ExecutionBackendKind::MicroVm
-            ),
-            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported { name })
-                if name == "RUSTC_WRAPPER"
-        ));
-    }
-
-    #[test]
-    fn microvm_backend_rejects_mixed_compiler_cache_wrappers() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Trusted",
-            "requestId": 1,
-            "steps": [
-                { "reference": { "name": "mozilla-actions/sccache-action" } },
-                { "reference": { "name": "kunobi-ninja/kache-action" } }
-            ]
-        }))
-        .unwrap();
-
-        assert!(matches!(
-            github_compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::ConflictingWrappers)
-        ));
-    }
-
-    #[test]
-    fn microvm_backend_rejects_explicit_sccache_without_guest_transport() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Trusted",
+            "jobDisplayName": "Trusted with sccache",
             "requestId": 1,
             "steps": [{
-                "reference": { "name": "mozilla-actions/sccache-action" }
+                "type": "Action",
+                "reference": {
+                    "type": "Repository",
+                    "name": "mozilla-actions/sccache-action",
+                    "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
+                }
             }]
         }))
         .unwrap();
-        let result = github_job_container_spec(
+        let spec = github_job_container_spec(
             &job,
             GitHubJobContainerPaths {
                 workspace_host: "/tmp/workspace".into(),
@@ -1294,54 +1223,13 @@ mod tests {
             "",
             "daemon".into(),
             "trusted",
-        );
-
-        assert!(matches!(
-            result,
-            Err(CacheAdmissionError::MicroVmTransportUnavailable {
-                declared: velnor_cache_service::CompilerCacheBackend::Sccache
-            })
-        ));
-    }
-
-    #[test]
-    fn microvm_backend_rejects_explicit_kache_without_guest_transport() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Trusted",
-            "requestId": 1,
-            "steps": [{
-                "reference": { "name": "kunobi-ninja/kache-action" }
-            }]
-        }))
+        )
         .unwrap();
-        let result = github_job_container_spec(
-            &job,
-            GitHubJobContainerPaths {
-                workspace_host: "/tmp/workspace".into(),
-                temp_host: "/tmp/temp".into(),
-                home_host: "/tmp/home".into(),
-                actions_host: "/tmp/actions".into(),
-                tools_host: "/tmp/tools".into(),
-                docker_host_work_dir: None,
-                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
-            },
-            "ubuntu:24.04",
-            Vec::new(),
-            "",
-            "daemon".into(),
-            "trusted",
-        );
 
-        assert!(matches!(
-            result,
-            Err(CacheAdmissionError::MicroVmTransportUnavailable {
-                declared: velnor_cache_service::CompilerCacheBackend::Kache
-            })
-        ));
+        assert_eq!(
+            spec.compiler_cache_backend,
+            velnor_cache_service::CompilerCacheBackend::Sccache
+        );
     }
 
     #[test]
@@ -1427,7 +1315,8 @@ mod tests {
                     "NODE_OPTIONS": "--max-old-space-size=4096",
                     "CACHE_ENABLED": true,
                     "FETCH_DEPTH": 0,
-                    "EMPTY_VALUE": null
+                    "EMPTY_VALUE": null,
+                    "DOCKER_HOST": "tcp://attacker.example:2376"
                 }
             }
         }))
@@ -1443,7 +1332,8 @@ mod tests {
                 "env": [
                     { "name": "RUST_LOG", "value": "debug" },
                     { "name": "RETRY_COUNT", "value": 3 },
-                    { "name": "STRICT_MODE", "value": false }
+                    { "name": "STRICT_MODE", "value": false },
+                    { "name": "DOCKER_CONTEXT", "value": "attacker" }
                 ]
             }
         }))
@@ -1484,7 +1374,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            job_container_options(&job),
+            job_container_options(&job, "trusted"),
             vec!["--cpus", "2", "--memory", "4g"]
         );
     }
@@ -1495,6 +1385,7 @@ mod tests {
             "--hostname".to_string(),
             "job-host".to_string(),
             "--privileged".to_string(),
+            "--privileged=true".to_string(),
             "-v".to_string(),
             "/:/host".to_string(),
             "--mount".to_string(),
@@ -1504,6 +1395,10 @@ mod tests {
             "/dev/kvm".to_string(),
             "--pid".to_string(),
             "host".to_string(),
+            "--ipc=host".to_string(),
+            "--cgroupns=host".to_string(),
+            "--userns=host".to_string(),
+            "--uts=host".to_string(),
             "--network=host".to_string(),
             "--security-opt".to_string(),
             "seccomp=unconfined".to_string(),
@@ -1514,6 +1409,47 @@ mod tests {
         assert_eq!(
             filter_privileged_container_options(options, false),
             vec!["--hostname", "job-host", "--cpus", "2"]
+        );
+    }
+
+    #[test]
+    fn container_options_drop_runtime_and_host_control_variants() {
+        let options = vec![
+            "--runtime".to_string(),
+            "runsc".to_string(),
+            "--sysctl=kernel.unprivileged_userns_clone=1".to_string(),
+            "--device-cgroup-rule".to_string(),
+            "a *:* rwm".to_string(),
+            "--privileged=true".to_string(),
+            "--ipc=host".to_string(),
+            "--cgroupns=host".to_string(),
+            "--userns=host".to_string(),
+            "--uts=host".to_string(),
+        ];
+
+        assert!(filter_privileged_container_options(options, false).is_empty());
+    }
+
+    #[test]
+    fn container_options_drop_namespace_joins_relative_binds_and_shared_volumes() {
+        let options = vec![
+            "--pid".into(),
+            "container:other".into(),
+            "--ipc=container:other".into(),
+            "--network=container:other".into(),
+            "--volumes-from".into(),
+            "other".into(),
+            "--volumes-from=other".into(),
+            "--mount".into(),
+            "type=bind,source=.,target=/host".into(),
+            "-v".into(),
+            "./workspace:/host-workspace".into(),
+            "--mount=type=volume,source=cache,target=/cache".into(),
+        ];
+
+        assert_eq!(
+            filter_privileged_container_options(options, false),
+            Vec::<String>::new()
         );
     }
 
@@ -1534,6 +1470,98 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_container_options_use_explicit_allowlist() {
+        let options = vec![
+            "--cpus".into(),
+            "2".into(),
+            "--memory=4g".into(),
+            "--health-cmd".into(),
+            "true".into(),
+            "--use-api-socket".into(),
+            "--gpus=all".into(),
+            "--env-file".into(),
+            "/host/secrets".into(),
+            "--label-file=/host/labels".into(),
+            "--cidfile".into(),
+            "/host/cid".into(),
+            "--restart=always".into(),
+            "--link".into(),
+            "other:other".into(),
+            "--storage-opt".into(),
+            "size=100g".into(),
+            "--log-driver".into(),
+            "journald".into(),
+            "--name=attacker-chosen".into(),
+            "--volume-driver".into(),
+            "nfs".into(),
+        ];
+
+        assert_eq!(
+            filter_privileged_container_options(options, false),
+            vec!["--cpus", "2", "--memory=4g", "--health-cmd", "true"]
+        );
+    }
+
+    #[test]
+    fn trusted_container_options_cannot_replace_runner_name() {
+        let options = vec![
+            "--name".into(),
+            "attacker-chosen".into(),
+            "--name=also-attacker-chosen".into(),
+            "--env".into(),
+            "DOCKER_HOST=tcp://attacker".into(),
+            "--env=DOCKER_CONTEXT=remote".into(),
+            "-eDOCKER_CONFIG=/host/config".into(),
+            "--env".into(),
+            "SAFE=value".into(),
+            "--hostname".into(),
+            "allowed".into(),
+        ];
+
+        assert_eq!(
+            filter_privileged_container_options(options, true),
+            vec!["--env", "SAFE=value", "--hostname", "allowed"]
+        );
+    }
+
+    #[test]
+    fn trusted_container_options_drop_missing_values_without_consuming_options() {
+        let options = vec![
+            "--name".into(),
+            "--hostname".into(),
+            "allowed".into(),
+            "--name".into(),
+            "-malformed-name".into(),
+            "--env".into(),
+            "--cpus=2".into(),
+            "-e".into(),
+            "--memory=4g".into(),
+            "--env".into(),
+        ];
+
+        assert_eq!(
+            filter_privileged_container_options(options, true),
+            vec![
+                "--hostname",
+                "allowed",
+                "-malformed-name",
+                "--cpus=2",
+                "--memory=4g"
+            ]
+        );
+    }
+
+    #[test]
+    fn container_option_terminator_is_removed_even_when_trusted() {
+        let options = vec!["--hostname".into(), "job-host".into(), "--".into()];
+
+        assert_eq!(
+            filter_privileged_container_options(options, true),
+            vec!["--hostname", "job-host"]
+        );
+    }
+
+    #[test]
     fn service_containers_use_non_job_container_resources() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -1548,7 +1576,7 @@ mod tests {
                     {
                         "alias": "postgres",
                         "image": "postgres:16",
-                        "options": "--health-cmd \"pg_isready -U postgres\"",
+                        "options": "--health-cmd \"pg_isready -U postgres\" --use-api-socket --gpus=all",
                         "environmentVariables": {
                             "POSTGRES_PASSWORD": "postgres"
                         },
@@ -1560,7 +1588,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            service_containers(&job),
+            service_containers(&job, "trusted"),
             vec![ServiceContainerSpec {
                 name: "velnor-service-job_1-postgres".into(),
                 image: "postgres:16".into(),
@@ -1604,7 +1632,7 @@ mod tests {
         }))
         .unwrap();
 
-        let services = service_containers(&job);
+        let services = service_containers(&job, "trusted");
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].network_alias, "postgres");
         assert_eq!(services[0].image, "postgres:16");

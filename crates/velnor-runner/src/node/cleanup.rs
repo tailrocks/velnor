@@ -7,13 +7,22 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use anyhow::Context;
+
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Completion responses are small protocol records, not artifact storage.
 /// Bound both durable writes and recovery reads so a hostile or corrupted
 /// outbox cannot consume unbounded disk or heap.
 pub const MAX_COMPLETION_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_OWNED_PID_BYTES: usize = 64;
+
+const QUARANTINE_ENTRY_NAME: &str = "outbox-entry";
+const QUARANTINE_PREFIX: &str = ".outbox-remove-";
+const OUTBOX_RECOVERY_LOCK_NAME: &str = ".outbox-recovery.lock";
 
 static NEXT_OUTBOX_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -102,8 +111,20 @@ pub fn write_owned_pid(
 #[must_use]
 pub fn read_owned_pid(state_dir: &Path, isolation_id: &str, generation: u64) -> Option<u32> {
     assert_safe_id(isolation_id).ok()?;
-    let bytes = std::fs::read_to_string(owned_path(state_dir, isolation_id, generation)).ok()?;
-    bytes.trim().parse().ok()
+    let path = owned_path(state_dir, isolation_id, generation);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(path).ok()?;
+    let mut contents = String::new();
+    file.take(MAX_OWNED_PID_BYTES as u64 + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    if contents.len() > MAX_OWNED_PID_BYTES {
+        return None;
+    }
+    contents.trim().parse().ok()
 }
 
 /// Atomically publish the completion payload before transport or journal intent.
@@ -162,7 +183,7 @@ pub fn remove_outbox(state_dir: &Path, job_id: &str, generation: u64) -> anyhow:
     };
     let name = outbox_name(job_id, generation);
     #[cfg(unix)]
-    return remove_outbox_unix(&parent, &name, job_id, generation);
+    return remove_outbox_unix(state_dir, &parent, &name, job_id, generation);
     #[cfg(not(unix))]
     remove_outbox_portable(&parent, &name, job_id, generation)
 }
@@ -171,9 +192,9 @@ fn outbox_name(job_id: &str, generation: u64) -> String {
     format!("{job_id}.{generation}")
 }
 
-fn temporary_outbox_name(job_id: &str, generation: u64) -> String {
+fn temporary_outbox_name(name: &str) -> String {
     let serial = NEXT_OUTBOX_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    format!(".{job_id}.{generation}.tmp-{}-{serial}", std::process::id())
+    format!("..{name}.tmp-{}-{serial}", std::process::id())
 }
 
 fn ensure_outbox_parent(state_dir: &Path) -> anyhow::Result<PathBuf> {
@@ -239,9 +260,44 @@ fn open_outbox_parent(state_dir: &Path) -> anyhow::Result<PathBuf> {
 }
 
 #[cfg(unix)]
+struct OutboxRecoveryLock {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+fn acquire_outbox_recovery_lock(
+    state_dir: &Path,
+    nonblocking: bool,
+) -> anyhow::Result<Option<OutboxRecoveryLock>> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600);
+    options.custom_flags(libc::O_NOFOLLOW);
+    let file = options
+        .open(state_dir.join(OUTBOX_RECOVERY_LOCK_NAME))
+        .context("open completion outbox recovery lock")?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!("completion outbox recovery lock is not a regular file");
+    }
+    let operation = if nonblocking {
+        rustix::fs::FlockOperation::NonBlockingLockExclusive
+    } else {
+        rustix::fs::FlockOperation::LockExclusive
+    };
+    match rustix::fs::flock(&file, operation) {
+        Ok(()) => Ok(Some(OutboxRecoveryLock { _file: file })),
+        Err(rustix::io::Errno::WOULDBLOCK) if nonblocking => Ok(None),
+        Err(error) => Err(std::io::Error::from(error).into()),
+    }
+}
+
+#[cfg(unix)]
 fn write_outbox_unix(parent: &std::fs::File, name: &str, payload: &[u8]) -> anyhow::Result<()> {
-    let temporary = temporary_outbox_name(name.trim_end_matches(|_| false), 0);
-    let temporary = temporary.replace(".0.tmp-", ".tmp-");
+    let temporary = temporary_outbox_name(name);
     let temp_fd = rustix::fs::openat(
         parent,
         Path::new(&temporary),
@@ -275,7 +331,7 @@ fn write_outbox_unix(parent: &std::fs::File, name: &str, payload: &[u8]) -> anyh
 #[cfg(not(unix))]
 fn write_outbox_portable(parent: &Path, name: &str, payload: &[u8]) -> anyhow::Result<()> {
     let path = parent.join(name);
-    let temporary = parent.join(temporary_outbox_name(name, 0));
+    let temporary = parent.join(temporary_outbox_name(name));
     let result = (|| -> anyhow::Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
@@ -364,7 +420,15 @@ fn read_outbox_portable(
 }
 
 fn read_bounded(mut file: std::fs::File, size: u64, path: &Path) -> anyhow::Result<Vec<u8>> {
-    let mut payload = Vec::with_capacity(size as usize);
+    if size > MAX_COMPLETION_PAYLOAD_BYTES as u64 {
+        anyhow::bail!(
+            "completion outbox payload exceeds {} bytes: {}",
+            MAX_COMPLETION_PAYLOAD_BYTES,
+            path.display()
+        );
+    }
+    let capacity = usize::try_from(size).context("completion outbox size does not fit usize")?;
+    let mut payload = Vec::with_capacity(capacity);
     Read::by_ref(&mut file)
         .take(MAX_COMPLETION_PAYLOAD_BYTES as u64 + 1)
         .read_to_end(&mut payload)?;
@@ -380,31 +444,227 @@ fn read_bounded(mut file: std::fs::File, size: u64, path: &Path) -> anyhow::Resu
 
 #[cfg(unix)]
 fn remove_outbox_unix(
+    state_dir: &Path,
     parent: &std::fs::File,
     name: &str,
     job_id: &str,
     generation: u64,
 ) -> anyhow::Result<()> {
     let path = outbox_path_from_parts(job_id, generation);
-    let fd = match rustix::fs::openat(
+    let _recovery_lock = acquire_outbox_recovery_lock(state_dir, false)?;
+    let (quarantine_name, quarantine) = create_outbox_quarantine(parent)?;
+    let moved = match rustix::fs::renameat(
         parent,
         Path::new(name),
+        &quarantine,
+        Path::new(QUARANTINE_ENTRY_NAME),
+    ) {
+        Ok(()) => true,
+        Err(error) if error == rustix::io::Errno::NOENT => false,
+        Err(error) => {
+            remove_outbox_quarantine(parent, &quarantine_name)?;
+            return Err(std::io::Error::from(error).into());
+        }
+    };
+    if !moved {
+        drop(quarantine);
+        remove_outbox_quarantine(parent, &quarantine_name)?;
+        return Ok(());
+    }
+
+    let fd = match rustix::fs::openat(
+        &quarantine,
+        Path::new(QUARANTINE_ENTRY_NAME),
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
         Ok(fd) => fd,
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(()),
-        Err(error) => return Err(std::io::Error::from(error).into()),
+        Err(error) => {
+            restore_outbox_entry(parent, quarantine, &quarantine_name, name)?;
+            return Err(std::io::Error::from(error).into());
+        }
     };
-    let stat = rustix::fs::fstat(&fd).map_err(std::io::Error::from)?;
+    let stat = match rustix::fs::fstat(&fd).map_err(std::io::Error::from) {
+        Ok(stat) => stat,
+        Err(error) => {
+            drop(fd);
+            restore_outbox_entry(parent, quarantine, &quarantine_name, name)?;
+            return Err(error.into());
+        }
+    };
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        drop(fd);
+        restore_outbox_entry(parent, quarantine, &quarantine_name, name)?;
         anyhow::bail!(
             "completion outbox is not a regular file: {}",
             path.display()
         );
     }
-    rustix::fs::unlinkat(parent, Path::new(name), AtFlags::empty())
+    drop(fd);
+    let unlink_error = rustix::fs::unlinkat(
+        &quarantine,
+        Path::new(QUARANTINE_ENTRY_NAME),
+        AtFlags::empty(),
+    )
+    .err()
+    .map(std::io::Error::from);
+    if let Some(error) = unlink_error {
+        let error = anyhow::anyhow!("remove completion outbox {}: {error}", path.display());
+        if let Err(restore_error) = restore_outbox_entry(parent, quarantine, &quarantine_name, name)
+        {
+            return Err(anyhow::anyhow!("{error}; restore failed: {restore_error}"));
+        }
+        return Err(error);
+    }
+    rustix::fs::fsync(&quarantine).map_err(std::io::Error::from)?;
+    drop(quarantine);
+    remove_outbox_quarantine(parent, &quarantine_name)?;
+    rustix::fs::fsync(parent).map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_outbox_quarantine(parent: &std::fs::File) -> anyhow::Result<(String, std::fs::File)> {
+    for _ in 0..8 {
+        let name = format!(
+            ".outbox-remove-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        );
+        match rustix::fs::mkdirat(parent, &name, Mode::from_raw_mode(0o700)) {
+            Ok(()) => {
+                let fd = rustix::fs::openat(
+                    parent,
+                    &name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| {
+                    let _ = rustix::fs::unlinkat(parent, Path::new(&name), AtFlags::REMOVEDIR);
+                    std::io::Error::from(error)
+                })?;
+                return Ok((name, fd.into()));
+            }
+            Err(error) if error == rustix::io::Errno::EXIST => continue,
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+    }
+    anyhow::bail!("could not allocate a unique completion outbox quarantine")
+}
+
+#[cfg(unix)]
+fn remove_outbox_quarantine(parent: &std::fs::File, name: &str) -> anyhow::Result<()> {
+    rustix::fs::unlinkat(parent, Path::new(name), AtFlags::REMOVEDIR)
         .map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+/// Parse the owner pid from a quarantine directory name.
+#[cfg(unix)]
+pub(crate) fn outbox_quarantine_pid(name: &str) -> anyhow::Result<Option<u32>> {
+    let Some(rest) = name.strip_prefix(QUARANTINE_PREFIX) else {
+        return Ok(None);
+    };
+    let (pid, nonce) = rest
+        .split_once('-')
+        .ok_or_else(|| anyhow::anyhow!("malformed completion outbox quarantine: {name}"))?;
+    if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("malformed completion outbox quarantine: {name}");
+    }
+    let pid = pid.parse::<u32>().map_err(|error| {
+        anyhow::anyhow!("malformed completion outbox quarantine {name}: {error}")
+    })?;
+    if pid == 0 {
+        anyhow::bail!("malformed completion outbox quarantine pid: {name}");
+    }
+    Ok(Some(pid))
+}
+
+/// Remove a crash-left quarantine directory using only directory fds.
+///
+/// The caller must handle a `false` result as an active removal operation.
+/// Unexpected children and non-regular payloads fail closed.
+#[cfg(unix)]
+pub(crate) fn remove_stale_outbox_quarantine(state_dir: &Path, name: &str) -> anyhow::Result<bool> {
+    if outbox_quarantine_pid(name)?.is_none() {
+        anyhow::bail!("not a completion outbox quarantine: {name}");
+    }
+    let parent = match open_outbox_parent(state_dir) {
+        Ok(parent) => parent,
+        Err(error) if is_not_found(&error) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    let Some(_recovery_lock) = acquire_outbox_recovery_lock(state_dir, true)? else {
+        return Ok(false);
+    };
+    let quarantine = match rustix::fs::openat(
+        &parent,
+        Path::new(name),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(true),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    let entries = rustix::fs::Dir::read_from(&quarantine)
+        .map_err(std::io::Error::from)
+        .context("read stale completion outbox quarantine")?;
+    let mut has_payload = false;
+    for entry in entries {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let entry_name = entry.file_name().to_bytes();
+        if entry_name == b"." || entry_name == b".." {
+            continue;
+        }
+        if entry_name != QUARANTINE_ENTRY_NAME.as_bytes() {
+            anyhow::bail!("unexpected completion outbox quarantine entry in {}", name);
+        }
+        let payload = rustix::fs::openat(
+            &quarantine,
+            Path::new(QUARANTINE_ENTRY_NAME),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        let stat = rustix::fs::fstat(&payload).map_err(std::io::Error::from)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            anyhow::bail!("stale completion outbox quarantine payload is not a regular file");
+        }
+        drop(payload);
+        has_payload = true;
+    }
+    if has_payload {
+        rustix::fs::unlinkat(
+            &quarantine,
+            Path::new(QUARANTINE_ENTRY_NAME),
+            AtFlags::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+    }
+    rustix::fs::fsync(&quarantine).map_err(std::io::Error::from)?;
+    drop(quarantine);
+    remove_outbox_quarantine(&parent, name)?;
+    rustix::fs::fsync(&parent).map_err(std::io::Error::from)?;
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn restore_outbox_entry(
+    parent: &std::fs::File,
+    quarantine: std::fs::File,
+    quarantine_name: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    rustix::fs::renameat(
+        &quarantine,
+        Path::new(QUARANTINE_ENTRY_NAME),
+        parent,
+        Path::new(name),
+    )
+    .map_err(std::io::Error::from)?;
+    drop(quarantine);
+    remove_outbox_quarantine(parent, quarantine_name)?;
     rustix::fs::fsync(parent).map_err(std::io::Error::from)?;
     Ok(())
 }
@@ -464,9 +724,10 @@ pub fn remove_owned(state_dir: &Path, isolation_id: &str, generation: u64) -> an
 /// Isolation / job / assignment ids must be a single path component.
 ///
 /// # Errors
-/// Empty, `..`, or separator characters.
+/// Empty, dot-prefixed, traversal, or separator characters.
 pub(crate) fn assert_safe_id(id: &str) -> anyhow::Result<()> {
     if id.is_empty()
+        || id.starts_with('.')
         || id == "."
         || id == ".."
         || id.contains('/')
@@ -546,9 +807,23 @@ mod tests {
     }
 
     #[test]
+    fn oversized_owned_pid_is_rejected_without_unbounded_read() {
+        let dir = tmp("pid-bounded");
+        std::fs::create_dir_all(dir.join("owned")).unwrap();
+        std::fs::write(
+            owned_path(&dir, "job-1", 1),
+            vec![b'7'; MAX_OWNED_PID_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(read_owned_pid(&dir, "job-1", 1), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn path_separator_id_is_rejected() {
         let dir = tmp("slash");
         assert!(claim_owned(&dir, "../etc", 1).is_err());
+        assert!(claim_owned(&dir, ".job", 1).is_err());
         assert!(claim_owned(&dir, ".", 1).is_err());
         assert!(claim_owned(&dir, "..", 1).is_err());
         assert!(read_owned_pid(&dir, "../etc", 1).is_none());
@@ -584,6 +859,25 @@ mod tests {
     }
 
     #[test]
+    fn oversized_outbox_read_is_rejected() {
+        let dir = tmp("outbox-read-bounded");
+        std::fs::create_dir_all(dir.join("outbox")).unwrap();
+        let path = outbox_path(&dir, "job-1", 1);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len((MAX_COMPLETION_PAYLOAD_BYTES + 1) as u64)
+            .unwrap();
+        assert!(read_outbox(&dir, "job-1", 1)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn concurrent_outbox_writers_publish_one_immutable_payload() {
         let dir = tmp("outbox-concurrent");
         let left = dir.clone();
@@ -609,6 +903,7 @@ mod tests {
         assert!(read_outbox(&dir, "job-1", 1).is_err());
         assert!(remove_outbox(&dir, "job-1", 1).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"secret");
+        assert!(std::fs::symlink_metadata(outbox_path(&dir, "job-1", 1)).is_ok());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -624,6 +919,80 @@ mod tests {
         assert!(read_outbox(&dir, "job-1", 1).is_err());
         assert!(remove_outbox(&dir, "job-1", 1).is_err());
         assert!(std::fs::read_dir(target).unwrap().next().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn temporary_outbox_name_preserves_full_outbox_name() {
+        let name = temporary_outbox_name("job.0.tmp-user.7");
+        let stem = name
+            .strip_prefix("..")
+            .unwrap()
+            .rsplit_once(".tmp-")
+            .unwrap()
+            .0;
+        assert_eq!(stem, "job.0.tmp-user.7");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_outbox_quarantine_is_removed_by_exact_directory_handle() {
+        let dir = tmp("outbox-quarantine");
+        let name = format!("{QUARANTINE_PREFIX}999999-{}", "a".repeat(32));
+        let quarantine = dir.join("outbox").join(&name);
+        std::fs::create_dir_all(&quarantine).unwrap();
+        std::fs::write(quarantine.join(QUARANTINE_ENTRY_NAME), b"payload").unwrap();
+
+        assert_eq!(outbox_quarantine_pid(&name).unwrap(), Some(999_999));
+        remove_stale_outbox_quarantine(&dir, &name).unwrap();
+        assert!(!quarantine.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_stale_outbox_quarantine_is_removed() {
+        let dir = tmp("outbox-quarantine-empty");
+        let name = format!("{QUARANTINE_PREFIX}999999-{}", "d".repeat(32));
+        let quarantine = dir.join("outbox").join(&name);
+        std::fs::create_dir_all(&quarantine).unwrap();
+
+        assert!(remove_stale_outbox_quarantine(&dir, &name).unwrap());
+        assert!(!quarantine.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_outbox_quarantine_defers_while_removal_lock_is_held() {
+        let dir = tmp("outbox-quarantine-lock");
+        let name = format!("{QUARANTINE_PREFIX}999999-{}", "b".repeat(32));
+        let quarantine = dir.join("outbox").join(&name);
+        std::fs::create_dir_all(&quarantine).unwrap();
+        std::fs::write(quarantine.join(QUARANTINE_ENTRY_NAME), b"payload").unwrap();
+        let lock = acquire_outbox_recovery_lock(&dir, false).unwrap();
+        assert!(lock.is_some());
+        assert!(!remove_stale_outbox_quarantine(&dir, &name).unwrap());
+        assert!(quarantine.exists());
+        drop(lock);
+        assert!(remove_stale_outbox_quarantine(&dir, &name).unwrap());
+        assert!(!quarantine.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_outbox_quarantine_preflights_before_mutating() {
+        let dir = tmp("outbox-quarantine-preflight");
+        let name = format!("{QUARANTINE_PREFIX}999999-{}", "c".repeat(32));
+        let quarantine = dir.join("outbox").join(&name);
+        std::fs::create_dir_all(&quarantine).unwrap();
+        std::fs::write(quarantine.join(QUARANTINE_ENTRY_NAME), b"payload").unwrap();
+        std::fs::write(quarantine.join("unexpected"), b"must survive").unwrap();
+
+        assert!(remove_stale_outbox_quarantine(&dir, &name).is_err());
+        assert!(quarantine.join(QUARANTINE_ENTRY_NAME).exists());
+        assert!(quarantine.join("unexpected").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 }

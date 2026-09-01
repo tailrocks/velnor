@@ -66,11 +66,29 @@ that temporary mismatch until the operator activates the new signed record.
   `VELNOR_JOB_CPUS=4` and `VELNOR_JOB_MEMORY=12g`, appended after workflow
   `container.options` so daemon policy wins on shared warm-runner hosts.
   Set either value empty in the daemon env to disable that cap for a trusted
-  scope, or tune per instance. All job units additionally run under
-  `velnor-jobs.slice`, which hard-caps the aggregate at 95% of host
-  (`CPUQuota=1900%`, `MemoryHigh=90%` throttle, `MemoryMax=95%` kill) so a
-  misconfigured pool cannot OOM the host; daemons and the broker stay in
-  `velnor-control.slice`, outside that cap.
+  scope, or tune per instance. Every job and service container receives the
+  runner-owned `--cgroup-parent=velnor-jobs.slice`; the per-job Docker API
+  lease also forces `HostConfig.CgroupParent` for BuildKit and nested
+  Testcontainers creates. All job units additionally run under
+  `velnor-jobs.slice`, whose post-install drop-in derives `CPUQuota` as 95%
+  of the detected online logical CPUs (`95 * getconf _NPROCESSORS_ONLN`). The
+  slice asserts that drop-in exists, so a missing or failed host-cap
+  calculation prevents protected workload startup instead of silently using a
+  fixed 20-CPU quota or no quota. The packaged `velnor-job@.service` places
+  systemd-launched workers in that slice; controller-spawned workers inherit
+  `velnor-control.slice`, while their Docker workloads still use the capped
+  parent. `MemoryHigh=90%` throttles and `MemoryMax=95%` kills within the same
+  slice; daemons and the broker stay in `velnor-control.slice`, outside that cap.
+  Docker admission fails closed unless `docker info` reports the systemd cgroup
+  driver on cgroup v2 and `velnor-jobs.slice` is loaded with the exact
+  host-scaled finite effective CPU quota. Host Docker calls are pinned to the
+  package-owned local socket. The per-job lease rejects ambiguous JSON/HTTP
+  framing, nested host binds, capabilities, devices, privileged/security
+  options, host namespace requests, and host-backed volume driver options; it
+  forwards only validated Docker TCP/h2c hijacks as raw streams. Untrusted
+  job/service container options use an explicit safe allowlist: names,
+  endpoint environment, mounts, network joins, port publishing, cross-container
+  volumes, and unknown Docker flags are dropped.
 - Rust compile-cache defaults: every job starts with
   `CARGO_INCREMENTAL=0`, `SCCACHE_CACHE_SIZE=20G`, and
   `SCCACHE_BASEDIRS=/__w:/github/home`. Workflow environment may explicitly

@@ -16,6 +16,13 @@ static EXEC_ENV_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
+const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+
+fn is_docker_control_env(name: &str) -> bool {
+    name.eq_ignore_ascii_case("DOCKER_HOST")
+        || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
+        || name.eq_ignore_ascii_case("DOCKER_CONFIG")
+}
 
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
@@ -203,6 +210,8 @@ impl JobContainerSpec {
             "-e".into(),
             "HOME=/github/home".into(),
             "-e".into(),
+            format!("DOCKER_HOST={JOB_DOCKER_HOST}"),
+            "-e".into(),
             "RUSTUP_HOME=/root/.rustup".into(),
             "-e".into(),
             "CARGO_HOME=/github/home/.cargo".into(),
@@ -225,6 +234,9 @@ impl JobContainerSpec {
         ];
         self.append_compiler_cache_mount(&mut args);
         for (name, value) in &self.env {
+            if is_docker_control_env(name) {
+                continue;
+            }
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
         // Daemon-owned compiler-cache variables are appended after workflow
@@ -233,6 +245,11 @@ impl JobContainerSpec {
         self.append_ownership_labels(&mut args);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
+        // Docker creates the actual workload in dockerd's cgroup, not in the
+        // Velnor worker process. Keep the outer job below the package-owned
+        // aggregate cap; the job lease proxy applies the same policy to
+        // containers created from inside the job.
+        self.append_job_cgroup_parent(&mut args);
 
         // Docker Engine 29 inherits systemd's 1024-file descriptor default
         // when no container limit is explicit. Large Rust/Zig links open one
@@ -275,11 +292,14 @@ impl JobContainerSpec {
     /// store. Seeding once per image digest removes that class.
     pub fn seed_mise_store_args(&self) -> Vec<String> {
         let store = mise_store_host(&self.temp_host);
-        vec![
+        let mut args = vec![
             "run".into(),
             "--rm".into(),
             "--entrypoint".into(),
             "sh".into(),
+        ];
+        self.append_job_cgroup_parent(&mut args);
+        args.extend([
             "-v".into(),
             self.mount_arg(
                 &self.mise_executable_store_host(),
@@ -292,7 +312,8 @@ impl JobContainerSpec {
             "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
              cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true"
                 .into(),
-        ]
+        ]);
+        args
     }
 
     fn exec_script_args(
@@ -334,6 +355,9 @@ impl JobContainerSpec {
         let mut args = vec!["exec".into(), "--workdir".into(), working_directory.into()];
         self.append_base_exec_env(&mut args);
         for (name, value) in env {
+            if is_docker_control_env(name) {
+                continue;
+            }
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
         args.push(self.name.clone());
@@ -389,6 +413,9 @@ impl JobContainerSpec {
         secret_masks: &[String],
     ) -> io::Result<()> {
         for (name, value) in env {
+            if is_docker_control_env(name) {
+                continue;
+            }
             let is_secret = env_name_is_secret(name) || env_value_is_secret(value, secret_masks);
             if is_secret && value.contains('\n') {
                 // Docker env files are line-oriented and cannot represent an
@@ -421,12 +448,13 @@ impl JobContainerSpec {
     /// a shimmed tool such as `gh` can make mise probe shimmed `rustup`,
     /// recursively forking until the job exhausts its cgroup.
     /// Re-asserted per exec because OrbStack (macOS dev hosts) injects the
-    /// host user's HOME into exec'd processes; explicit -e wins. Step env
-    /// (GITHUB_ENV and `env:` blocks) is appended after these, and docker
-    /// applies the last duplicate -e, so steps can still override.
+    /// host user's HOME into exec'd processes; explicit -e wins. Docker
+    /// endpoint/context/config overrides from workflow and step env are
+    /// dropped, so every in-container Docker client stays on the lease.
     fn append_base_exec_env(&self, args: &mut Vec<String>) {
         for kv in [
             "HOME=/github/home".to_string(),
+            format!("DOCKER_HOST={JOB_DOCKER_HOST}"),
             "RUSTUP_HOME=/root/.rustup".to_string(),
             "CARGO_HOME=/github/home/.cargo".to_string(),
             "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
@@ -496,9 +524,13 @@ impl JobContainerSpec {
         self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
+            if is_docker_control_env(name) {
+                continue;
+            }
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
         self.append_compiler_cache_environment(&mut args);
+        self.append_job_cgroup_parent(&mut args);
         if !path_prepend.is_empty() {
             let path = path_prepend
                 .iter()
@@ -544,6 +576,8 @@ impl JobContainerSpec {
     ) -> Vec<String> {
         vec![
             "build".into(),
+            "--cgroup-parent".into(),
+            crate::docker_lease::JOB_CGROUP_PARENT.into(),
             "--tag".into(),
             image.into(),
             "--file".into(),
@@ -601,9 +635,13 @@ impl JobContainerSpec {
         self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
+            if is_docker_control_env(name) {
+                continue;
+            }
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
         self.append_compiler_cache_environment(&mut args);
+        self.append_job_cgroup_parent(&mut args);
         if let Some(entrypoint) = entrypoint {
             args.extend(["--entrypoint".into(), entrypoint.into()]);
         }
@@ -745,17 +783,25 @@ impl JobContainerSpec {
                 );
                 self.temp_host.join("_velnor/ephemeral/cargo-bin")
             },
-            |repository| cargo_executable_store_host(&self.temp_host, &repository),
+            |repository| {
+                cargo_executable_store_host_for_scope(
+                    &self.temp_host,
+                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    &repository,
+                )
+            },
         )
     }
 
     pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
         match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
-            (Some(repository), Some(slot)) => {
-                mise_executable_store_host(&self.temp_host, &repository)
-                    .join("slots")
-                    .join(slot)
-            }
+            (Some(repository), Some(slot)) => mise_executable_store_host_for_scope(
+                &self.temp_host,
+                compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                &repository,
+            )
+            .join("slots")
+            .join(slot),
             _ => {
                 eprintln!(
                     "forensics.lifecycle: persistent mise install store refused: missing github.repository or runner slot identity"
@@ -776,14 +822,26 @@ impl JobContainerSpec {
                 );
                 self.temp_host.join("_velnor/ephemeral/mise-binaries")
             },
-            |repository| mise_binary_store_host(&self.temp_host, &repository),
+            |repository| {
+                mise_binary_store_host_for_scope(
+                    &self.temp_host,
+                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    &repository,
+                )
+            },
         )
     }
 
     fn playwright_browser_store_host(&self) -> PathBuf {
         self.repository_store_key().map_or_else(
             || self.home_host.join(".cache/ms-playwright"),
-            |repository| playwright_browser_store_host(&self.temp_host, &repository),
+            |repository| {
+                playwright_browser_store_host_for_scope(
+                    &self.temp_host,
+                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    &repository,
+                )
+            },
         )
     }
 
@@ -815,6 +873,13 @@ impl JobContainerSpec {
             format!("velnor.daemon-id={}", self.daemon_id),
             "--label".into(),
             format!("velnor.job-id={}", self.name),
+        ]);
+    }
+
+    fn append_job_cgroup_parent(&self, args: &mut Vec<String>) {
+        args.extend([
+            "--cgroup-parent".into(),
+            crate::docker_lease::JOB_CGROUP_PARENT.into(),
         ]);
     }
 }
@@ -920,6 +985,10 @@ impl ServiceContainerSpec {
             args.extend(["-p".into(), port.clone()]);
         }
         args.extend(self.options.iter().cloned());
+        args.extend([
+            "--cgroup-parent".into(),
+            crate::docker_lease::JOB_CGROUP_PARENT.into(),
+        ]);
         // Runner-owned network policy must win over any network-shaped token
         // present in the expanded service options. Docker uses the final
         // occurrence, so append the per-job network and workflow service key
@@ -1205,9 +1274,21 @@ pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
 
 /// Host-persistent Playwright browser downloads, scoped by trust + repository.
 pub(crate) fn playwright_browser_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    playwright_browser_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn playwright_browser_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
     let root =
         crate::storage::cache_class_path(&daemon_store_root(temp_host), "caches", "_velnor_caches");
-    crate::storage::append_legacy_trust(root, &crate::github_adapter::cargo_target_trust_scope())
+    crate::storage::append_legacy_trust(root, trust_scope)
         .join(sanitize_store_key(repository))
         .join("playwright")
 }
@@ -1571,6 +1652,9 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
         assert!(args
             .windows(2)
+            .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
+        assert!(args
+            .windows(2)
             .any(|pair| pair == ["--ulimit", "nofile=65536:65536"]));
         assert!(args
             .windows(2)
@@ -1608,6 +1692,9 @@ mod tests {
         assert!(!args
             .last()
             .is_some_and(|script| script.contains("/root/.rustup")));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
     }
 
     #[test]
@@ -1686,6 +1773,8 @@ mod tests {
                 "-e",
                 "HOME=/github/home",
                 "-e",
+                "DOCKER_HOST=unix:///var/run/docker.sock",
+                "-e",
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
@@ -1726,6 +1815,8 @@ mod tests {
                 "-e",
                 "HOME=/github/home",
                 "-e",
+                "DOCKER_HOST=unix:///var/run/docker.sock",
+                "-e",
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
@@ -1742,6 +1833,40 @@ mod tests {
                 "/__a/action/dist/index.js"
             ]
         );
+    }
+
+    #[test]
+    fn docker_endpoint_environment_is_runner_owned() {
+        let mut spec = spec();
+        spec.env = vec![
+            ("DOCKER_HOST".into(), "tcp://attacker.example:2376".into()),
+            ("DOCKER_CONTEXT".into(), "attacker".into()),
+            ("DOCKER_CONFIG".into(), "/tmp/attacker".into()),
+            ("SAFE_ENV".into(), "kept".into()),
+        ];
+        let start = spec.start_args();
+        assert!(start.contains(&"DOCKER_HOST=unix:///var/run/docker.sock".into()));
+        assert!(start.contains(&"SAFE_ENV=kept".into()));
+        assert!(!start.iter().any(|arg| arg.contains("attacker.example")));
+        assert!(!start.iter().any(|arg| arg == "DOCKER_CONTEXT=attacker"));
+        assert!(!start.iter().any(|arg| arg == "DOCKER_CONFIG=/tmp/attacker"));
+
+        let prepared = spec
+            .prepare_exec_process_args(
+                "/__w",
+                &[
+                    ("DOCKER_HOST".into(), "tcp://attacker.example:2376".into()),
+                    ("DOCKER_CONTEXT".into(), "attacker".into()),
+                    ("DOCKER_CONFIG".into(), "/tmp/attacker".into()),
+                ],
+                &[],
+                &["docker".into(), "version".into()],
+            )
+            .unwrap();
+        assert!(prepared
+            .args()
+            .contains(&"DOCKER_HOST=unix:///var/run/docker.sock".into()));
+        assert!(!prepared.args().iter().any(|arg| arg.contains("attacker")));
     }
 
     #[test]
@@ -1827,6 +1952,10 @@ mod tests {
             let joined = prepared.args().join("\0");
             assert!(prepared.args().contains(&"--env-file".into()));
             assert!(!joined.contains("PLACEHOLDER_CREDENTIAL"));
+            assert!(prepared
+                .args()
+                .windows(2)
+                .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
         }
     }
 
@@ -1944,6 +2073,9 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--label", "velnor.daemon-id=test-daemon"] }));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
         assert!(args.windows(2).any(|pair| pair == ["--entrypoint", "node"]));
         assert_eq!(
             &args[args.len() - 2..],
@@ -2047,6 +2179,8 @@ mod tests {
             ),
             vec![
                 "build",
+                "--cgroup-parent",
+                "velnor-jobs.slice",
                 "--tag",
                 "velnor-action-owner-repo-v1-root",
                 "--file",
@@ -2091,6 +2225,9 @@ mod tests {
             .any(|pair| { pair == ["--label", "velnor.daemon-id=test-daemon"] }));
         assert!(args
             .windows(2)
+            .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
+        assert!(args
+            .windows(2)
             .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));
         assert_eq!(&args[args.len() - 2..], ["alpine:3.20", "arg1"]);
     }
@@ -2120,6 +2257,8 @@ mod tests {
                 "5432:5432",
                 "--health-cmd",
                 "pg_isready",
+                "--cgroup-parent",
+                "velnor-jobs.slice",
                 "--network",
                 "velnor-net-1",
                 "--network-alias",
@@ -2175,6 +2314,37 @@ mod tests {
             .filter(|pair| pair[0] == "--network")
             .collect::<Vec<_>>();
         assert_eq!(network_pairs.last().unwrap()[1], "velnor-net-1");
+    }
+
+    #[test]
+    fn job_runner_cgroup_parent_overrides_expanded_options() {
+        let mut job = spec();
+        job.options = vec!["--cgroup-parent".into(), "unexpected.slice".into()];
+        let args = job.start_args();
+        let cgroup_pairs = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--cgroup-parent")
+            .collect::<Vec<_>>();
+        assert_eq!(cgroup_pairs.last().unwrap()[1], "velnor-jobs.slice");
+    }
+
+    #[test]
+    fn service_runner_cgroup_parent_overrides_expanded_options() {
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-1".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: vec!["--cgroup-parent".into(), "unexpected.slice".into()],
+        };
+        let args = service.start_args();
+        let cgroup_pairs = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--cgroup-parent")
+            .collect::<Vec<_>>();
+        assert_eq!(cgroup_pairs.last().unwrap()[1], "velnor-jobs.slice");
     }
 
     #[test]

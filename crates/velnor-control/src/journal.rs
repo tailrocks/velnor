@@ -1,8 +1,9 @@
 //! Durable node journal: WAL + `synchronous=FULL`, immutable events, reducer.
 //!
 //! Side-effect commands are returned only after the intent event is committed.
-//! Completions are at-least-once: an outbox row survives until a remote
-//! acknowledgement (or observed terminal) is itself committed.
+//! Completions are fail-closed around one durable local send claim: an outbox
+//! row survives until a remote acknowledgement (or observed terminal) is
+//! itself committed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -759,35 +760,38 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
             payload_sha256,
         } => {
-            let slot_generation =
-                state
-                    .jobs
+            if let Some(job_index) = state.jobs.iter().position(|job| job.job_id == job_id) {
+                let job = &state.jobs[job_index];
+                let slot_generation = state
+                    .slots
                     .iter()
-                    .find(|job| job.job_id == job_id)
-                    .and_then(|job| {
-                        state
-                            .slots
-                            .iter()
-                            .find(|slot| slot.slot_id == job.slot_id)
-                            .map(|slot| (job.generation, slot.generation))
-                    });
-            if let Some((job_generation, slot_generation)) = slot_generation {
-                if job_generation != generation || slot_generation != generation {
+                    .find(|slot| slot.slot_id == job.slot_id)
+                    .map(|slot| slot.generation);
+                if job.generation != generation || slot_generation != Some(generation) {
                     rejected = true;
-                } else {
-                    if let Some(job) = state.jobs.iter_mut().find(|job| job.job_id == job_id) {
-                        job.phase = ActorPhase::Completing;
+                } else if let Some(outbox_index) =
+                    state.outbox.iter().position(|row| row.job_id == job_id)
+                {
+                    // Completion intent is a durable prepare record. Replaying the
+                    // same prepare must not replace the row: replacement used to
+                    // clear `send_started`, allowing concurrent/replayed callers to
+                    // issue more than one terminal send.
+                    let row = &state.outbox[outbox_index];
+                    if row.generation != generation
+                        || !row.intended
+                        || row.remote_acked
+                        || row.payload_sha256 != payload_sha256
+                        || !outbox_owner_is_proven(&state, row)
+                    {
+                        rejected = true;
+                    } else if state.jobs[job_index].phase != ActorPhase::Completing {
+                        state.jobs[job_index].phase = ActorPhase::Completing;
                     }
-                    state.outbox.retain(|row| row.job_id != job_id);
+                } else {
+                    state.jobs[job_index].phase = ActorPhase::Completing;
                     state.outbox.push(OutboxRecord {
                         job_id: job_id.clone(),
-                        slot_id: state
-                            .jobs
-                            .iter()
-                            .find(|job| job.job_id == job_id)
-                            .expect("completion job was validated")
-                            .slot_id
-                            .clone(),
+                        slot_id: state.jobs[job_index].slot_id.clone(),
                         generation,
                         payload_sha256: payload_sha256.clone(),
                         intended: true,
@@ -809,7 +813,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
                 let valid = {
                     let row = &state.outbox[index];
-                    row.generation == generation && outbox_owner_is_proven(&state, row)
+                    row.generation == generation
+                        && row.intended
+                        && !row.remote_acked
+                        && !row.send_started
+                        && outbox_owner_is_proven(&state, row)
                 };
                 if valid {
                     state.outbox[index].send_started = true;
@@ -825,7 +833,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
                 let valid = {
                     let row = &state.outbox[index];
-                    row.generation == generation && outbox_owner_is_proven(&state, row)
+                    row.generation == generation
+                        && row.intended
+                        && row.send_started
+                        && !row.remote_acked
+                        && outbox_owner_is_proven(&state, row)
                 };
                 if valid {
                     state.outbox[index].remote_acked = true;
@@ -3201,6 +3213,16 @@ mod tests {
 
         assert!(
             !recovered
+                .apply(Event::CompletionSendStarted {
+                    job_id: job_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        assert!(
+            !recovered
                 .apply(Event::RemoteObservedTerminal {
                     job_id: job_id.clone(),
                     generation,
@@ -3797,6 +3819,54 @@ mod tests {
     }
 
     #[test]
+    fn terminal_ack_requires_a_durable_send_claim() {
+        let (_dir, mut journal) = open_tmp("ack-requires-send-claim");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("guid-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("guid-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "w".into(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                payload_sha256: payload_checksum(b"ok"),
+            })
+            .unwrap();
+
+        let ack = journal
+            .apply(Event::RemoteAcked {
+                job_id: job("guid-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+        assert!(ack.rejected);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.outbox.len(), 1);
+        assert!(!state.outbox[0].remote_acked);
+    }
+
+    #[test]
     fn remote_ack_restores_ready() {
         let (dir, mut journal) = open_tmp("ack-ready");
         prime_ready(&mut journal, "scope-1");
@@ -3828,6 +3898,12 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 payload_sha256: payload_checksum(b"ok"),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("guid-1"),
+                generation: r#gen(),
             })
             .unwrap();
         let acked = journal

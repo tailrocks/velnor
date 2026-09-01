@@ -84,7 +84,8 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     }
 
     run_required(runner, "git", &["--version".to_string()], "Host git")?;
-    run_required(runner, "docker", &["version".to_string()], "Docker daemon")?;
+    crate::execution::verify_docker_job_cgroup_boundary(runner)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if args.require_buildx {
         run_required(
             runner,
@@ -403,9 +404,39 @@ mod tests {
                     "velnor-script-ok\n",
                 )?;
             }
+            let stdout = if program == "docker"
+                && args
+                    == [
+                        "info".to_string(),
+                        "--format".to_string(),
+                        "{{.CgroupDriver}} {{.CgroupVersion}}".to_string(),
+                    ] {
+                "systemd 2\n"
+            } else if program == "getconf" && args == ["_NPROCESSORS_ONLN".to_string()] {
+                "1\n"
+            } else if program == "systemctl"
+                && args
+                    == [
+                        "cat".to_string(),
+                        crate::docker_lease::JOB_CGROUP_PARENT.to_string(),
+                    ]
+            {
+                "[Slice]\nCPUQuota=95%\n"
+            } else if program == "systemctl"
+                && args.first().is_some_and(|arg| arg == "show")
+                && args.len() == 5
+                && args.get(1).is_some_and(|arg| arg == "--property=LoadState")
+                && args
+                    .get(2)
+                    .is_some_and(|arg| arg == "--property=CPUQuotaPerSecUSec")
+            {
+                "loaded\n950ms\n"
+            } else {
+                ""
+            };
             Ok(CommandResult {
                 code,
-                stdout: String::new(),
+                stdout: stdout.to_string(),
                 stderr: "failed".to_string(),
             })
         }
@@ -457,16 +488,23 @@ mod tests {
         );
         assert_eq!(
             runner.calls[1],
-            ("docker".to_string(), vec!["version".to_string()])
+            (
+                "docker".to_string(),
+                vec![
+                    "info".to_string(),
+                    "--format".to_string(),
+                    "{{.CgroupDriver}} {{.CgroupVersion}}".to_string()
+                ]
+            )
         );
         assert_eq!(
-            runner.calls[2],
+            runner.calls[5],
             (
                 "docker".to_string(),
                 vec!["buildx".to_string(), "version".to_string()]
             )
         );
-        let image_tools_call = &runner.calls[3];
+        let image_tools_call = &runner.calls[6];
         assert_eq!(image_tools_call.0, "docker");
         assert_eq!(image_tools_call.1[0], "run");
         assert!(image_tools_call.1.windows(2).any(|pair| {
@@ -487,7 +525,7 @@ mod tests {
             .1
             .iter()
             .any(|value| value.contains("command -v node >/dev/null && node --version")));
-        let script_call = &runner.calls[4];
+        let script_call = &runner.calls[7];
         assert_eq!(script_call.0, "docker");
         assert!(script_call.1.windows(2).any(|pair| {
             pair[0] == "--name" && pair[1].starts_with("velnor-preflight-script-")
@@ -499,7 +537,7 @@ mod tests {
             "{}:/__w",
             temp.join("preflight").join("workspace").display()
         )));
-        let bind_mount_call = &runner.calls[5];
+        let bind_mount_call = &runner.calls[8];
         assert_eq!(bind_mount_call.0, "docker");
         assert_eq!(bind_mount_call.1[0], "run");
         assert!(bind_mount_call.1.windows(2).any(|pair| {
@@ -549,7 +587,7 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 0, 0, 0, 1],
+            codes: vec![0, 0, 0, 0, 0, 0, 0, 1],
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();
@@ -577,7 +615,7 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 0, 0, 1],
+            codes: vec![0, 0, 0, 0, 0, 0, 1],
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();
@@ -607,7 +645,7 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 0, 1],
+            codes: vec![0, 0, 0, 0, 0, 1],
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();

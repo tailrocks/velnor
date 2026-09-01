@@ -308,6 +308,90 @@ fn docker_backend_does_not_boot_firecracker() {
 }
 
 #[test]
+fn docker_backend_rejects_unbounded_cgroup_driver() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+    for driver in ["cgroupfs 2", "systemd 1"] {
+        let mut fs = MemoryFs::default();
+        let docker = socket_for(ExecutionBackendKind::Docker);
+        fs.write(&docker, b"socket").unwrap();
+        let mut runner = RecordingCommands {
+            docker_cgroup_probe: Some(CommandResult {
+                code: 0,
+                stdout: driver.into(),
+                stderr: String::new(),
+            }),
+            ..RecordingCommands::default()
+        };
+        let mut api = RecordingFirecracker::default();
+        let kvm = PathBuf::from("/dev/kvm");
+        let artifacts = PathBuf::from("/microvm");
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+
+        let error = preflight_selected(&file, &mut world).unwrap_err();
+        assert!(error.to_string().contains("systemd cgroup driver"));
+        assert!(runner
+            .calls
+            .iter()
+            .all(|(program, _)| program != "systemctl"));
+    }
+}
+
+#[test]
+fn docker_backend_rejects_missing_effective_cpu_quota() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let docker = socket_for(ExecutionBackendKind::Docker);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        docker_cgroup_quota: Some(CommandResult {
+            code: 0,
+            stdout: "infinity".into(),
+            stderr: String::new(),
+        }),
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let artifacts = PathBuf::from("/microvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+
+    let error = preflight_selected(&file, &mut world).unwrap_err();
+    assert!(error.to_string().contains("CPUQuotaPerSecUSec"));
+}
+
+#[test]
+fn docker_backend_accepts_fractional_effective_cpu_quota() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let docker = socket_for(ExecutionBackendKind::Docker);
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        docker_cgroup_cpu_count: Some(CommandResult {
+            code: 0,
+            stdout: "2".into(),
+            stderr: String::new(),
+        }),
+        docker_cgroup_quota: Some(CommandResult {
+            code: 0,
+            stdout: "1.900000s".into(),
+            stderr: String::new(),
+        }),
+        docker_cgroup_unit: Some(CommandResult {
+            code: 0,
+            stdout: "[Slice]\nCPUQuota=190%\n".into(),
+            stderr: String::new(),
+        }),
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let artifacts = PathBuf::from("/microvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+
+    preflight_selected(&file, &mut world).expect("fractional systemd quota must parse exactly");
+}
+
+#[test]
 fn docker_backend_execute_runs_network_service_and_job_containers() {
     let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
     let mut fs = MemoryFs::default();
