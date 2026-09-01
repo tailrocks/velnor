@@ -8,7 +8,10 @@ Docker or Firecracker backend, and keeps bounded operational evidence.
 This repository also contains the Velnor documentation site: Fumadocs, MDX,
 TanStack Start, strict TypeScript, and Bun.
 
-Read the [documentation](/docs/).
+Read the [documentation](https://velnor.tailrocks.com/docs).
+
+Documentation deploys automatically from `main` to
+`https://velnor.tailrocks.com` through GitHub Pages.
 
 ```bash
 bun install
