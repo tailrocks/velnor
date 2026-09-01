@@ -1,11 +1,11 @@
 # Velnor future direction
 
 Status: future-only register, reviewed 2026-09-01. `CURRENT` implementation
-descriptions live in [architecture](architecture.md), [system now](system-now.md),
-and [execution now](execution-now.md). Nothing in this file is a shipped
+descriptions live in [architecture](../concepts/architecture.md), [system](../concepts/system.md),
+and [execution](../guides/execution.md). Nothing in this file is a shipped
 capability, readiness claim, or security proof.
 
-> Navigation: [← CI estate contract](ci-estate-contract.md) · [Index](index.md) · [Next: Evidence record →](evidence-record-2026-09-01.md)
+> Navigation: [← CI estate contract](../verification/ci-estate-contract.md) · [Index](../index.md) · [Next: Evidence record →](../verification/evidence-record-2026-09-01.md)
 
 ## Boundaries that future work must preserve
 
@@ -36,7 +36,7 @@ These constraints come from `AGENTS.md`, the model dependency law in
 | F-REMOTE | Not implemented in current transport | The client/API currently target local Unix sockets. Remote contexts, authentication, authorization, certificate lifecycle, and revocation need a separate reviewed boundary. | Approved network/PKI/identity/role design plus reconnect, partial failure, and mutation tests. No SSH or unreviewed listener shortcut. |
 | F-PARITY | Open | The runner implements a substantial Actions subset, but source/tests do not prove complete GitHub Actions parity. | Enumerated capability matrix, fixture coverage, upstream protocol comparison, and explicit unsupported behavior. |
 | F-CACHE | Code present; estate-wide benefit unproven | CAS, action journal, and compiler-cache services have unit/integration coverage. That does not prove deployment isolation, quota behavior, cleanup, or cold/warm/rerun benefit across the estate. | Signed deployment, isolated fixture, scoped A/B runs, retention/pressure evidence, and rollback path. |
-| F-SECURITY | Source controls present; host proof incomplete | Admission, integrity, identity fencing, and data-boundary controls are implemented. Source review does not prove kernel, KVM, host, filesystem, network, encryption-at-rest, or secure-erasure properties. | Threat-specific live tests and host/dependency review. Keep the limits in [security and data](security-and-data.md). |
+| F-SECURITY | Source controls present; host proof incomplete | Admission, integrity, identity fencing, and data-boundary controls are implemented. Source review does not prove kernel, KVM, host, filesystem, network, encryption-at-rest, or secure-erasure properties. | Threat-specific live tests and host/dependency review. Keep the limits in [security and data](../operations/security-and-data.md). |
 | F-CUTOVER | Explicit migration seam remains | `velnorctl` still depends on the `velnor-runner` runtime facade, and the runner source labels the scaffold transitional. | Remove the seam only after replacement ownership, package/service invocations, fixtures, and rollback/recovery paths are independently proven. |
 | F-DOCS | Ongoing | Keep this map and all current docs synchronized with code, tests, package units, and evidence. | Every changed interface updates its reference and at least one task/proof path; stale claims are removed. |
 

@@ -1,4 +1,4 @@
-# Runtime checking and proof
+# Runtime checking
 
 Status: implemented runtime behavior only. Source and tests are the authority. Plan prose, design sketches, and future acceptance criteria are not runtime proof.
 
@@ -6,7 +6,7 @@ The runtime rule is simple: validate before side effects, persist intent before
 executing the matching side effect, and fail closed when identity, freshness,
 integrity, or ownership cannot be proved.
 
-> Navigation: [← Development](development-now.md) · [Index](index.md) · [Next: CI estate contract →](ci-estate-contract.md)
+> Navigation: [← Development](../guides/development.md) · [Index](../index.md) · [Next: CI estate contract →](ci-estate-contract.md)
 
 ## Runtime path
 

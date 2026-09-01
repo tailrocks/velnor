@@ -4,7 +4,7 @@ Status: current source inventory, reviewed 2026-09-01. Presence of a client or
 URL builder proves implementation intent and protocol shape; it does not prove
 that credentials, permissions, network access, or a live service are available.
 
-> Navigation: [← Execution now](execution-now.md) · [Index](index.md) · [Next: Interface reference →](interface-reference.md)
+> Navigation: [← Execution](../guides/execution.md) · [Index](../index.md) · [Next: Interface reference →](interface.md)
 
 ## Integration map
 
@@ -35,10 +35,10 @@ Release infrastructure
 | --- | --- | --- |
 | GitHub REST | GitHub.com and GHES URL roots; runner groups, JIT configs, runner listing/deletion, queued jobs, run inspection/cancel/rerun/dispatch. | `crates/velnor-runner/src/protocol.rs:459-647,915-965,1133-1426`; `crates/velnor-control/src/github.rs:46-148` |
 | JIT registration | OAuth client-credentials with a JWT bearer assertion; `generate-jitconfig`; name, labels, runner group, and scope. | `crates/velnor-runner/src/protocol.rs:915-965,1133-1158` |
-| Runner V2 broker | `POST /session`, `GET /message`, and `POST /acknowledge`; empty success means idle, while non-2xx is an error. | `crates/velnor-runner/src/protocol.rs:1858-1946`; [job flow](execution-now.md#from-broker-message-to-admission) |
+| Runner V2 broker | `POST /session`, `GET /message`, and `POST /acknowledge`; empty success means idle, while non-2xx is an error. | `crates/velnor-runner/src/protocol.rs:1858-1946`; [job flow](../guides/execution.md#from-broker-message-to-admission) |
 | Run Service | `POST /acquirejob`, `/renewjob`, and `/completejob`; delivery is acquired before execution and completion is retried with durable intent. | `crates/velnor-runner/src/protocol.rs:2007-2207`; `crates/velnor-runner/src/node/complete.rs:34-177` |
 | Results Service | VSS/Twirp step updates, signed step/job log and summary uploads, and a persistent WebSocket live-feed connection. | `crates/velnor-runner/src/protocol.rs:2246-2490,3693-4414`; `crates/velnor-runner/src/runner.rs:6601-6902` |
-| Runner protocol authority | Velnor pins `actions/runner` `v2.337.0`; upstream source remains the behavior authority for protocol changes. | [runner protocol reference](runner-protocol-reference.md); `crates/velnor-runner/src/protocol.rs:29-38` |
+| Runner protocol authority | Velnor pins `actions/runner` `v2.337.0`; upstream source remains the behavior authority for protocol changes. | [runner protocol reference](runner-protocol.md); `crates/velnor-runner/src/protocol.rs:29-38` |
 
 GitHub supplies the workflow/job payload, including `SystemVssConnection`,
 job-scoped result credentials, variables, masks, endpoints, actions, steps,

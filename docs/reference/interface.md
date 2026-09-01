@@ -9,7 +9,7 @@ Status markers:
 - `PROTOCOL` — current external wire contract implemented by the runner/client.
 - `INTERNAL` — current application port or model contract, not necessarily a public route.
 
-> Navigation: [← Integrations](integrations.md) · [Index](index.md) · [Next: Runner protocol →](runner-protocol-reference.md)
+> Navigation: [← Integrations](integrations.md) · [Index](../index.md) · [Next: Runner protocol →](runner-protocol.md)
 
 ## Identity and limits
 

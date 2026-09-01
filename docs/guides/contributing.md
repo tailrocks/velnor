@@ -2,9 +2,9 @@
 
 Audience: contributors changing Velnor code, interfaces, tests, packages, or
 operational behavior. This is the maintenance contract for the docs linked
-from [the index](index.md).
+from [the index](../index.md).
 
-> Navigation: [← Evidence record](evidence-record-2026-09-01.md) · [Index](index.md) · [Next: README / repeat →](../README.md)
+> Navigation: [← Evidence record](../verification/evidence-record-2026-09-01.md) · [Index](../index.md) · [Next: Start again →](../index.md)
 
 ## Choose the document type first
 
@@ -15,10 +15,10 @@ reference needed to execute them, and interface/protocol pages are reference.
 
 | Need | Velnor form | Example |
 | --- | --- | --- |
-| Learn the project | Tutorial/onboarding | [README](../README.md) |
-| Understand the system | Explanation | [architecture](architecture.md), [system](system-now.md), [execution](execution-now.md), [security](security-and-data.md) |
-| Complete a task | How-to | [operator guide](operator-now.md), [development](development-now.md) |
-| Look up a contract | Reference | [interface reference](interface-reference.md), [runner protocol](runner-protocol-reference.md) |
+| Learn the project | Tutorial/onboarding | [documentation index](../index.md) |
+| Understand the system | Explanation | [architecture](../concepts/architecture.md), [system](../concepts/system.md), [execution](execution.md), [security](../operations/security-and-data.md) |
+| Complete a task | How-to | [operator guide](operator.md), [development](development.md) |
+| Look up a contract | Reference | [interface reference](../reference/interface.md), [runner protocol](../reference/runner-protocol.md) |
 
 This separation follows [Diátaxis](https://diataxis.fr/). Do not turn a
 reference table into a tutorial or bury an operational command inside a design
@@ -39,9 +39,9 @@ essay.
    one interface.
 
 The evidence vocabulary and document ownership table are in
-[index.md](index.md). Source dependency law is enforced by
+[index.md](../index.md). Source dependency law is enforced by
 `crates/velnor-client/tests/dependency_boundaries.rs`; runtime proof boundaries
-are summarized in [runtime-checking-proof](runtime-checking-proof.md).
+are summarized in [runtime-checking](../verification/runtime-checking.md).
 
 ## Procedure and API checklist
 
@@ -63,7 +63,7 @@ Every API reference should include:
 - persistence and cursor behavior;
 - one minimal example.
 
-The local API reference in [interface-reference](interface-reference.md) is the
+The local API reference in [interface](../reference/interface.md) is the
 model for this format.
 
 ## Change workflow

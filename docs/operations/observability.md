@@ -5,7 +5,7 @@ observation planes with different durability and disclosure rules. A log, event,
 telemetry record, health file, or green test is not automatically proof that a
 job or fleet is healthy.
 
-> Navigation: [← Operator guide](operator-now.md) · [Index](index.md) · [Next: Security and data →](security-and-data.md)
+> Navigation: [← Operator guide](../guides/operator.md) · [Index](../index.md) · [Next: Security and data →](security-and-data.md)
 
 ## Five observation planes
 
@@ -79,7 +79,7 @@ The same job output has intentionally different formats:
 Mixing raw feed lines with timestamped blob lines changes GitHub UI/download
 semantics. Runner forensic logs rotate at 32 MiB with one `.1` file.
 `crates/velnor-runner/src/slot_log.rs:1-12,77-181`;
-`docs/interface-reference.md` (log channel contract).
+`docs/reference/interface.md` (log channel contract).
 
 ## Health and metrics
 

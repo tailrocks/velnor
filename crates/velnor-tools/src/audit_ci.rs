@@ -1,4 +1,4 @@
-//! Estate CI contract auditor (`docs/ci-estate-contract.md`).
+//! Estate CI contract auditor (`docs/verification/ci-estate-contract.md`).
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -39,7 +39,7 @@ fn has_truthful_both_lane_contract(text: &str) -> bool {
         || has_explicit_velnor_capability_gate(text)
 }
 const SHA_LEN: usize = 40;
-const FLEET_MAP_FILE: &str = "docs/ci-estate-contract.md";
+const FLEET_MAP_FILE: &str = "docs/verification/ci-estate-contract.md";
 const FLEET_MAP_START: &str = "<!-- fleet-map:start -->";
 const FLEET_MAP_END: &str = "<!-- fleet-map:end -->";
 const LEGACY_RUNNER_GROUP_DOCTOR: &str = "scripts/runner_group_doctor.sh";
@@ -4411,8 +4411,9 @@ jobs:
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         assert!(!root.join("scripts/runner_group_doctor.sh").exists());
 
-        let evidence = fs::read_to_string(root.join("docs/evidence-record-2026-09-01.md"))
-            .expect("evidence record");
+        let evidence =
+            fs::read_to_string(root.join("docs/verification/evidence-record-2026-09-01.md"))
+                .expect("evidence record");
         let active_incident = evidence
             .split_once("### 2026-08-24: organization allowlist drift")
             .and_then(|(_, section)| section.split_once("### "))

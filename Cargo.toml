@@ -66,7 +66,7 @@ unicode-normalization = "0.1.24"
 regex = "1.11.1"
 tokio-tungstenite = { version = "0.30", features = ["native-tls", "native-tls-vendored"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-# Structured spans/events for performance analysis (see docs/security-and-data.md): JSON
+# Structured spans/events for performance analysis (see docs/operations/security-and-data.md): JSON
 # span-close events with busy/idle timings land in <config>/logs/trace.jsonl;
 # the `otel` feature adds an OTLP exporter gated on VELNOR_OTLP_ENDPOINT.
 tracing = "0.1.41"

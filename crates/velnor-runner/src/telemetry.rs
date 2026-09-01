@@ -1,4 +1,4 @@
-//! Tracing subscriber wiring (see docs/security-and-data.md).
+//! Tracing subscriber wiring (see docs/operations/security-and-data.md).
 //!
 //! Performance and incident analysis must be possible from on-disk data:
 //! every `tracing` span and event is appended as JSON lines (with span

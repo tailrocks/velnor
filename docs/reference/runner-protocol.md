@@ -5,7 +5,7 @@ broker/run-service V2 path in the upstream `actions/runner` source. This file
 is the input to `velnor-tools check-runner-reference`; the code and upstream
 source remain the behavioral authorities.
 
-> Navigation: [← Interface reference](interface-reference.md) · [Index](index.md) · [Next: Operator guide →](operator-now.md)
+> Navigation: [← Interface reference](interface.md) · [Index](../index.md) · [Next: Operator guide →](../guides/operator.md)
 
 ## Pinned release
 
@@ -39,6 +39,6 @@ compatibility tests.
   [`JobDispatcher.cs`](https://github.com/actions/runner/blob/v2.337.0/src/Runner.Listener/JobDispatcher.cs).)
 
 Detailed current runner and execution behavior is in
-[system behavior](system-now.md), [execution](execution-now.md), and the
-[interface reference](interface-reference.md). Open gaps are tracked in
-[future direction](future-direction.md).
+[system behavior](../concepts/system.md), [execution](../guides/execution.md), and the
+[interface reference](interface.md). Open gaps are tracked in
+[future direction](../roadmap/future-direction.md).

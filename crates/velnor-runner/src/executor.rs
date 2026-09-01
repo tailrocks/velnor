@@ -12437,7 +12437,7 @@ fn unix_now_rfc3339() -> String {
     // Second-precision RFC3339 for step START/COMPLETION METADATA fields
     // (started_at/completed_at) only. This is NOT a log-line prefix: log-line
     // timestamps live in runner.rs (`blob_log_lines`, 7-digit sub-seconds) —
-    // see docs/interface-reference.md before touching either. A previous
+    // see docs/reference/interface.md before touching either. A previous
     // version of this comment claimed blob-line prefixes need second
     // precision; that was wrong and caused a UI regression when copied.
     let fmt =

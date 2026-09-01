@@ -3,7 +3,7 @@
 Short definitions for newcomers. The linked documents contain the full
 behavior and proof limits.
 
-> Navigation: [← Index](index.md) · **Glossary** · [Next: Architecture →](architecture.md)
+> Navigation: [← Index](../index.md) · **Glossary** · [Next: Architecture →](architecture.md)
 
 | Term | Meaning in Velnor |
 | --- | --- |
@@ -35,4 +35,4 @@ behavior and proof limits.
 | `OPEN/UNPROVEN` | No completion or capability claim is made. |
 
 Start with [architecture](architecture.md) for the relationships among these
-terms, then [execution](execution-now.md) for the job lifecycle.
+terms, then [execution](../guides/execution.md) for the job lifecycle.

@@ -1,7 +1,7 @@
 //! Forensic log files for daemon slots and the daemon supervisor.
 //!
 //! Incident analysis must be possible from on-disk logs alone (see
-//! docs/evidence-record-2026-09-01.md): every broker poll outcome, control message, token refresh, registry
+//! docs/verification/evidence-record-2026-09-01.md): every broker poll outcome, control message, token refresh, registry
 //! reconcile check, and recycle decision is appended to a dedicated file under
 //! `<config-dir>/logs/`, so a split-brain between "broker polling succeeds"
 //! and "GitHub runner registry says offline/missing" is reconstructable after

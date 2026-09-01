@@ -2041,7 +2041,7 @@ fn jailer_failure_does_not_touch_host_docker_socket() {
 
 #[test]
 fn fixture_parity_yaml_keeps_lanes_choice() {
-    let yaml = include_str!("../../../../docs/fixture-backend-parity.yml");
+    let yaml = include_str!("../../../../docs/verification/fixture-backend-parity.yml");
     assert!(yaml.contains("lanes:"), "{yaml}");
     assert!(yaml.contains("options: [velnor, github, both]"), "{yaml}");
     assert!(yaml.contains("GITHUB_OUTPUT"), "{yaml}");

@@ -2,7 +2,7 @@
 //! run via the GitHub API and diff their Checks-UI surface per step.
 //!
 //! Implements the repeatable comparison demanded by the future evidence gate
-//! in `docs/future-direction.md` ("Preferred extraction method: the GitHub
+//! in `docs/roadmap/future-direction.md` ("Preferred extraction method: the GitHub
 //! API"). The
 //! gate is **equal-or-better, never less informative**: any paired step where
 //! the GitHub lane shows information the Velnor lane lacks (a step missing
@@ -76,7 +76,7 @@ pub enum RunClass {
 }
 
 impl RunClass {
-    // docs/future-direction.md: initial warm/no-change budgets.
+    // docs/roadmap/future-direction.md: initial warm/no-change budgets.
     fn wall_budget_seconds(self) -> i64 {
         match self {
             Self::A => 150,
@@ -306,7 +306,7 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         report,
         "Known documented divergence (not gated): V2 jobs have no v1 log \
          archive, so the per-job raw-log download 404s on the Velnor lane; \
-         the `job-log` artifact is the workaround (see docs/future-direction.md)."
+         the `job-log` artifact is the workaround (see docs/roadmap/future-direction.md)."
     )?;
 
     let report_path = run_dir.join("report.md");
@@ -997,7 +997,7 @@ fn analyze_lane_log(text: &str) -> LaneLogStats {
 }
 
 /// Strip the `.NET "o"` blob prefix (`YYYY-MM-DDTHH:MM:SS.fffffffZ `) GitHub
-/// stores on every downloaded log line — see docs/interface-reference.md.
+/// stores on every downloaded log line — see docs/reference/interface.md.
 fn strip_blob_timestamp(line: &str) -> Option<&str> {
     let bytes = line.as_bytes();
     if bytes.len() < 28 {

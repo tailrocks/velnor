@@ -7,7 +7,7 @@ research, ADRs, proposals, runbooks, plan evidence, measured baselines, frozen
 references, acceptance results, and known gaps read from this repository on
 2026-09-01.
 
-> Navigation: [← Future direction](future-direction.md) · [Index](index.md) · [Next: Contributing documentation →](contributing.md)
+> Navigation: [← Future direction](../roadmap/future-direction.md) · [Index](../index.md) · [Next: Contributing documentation →](../guides/contributing.md)
 
 - **Authority snapshot** means the repository's marked contract or a dated
   state capture. It is not proof that runtime behavior currently matches it.

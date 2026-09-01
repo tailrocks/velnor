@@ -1,7 +1,7 @@
 # Plan 039 release-ref ledger — all 157 entries approved under operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3.
 #
 # Schema (owned by crates/velnor-tools/src/fleet_policy.rs; validated by
-# audit-ci per docs/future-direction.md Step 1):
+# audit-ci per docs/roadmap/future-direction.md Step 1):
 #
 #   schema_version = 1
 #

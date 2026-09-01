@@ -1,8 +1,8 @@
-# Execution now
+# Execution
 
 Code-backed lifecycle for one acquired Actions job. Citations use `path:line` and only cover the requested source set. “Design-only” marks behavior not proven by this implementation.
 
-> Navigation: [← System now](system-now.md) · [Index](index.md) · [Next: Integrations →](integrations.md)
+> Navigation: [← System](../concepts/system.md) · [Index](../index.md) · [Next: Integrations →](../reference/integrations.md)
 
 ## From broker message to admission
 

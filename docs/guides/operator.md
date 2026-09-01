@@ -3,7 +3,7 @@
 This is the executable operator surface in the current tree. `velnorctl` is the
 human command center. `velnor-runner` remains the interim machine-invoked binary
 for daemon, node-role, release, and Debian hooks. The product split and
-current/future boundary are defined in [the documentation index](index.md)
+current/future boundary are defined in [the documentation index](../index.md)
 and `crates/velnor-runner/src/service.rs:1-12`.
 
 `NOW` below means the command has an implemented, observable result. `RESERVED`
@@ -11,7 +11,7 @@ means the parser accepts the command, but current code returns a plan, an
 unavailable error, or an unsupported-operation error; it does not perform the
 promised host/GitHub action.
 
-> Navigation: [← Runner protocol](runner-protocol-reference.md) · [Index](index.md) · [Next: Observability →](observability.md)
+> Navigation: [← Runner protocol](../reference/runner-protocol.md) · [Index](../index.md) · [Next: Observability →](../operations/observability.md)
 
 ## Production install and start
 

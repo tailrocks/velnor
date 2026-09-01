@@ -5,7 +5,7 @@ machine-readable source for the local estate auditor. A policy snapshot is not
 live proof that every GitHub restriction, runner assignment, or workflow is
 currently correct; live acceptance remains future/evidence-gated.
 
-> Navigation: [← Runtime proof](runtime-checking-proof.md) · [Index](index.md) · [Next: Future direction →](future-direction.md)
+> Navigation: [← Runtime checking](runtime-checking.md) · [Index](../index.md) · [Next: Future direction →](../roadmap/future-direction.md)
 
 ## Contract
 
@@ -80,5 +80,5 @@ unreviewed removal stops acceptance.
 
 Implementation: `crates/velnor-tools/src/audit_ci.rs` and
 `crates/velnor-tools/src/fleet_policy.rs`. Future status and missing proof live
-in [future direction](future-direction.md); dated measurements live in the
+in [future direction](../roadmap/future-direction.md); dated measurements live in the
 [evidence record](evidence-record-2026-09-01.md).
