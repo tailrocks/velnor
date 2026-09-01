@@ -858,11 +858,17 @@ fn is_directory(stat: &rustix::fs::Stat) -> bool {
 
 #[cfg(unix)]
 fn stat_identity(stat: &rustix::fs::Stat) -> (u64, u64, u32) {
-    (
-        stat.st_dev as u64,
-        stat.st_ino,
-        u32::from(stat.st_mode & 0o170_000),
-    )
+    #[cfg(target_os = "linux")]
+    let device = stat.st_dev;
+    #[cfg(target_os = "macos")]
+    let device = stat.st_dev as u64;
+
+    #[cfg(target_os = "linux")]
+    let file_type = stat.st_mode & 0o170_000;
+    #[cfg(target_os = "macos")]
+    let file_type = u32::from(stat.st_mode & 0o170_000);
+
+    (device, stat.st_ino, file_type)
 }
 
 #[cfg(unix)]
