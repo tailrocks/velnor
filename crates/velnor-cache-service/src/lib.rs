@@ -733,13 +733,13 @@ impl<C: Clock> CompilerCacheService<C> {
             ))
         })?;
         fs::create_dir_all(parent)?;
-        if let Ok(metadata) = fs::symlink_metadata(destination) {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(CacheError::InvalidOutput(format!(
-                    "compiler output destination is not a regular directory: {}",
-                    destination.display()
-                )));
-            }
+        if let Ok(metadata) = fs::symlink_metadata(destination)
+            && (metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            return Err(CacheError::InvalidOutput(format!(
+                "compiler output destination is not a regular directory: {}",
+                destination.display()
+            )));
         }
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
