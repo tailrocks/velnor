@@ -1081,7 +1081,7 @@ fn fleet_policy_findings(
                 "fleet-policy-current",
                 &relative,
                 "$",
-                "missing required generated policy file; run rtk mise run fleet-generate",
+                "missing required generated policy file; run on the provisioned publisher host with VELNOR_FLEET_POLICY_OUT_DIR set: rtk mise run fleet-generate",
             ));
             continue;
         };
@@ -1096,7 +1096,7 @@ fn fleet_policy_findings(
                 &relative,
                 "$",
                 format!(
-                    "policy bytes are stale versus deterministic generation (first difference at byte {first_difference}); run rtk mise run fleet-generate"
+                    "policy bytes are stale versus deterministic generation (first difference at byte {first_difference}); run on the provisioned publisher host with VELNOR_FLEET_POLICY_OUT_DIR set: rtk mise run fleet-generate"
                 ),
             ));
         }
