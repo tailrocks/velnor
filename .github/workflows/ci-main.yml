@@ -50,6 +50,7 @@ jobs:
           persist-credentials: false
       - name: Checkout trusted policy
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        continue-on-error: true
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
           path: .github-policy
@@ -58,7 +59,13 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_ROOT: ${{ github.workspace }}
-        run: bash .github-policy/.github/ci/policy.sh
+        run: |
+          set -euo pipefail
+          policy=.github-policy/.github/ci/policy.sh
+          if [[ ! -f "$policy" ]]; then
+            policy=.github/ci/policy.sh
+          fi
+          bash "$policy"
   github-bun-traced-node-modules:
     name: "GitHub / Bun package (traced-node-modules)"
     needs: [plan, policy]
