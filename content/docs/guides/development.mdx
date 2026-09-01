@@ -40,9 +40,12 @@ mise run check
   features. The release-boundary task must fail if release code is built with the
   loopback-only `test-support` feature.
 - `actionlint` checks workflow syntax; `deny` runs advisory checks. `check` is the
-  aggregate gate and also runs the offline CI/fleet policy tasks. It is not
-  wholly read-only: its `fleet-generate` dependency rewrites generated files
-  under `fleet/policies/`. Review that diff after running it.
+  aggregate gate and also runs the offline CI/fleet policy tasks. Fleet policy
+  generation is a privileged publisher operation: set
+  `VELNOR_FLEET_POLICY_OUT_DIR` to the provisioned absolute root-owned directory.
+  `audit-ci`, `fleet-plan`, and the runtime read that same directory when the
+  variable is set; without it, repository checks read the committed
+  `fleet/policies/` snapshots.
 
 These commands and their exact arguments are defined in [`mise.toml:18-51`](../../mise.toml)
 [`mise.toml:68-85`](../../mise.toml) [`mise.toml:142-149`](../../mise.toml). For a

@@ -3,7 +3,7 @@ import {
   createGenerator,
   remarkAutoTypeTable,
 } from 'fumadocs-typescript'
-import { remarkMdxMermaid } from 'fumadocs-core/mdx-plugins'
+import { remarkMdxMermaid, remarkStructure } from 'fumadocs-core/mdx-plugins'
 import { defineConfig } from 'fumadocs-mdx/config'
 
 const generator = createGenerator({
@@ -12,6 +12,10 @@ const generator = createGenerator({
 
 export default defineConfig({
   mdxOptions: {
-    remarkPlugins: [remarkMdxMermaid, [remarkAutoTypeTable, { generator }]],
+    remarkPlugins: [
+      remarkMdxMermaid,
+      [remarkStructure, { exportAs: 'structuredData' }],
+      [remarkAutoTypeTable, { generator }],
+    ],
   },
 })
