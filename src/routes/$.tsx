@@ -1,4 +1,4 @@
-import { createFileRoute, notFound } from '@tanstack/react-router'
+import { createFileRoute, Link, notFound } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { Suspense, use } from 'react'
 import { DocsLayout } from 'fumadocs-ui/layouts/docs'
@@ -58,9 +58,9 @@ export function Content({ path, markdownUrl }: { path: string; markdownUrl: stri
       <DocsTitle>{page.title}</DocsTitle>
       <DocsDescription>{page.description}</DocsDescription>
       <div className="-mt-4 border-b pb-6">
-        <a className="text-fd-muted-foreground text-sm underline underline-offset-4" href={markdownUrl}>
+        <Link className="text-fd-muted-foreground text-sm underline underline-offset-4" to={markdownUrl}>
           View as Markdown
-        </a>
+        </Link>
       </div>
       <DocsBody><MDX components={useMDXComponents()} /></DocsBody>
     </DocsPage>
