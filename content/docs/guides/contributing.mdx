@@ -46,6 +46,22 @@ The evidence vocabulary and document ownership table are in
 [index.mdx](/docs). Source dependency law is enforced by
 `crates/velnor-client/tests/dependency_boundaries.rs`.
 
+## Diagrams
+
+Use Mermaid fenced blocks for diagrams:
+
+````md
+```mermaid
+flowchart TD
+  A[Admission] --> B[Execution]
+```
+````
+
+The documentation site renders these blocks as diagrams with strict SVG
+sanitization. Keep labels readable, use diagrams to clarify relationships,
+and retain surrounding prose so the page remains understandable without the
+rendered graphic.
+
 ## Procedure and API checklist
 
 Every how-to should include:
