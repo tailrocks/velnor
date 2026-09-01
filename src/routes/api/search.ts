@@ -17,5 +17,5 @@ const server = createFromSource(source, {
 })
 
 export const Route = createFileRoute('/api/search')({
-  server: { handlers: { GET: () => server.staticGET() } },
+  server: { handlers: { GET: ({ request }) => server.GET(request) } },
 })
