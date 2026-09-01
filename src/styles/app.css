@@ -1,3 +1,83 @@
 @import 'tailwindcss';
 @import 'fumadocs-ui/css/neutral.css';
 @import 'fumadocs-ui/css/preset.css';
+
+:root {
+  --color-fd-muted-foreground: hsl(0 0% 36%);
+}
+
+.dark {
+  --color-fd-muted-foreground: hsl(0 0% 78%);
+}
+
+body {
+  text-rendering: optimizeLegibility;
+}
+
+:where(a, button, [role='button']):focus-visible {
+  outline: 2px solid var(--color-fd-ring);
+  outline-offset: 3px;
+}
+
+#nd-home-layout {
+  background:
+    radial-gradient(circle at 50% 0%, color-mix(in oklab, var(--color-fd-primary) 8%, transparent), transparent 32rem),
+    var(--color-fd-background);
+}
+
+#nd-home-layout > main {
+  align-items: flex-start;
+}
+
+.prose {
+  font-size: 1.0625rem;
+  line-height: 1.75;
+}
+
+.prose :where(h1, h2, h3, h4) {
+  scroll-margin-top: 5rem;
+  letter-spacing: -0.02em;
+}
+
+.prose :where(h2) {
+  border-top: 1px solid var(--color-fd-border);
+  padding-top: 1.75rem;
+}
+
+.prose :where(h3) {
+  margin-top: 2rem;
+}
+
+.prose :where(a) {
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.2em;
+}
+
+[data-mermaid-fallback] {
+  margin-block: 1.5rem;
+  overflow-x: auto;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 0.75rem;
+  background: var(--color-fd-muted);
+  padding: 1rem;
+}
+
+[data-mermaid-status] {
+  margin-bottom: 0.75rem;
+  color: var(--color-fd-muted-foreground);
+  font-size: 0.875rem;
+}
+
+[data-mermaid-error] {
+  border-color: color-mix(in oklab, var(--color-fd-error) 45%, var(--color-fd-border));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

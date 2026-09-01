@@ -2,7 +2,7 @@ import { createFileRoute, notFound } from '@tanstack/react-router'
 import { getLLMText, source } from '@/lib/source'
 import { decodeMarkdownUrl } from '@/lib/shared'
 
-export const Route = createFileRoute('/docs/{$}.md')({
+export const Route = createFileRoute('/{$}.md')({
   server: {
     handlers: {
       GET: async ({ params }) => {

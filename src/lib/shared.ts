@@ -1,5 +1,5 @@
 export const appName = 'Velnor Documentation'
-export const docsRoute = '/docs'
+export const docsRoute = ''
 
 export const gitConfig = {
   user: 'tailrocks',

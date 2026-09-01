@@ -10,7 +10,7 @@ selected execution backend, and reports their outcome. The system is organized
 around explicit ownership, durable control state, and fenced process
 boundaries.
 
-> Navigation: [← Architecture](/docs/concepts/architecture) · [Index](/docs) · [Next: Execution →](/docs/guides/execution)
+> Navigation: [← Architecture](/concepts/architecture) · [Index](/) · [Next: Execution →](/guides/execution)
 
 ## Responsibilities and ownership
 
@@ -81,7 +81,7 @@ authentication or resource failure is not treated as idle capacity.
 Execution backend selection is explicit. Docker and microVM execution are
 separate paths, and a missing or invalid backend configuration fails closed.
 The execution guide documents the job lifecycle and backend behavior in detail:
-[Execution](/docs/guides/execution).
+[Execution](/guides/execution).
 
 ## Drain, restart, and failure boundaries
 
@@ -99,4 +99,4 @@ identity is consumed. Local failures use bounded retry and backoff; remote
 identity loss requires cleanup and re-registration.
 
 For the broader component boundaries, ownership rules, and system invariants,
-see [Architecture](/docs/concepts/architecture#velnor-architecture).
+see [Architecture](/concepts/architecture#velnor-architecture).

@@ -9,15 +9,29 @@ import { baseOptions } from '@/lib/layout.shared'
 import { encodeMarkdownUrl } from '@/lib/shared'
 import { useMDXComponents } from '@/components/mdx'
 
-export const Route = createFileRoute('/docs/$')({
+export type PageData = {
+  path: string
+  title: string
+  description?: string
+  markdownUrl: string
+  pageTree: Awaited<ReturnType<typeof source.serializePageTree>>
+}
+
+export const Route = createFileRoute('/$')({
   component: Page,
-  loader: async ({ params }) => {
+  head: ({ loaderData }) => ({
+    meta: [
+      { title: (loaderData as unknown as PageData).title },
+      { name: 'description', content: (loaderData as unknown as PageData).description },
+    ],
+  }),
+  loader: async ({ params }): Promise<PageData> => {
     const slugs = params._splat?.split('/') ?? []
     return loader({ data: slugs })
   },
 })
 
-const loader = createServerFn({ method: 'GET' })
+export const loader = createServerFn({ method: 'GET' })
   .validator((slugs: string[]) => slugs)
   .handler(async ({ data: slugs }) => {
     const page = source.getPage(slugs)
@@ -26,12 +40,14 @@ const loader = createServerFn({ method: 'GET' })
 
     return {
       path: page.path,
+      title: page.data.title,
+      description: page.data.description,
       markdownUrl: encodeMarkdownUrl(page.slugs, page.locale),
       pageTree: await source.serializePageTree(source.getPageTree()),
     }
   })
 
-function Content({ path, markdownUrl }: { path: string; markdownUrl: string }) {
+export function Content({ path, markdownUrl }: { path: string; markdownUrl: string }) {
   const page = docs.getPage(path)
   if (!page) throw new Error(`Unknown documentation page: ${path}`)
   const { toc } = use(page.load())
@@ -52,7 +68,7 @@ function Content({ path, markdownUrl }: { path: string; markdownUrl: string }) {
 }
 
 function Page() {
-  const { pageTree, path, markdownUrl } = useFumadocsLoader(Route.useLoaderData())
+  const { pageTree, path, markdownUrl } = useFumadocsLoader(Route.useLoaderData() as PageData)
   return (
     <DocsLayout {...baseOptions()} tree={pageTree}>
       <Suspense><Content path={path} markdownUrl={markdownUrl} /></Suspense>
