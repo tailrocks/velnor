@@ -132,6 +132,7 @@ pub(crate) struct CompilerActionSession {
     service: Arc<ProductionCompilerCache>,
     action: StructuredCompileAction,
     key: ActionKey,
+    workspace_directory: PathBuf,
     output_directory: PathBuf,
     timeout: Duration,
 }
@@ -187,6 +188,7 @@ impl CompilerActionSession {
             service,
             action,
             key,
+            workspace_directory: container.workspace_host.clone(),
             output_directory: container.workspace_host.join(CACHEABLE_TARGET_DIRECTORY),
             timeout,
         }))
@@ -273,6 +275,11 @@ impl CompilerActionSession {
             });
         }
 
+        if let Err(error) = self.revalidate_action_identity() {
+            let cleanup = abandon_lease(&self.service, &lease_state);
+            return Err(with_cleanup_context(error, cleanup));
+        }
+
         let output_root = match self.service.store_output_tree(&self.output_directory) {
             Ok(root) => root,
             Err(error) => {
@@ -283,6 +290,10 @@ impl CompilerActionSession {
                 ));
             }
         };
+        if let Err(error) = self.revalidate_action_identity() {
+            let cleanup = abandon_lease(&self.service, &lease_state);
+            return Err(with_cleanup_context(error, cleanup));
+        }
         let started_at_ms = unix_now_ms();
         let key = self.key;
         let source_digest = key.input_root.clone();
@@ -322,6 +333,19 @@ impl CompilerActionSession {
             cache_hit: false,
             bypassed: false,
         })
+    }
+
+    fn revalidate_action_identity(&self) -> Result<()> {
+        let expected_command_digest = Digest::from_bytes(self.action.command.as_bytes());
+        if self.key.command_digest != expected_command_digest {
+            bail!("structured compiler action identity changed before publication");
+        }
+        let current_input_root = digest_input_tree(&self.workspace_directory)
+            .context("revalidate compiler-cache input identity")?;
+        if current_input_root != self.key.input_root {
+            bail!("compiler workspace changed before cache publication");
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -839,6 +863,7 @@ mod tests {
 
     struct TestRunner {
         target: PathBuf,
+        mutate_input: Option<PathBuf>,
         code: i32,
         fail: bool,
         calls: usize,
@@ -853,6 +878,9 @@ mod tests {
             if self.code == 0 {
                 fs::create_dir_all(&self.target)?;
                 fs::write(self.target.join("libdemo.rlib"), b"compiler output")?;
+            }
+            if let Some(path) = &self.mutate_input {
+                fs::write(path, b"[package]\nname='changed'\n")?;
             }
             Ok(CommandResult {
                 code: self.code,
@@ -989,6 +1017,7 @@ mod tests {
         .expect("structured action");
         let mut producer = TestRunner {
             target: container.workspace_host.join("target"),
+            mutate_input: None,
             code: 0,
             fail: false,
             calls: 0,
@@ -1009,6 +1038,7 @@ mod tests {
         .expect("structured action");
         let mut consumer = TestRunner {
             target: container.workspace_host.join("target"),
+            mutate_input: None,
             code: 17,
             fail: false,
             calls: 0,
@@ -1022,6 +1052,55 @@ mod tests {
                 .expect("restored output"),
             b"compiler output"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changed_workspace_is_fenced_before_cache_publication() {
+        let root = test_root("workspace-change");
+        let container = prepare(&root);
+        let service = service(&root);
+        let session = CompilerActionSession::new(
+            Arc::clone(&service),
+            &container,
+            "cargo build --locked",
+            &[("CARGO_INCREMENTAL".into(), "0".into())],
+            Duration::from_secs(5),
+        )
+        .expect("session construction")
+        .expect("structured action");
+        let mut runner = TestRunner {
+            target: container.workspace_host.join("target"),
+            mutate_input: Some(container.workspace_host.join("Cargo.toml")),
+            code: 0,
+            fail: false,
+            calls: 0,
+        };
+        let error = session
+            .execute(
+                &mut runner,
+                &["exec".into(), "compiler".into()],
+                &[("CARGO_INCREMENTAL".into(), "0".into())],
+                &mut |_, _| {},
+            )
+            .expect_err("changed workspace must not publish");
+        assert!(error.to_string().contains("workspace changed"));
+
+        let retry = CompilerActionSession::new(
+            Arc::clone(&service),
+            &container,
+            "cargo build --locked",
+            &[("CARGO_INCREMENTAL".into(), "0".into())],
+            Duration::from_secs(5),
+        )
+        .expect("retry construction")
+        .expect("structured retry");
+        let retry_lease = service
+            .begin_blocking(retry.key())
+            .expect("abandoned lease is safely reusable");
+        service
+            .abandon_blocking(&retry_lease)
+            .expect("cleanup retry lease");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1136,6 +1215,7 @@ mod tests {
         let lease = service.begin_blocking(session.key()).expect("hold lease");
         let mut runner = TestRunner {
             target: container.workspace_host.join("target"),
+            mutate_input: None,
             code: 0,
             fail: false,
             calls: 0,
@@ -1166,6 +1246,7 @@ mod tests {
             .expect("structured action");
             let mut runner = TestRunner {
                 target: container.workspace_host.join("target"),
+                mutate_input: None,
                 code,
                 fail,
                 calls: 0,
@@ -1190,10 +1271,12 @@ mod tests {
             )
             .expect("retry construction")
             .expect("structured retry");
-            let retry_error = service
+            let retry_lease = service
                 .begin_blocking(retry.key())
-                .expect_err("lease abandoned");
-            assert!(retry_error.is_lease_contention());
+                .expect("abandoned lease takeover");
+            service
+                .abandon_blocking(&retry_lease)
+                .expect("cleanup retry lease");
             let _ = fs::remove_dir_all(root);
         }
     }

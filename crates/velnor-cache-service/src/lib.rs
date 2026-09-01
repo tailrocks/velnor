@@ -31,6 +31,9 @@ pub const KACHE_VERSION: &str = "0.14.2";
 pub const SCCACHE_VERSION: &str = "0.16.0";
 const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
+const DEFAULT_CACHE_QUOTA_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const MAX_OUTPUT_CAPTURE_BYTES: u64 = 5 * 1024 * 1024 * 1024 + 16 * 1024 * 1024;
+const QUOTA_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 const OUTPUT_ROOT_DIGEST: &str = "output_root";
 const RESULT_DIGEST: &str = "compiler_cache_result";
 const ACCOUNTING_DIGEST: &str = "compiler_cache_physical_byte_accounting";
@@ -135,6 +138,8 @@ pub struct CompilerCacheConfig {
     pub policy: CompilerCachePolicy,
     pub lease_duration_ms: u64,
     pub heartbeat_every_ms: u64,
+    /// Durable logical-byte ceiling for the service-owned CAS and metadata.
+    pub max_storage_bytes: u64,
 }
 
 impl CompilerCacheConfig {
@@ -148,6 +153,7 @@ impl CompilerCacheConfig {
             policy: CompilerCachePolicy::Auto,
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             heartbeat_every_ms: DEFAULT_HEARTBEAT_MS,
+            max_storage_bytes: DEFAULT_CACHE_QUOTA_BYTES,
         }
     }
 
@@ -163,6 +169,11 @@ impl CompilerCacheConfig {
         {
             return Err(CacheError::InvalidConfig(
                 "compiler-cache lease duration and heartbeat must be positive and heartbeat must be strictly less than lease duration".into(),
+            ));
+        }
+        if self.max_storage_bytes == 0 {
+            return Err(CacheError::InvalidConfig(
+                "compiler-cache storage quota must be positive".into(),
             ));
         }
         Ok(())
@@ -339,6 +350,7 @@ pub struct CompilerCacheService<C: Clock> {
     trust_class: TrustClass,
     lease_duration_ms: u64,
     heartbeat_every_ms: u64,
+    max_storage_bytes: u64,
     cas: CasStore,
     metadata: Mutex<Connection>,
     journal: Mutex<LeaseManager<C>>,
@@ -386,6 +398,7 @@ impl<C: Clock> CompilerCacheService<C> {
             trust_class: config.trust_class,
             lease_duration_ms: config.lease_duration_ms,
             heartbeat_every_ms: config.heartbeat_every_ms,
+            max_storage_bytes: config.max_storage_bytes,
             cas,
             metadata: Mutex::new(metadata),
             journal: Mutex::new(journal),
@@ -552,6 +565,24 @@ impl<C: Clock> CompilerCacheService<C> {
         lease: ProducerLease,
         result: CompilerResult,
     ) -> Result<PhysicalByteAccounting, CacheError> {
+        let outcome = self.publish_with_accounting_inner(&lease, result);
+        match outcome {
+            Ok(accounting) => Ok(accounting),
+            Err(error) => match self.abandon_blocking(&lease) {
+                Ok(()) | Err(CacheError::Journal(JournalError::LeaseFenced)) => Err(error),
+                Err(cleanup) => Err(CacheError::PublicationCleanup {
+                    publication: error.to_string(),
+                    cleanup: cleanup.to_string(),
+                }),
+            },
+        }
+    }
+
+    fn publish_with_accounting_inner(
+        &self,
+        lease: &ProducerLease,
+        result: CompilerResult,
+    ) -> Result<PhysicalByteAccounting, CacheError> {
         if self.backend == CompilerCacheBackend::Off {
             return Err(CacheError::Disabled);
         }
@@ -564,7 +595,7 @@ impl<C: Clock> CompilerCacheService<C> {
         {
             return Err(CacheError::TrustMismatch);
         }
-        self.ensure_active_lease(&lease)?;
+        self.ensure_active_lease(lease)?;
         if result.exit_code != 0 {
             return Err(CacheError::FailedResult {
                 exit_code: result.exit_code,
@@ -572,16 +603,34 @@ impl<C: Clock> CompilerCacheService<C> {
         }
         self.validate_output_tree(&result.output_root)?;
         let result_bytes = serde_json::to_vec(&result)?;
-        let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::ResultCas)?;
-        let accounting_digest = self.cas.put(&serde_json::to_vec(&accounting)?)?;
-        #[cfg(test)]
-        self.fail_if_injected(FailureBoundary::AccountingCas)?;
+        let (result_digest, accounting, accounting_digest) = {
+            let mut metadata = self.lock_metadata()?;
+            let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let accounting_probe = serde_json::to_vec(&PhysicalByteAccounting::unknown())?;
+            let requested = u64::try_from(result_bytes.len())
+                .map_err(|_| CacheError::InvalidMetadata("result is too large".into()))?
+                .checked_add(
+                    u64::try_from(accounting_probe.len()).map_err(|_| {
+                        CacheError::InvalidMetadata("accounting is too large".into())
+                    })?,
+                )
+                .ok_or_else(|| CacheError::InvalidMetadata("quota request overflowed".into()))?;
+            self.ensure_quota(requested)?;
+            let (result_digest, accounting) = self.cas.put_with_accounting(&result_bytes)?;
+            #[cfg(test)]
+            self.fail_if_injected(FailureBoundary::ResultCas)?;
+            let accounting_bytes = serde_json::to_vec(&accounting)?;
+            let accounting_digest = self.cas.put(&accounting_bytes)?;
+            #[cfg(test)]
+            self.fail_if_injected(FailureBoundary::AccountingCas)?;
+            self.ensure_storage_within_quota()?;
+            transaction.commit()?;
+            (result_digest, accounting, accounting_digest)
+        };
         let complete = ActionRecord {
             action_key: lease.action.clone(),
             state: ActionState::Complete,
-            producer_lease_ref: Some(lease_reference(&lease)),
+            producer_lease_ref: Some(lease_reference(lease)),
             consumer_run_ids: BTreeSet::new(),
             output_digests: BTreeMap::from([
                 (OUTPUT_ROOT_DIGEST.into(), result.output_root.clone()),
@@ -597,7 +646,7 @@ impl<C: Clock> CompilerCacheService<C> {
         // is part of that durable record, so recovery never needs to infer
         // whether the primary result object was new or deduplicated.
         let mut journal = self.lock_journal()?;
-        journal.append_action_and_release(&lease, &complete)?;
+        journal.append_action_and_release(lease, &complete)?;
         drop(journal);
         #[cfg(test)]
         self.fail_if_injected(FailureBoundary::JournalComplete)?;
@@ -626,6 +675,7 @@ impl<C: Clock> CompilerCacheService<C> {
             return Err(CacheError::Disabled);
         }
         self.ensure_trust_scope(key)?;
+        self.ensure_quota(0)?;
         let mut journal = self.lock_journal()?;
         let lease = journal.acquire(
             key,
@@ -699,7 +749,16 @@ impl<C: Clock> CompilerCacheService<C> {
 
     /// Snapshot a compiler output directory into this service's immutable CAS.
     pub fn store_output_tree(&self, root: &Path) -> Result<Digest, CacheError> {
-        self.cas.put_directory_tree(root).map_err(CacheError::from)
+        let mut metadata = self.lock_metadata()?;
+        let transaction = metadata.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.ensure_quota(MAX_OUTPUT_CAPTURE_BYTES)?;
+        let digest = self
+            .cas
+            .put_directory_tree(root)
+            .map_err(CacheError::from)?;
+        self.ensure_storage_within_quota()?;
+        transaction.commit()?;
+        Ok(digest)
     }
 
     /// Validate an output tree and ensure every file belongs to the compiler
@@ -903,6 +962,21 @@ pub enum CacheError {
     InvalidConfig(String),
     #[error("compiler-cache mutex is poisoned")]
     LockPoisoned,
+    #[error(
+        "compiler-cache publication failed ({publication}); lease cleanup also failed ({cleanup})"
+    )]
+    PublicationCleanup {
+        publication: String,
+        cleanup: String,
+    },
+    #[error(
+        "compiler-cache storage quota exceeded: limit={limit} current={current} requested={requested}"
+    )]
+    QuotaExceeded {
+        limit: u64,
+        current: u64,
+        requested: u64,
+    },
     #[cfg(test)]
     #[error("injected compiler-cache failure")]
     InjectedFailure,
@@ -916,11 +990,7 @@ impl CacheError {
     pub fn is_lease_contention(&self) -> bool {
         matches!(
             self,
-            Self::Journal(
-                JournalError::LeaseBusy { .. }
-                    | JournalError::LeaseAbandonable { .. }
-                    | JournalError::LeaseExpired
-            )
+            Self::Journal(JournalError::LeaseBusy { .. } | JournalError::LeaseExpired)
         )
     }
 }
@@ -1187,6 +1257,35 @@ fn lease_reference(lease: &ProducerLease) -> String {
     format!("compiler-cache/{}", lease.generation)
 }
 
+fn storage_size_bytes(root: &Path) -> Result<u64, CacheError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total = 0_u64;
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache storage contains symlink: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_file() {
+            total = total.checked_add(metadata.len()).ok_or_else(|| {
+                CacheError::InvalidMetadata("storage byte count overflowed".into())
+            })?;
+        } else if metadata.is_dir() {
+            for entry in fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache storage contains unsupported entry: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(total)
+}
+
 fn trust_namespace(trust_class: TrustClass) -> &'static str {
     match trust_class {
         TrustClass::Untrusted => "untrusted",
@@ -1214,6 +1313,36 @@ impl<C: Clock> CompilerCacheService<C> {
         } else {
             Err(CacheError::Journal(JournalError::LeaseFenced))
         }
+    }
+
+    fn ensure_quota(&self, requested: u64) -> Result<(), CacheError> {
+        let current = storage_size_bytes(&self.storage_root)?;
+        let requested = requested
+            .checked_add(QUOTA_HEADROOM_BYTES)
+            .ok_or_else(|| CacheError::InvalidMetadata("quota request overflowed".into()))?;
+        let projected = current
+            .checked_add(requested)
+            .ok_or_else(|| CacheError::InvalidMetadata("quota projection overflowed".into()))?;
+        if projected > self.max_storage_bytes {
+            return Err(CacheError::QuotaExceeded {
+                limit: self.max_storage_bytes,
+                current,
+                requested,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_storage_within_quota(&self) -> Result<(), CacheError> {
+        let current = storage_size_bytes(&self.storage_root)?;
+        if current > self.max_storage_bytes {
+            return Err(CacheError::QuotaExceeded {
+                limit: self.max_storage_bytes,
+                current,
+                requested: 0,
+            });
+        }
+        Ok(())
     }
 
     fn lock_journal(&self) -> Result<MutexGuard<'_, LeaseManager<C>>, CacheError> {
@@ -1670,15 +1799,28 @@ mod tests {
             match boundary {
                 FailureBoundary::ResultCas | FailureBoundary::AccountingCas => {
                     assert_eq!(latest.state, ActionState::Leased);
+                    assert_eq!(
+                        cache
+                            .lock_journal()
+                            .expect("journal lock")
+                            .lease_status(&action_key)
+                            .expect("lease status"),
+                        Some(LeaseStatus::Abandoned)
+                    );
                     assert!(cache
                         .lookup_with_publication_accounting(&action_key)
                         .await
                         .expect("partial publication lookup")
                         .is_none());
-                    let metadata = cache.lock_metadata().expect("metadata lock");
-                    assert!(read_metadata(&metadata, &key_digest)
-                        .expect("partial metadata read")
-                        .is_none());
+                    {
+                        let metadata = cache.lock_metadata().expect("metadata lock");
+                        assert!(read_metadata(&metadata, &key_digest)
+                            .expect("partial metadata read")
+                            .is_none());
+                    }
+                    let retry = cache.begin(&action_key).await.expect("lease takeover");
+                    assert!(retry.generation > 1);
+                    cache.abandon(&retry).await.expect("abandon retry lease");
                 }
                 FailureBoundary::JournalComplete | FailureBoundary::MetadataFinalization => {
                     assert_eq!(latest.state, ActionState::Complete);
@@ -1708,6 +1850,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn storage_quota_rejects_unbounded_compiler_output_growth() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let output = directory.path().join("target");
+        fs::create_dir_all(&output).expect("output directory");
+        fs::write(output.join("libdemo.rlib"), b"output").expect("output file");
+
+        let mut config = CompilerCacheConfig::new(directory.path().join("cache"), "test-worker");
+        config.policy = CompilerCachePolicy::Kache;
+        config.max_storage_bytes = 1;
+        let cache =
+            CompilerCacheService::open(config, WrapperDeclaration::default(), TokioClock::new())
+                .expect("service");
+        assert!(matches!(
+            cache.store_output_tree(&output),
+            Err(CacheError::QuotaExceeded { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2209,18 +2370,15 @@ mod tests {
                 .lock_journal()
                 .expect("journal lock")
                 .lease_status(&action_key)
-                .expect("live failed lease"),
-            Some(LeaseStatus::Active)
-        );
-        cache.abandon(&lease).await.expect("abandon failed result");
-        assert_eq!(
-            cache
-                .lock_journal()
-                .expect("journal lock")
-                .lease_status(&action_key)
-                .expect("abandoned failed lease"),
+                .expect("failed lease status"),
             Some(LeaseStatus::Abandoned)
         );
+        assert!(matches!(
+            cache.abandon(&lease).await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
+        let retry = cache.begin(&action_key).await.expect("lease takeover");
+        cache.abandon(&retry).await.expect("abandon retry lease");
         assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
     }
 

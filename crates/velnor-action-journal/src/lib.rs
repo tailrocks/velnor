@@ -146,10 +146,6 @@ pub enum JournalError {
     TrustClassMismatch,
     #[error("lease is already held for action {action_key_digest}")]
     LeaseBusy { action_key_digest: Digest },
-    #[error(
-        "lease is abandonable for action {action_key_digest}; takeover belongs to the coordinator"
-    )]
-    LeaseAbandonable { action_key_digest: Digest },
     #[error("lease was already released for action {action_key_digest}")]
     LeaseReleased { action_key_digest: Digest },
     #[error("lease was not found for action {action_key_digest}")]
@@ -610,14 +606,18 @@ impl<C: Clock> LeaseManager<C> {
                     lease_row_from_query,
                 )
                 .optional()?;
-            let generation = match row {
+            let generation = match row.as_ref() {
                 None => 1,
                 Some(row) => {
                     verify_stored_action_key(&row.action_key_json, &action_key_digest)?;
                     if row.state != LeaseState::Active {
                         match row.state {
                             LeaseState::Abandoned => {
-                                return Err(JournalError::LeaseAbandonable { action_key_digest });
+                                row.generation.checked_add(1).ok_or_else(|| {
+                                    JournalError::InvalidState(
+                                        "lease generation overflow during takeover".into(),
+                                    )
+                                })?
                             }
                             LeaseState::Released => {
                                 return Err(JournalError::LeaseReleased { action_key_digest });
@@ -635,21 +635,45 @@ impl<C: Clock> LeaseManager<C> {
                     }
                 }
             };
-            transaction.execute(
-                "INSERT INTO producer_leases(
-                     action_key_digest, action_key_json, generation, owner,
-                     expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active')",
-                rusqlite::params![
-                    action_key_digest.to_string(),
-                    action_key_json,
-                    sqlite_integer(generation)?,
-                    owner,
-                    expires_at_ms,
-                    sqlite_integer(heartbeat_every_ms)?,
-                    sqlite_integer(lease_duration_ms)?,
-                ],
-            )?;
+            if let Some(previous) = row.as_ref() {
+                let changed = transaction.execute(
+                    "UPDATE producer_leases
+                     SET action_key_json = ?1, generation = ?2, owner = ?3,
+                         expires_at_ms = ?4, heartbeat_every_ms = ?5,
+                         lease_duration_ms = ?6, state = 'active'
+                     WHERE action_key_digest = ?7 AND generation = ?8
+                       AND state = 'abandoned'",
+                    rusqlite::params![
+                        action_key_json,
+                        sqlite_integer(generation)?,
+                        owner,
+                        expires_at_ms,
+                        sqlite_integer(heartbeat_every_ms)?,
+                        sqlite_integer(lease_duration_ms)?,
+                        action_key_digest.to_string(),
+                        sqlite_integer(previous.generation)?,
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(JournalError::LeaseFenced);
+                }
+            } else {
+                transaction.execute(
+                    "INSERT INTO producer_leases(
+                         action_key_digest, action_key_json, generation, owner,
+                         expires_at_ms, heartbeat_every_ms, lease_duration_ms, state
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active')",
+                    rusqlite::params![
+                        action_key_digest.to_string(),
+                        action_key_json,
+                        sqlite_integer(generation)?,
+                        owner,
+                        expires_at_ms,
+                        sqlite_integer(heartbeat_every_ms)?,
+                        sqlite_integer(lease_duration_ms)?,
+                    ],
+                )?;
+            }
             transaction.commit()?;
             generation
         };
@@ -1368,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn expiry_increments_generation_and_defers_takeover() {
+    fn expiry_increments_generation_and_allows_atomic_takeover() {
         let clock = TestClock::default();
         let mut manager = LeaseManager::open(":memory:", clock.clone()).unwrap();
         let lease = manager.acquire(&action(42), "worker-a", 100, 25).unwrap();
@@ -1379,14 +1403,17 @@ mod tests {
             manager.lease_status(&lease.action).unwrap(),
             Some(LeaseStatus::Abandoned)
         );
-        assert!(matches!(
-            manager.acquire(&lease.action, "worker-b", 100, 25),
-            Err(JournalError::LeaseAbandonable { .. })
-        ));
+        let takeover = manager
+            .acquire(&lease.action, "worker-b", 100, 25)
+            .expect("abandoned lease takeover");
+        assert_eq!(takeover.generation, lease.generation + 2);
+        assert_eq!(takeover.owner, "worker-b");
         let events = manager.drain_telemetry();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[1].generation, lease.generation + 1);
         assert_eq!(events[1].kind, LeaseTransitionKind::Expired);
+        assert_eq!(events[2].generation, takeover.generation);
+        assert_eq!(events[2].kind, LeaseTransitionKind::Acquired);
     }
 
     #[test]
