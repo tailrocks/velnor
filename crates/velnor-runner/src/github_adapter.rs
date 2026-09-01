@@ -48,7 +48,6 @@ pub fn github_job_container_spec(
             )
         })
         .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
-    let compiler_cache_declaration = crate::manifest::compiler_cache_declaration(job);
     Ok(JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -77,11 +76,8 @@ pub fn github_job_container_spec(
                 crate::manifest::compiler_cache_backend(job)?
             }
             velnor_model::ExecutionBackendKind::MicroVm => {
-                if compiler_cache_declaration.sccache || compiler_cache_declaration.kache {
-                    crate::manifest::compiler_cache_backend(job)?
-                } else {
-                    velnor_cache_service::CompilerCacheBackend::Off
-                }
+                crate::manifest::validate_microvm_compiler_cache(job)?;
+                velnor_cache_service::CompilerCacheBackend::Off
             }
         },
         compiler_cache_trust_class: compiler_cache_trust_class(trust_scope),
@@ -918,6 +914,42 @@ fn sanitize_path_segment(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn microvm_job() -> AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "MicroVM admission test",
+            "requestId": 1
+        }))
+        .unwrap()
+    }
+
+    fn compiler_cache_backend(
+        job: &AgentJobRequestMessage,
+        execution_backend: velnor_model::ExecutionBackendKind,
+    ) -> std::result::Result<velnor_cache_service::CompilerCacheBackend, CacheAdmissionError> {
+        github_job_container_spec(
+            job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .map(|spec| spec.compiler_cache_backend)
+    }
+
     #[test]
     fn github_adapter_builds_normalized_plan_metadata() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
@@ -1189,24 +1221,162 @@ mod tests {
     }
 
     #[test]
-    fn microvm_backend_preserves_explicit_compiler_cache_wrapper() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Trusted with sccache",
-            "requestId": 1,
-            "steps": [{
-                "type": "Action",
-                "reference": {
-                    "type": "Repository",
-                    "name": "mozilla-actions/sccache-action",
-                    "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
-                }
-            }]
+    fn microvm_rejects_explicit_sccache_action() {
+        let mut job = microvm_job();
+        job.steps = vec![serde_json::from_value(serde_json::json!({
+            "type": "Action",
+            "reference": {
+                "type": "Repository",
+                "name": "mozilla-actions/sccache-action",
+                "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
+            }
         }))
+        .unwrap()];
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::MicroVmTransportUnavailable {
+                declared: velnor_cache_service::CompilerCacheBackend::Sccache
+            })
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_explicit_kache_action() {
+        let mut job = microvm_job();
+        job.steps = vec![serde_json::from_value(serde_json::json!({
+            "type": "Action",
+            "reference": {
+                "type": "Repository",
+                "name": "kunobi-ninja/kache-action",
+                "ref": "49398d37113c616fdb61be434cb497e3c2c8f3e6"
+            }
+        }))
+        .unwrap()];
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::MicroVmTransportUnavailable {
+                declared: velnor_cache_service::CompilerCacheBackend::Kache
+            })
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_mixed_compiler_cache_actions() {
+        let mut job = microvm_job();
+        job.steps = serde_json::from_value(serde_json::json!([
+            {
+                "type": "Action",
+                "reference": { "name": "mozilla-actions/sccache-action" }
+            },
+            {
+                "type": "Action",
+                "reference": { "name": "kunobi-ninja/kache-action" }
+            }
+        ]))
         .unwrap();
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::ConflictingWrappers)
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_compiler_wrapper_in_job_environment() {
+        let mut job = microvm_job();
+        job.environment_variables = vec![serde_json::json!({
+            "map": [{
+                "Key": "RUSTC_WRAPPER",
+                "Value": "sccache"
+            }]
+        })];
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
+                name: "RUSTC_WRAPPER".into()
+            })
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_sccache_environment_in_job_container() {
+        let mut job = microvm_job();
+        job.job_container = Some(serde_json::json!({
+            "environmentVariables": { "SCCACHE_ENDPOINT": "https://cache.example" }
+        }));
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
+                name: "SCCACHE_ENDPOINT".into()
+            })
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_kache_environment_in_variables() {
+        let mut job = microvm_job();
+        job.variables.insert(
+            "KACHE_REMOTE_URL".into(),
+            crate::job_message::VariableValue {
+                value: Some("https://cache.example".into()),
+                is_secret: false,
+            },
+        );
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
+                name: "KACHE_REMOTE_URL".into()
+            })
+        );
+    }
+
+    #[test]
+    fn microvm_rejects_compiler_wrapper_in_step_environment() {
+        let mut job = microvm_job();
+        job.steps = vec![serde_json::from_value(serde_json::json!({
+            "environment": { "RUSTC_WRAPPER": "kache" }
+        }))
+        .unwrap()];
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
+            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
+                name: "RUSTC_WRAPPER".into()
+            })
+        );
+    }
+
+    #[test]
+    fn docker_preserves_explicit_compiler_cache_wrapper() {
+        let mut job = microvm_job();
+        job.steps = vec![serde_json::from_value(serde_json::json!({
+            "type": "Action",
+            "reference": {
+                "type": "Repository",
+                "name": "mozilla-actions/sccache-action",
+                "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
+            }
+        }))
+        .unwrap()];
+
+        assert_eq!(
+            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::Docker),
+            Ok(velnor_cache_service::CompilerCacheBackend::Sccache)
+        );
+    }
+
+    #[test]
+    fn docker_preserves_compiler_cache_environment() {
+        let mut job = microvm_job();
+        job.job_container = Some(serde_json::json!({
+            "environmentVariables": { "RUSTC_WRAPPER": "sccache" }
+        }));
+
         let spec = github_job_container_spec(
             &job,
             GitHubJobContainerPaths {
@@ -1216,7 +1386,7 @@ mod tests {
                 actions_host: "/tmp/actions".into(),
                 tools_host: "/tmp/tools".into(),
                 docker_host_work_dir: None,
-                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -1226,10 +1396,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            spec.compiler_cache_backend,
-            velnor_cache_service::CompilerCacheBackend::Sccache
-        );
+        assert!(spec
+            .env
+            .iter()
+            .any(|(name, value)| name == "RUSTC_WRAPPER" && value == "sccache"));
     }
 
     #[test]

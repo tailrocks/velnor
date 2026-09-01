@@ -103,7 +103,7 @@ pub fn resolve_backend(
     Ok(backend)
 }
 
-/// Exact admission failures for conflicting cache ownership.
+/// Exact cache admission failures.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CacheAdmissionError {
     #[error(
@@ -115,6 +115,14 @@ pub enum CacheAdmissionError {
         policy: CompilerCachePolicy,
         declared: CompilerCacheBackend,
     },
+    #[error(
+        "compiler-cache backend {declared:?} is unsupported for MicroVM: guest transport is not admitted"
+    )]
+    MicroVmTransportUnavailable { declared: CompilerCacheBackend },
+    #[error(
+        "compiler-cache environment '{name}' is unsupported for MicroVM: guest transport is not admitted"
+    )]
+    MicroVmEnvironmentUnsupported { name: String },
 }
 
 /// Service configuration. The root must be a daemon-owned persistent path.
