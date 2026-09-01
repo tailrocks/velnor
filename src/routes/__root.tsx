@@ -1,13 +1,9 @@
 import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 import { RootProvider } from 'fumadocs-ui/provider/tanstack'
-import type { ComponentProps, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 
 import SearchDialog from '@/components/search'
 import appCss from '../styles/app.css?url'
-
-function StaticLink({ href, prefetch: _prefetch, ...props }: ComponentProps<'a'> & { prefetch?: boolean }) {
-  return <a href={href} {...props} />
-}
 
 export const Route = createRootRoute({
   head: () => ({
@@ -53,7 +49,7 @@ function RootDocument({ children }: { children: ReactNode }) {
         <HeadContent />
       </head>
       <body className="flex min-h-screen flex-col">
-        <RootProvider components={{ Link: StaticLink }} search={{ SearchDialog }}>{children}</RootProvider>
+        <RootProvider search={{ SearchDialog }}>{children}</RootProvider>
         <Scripts />
       </body>
     </html>
