@@ -2159,7 +2159,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // retries transient filesystem/database failures with the same bounded
     // loop as registration failures. No pass may preflight or register
     // without durable lifecycle state.
-    crate::ops::init(instance_slug_for_store())
+    crate::ops::init_at(instance_slug_for_store(), args.state_db.as_deref())
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
     let _storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
@@ -13435,6 +13435,7 @@ jobs:
 
     fn daemon_args(slots: usize) -> DaemonArgs {
         DaemonArgs {
+            state_db: None,
             config_dir: None,
             url: None,
             pat: None,

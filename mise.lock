@@ -178,10 +178,6 @@ backend = "cargo:cargo-deb"
 version = "0.23.3"
 backend = "cargo:cargo-zigbuild"
 
-[[tools."npm:ajv-cli"]]
-version = "5.0.0"
-backend = "npm:ajv-cli"
-
 [[tools.rust]]
 version = "1.98.0"
 backend = "core:rust"

@@ -94,10 +94,6 @@ pub struct DaemonArgs {
 pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     enforce_admission()?;
     crate::http::validate_socket_groups()?;
-    let legacy_args: rt::DaemonArgs = args.clone().into();
-    let command = rt::Command::Daemon(Box::new(legacy_args));
-    init_telemetry(telemetry_dir(&command).as_deref());
-
     let instance = args.name.as_deref().unwrap_or("default");
     let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
     let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
@@ -110,15 +106,13 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let _instance_lock = InstanceLock::acquire(&control_path)?;
     crate::http::remove_stale_socket(&control_path)?;
     crate::http::remove_stale_socket(&admin_path)?;
-    let state_path = args
-        .state_db
-        .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH));
-    // The control process and every supervised runner slot must derive the
-    // same operational and telemetry paths. Child slot processes inherit this
-    // already-resolved path through the existing runner environment contract.
-    // SAFETY: this resolves the process-wide child-inheritance setting before
-    // the daemon starts its supervised runner slots.
-    unsafe { std::env::set_var("VELNOR_STATE_DB", &state_path) };
+    let state_path = resolve_state_db_path(args.state_db.as_deref());
+    // Carry the resolved path in the typed daemon context. This keeps daemon
+    // initialization deterministic without mutating process-global state.
+    let mut legacy_args: rt::DaemonArgs = args.clone().into();
+    legacy_args.state_db = Some(state_path.clone());
+    let command = rt::Command::Daemon(Box::new(legacy_args));
+    init_telemetry(telemetry_dir(&command).as_deref());
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
     let services =
         velnor_control::application::ApplicationServices::with_store(Arc::clone(&store), instance)?;
@@ -168,6 +162,12 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     })
     .await;
     result
+}
+
+fn resolve_state_db_path(explicit: Option<&Path>) -> PathBuf {
+    explicit
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(velnor_control::store::DEFAULT_STATE_DB_PATH))
 }
 
 /// Owns a bound Unix listener and the pathname that must disappear with it.
@@ -296,6 +296,7 @@ fn cleanup_socket(path: &Path, expected: SocketIdentity) {
 impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
     fn from(args: DaemonArgs) -> Self {
         Self {
+            state_db: args.state_db,
             config_dir: args.config_dir,
             url: args.url,
             pat: args.pat,
@@ -798,5 +799,11 @@ mod tests {
         assert!(converted.require_docker_socket);
         assert!(converted.require_buildx);
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn explicit_state_db_path_is_carried_without_environment_mutation() {
+        let explicit = Path::new("/tmp/velnor-test/state.db");
+        assert_eq!(resolve_state_db_path(Some(explicit)), explicit);
     }
 }

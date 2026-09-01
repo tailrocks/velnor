@@ -91,6 +91,9 @@ impl From<ServiceCommand> for Command {
 /// struct below is the single clap definition of every daemon flag.
 #[derive(Debug, Clone, Args)]
 pub struct DaemonArgs {
+    /// Operational store path shared by the daemon's durable lifecycle state.
+    #[arg(long, env = "VELNOR_STATE_DB")]
+    pub state_db: Option<PathBuf>,
     /// Base configuration directory. For --slots > 1, each slot reads config from <config-dir>/slots/slot-N.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
@@ -401,6 +404,7 @@ impl From<CapabilitiesArgs> for crate::args::CapabilitiesArgs {
 impl From<DaemonArgs> for crate::args::DaemonArgs {
     fn from(a: DaemonArgs) -> Self {
         Self {
+            state_db: a.state_db,
             config_dir: a.config_dir,
             url: a.url,
             pat: a.pat,

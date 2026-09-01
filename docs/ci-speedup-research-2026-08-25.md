@@ -153,9 +153,10 @@ This removes the upgrade/drain queue without weakening in-flight job safety;
 live proof requires the corrected binary and the same exact runner-group
 policy admission used by the JIT test.
 
-### Live policy gate — 2026-08-26
+### Historical live policy gate snapshot — 2026-08-26
 
-Read-only `velnor-tools fleet-policy audit` confirmed the admission blocker:
+The 2026-08-26 read-only `velnor-tools fleet-policy audit` confirmed the
+admission blocker at that time:
 
 - Tailrocks: **80** mismatch classes; two unexpected repositories.
 - ChainArgos: **23** mismatch classes; two unexpected repositories.

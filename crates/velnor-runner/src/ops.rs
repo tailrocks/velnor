@@ -10,7 +10,7 @@
 //! infrastructure rejection instead of silently executing unrecorded work.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -78,7 +78,22 @@ fn install_global(sink: Arc<OpsSink>) {
 
 /// Open the operational store as a mandatory readiness gate.
 pub fn init(instance_slug: String) -> Result<(), velnor_control::store::StoreError> {
-    let sink = OpsSink::open(state_db_path(), instance_slug)?;
+    init_at(instance_slug, None)
+}
+
+/// Open the operational store at an already-resolved path. The explicit
+/// context is authoritative; environment lookup remains only for service
+/// entrypoints and standalone runner invocations that have no typed path.
+pub fn init_at(
+    instance_slug: String,
+    explicit_path: Option<&Path>,
+) -> Result<(), velnor_control::store::StoreError> {
+    let sink = OpsSink::open(
+        explicit_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(state_db_path),
+        instance_slug,
+    )?;
     install_global(Arc::new(sink));
     Ok(())
 }
