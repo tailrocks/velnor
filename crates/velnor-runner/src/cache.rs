@@ -16,6 +16,10 @@ use crate::{
 };
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+const PERSISTENT_TARGET_MAX_NODES: usize = 1_000_000;
+const PERSISTENT_TARGET_MAX_DIRECTORIES: usize = 100_000;
+const PERSISTENT_TARGET_MAX_DEPTH: usize = 256;
+const PERSISTENT_TARGET_MAX_PATH_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Serializes one actions/cache generation across save, restore, and GC.
 ///
@@ -680,6 +684,12 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
     .then(|| CacheEntryLock::exclusive(lock_path))
     .transpose()?;
     if candidate.store == CacheStore::Targets {
+        if target_generation_is_current(&candidate.path)? {
+            bail!(
+                "refusing to remove current target generation: {}",
+                candidate.path.display()
+            );
+        }
         if !target_generation_is_complete(&candidate.path) {
             bail!(
                 "target generation changed or became incomplete before removal: {}",
@@ -1124,13 +1134,78 @@ fn target_generation_size(path: &Path) -> Option<(u64, SystemTime)> {
     secure_target_tree_size(&data).ok()
 }
 
+#[derive(Debug, Default)]
+struct TargetTraversalBudget {
+    nodes: usize,
+    directories: usize,
+    path_bytes: u64,
+}
+
+impl TargetTraversalBudget {
+    fn visit(&mut self, relative: &Path, directory: bool) -> Result<()> {
+        let depth = relative.components().count();
+        if depth > PERSISTENT_TARGET_MAX_DEPTH {
+            bail!(
+                "persistent target path exceeds the {}-component depth limit",
+                PERSISTENT_TARGET_MAX_DEPTH
+            );
+        }
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .context("persistent target node count overflowed")?;
+        if self.nodes > PERSISTENT_TARGET_MAX_NODES {
+            bail!(
+                "persistent target traversal visited more than the {}-node limit",
+                PERSISTENT_TARGET_MAX_NODES
+            );
+        }
+        self.path_bytes = self
+            .path_bytes
+            .checked_add(
+                u64::try_from(relative.as_os_str().as_encoded_bytes().len()).unwrap_or(u64::MAX),
+            )
+            .context("persistent target path byte count overflowed")?;
+        if self.path_bytes > PERSISTENT_TARGET_MAX_PATH_BYTES {
+            bail!(
+                "persistent target paths exceed the {}-byte limit",
+                PERSISTENT_TARGET_MAX_PATH_BYTES
+            );
+        }
+        if directory {
+            self.directories = self
+                .directories
+                .checked_add(1)
+                .context("persistent target directory count overflowed")?;
+            if self.directories > PERSISTENT_TARGET_MAX_DIRECTORIES {
+                bail!(
+                    "persistent target traversal visited more than the {}-directory limit",
+                    PERSISTENT_TARGET_MAX_DIRECTORIES
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 fn secure_target_tree_size(directory: &crate::fs_copy::NoFollowDir) -> Result<(u64, SystemTime)> {
+    let mut budget = TargetTraversalBudget::default();
+    secure_target_tree_size_with_budget(directory, Path::new(""), &mut budget)
+}
+
+fn secure_target_tree_size_with_budget(
+    directory: &crate::fs_copy::NoFollowDir,
+    relative: &Path,
+    budget: &mut TargetTraversalBudget,
+) -> Result<(u64, SystemTime)> {
+    budget.visit(relative, true)?;
     let mut bytes = 0u64;
     let mut newest = SystemTime::UNIX_EPOCH;
     directory.for_each_entry_filtered(
         |_| true,
         |entry| match entry.source {
             crate::fs_copy::NoFollowSource::File(file) => {
+                budget.visit(&relative.join(&entry.name), false)?;
                 let metadata = file.metadata().context("inspect target generation file")?;
                 if !metadata.is_file() {
                     bail!("target generation contains a non-regular file");
@@ -1140,7 +1215,9 @@ fn secure_target_tree_size(directory: &crate::fs_copy::NoFollowDir) -> Result<(u
                 Ok(())
             }
             crate::fs_copy::NoFollowSource::Directory(directory) => {
-                let (child_bytes, child_newest) = secure_target_tree_size(&directory)?;
+                let child_relative = relative.join(&entry.name);
+                let (child_bytes, child_newest) =
+                    secure_target_tree_size_with_budget(&directory, &child_relative, budget)?;
                 bytes = bytes.saturating_add(child_bytes);
                 newest = newest.max(child_newest);
                 Ok(())
@@ -1151,29 +1228,50 @@ fn secure_target_tree_size(directory: &crate::fs_copy::NoFollowDir) -> Result<(u
 }
 
 fn current_pointer_generation(path: &Path) -> Option<String> {
-    let directory = crate::fs_copy::NoFollowDir::open_absolute(path).ok()?;
+    current_pointer_generation_checked(path).ok().flatten()
+}
+
+fn current_pointer_generation_checked(path: &Path) -> Result<Option<String>> {
+    let directory = crate::fs_copy::NoFollowDir::open_absolute(path)
+        .with_context(|| format!("open target scope {}", path.display()))?;
     let Some(crate::fs_copy::NoFollowSource::File(pointer)) =
-        directory.open_source(Path::new("current")).ok()?
+        directory.open_source(Path::new("current"))?
     else {
-        return None;
+        return Ok(None);
     };
     let mut bytes = Vec::new();
     pointer
         .take(129)
         .read_to_end(&mut bytes)
-        .ok()
-        .filter(|_| bytes.len() <= 128)?;
-    let value = String::from_utf8(bytes).ok()?;
+        .context("read target current pointer")?;
+    if bytes.len() > 128 {
+        bail!("target current pointer exceeds the 128-byte limit");
+    }
+    let value = String::from_utf8(bytes).context("target current pointer is not UTF-8")?;
     let mut lines = value.lines();
-    let generation = lines.next()?.to_string();
-    (lines.next().is_none()
-        && value.ends_with('\n')
-        && !generation.is_empty()
-        && generation.len() <= 128
-        && generation
+    let Some(generation) = lines.next() else {
+        bail!("target current pointer is empty");
+    };
+    if lines.next().is_some()
+        || !value.ends_with('\n')
+        || generation.is_empty()
+        || generation.len() > 128
+        || !generation
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
-    .then_some(generation)
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("target current pointer is malformed");
+    }
+    Ok(Some(generation.to_owned()))
+}
+
+fn target_generation_is_current(path: &Path) -> Result<bool> {
+    let parent = path.parent().context("target generation has no parent")?;
+    let name = path
+        .file_name()
+        .context("target generation has no name")?
+        .to_string_lossy();
+    Ok(current_pointer_generation_checked(parent)?.as_deref() == Some(name.as_ref()))
 }
 
 fn pointer_protected_target_generations(work_root: &Path) -> BTreeSet<PathBuf> {
@@ -1473,6 +1571,50 @@ mod tests {
             .unwrap();
         remover.join().unwrap();
         assert!(!entry.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_gc_rechecks_current_under_publisher_lock() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-target-race-{}", uuid::Uuid::new_v4()));
+        let scope = root.join("targets/trusted/workspace/repo/workflow/job");
+        let generation = scope.join("target-generation-race");
+        fs::create_dir_all(generation.join("data")).unwrap();
+        fs::write(generation.join("data/output"), b"output").unwrap();
+        fs::write(generation.join(".velnor-target-complete-v1"), b"complete\n").unwrap();
+
+        let candidate = EvictionCandidate {
+            path: generation.clone(),
+            store: CacheStore::Targets,
+            scope: vec![
+                "trusted".into(),
+                "repo".into(),
+                "workflow".into(),
+                "job".into(),
+            ],
+            bytes: 6,
+            reason: "test".into(),
+        };
+        // The publisher and GC both lock the job bucket. Hold the publisher
+        // side while GC has already selected the generation, then publish the
+        // pointer. GC must re-read it after acquiring the same lock.
+        let publisher_lock = CacheEntryLock::exclusive(&scope).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let remover =
+            std::thread::spawn(move || sender.send(remove_candidate(&candidate)).unwrap());
+        assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+        fs::write(scope.join("current"), b"target-generation-race\n").unwrap();
+        drop(publisher_lock);
+
+        let error = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap_err();
+        remover.join().unwrap();
+        assert!(error.to_string().contains("current target generation"));
+        assert!(generation.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
