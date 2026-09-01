@@ -74,6 +74,10 @@ const PAGES_ARCHIVE_MAX_PATH_DEPTH: usize = 256;
 const PAGES_ARCHIVE_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const PERSISTENT_TARGET_MAX_NODES: usize = 1_000_000;
+const PERSISTENT_TARGET_MAX_DIRECTORIES: usize = 100_000;
+const PERSISTENT_TARGET_MAX_DEPTH: usize = 256;
+const PERSISTENT_TARGET_MAX_PATH_BYTES: u64 = 64 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 static DOCKER_TIMEOUT_CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -6595,7 +6599,7 @@ fn materialize_persistent_target(
         Path::new("target"),
     )
     .with_context(|| format!("open job-local target {}", target.display()))?;
-    copy_dir_contents_filtered(
+    copy_persistent_target_contents(
         &payload,
         &generation_path.join("data"),
         &destination,
@@ -6655,7 +6659,7 @@ fn publish_persistent_target(
     let payload = generation.open_relative_directory(Path::new("data"))?;
     let source = crate::fs_copy::NoFollowDir::open_absolute(&target)
         .with_context(|| format!("securely open job-local target {}", target.display()))?;
-    copy_dir_contents_filtered(&source, &target, &payload, Path::new(""), true)
+    copy_persistent_target_contents(&source, &target, &payload, Path::new(""), true)
         .context("stage persistent target generation")?;
     write_target_file(&generation, TARGET_COMPLETE_MARKER, b"complete\n")?;
     write_target_file(
@@ -10469,6 +10473,88 @@ fn normalize_artifact_file_permissions(file: &fs::File, destination: &Path) -> R
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PersistentTargetTraversalLimits {
+    max_nodes: usize,
+    max_directories: usize,
+    max_depth: usize,
+    max_path_bytes: u64,
+}
+
+impl PersistentTargetTraversalLimits {
+    fn bounded() -> Self {
+        Self {
+            max_nodes: PERSISTENT_TARGET_MAX_NODES,
+            max_directories: PERSISTENT_TARGET_MAX_DIRECTORIES,
+            max_depth: PERSISTENT_TARGET_MAX_DEPTH,
+            max_path_bytes: PERSISTENT_TARGET_MAX_PATH_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PersistentTargetTraversalBudget {
+    limits: Option<PersistentTargetTraversalLimits>,
+    nodes: usize,
+    directories: usize,
+    path_bytes: u64,
+}
+
+impl PersistentTargetTraversalBudget {
+    fn unbounded() -> Self {
+        Self::default()
+    }
+
+    fn visit(&mut self, relative: &Path, directory: bool) -> Result<()> {
+        let Some(limits) = self.limits else {
+            return Ok(());
+        };
+        let depth = relative.components().count();
+        if depth > limits.max_depth {
+            bail!(
+                "persistent target path exceeds the {}-component depth limit",
+                limits.max_depth
+            );
+        }
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .context("persistent target node count overflowed")?;
+        if self.nodes > limits.max_nodes {
+            bail!(
+                "persistent target traversal visited more than the {}-node limit",
+                limits.max_nodes
+            );
+        }
+        self.path_bytes = self
+            .path_bytes
+            .checked_add(
+                u64::try_from(relative.as_os_str().as_encoded_bytes().len())
+                    .unwrap_or(u64::MAX),
+            )
+            .context("persistent target path byte count overflowed")?;
+        if self.path_bytes > limits.max_path_bytes {
+            bail!(
+                "persistent target paths exceed the {}-byte limit",
+                limits.max_path_bytes
+            );
+        }
+        if directory {
+            self.directories = self
+                .directories
+                .checked_add(1)
+                .context("persistent target directory count overflowed")?;
+            if self.directories > limits.max_directories {
+                bail!(
+                    "persistent target traversal visited more than the {}-directory limit",
+                    limits.max_directories
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 fn copy_dir_contents_filtered(
     source: &crate::fs_copy::NoFollowDir,
     source_path: &Path,
@@ -10476,11 +10562,95 @@ fn copy_dir_contents_filtered(
     destination_relative: &Path,
     include_hidden: bool,
 ) -> Result<()> {
+    let mut budget = PersistentTargetTraversalBudget::unbounded();
+    copy_dir_contents_filtered_with_budget(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        &mut budget,
+    )
+}
+
+fn copy_persistent_target_contents(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+) -> Result<()> {
+    copy_persistent_target_contents_with_limits(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        PersistentTargetTraversalLimits::bounded(),
+    )
+}
+
+fn copy_persistent_target_contents_with_limits(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+    limits: PersistentTargetTraversalLimits,
+) -> Result<()> {
+    let mut budget = PersistentTargetTraversalBudget {
+        limits: Some(limits),
+        ..PersistentTargetTraversalBudget::default()
+    };
+    copy_dir_contents_filtered_with_budget(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        &mut budget,
+    )
+}
+
+fn copy_dir_contents_filtered_with_budget(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+    budget: &mut PersistentTargetTraversalBudget,
+) -> Result<()> {
+    budget.visit(destination_relative, true)?;
+    copy_dir_contents_filtered_in_open_directory(
+        source,
+        source_path,
+        destination_directory,
+        destination_relative,
+        include_hidden,
+        budget,
+    )
+}
+
+fn copy_dir_contents_filtered_in_open_directory(
+    source: &crate::fs_copy::NoFollowDir,
+    source_path: &Path,
+    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
+    destination_relative: &Path,
+    include_hidden: bool,
+    budget: &mut PersistentTargetTraversalBudget,
+) -> Result<()> {
     source.for_each_entry_filtered(
         |name| include_hidden || !hidden_file_name(name),
         |entry| {
             let path = source_path.join(&entry.name);
             let target_relative = destination_relative.join(&entry.name);
+            budget.visit(
+                &target_relative,
+                matches!(
+                    &entry.source,
+                    crate::fs_copy::NoFollowSource::Directory(_)
+                ),
+            )?;
             match entry.source {
                 crate::fs_copy::NoFollowSource::Directory(directory) => {
                     let child_destination = destination_directory
@@ -10488,12 +10658,13 @@ fn copy_dir_contents_filtered(
                         .with_context(|| {
                             format!("create directory {}", target_relative.display())
                         })?;
-                    copy_dir_contents_filtered(
+                    copy_dir_contents_filtered_in_open_directory(
                         &directory,
                         &path,
                         &child_destination,
                         &target_relative,
                         include_hidden,
+                        budget,
                     )?;
                 }
                 crate::fs_copy::NoFollowSource::File(file) => {
@@ -17009,6 +17180,79 @@ esac
             stale_time
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_target_copy_enforces_traversal_budgets_before_recursion() {
+        let cases = [
+            (
+                "directory",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 1,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                },
+                "directory limit",
+            ),
+            (
+                "node",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 1,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 1024,
+                },
+                "node limit",
+            ),
+            (
+                "depth",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 1,
+                    max_path_bytes: 1024,
+                },
+                "depth limit",
+            ),
+            (
+                "path",
+                PersistentTargetTraversalLimits {
+                    max_nodes: 16,
+                    max_directories: 16,
+                    max_depth: 16,
+                    max_path_bytes: 4,
+                },
+                "byte limit",
+            ),
+        ];
+
+        for (name, limits, expected_error) in cases {
+            let root = temp_dir().join(format!("target-budget-{name}"));
+            let source = root.join("source");
+            let destination = root.join("destination");
+            fs::create_dir_all(source.join("nested/deeper")).unwrap();
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(source.join("nested/deeper/output"), b"output").unwrap();
+
+            let source_directory = crate::fs_copy::NoFollowDir::open_absolute(&source).unwrap();
+            let destination_directory =
+                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&destination)
+                    .unwrap();
+            let error = copy_persistent_target_contents_with_limits(
+                &source_directory,
+                &source,
+                &destination_directory,
+                Path::new(""),
+                true,
+                limits,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error:#}");
+            assert!(!destination.join("nested/deeper/output").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
