@@ -981,14 +981,16 @@ fn audit_repo_profile(
 
 /// Plan 039 Step 1 repository-local enforcement: when a checkout carries
 /// `fleet/release-refs.toml`, validate it against the ledger schema and require
-/// every generated `<org>-desired-policy.json` under `fleet/policies/` to be
-/// byte-current versus offline deterministic generation.
+/// every generated `<org>-desired-policy.json` under the configured policy
+/// directory (default `fleet/policies/`) to be byte-current versus offline
+/// deterministic generation.
 fn audit_fleet_policy_surface(root: &Path) -> Result<Vec<Finding>> {
     let ledger_path = root.join("fleet/release-refs.toml");
     if !ledger_path.is_file() {
         return Ok(Vec::new());
     }
-    let policies_dir = root.join("fleet/policies");
+    let configured = std::env::var_os("VELNOR_FLEET_POLICY_OUT_DIR");
+    let policies_dir = fleet_policy_directory(root, configured.as_deref().map(Path::new))?;
     let mut on_disk = BTreeMap::new();
     let mut unreadable = Vec::new();
     if policies_dir.is_dir() {
@@ -1024,6 +1026,19 @@ fn audit_fleet_policy_surface(root: &Path) -> Result<Vec<Finding>> {
         ));
     }
     Ok(findings)
+}
+
+fn fleet_policy_directory(root: &Path, configured: Option<&Path>) -> Result<PathBuf> {
+    let Some(path) = configured else {
+        return Ok(root.join("fleet/policies"));
+    };
+    if path.is_relative() {
+        bail!(
+            "VELNOR_FLEET_POLICY_OUT_DIR must be absolute when set; refusing {}",
+            path.display()
+        );
+    }
+    Ok(path.to_owned())
 }
 
 /// Pure comparison core for [`audit_fleet_policy_surface`]: ledger parse
@@ -1081,7 +1096,7 @@ fn fleet_policy_findings(
                 "fleet-policy-current",
                 &relative,
                 "$",
-                "missing required generated policy file; run rtk mise run fleet-generate",
+                "missing required generated policy file; run on the provisioned publisher host with VELNOR_FLEET_POLICY_OUT_DIR set: rtk mise run fleet-generate",
             ));
             continue;
         };
@@ -1096,7 +1111,7 @@ fn fleet_policy_findings(
                 &relative,
                 "$",
                 format!(
-                    "policy bytes are stale versus deterministic generation (first difference at byte {first_difference}); run rtk mise run fleet-generate"
+                    "policy bytes are stale versus deterministic generation (first difference at byte {first_difference}); run on the provisioned publisher host with VELNOR_FLEET_POLICY_OUT_DIR set: rtk mise run fleet-generate"
                 ),
             ));
         }
@@ -4377,6 +4392,19 @@ jobs:
         assert!(findings[0]
             .message
             .contains("missing required generated policy file"));
+    }
+
+    #[test]
+    fn fleet_policy_directory_requires_absolute_publisher_override() {
+        let root = Path::new("/checkout");
+        assert_eq!(
+            fleet_policy_directory(root, None).unwrap(),
+            PathBuf::from("/checkout/fleet/policies")
+        );
+        let error = fleet_policy_directory(root, Some(Path::new("fleet/policies")))
+            .expect_err("publisher override must be absolute")
+            .to_string();
+        assert!(error.contains("VELNOR_FLEET_POLICY_OUT_DIR"), "{error}");
     }
 
     #[test]
