@@ -1,8 +1,8 @@
 # Velnor documentation
 
-This is the documentation home. The root [README](../README.md) is only a
-pointer here. Read this page for the directory structure, the full newcomer
-route, document ownership, and claim-status rules.
+This is the documentation home. The root [README](../README.md) gives the
+project summary, license, and link here. Read this page for the directory
+structure, the full newcomer route, document ownership, and claim-status rules.
 
 Velnor is a Rust-first GitHub Actions runner and control plane. It acquires
 workflow jobs, validates their complete action graph and capabilities before
