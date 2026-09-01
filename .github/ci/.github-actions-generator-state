@@ -4,13 +4,10 @@ schema = 1
 .github/ci/project.toml	120278bacf2fb941
 .github/ci/run.sh	9511d2962df87cfa
 .github/workflows/ci-bun-velnor.yml	9f9d0d8fcf28b388
-.github/workflows/ci-bun.yml	52137f29b43d3baa
 .github/workflows/ci-docker-docker.yml	078065552aff507f
-.github/workflows/ci-docker.yml	ba0fdf15ce27fd2b
 .github/workflows/ci-docs-docs.yml	a1c41baec8227297
-.github/workflows/ci-docs.yml	d4dcd7d9f9a77a15
-.github/workflows/ci-main.yml	6d9772c737c04f08
-.github/workflows/ci-pr.yml	5b3b459fe3bb88d8
+.github/workflows/ci-main.yml	935f9625974f834c
+.github/workflows/ci-pr.yml	eca97b2c0bb033dc
 .github/workflows/ci-rust-policy.yml	a7f0ffb6cb5cd86b
 .github/workflows/ci-rust-unit-collector.yml	4d2c83df27dfacb2
 .github/workflows/ci-rust-velnor-action-journal.yml	e8478421e397f0a7
@@ -24,6 +21,5 @@ schema = 1
 .github/workflows/ci-rust-velnor-runner.yml	4d5df1f61bb0bc07
 .github/workflows/ci-rust-velnor-tools.yml	045a8a153cf01bdd
 .github/workflows/ci-rust-velnorctl.yml	43dba3aae982730f
-.github/workflows/ci-rust.yml	4cb024dcbe728b15
 .github/workflows/maintenance.yml	05934a71a8bbe286
-.github/workflows/nightly.yml	73447267200b5a2f
+.github/workflows/nightly.yml	8fb832215c11717b
