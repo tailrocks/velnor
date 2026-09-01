@@ -1220,17 +1220,7 @@ fn collect_directory_tree(
                         "tree contains too many entries (limit {MAX_TREE_ENTRIES})"
                     )));
                 }
-                let file = rustix::fs::openat(
-                    directory,
-                    &name,
-                    rustix::fs::OFlags::RDONLY
-                        | rustix::fs::OFlags::CLOEXEC
-                        | rustix::fs::OFlags::NOFOLLOW
-                        | rustix::fs::OFlags::NONBLOCK,
-                    rustix::fs::Mode::empty(),
-                )
-                .map_err(io::Error::from)?;
-                let file: File = file.into();
+                let file = open_regular_tree_source(directory, &name, relative)?;
                 let mut bytes = Vec::new();
                 file.take(MAX_TREE_FILE_BYTES.saturating_add(1))
                     .read_to_end(&mut bytes)?;
@@ -1267,6 +1257,31 @@ fn collect_directory_tree(
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_regular_tree_source(
+    directory: &File,
+    name: &OsStr,
+    relative: &str,
+) -> Result<File, CasError> {
+    let descriptor = rustix::fs::openat(
+        directory,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let file: File = descriptor.into();
+    if !file.metadata()?.file_type().is_file() {
+        return Err(CasError::UnsafePath(format!(
+            "tree source entry is not a regular file: {relative}"
+        )));
+    }
+    Ok(file)
 }
 
 #[cfg(not(unix))]
@@ -2365,6 +2380,27 @@ mod tests {
             store.get(&directory_digest),
             Err(CasError::UnsafePath(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_tree_descriptor_rejects_fifo_before_reading() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let (temp, _store) = store();
+        let root = temp.path().join("tree");
+        fs::create_dir(&root).unwrap();
+        let fifo = root.join("fifo");
+        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_name` is a valid, NUL-terminated path and the mode is
+        // a valid permission mask. The call only creates the test fixture.
+        let result = unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo failed: {}", io::Error::last_os_error());
+
+        let directory = open_existing_secure_directory(&root).unwrap();
+        let error = open_regular_tree_source(&directory, OsStr::new("fifo"), "fifo")
+            .expect_err("FIFO must be rejected at the opened descriptor boundary");
+        assert!(matches!(error, CasError::UnsafePath(_)));
     }
 
     #[cfg(unix)]
