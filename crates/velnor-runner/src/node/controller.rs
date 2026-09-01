@@ -2425,7 +2425,9 @@ mod tests {
     use crate::node::exec::write_exec_config;
     use serde_json::json;
     use velnor_control::journal::FleetState;
+    #[cfg(feature = "test-support")]
     use wiremock::matchers::{method, path};
+    #[cfg(feature = "test-support")]
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Serializes tests that mutate `GITHUB_TOKEN` (process-global env):
