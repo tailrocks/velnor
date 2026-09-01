@@ -2,7 +2,7 @@
 
 This is the repository’s current development contract. Citations use `path:line`.
 
-> Navigation: [← Security and data](../operations/security-and-data.md) · [Index](../index.md) · [Next: Runtime checking →](../verification/runtime-checking.md)
+> Navigation: [← Security and data](../operations/security-and-data.md) · [Index](../index.md) · [Next: Contributing →](contributing.md)
 
 ## Current: build, test, lint, format
 
@@ -175,17 +175,14 @@ Evidence is structured, deterministic, and fail-closed:
 
 - Phase 0 means proving existing Rust CI/CD workflows against the public fixture
   first. Velnor-native workflow language, YAML scheduling, and macOS job
-  execution are outside the current scope (`README.md:15-25`,
-  `docs/concepts/system.md:73-79`).
+  execution are outside the current scope (`docs/concepts/system.md:73-79`).
 
 ## Future / planned — not current procedure
 
 - The `velnor-runner` library dependency in `velnorctl` is interim. Plan 079 is
   the stated deletion point for the runner binary and remaining plumbing; do
   not add new dependencies to extend that transition.
-  (`docs/roadmap/future-direction.md:28-39`,
-  `crates/velnorctl/Cargo.toml:31-42`).
+  (`crates/velnorctl/Cargo.toml:31-42`).
 - `unit-collector` TASK-004 is not complete until the real Parallax ordinary-PR
   attribution report exists. Committed synthetic fixtures are current evidence,
-  not completion proof (`tools/unit-collector/tests/fixtures.rs:9-70`,
-  `docs/verification/evidence-record-2026-09-01.md:649-657`).
+  not completion proof (`tools/unit-collector/tests/fixtures.rs:9-70`).

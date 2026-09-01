@@ -1,209 +1,207 @@
 # Velnor architecture
 
-Audience: engineers and operators who know Linux, GitHub Actions, and basic
-Rust, but do not yet know this repository. Read this explanation before the
-[reference](../reference/interface.md) or [operator guide](../guides/operator.md).
+Velnor is a node-local execution system for GitHub Actions. GitHub remains the
+workflow scheduler and source of truth. Velnor provides ephemeral runner
+capacity, validates work, executes it in an explicitly selected backend, and
+reports the outcome.
 
-Status: current implementation map, inspected against the source tree on
-2026-09-01. A statement marked design-only is not a shipped guarantee.
+Velnor does not maintain a competing workflow scheduler. A local queue cannot
+create GitHub work, and a Velnor node does not silently switch to another
+executor when its configured backend is unavailable.
 
-> Navigation: [← Glossary](glossary.md) · [Index](../index.md) · [Next: System →](system.md)
+## Responsibility boundaries
 
-## What Velnor is responsible for
-
-GitHub remains the scheduler, workflow UI, repository authority, and source of
-the job message. Velnor is the node-local execution system around one or more
-ephemeral GitHub runner identities. It owns:
-
-1. JIT runner registration and Runner V2 broker/run-service communication.
-2. Admission: validate the full job/action closure and capabilities before
-   checkout, credentials, cache mutation, service startup, or container work.
-3. A backend-neutral execution plan and exactly one selected executor: Docker
-   or jailed Firecracker microVM.
-4. Node supervision, per-slot process isolation, generation fencing, cleanup,
-   and bounded recovery.
-5. Sanitized control-plane resources, lifecycle events, bounded logs/telemetry,
-   action journaling, leases, and storage accounting. The current bundle
-   durably wires lifecycle/events/telemetry; query, raw-log, and storage
-   projections are still in-memory until their normalized readers land.
-
-The daemon is not a second workflow scheduler. It does not invent jobs when
-GitHub has no broker message, and it does not silently fall back to another
-backend or hosted runner.
-
-## Components and dependency direction
-
-```text
-                    GitHub Actions / GitHub REST
-                               │
-                    velnor-runner protocol + runner
-                               │
-               ┌───────────────┴────────────────┐
-               │                                │
-        admission / plan                 node supervision
-               │                                │
-        execution backend ────────┬──── Docker
-               │                  └──── Firecracker + guest agent
-               │
-        action journal ── cache service ── CAS
-               │
-        control store / services ── local Unix API ── velnorctl
-               │
-        shared versioned model ── renderers / client / control
-```
-
-Workspace ownership is deliberately layered:
-
-| Layer | Crates | Rule |
-| --- | --- | --- |
-| Shared contracts | `velnor-model`, `velnor-action-model` | I/O-free types. `velnor-model` owns versioned resources and DTOs; action model owns physical-action identity. |
-| Durable physical state | `velnor-cas`, `velnor-action-journal`, `velnor-cache-service` | Content integrity, crash-safe actions, leases, consumers, and cache reuse are separate concerns. |
-| Control plane | `velnor-control`, `velnor-client`, `velnor-render` | Application services, transport contract, and output formatting remain independent. |
-| Product surfaces | `velnorctl`, `velnor-runner`, `velnor-tools`, `unit-collector` | CLI/adapters, daemon/runtime, maintainer audits, and build evidence. |
-
-The workspace manifest lists the 12 members. Shared crates do not depend on
-Clap or Axum; the client does not depend on daemon internals; the runner facade
-is explicitly transitional. See `Cargo.toml:1-19`,
-`crates/velnor-model/src/lib.rs:1-15`,
-`crates/velnor-client/src/lib.rs:1-14`, and
-`crates/velnor-runner/src/lib.rs:1-63`.
-
-## Process topology
-
-```text
-systemd
-  ├─ guardian                 health/unit supervision; no GitHub or Docker
-  └─ velnor-runner daemon     one scope; controller and lifecycle owner
-       └─ controller           desired capacity, permits, registrations
-            ├─ slot-0          one OS process per ready slot
-            │    └─ job         transient process per acquired job
-            ├─ slot-1
-            └─ ...
-```
-
-The controller deliberately does not make a slot a Tokio task-only boundary.
-Slot and job children survive controller restart unless explicitly drained;
-heartbeats carry generation and sequence, so stale children cannot prove
-current readiness. The service command surface defines `guardian`,
-`controller`, `slot`, and `job` roles in
-`crates/velnor-runner/src/service.rs:35-51`; node ownership is documented in
-`crates/velnor-runner/src/node/mod.rs:1-17` and
-`crates/velnor-runner/src/node/controller.rs:1-5`.
-
-Readiness is a proof, not a process-state shortcut: local state, selected
-backend preflight, runner registration, and fresh slot heartbeat must all hold.
-The controller bounds remote reconciliation, JIT concurrency, heartbeat age,
-and child drain; see `crates/velnor-runner/src/node/controller.rs:20-82`.
-
-## Job data flow
-
-```text
-broker poll
-   │ RunnerJobRequest reference
-   ▼
-decode job message
-   │ plan/job identity, variables, masks, actions, steps, services, resources
-   ▼
-claim (plan_id, job_id) + atomic in-flight marker
-   ▼
-admission
-   │ complete action graph, refs/SHA, inputs, capabilities, limits, backend
-   ▼
-renew lease + acquire capacity
-   ▼
-ValidatedPlan
-   │ backend-neutral steps, env, services, workspace, cache/artifact operations
-   ▼
-reserve → prepare → start → execute/cancel → collect → teardown
-   ▼
-timeline/result upload + completion + local journal/control events
-```
-
-Admission is intentionally before side effects. A duplicate broker delivery is
-fenced by the on-disk claim. Once admitted, both executors consume the same
-`ValidatedPlan`; only the sandbox, transport, process, filesystem, network, and
-cleanup implementation changes. See
-`crates/velnor-runner/src/runner.rs:200-355`,
-`crates/velnor-runner/src/runner.rs:5285-6059`, and
-`crates/velnor-runner/src/execution/backend.rs:30-79`.
-
-## Executor boundary
-
-The execution file must contain `[execution] backend = "docker"` or
-`"microvm"`. Missing or unknown values fail closed. The common phase machine
-is:
-
-```text
-New → Preflighted → Reserved → Prepared → Started → Executing
-  → Stopped → Collecting → TornDown
-```
-
-Docker uses the host Docker socket and a systemd cgroup boundary. Firecracker
-uses KVM, a verified artifact set, a jailer, per-job writable storage, guest
-Docker, per-VM network resources, and a bounded vsock protocol. The microVM
-path rejects the host Docker socket. There is no automatic Docker/microVM
-fallback. See `crates/velnor-runner/src/execution/mod.rs:121-204`,
-`crates/velnor-runner/src/execution/backend.rs:1-28`, and
-`crates/velnor-runner/src/execution/isolation.rs:1-112`.
-
-This is an isolation choice, not a claim of equivalent security: the Docker
-path is a trusted host-Docker boundary; the microVM path is the stronger
-boundary when host-Docker access is unacceptable. Kernel, KVM, image, host
-hardening, and secure deletion claims remain outside the source-level proof.
-See [security and data](../operations/security-and-data.md).
-
-## Control-plane data flow
-
-```text
-runner/control services
-      │ sanitized resources + durable events
-      ▼
-        /var/lib/velnor/state.db     SQLite/WAL lifecycle/event state
-      │
-      ├─ /run/velnor/<instance>/control.sock  GET queries/watch/logs/telemetry
-      └─ /run/velnor/<instance>/admin.sock    POST lifecycle mutations
-                                                (currently reserved)
-      ▲
-velnorctl → version negotiation → typed DTOs → renderer
-```
-
-The model layer is the source of truth for resource shape; tables and output
-formats are views. Control events and state are sanitized and bounded. Raw job
-messages, credentials, masks, and raw logs do not belong in the operational
-database. At present, `ApplicationServices::with_store` reconstructs the
-query, log, and storage services empty; only the event stream, lifecycle
-service, and process telemetry are wired to durable paths. This is an important
-implementation boundary, not a retention guarantee. See
-`crates/velnor-control/src/application.rs:30-52,220-254`, the
-[interface reference](../reference/interface.md), and
-[security and data](../operations/security-and-data.md).
-
-## Why these design decisions exist
-
-| Decision | Reason | Consequence |
-| --- | --- | --- |
-| GitHub owns scheduling | Preserve GitHub Actions semantics and avoid a second source of truth. | Broker/run-service behavior must track `actions/runner`; no local queue can replace GitHub. |
-| Validate before side effects | Remove the enabling condition for unsafe action/capability execution. | Unsupported or malformed jobs fail before checkout, secrets, containers, and cache mutation. |
-| Explicit executor selection | Make the trust boundary visible and reproducible. | Configuration failure stops the job; there is no silent fallback. |
-| Process-per-slot and generation fencing | Keep worker availability independent from controller lifetime and reject stale ownership. | Restart and drain are bounded protocols, not task cancellation alone. |
-| Typed shared model plus thin transport | Keep domain contracts usable by daemon, CLI, client, and renderers without framework coupling. | Version/schema negotiation is explicit; handlers cannot invent parallel DTOs. |
-| Sanitized operational projections | Make recovery and operations inspectable without turning the control DB into a secret or log vault. | Lifecycle/events are durable today; query/log/storage projections still need normalized readers before they survive service recreation. |
-| Plan-first reconciliation | Make destructive/expensive operations reviewable and idempotent. | A GC or lifecycle mutation needs reason, identity/version, and exact confirmation. |
-| Independent release identity | Prevent a package from mixing binaries, manifests, and microVM payloads from different builds. | Package hooks verify coherence before service activation. |
-
-These are implementation-backed choices, not promises about all future plans.
-The current proof boundaries are recorded in
-[runtime checking](../verification/runtime-checking.md) and
-[future direction](../roadmap/future-direction.md).
-
-## Where to read the implementation
-
-| Question | Start at |
+| Owner | Responsibilities |
 | --- | --- |
-| How does a daemon become ready? | `crates/velnor-runner/src/runner.rs`, `crates/velnor-runner/src/node/controller.rs`, `docs/concepts/system.md` |
-| How is a job admitted? | `crates/velnor-runner/src/job_message.rs`, `crates/velnor-runner/src/admission.rs`, `crates/velnor-runner/src/plan.rs`, `docs/guides/execution.md` |
-| How are Actions steps executed? | `crates/velnor-runner/src/executor.rs`, `crates/velnor-runner/src/workflow_command.rs`, `crates/velnor-runner/src/script_step.rs` |
-| How are Docker and microVM kept separate? | `crates/velnor-runner/src/execution/backend.rs`, `crates/velnor-runner/src/execution/docker.rs`, `crates/velnor-runner/src/execution/firecracker.rs` |
-| How do operators inspect state? | `velnorctl`, `velnor-client`, `velnor-control`, `docs/reference/interface.md` |
-| What is retained or redacted? | `crates/velnor-control/src/store`, `crates/velnor-runner/src/slot_log.rs`, `crates/velnor-runner/src/telemetry.rs`, `docs/operations/security-and-data.md` |
-| What does CI prove? | `.github/workflows`, `scripts`, tests, `docs/guides/development.md` |
+| GitHub Actions | Workflow and job creation, runner matching, job payload authority, remote run state, hosted service APIs, and the user-facing workflow result. |
+| Velnor control plane | Node identity, capacity, admission decisions, local lifecycle state, bounded operational events, and recovery intent. |
+| Velnor runner | JIT registration, broker sessions, job acquisition, lease renewal, execution coordination, progress publishing, completion reporting, and cleanup. |
+| Execution backend | Isolation and process/container lifecycle for one validated job: Docker or Firecracker microVM. |
+| Operator | GitHub policy, labels, credentials, backend choice, service lifecycle, and interpretation of health and failure signals. |
+
+Velnor knows what it has registered, what it has accepted locally, what its
+capacity can run, and what it has sent or durably staged for GitHub. GitHub
+knows the authoritative workflow graph, job state, runner assignment, and
+remote result. Neither side should be inferred from the other side's local
+projection during an outage.
+
+## System shape
+
+```mermaid
+flowchart LR
+    GH[GitHub Actions]
+    subgraph V[Velnor node]
+        G[Guardian\nhealth and supervision]
+        C[Controller\ncapacity and lifecycle]
+        S[Runner slots\nJIT sessions]
+        A[Admission and plan]
+        B{Explicit backend}
+        D[Docker]
+        F[Firecracker microVM]
+        J[(Journal and\ncompletion outbox)]
+        O[Control API\nUnix sockets]
+        X[velnorctl]
+    end
+    GH <--> S
+    C --> S
+    S --> A --> B
+    B --> D
+    B --> F
+    S <--> J
+    C <--> J
+    O <--> J
+    X <--> O
+    G -. monitors .-> C
+```
+
+The daemon controller manages desired slot capacity and lifecycle. Each ready
+slot is an independent runner process with its own GitHub session. An acquired
+job runs in a transient job boundary beneath that slot. Controller restart does
+not by itself terminate surviving slot or active-job processes; generation and
+heartbeat checks prevent stale children from proving current readiness.
+
+Readiness is a proof, not merely a live process: local state must be writable,
+the selected backend must pass preflight, GitHub registration must be valid,
+and slot heartbeats must be fresh. Failure of any required condition makes the
+node unavailable or degraded rather than schedulable by implication.
+
+## End-to-end job flow
+
+```mermaid
+sequenceDiagram
+    participant W as GitHub workflow
+    participant G as GitHub broker
+    participant V as Velnor slot
+    participant R as GitHub Run Service
+    participant A as Admission
+    participant E as Executor
+    participant P as Results/Timeline services
+    participant L as Local journal/outbox
+
+    W->>G: Create and queue job
+    G-->>V: Long-poll job reference
+    V->>G: Acknowledge Busy (when requested)
+    V->>R: Acquire full job payload
+    V->>L: Claim identity and persist in-flight state
+    V->>A: Validate policy, capabilities, actions, limits
+    A-->>V: Validated execution plan or rejection
+    V->>R: Renew job lease while active
+    V->>E: Reserve, prepare, start, execute
+    E-->>V: Step output, status, logs, artifacts
+    V->>P: Publish step status, timeline, and log data
+    V->>L: Persist completion payload before sending
+    V->>R: Complete job with result and outputs
+    R-->>V: Acknowledge completion
+    V->>L: Record acknowledgement and remove outbox entry
+    R-->>W: Update workflow and job state
+```
+
+The important ordering is:
+
+1. GitHub creates the job and decides which labels and runner scope match.
+2. A Velnor slot learns of work through an authenticated broker session. REST
+   queue listings are diagnostic; they do not assign work to Velnor.
+3. The broker message identifies the run-service request. Velnor acquires the
+   complete job payload through the Run Service.
+4. Velnor claims the job locally, then resolves the complete action closure,
+   policy, capability requirements, references, inputs, and resource limits.
+5. Only an admitted job receives leases, capacity, checkout, downloads,
+   credentials, cache mutation, services, or executor resources.
+6. The plan selects exactly one configured backend. Its lifecycle is
+   `preflight → reserve → prepare → start → execute or cancel → collect → teardown`.
+7. Velnor publishes progress while steps run, renews the GitHub lease, and
+   handles broker cancellation messages.
+8. Publishers drain before terminal completion. Velnor stages the completion
+   payload locally, sends it to GitHub, records remote acknowledgement, then
+   cleans local in-flight state.
+
+## Initiators and transport types
+
+| Interaction | Initiator | Transport and behavior |
+| --- | --- | --- |
+| Workflow/job creation | GitHub | Internal GitHub scheduling. Velnor does not initiate it. |
+| Runner registration | Velnor | Authenticated HTTPS request for a JIT runner configuration; successful registration is an explicit response. |
+| Work delivery | Velnor | Authenticated long-poll to the broker. Empty responses mean idle; authentication and other non-success responses are failures. |
+| Busy acknowledgement | Velnor | Optional authenticated HTTPS request to the broker after receiving a job reference. |
+| Job acquisition | Velnor | Authenticated request/response to the Run Service. Transient failures retry; permanent failures end the session or job attempt. |
+| Lease renewal | Velnor | Repeated authenticated request/response while a job is active. |
+| Cancellation delivery | Velnor | Active-session broker polling. The runner matches the cancellation to its job. |
+| Step status and logs | Velnor | Authenticated uploads to Results Service and timeline/feed services; progress publishing is best effort and bounded. |
+| Completion | Velnor | Authenticated Run Service request/response carrying terminal result, outputs, and metadata. |
+| Operator inspection | Operator | Local Unix-socket control API, local health files, metrics files, and bounded local logs, normally through `velnorctl`. |
+
+GitHub initiates scheduling and sends work requests. Velnor initiates every
+runner-side network operation after registration: it polls, acquires, renews,
+uploads, and completes. There is no inbound GitHub callback into the Velnor
+daemon in the normal runner flow.
+
+## Admission, execution, and isolation
+
+Admission resolves local, remote, and composite action requirements before
+side effects. Unknown or unsupported action forms, invalid references,
+capability mismatches, trust-policy violations, and resource-bound failures
+are rejected closed.
+
+Docker uses the host Docker socket within the configured host and cgroup
+boundary. Firecracker uses KVM, verified artifacts, a jailer, isolated
+namespaces and networking, and a guest agent. Firecracker rejects host Docker
+socket access. The two paths are not interchangeable and there is no automatic
+fallback between them.
+
+The job plan carries workspace, environment, services, outputs, masks, cache
+and artifact operations, and step execution data. Job credentials come from
+the acquired GitHub job payload; the operator registration credential is not
+substituted for job credentials. Credentials are excluded from reusable
+microVM snapshots and sanitized from operational evidence.
+
+## Interruptions and recovery
+
+Transient broker, acquisition, lease, and upload failures use bounded retries
+or backoff according to operation. Authentication failures require credential
+recovery; missing runner registration requires session recreation. A node that
+cannot prove GitHub connectivity or routing readiness must not claim new work.
+
+During drain, idle slots deregister and stop at a poll boundary. Active jobs
+continue long enough to finish and report when possible. Stop escalation is
+bounded by service policy; active work is eventually terminated if the drain
+deadline expires.
+
+Cancellation is checked separately for active jobs. Velnor cancels execution,
+collects what it can, publishes the terminal state, and completes the GitHub
+job. Malformed cancellation input is treated conservatively as cancellation.
+
+Completion has a stronger durability contract than ordinary progress. Velnor
+writes the exact job/generation completion payload to a local outbox before
+transport. It removes that entry only after GitHub's terminal acknowledgement.
+After a crash, recovery can replay the same payload rather than inventing a
+second completion. Orphaned, malformed, symlinked, oversized, or ambiguous
+outbox entries fail closed and are preserved or quarantined for diagnosis.
+
+Progress logs and telemetry are bounded operational evidence, not an archival
+record. Local projections may be incomplete after service recreation; durable
+events and completion intent are the stronger recovery evidence.
+
+## Cancellation difference from the upstream runner
+
+Velnor follows the upstream GitHub Runner V2 shapes for broker sessions, job
+acquisition, lease renewal, and completion. Its active-job cancellation path is
+not fully equivalent to upstream behavior.
+
+The upstream runner dispatches cancellation to the worker, allows graceful
+handling, and escalates after a cancellation timeout. Velnor's Docker path
+currently performs host-side container termination from its active cancellation
+path. Firecracker cancellation is narrower and is not end-to-end equivalent to
+the upstream worker-dispatch model. Operators must therefore treat a
+cancellation as a Velnor termination/recovery event, not assume identical
+step-level cancellation semantics.
+
+## Operator mental model
+
+Use GitHub to answer: was the job created, what runner labels and scope does it
+require, and what state did GitHub accept? Use Velnor to answer: is a slot
+registered and ready, was the job admitted, which backend ran it, what local
+failure or capacity decision occurred, and whether completion is staged or
+acknowledged.
+
+For commands and current visibility limits, see the [interface reference](../reference/interface.md).
+For installation and service lifecycle, see the [operator guide](../guides/operator.md).

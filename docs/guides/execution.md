@@ -1,123 +1,160 @@
-# Execution
+# Job execution
 
-Code-backed lifecycle for one acquired Actions job. Citations use `path:line` and only cover the requested source set. “Design-only” marks behavior not proven by this implementation.
+Velnor is a GitHub Actions runner. GitHub remains the scheduler and source of
+truth; Velnor admits eligible jobs, executes them, streams progress, and
+reports the result.
 
-> Navigation: [← System](../concepts/system.md) · [Index](../index.md) · [Next: Integrations →](../reference/integrations.md)
+## Lifecycle
 
-## From broker message to admission
-
-The V2 broker delivers a `RunnerJobRequest` reference. The message carries plan/job identity, timeline, variables and masks, resources, steps, environment, workspace, actions, dependencies, and billing owner. (`crates/velnor-runner/src/protocol.rs:3157-3234`, `crates/velnor-runner/src/job_message.rs:10-68`)
-
-The receive path is two-stage because the broker message is a delivery
-notification, not the full job payload:
-
-```text
-POST /session
-  → GET /message?sessionId=…
-  → RunnerJobRequest { runnerRequestId, runServiceUrl, ... }
-  → POST /acknowledge?sessionId=…&status=Busy   (best effort)
-  → POST {runServiceUrl}/acquirejob
-  → AgentJobRequestMessage
+```mermaid
+sequenceDiagram
+    participant G as GitHub
+    participant B as Broker
+    participant V as Velnor
+    participant E as Docker or microVM
+    participant R as Run/Results services
+    G->>B: Queue eligible job
+    V->>B: Create session and long-poll
+    B-->>V: RunnerJobRequest reference
+    V->>B: Acknowledge Busy
+    V->>R: Acquire job payload
+    V->>V: Claim, validate, and admit
+    V->>E: Preflight, reserve, prepare, execute
+    V->>R: Step status, logs, lease renewal
+    V->>E: Collect and tear down
+    V->>R: Complete job
 ```
 
-An empty `204`/empty-success broker response means idle. A non-2xx response,
-including an empty `401`, `403`, `404`, or `500`, is an error—not an idle poll.
-Authentication failures refresh credentials; other poll failures use bounded
-retry/backoff. The broker acknowledgement is sent before acquisition when the
-message requests it, but acknowledgement failure does not prevent acquisition.
-(`crates/velnor-runner/src/protocol.rs:1694-1767`,
-`crates/velnor-runner/src/protocol.rs:1879-1946`,
-`crates/velnor-runner/src/runner.rs:4937-5036`,
-`crates/velnor-runner/src/runner.rs:5124-5155`)
+The broker message is a delivery notification, not the full job. Velnor
+acquires the payload from the Run Service, then claims the job locally. A host
+lock and atomic in-flight marker fence duplicate delivery.
 
-Run-service acquisition retries transient transport/timeout/`408`/`429`/`5xx`
-failures a bounded number of times while preserving the broker session. `404`,
-`409`, and `422` are skipped acquisitions: Velnor returns to polling rather
-than locally completing a job it did not acquire. (`crates/velnor-runner/src/protocol.rs:2007-2085`,
-`crates/velnor-runner/src/runner.rs:5164-5193`)
+Admission happens before checkout, downloads, container creation, cache or
+artifact work, leases, or injection of job execution credentials. It checks
+the trust policy, capability manifest, action graph, job shape, and selected
+backend. Rejection is fail-closed.
 
-The runner:
+After admission, Velnor reserves capacity, renews the GitHub job lease,
+normalizes the workspace and environment, executes ordered steps, publishes
+step and timeline updates, drains publishers, reports completion, and cleans
+up. Teardown is mandatory; the result records whether cleanup completed.
 
-1. Claims `(plan_id, job_id)` with an on-disk flock and writes an atomic in-flight marker. (`crates/velnor-runner/src/runner.rs:200-355`)
-2. Parses and validates script/action steps, trust capabilities, and the execution backend before expensive work. Admission precedes run-service renewal, leases, checkout, downloads, containers, and injection of job execution credentials. The run-service access token needed to acquire and renew the job is extracted from the acquired payload before admission. (`crates/velnor-runner/src/runner.rs:5200-5265`, `crates/velnor-runner/src/runner.rs:5285-5609`, `crates/velnor-runner/src/runner.rs:6150-6167`)
-3. Acquires active capacity while renewing the remote job lease. Cancellation, capacity timeout, or registration loss completes the job explicitly and clears local state. (`crates/velnor-runner/src/runner.rs:5611-5799`)
-4. Starts timeline/job state, runs the backend, keeps renewal alive through completion, publishes completion, then clears the in-flight marker and tears down. (`crates/velnor-runner/src/runner.rs:5799-6059`)
+## Admission and supported work
 
-Cancellation is a separate busy-session broker message, not a field on the
-renewal request. In the active V2 path, a matching (or malformed) message sets
-runner cancellation state; the Docker path then kills/removes the host job
-container. There is no generic cancellation signal into the executor, and
-microVM cancellation is not wired through this runner path. A registration
-`404` also cancels the job. Unrelated messages are ignored.
-(`crates/velnor-runner/src/runner.rs:6481-6555`,
-`crates/velnor-runner/src/runner.rs:7088-7142`,
-`crates/velnor-runner/src/runner.rs:5884-5905`,
-`crates/velnor-runner/src/runner.rs:7145-7167`)
+Action references are resolved before side effects. Native adapters are
+explicitly allowlisted, and action references must satisfy the configured
+capability manifest and pinning rules.
 
-The request plan is converted into `ValidatedPlan`: identity, ordered validated steps, services, image, environment, workspace, timeouts, cancellation, outputs, artifacts, annotations, summaries, cache, and optional buildx/testcontainer data. (`crates/velnor-runner/src/execution/backend.rs:30-79`, `crates/velnor-runner/src/execution/backend.rs:212-334`)
+Supported forms include:
 
-Final completion is also two-phase. The runner builds and stores the exact
-completion payload, commits a durable outbox intent, sends `completejob`, then
-records remote acknowledgement or an exact terminal observation before
-deleting the outbox. Transient transport/`5xx`/`408`/`409`/`429` failures retry;
-other 4xx responses remain failures. (`crates/velnor-runner/src/node/complete.rs:34-177`,
-`crates/velnor-runner/src/protocol.rs:1769-1811`,
-`crates/velnor-runner/src/protocol.rs:2153-2210`)
+- shell/script steps;
+- JavaScript actions with supported `runs.using` metadata and `runs.main`;
+- Docker actions with `runs.image`;
+- composite actions supported by the planner;
+- checkout, cache, artifact, summaries, outputs, masks, services, Buildx, and
+  testcontainer features where the selected backend and trust policy permit.
 
-## Backend selection and common lifecycle
+Unsupported or restricted work fails admission. This includes unknown action
+forms, unsupported JavaScript runtimes, missing Docker action images, unsafe
+paths or archive entries, unpinned or unavailable action references, nested
+local composite actions, nested Docker composites, and tool-install actions
+that require a persistent Node sidecar. MicroVM execution has a narrower
+subset: it rejects unsupported action forms, cache actions, empty execution
+context, and host-socket mounts.
 
-`execution.toml` must explicitly select `docker` or `microvm`. Resolution checks the configured path, then the config directory, then `/etc/velnor/execution.toml`; no file means failure. The selected backend is opened directly. (`crates/velnor-runner/src/execution/mod.rs:121-173`)
+## Checkout, cache, and artifacts
 
-Every backend session uses a typed phase machine:
+Checkout resolves repository, ref, destination, depth, tags, clean behavior,
+LFS, and credential persistence. A mirror may be refreshed first; direct
+checkout is the fallback. LFS downloads require credentials. Temporary Git
+credentials are scoped to the checkout host and removed during cleanup;
+cleanup failure is reported in local diagnostics.
 
-```text
-New → Preflighted → Reserved → Prepared → Started → Executing
-  → Stopped → Collecting → TornDown
+`actions/cache` restores from the declared cache root and saves through its
+save operation. Unknown or unsafe paths fail closed. Cache keys include the
+action reference, operating system, architecture, and declared paths. Some
+host-persistent paths use their own persistence rules.
+
+Artifact upload validates and copies declared paths into local artifact
+storage, then uploads to GitHub Results Service when runtime credentials and
+backend identifiers are present. Downloads use Results Service when available
+and otherwise use same-host local artifacts. Paths, archive entries, payloads,
+and sizes are bounded.
+
+## Credentials and secrets
+
+The operator PAT is for registration, runner management, and cleanup. It is
+not used as a job token. GitHub supplies job credentials in the acquired
+payload; Velnor injects the applicable `GITHUB_TOKEN`, Actions runtime token,
+OIDC data, cache credentials, and Results Service data only after admission.
+
+Non-trusted scopes reject user secrets. Secret variables and mask hints become
+runtime masks; masked values are excluded from environment URLs and sanitized
+job dumps. Firecracker snapshots must contain no job credentials, and guest
+readiness rejects guests that already contain them.
+
+## Backend selection
+
+Select exactly one backend in `/etc/velnor/execution.toml` (or the configured
+execution file):
+
+```toml
+[execution]
+backend = "docker" # or "microvm"
 ```
 
-Wrong-phase calls fail. `run_validated_job` reserves, prepares, starts, executes or cancels, collects, and always attempts teardown; the returned outcome records whether cleanup completed. (`crates/velnor-runner/src/execution/backend.rs:1-28`, `crates/velnor-runner/src/execution/backend.rs:775-1042`, `crates/velnor-runner/src/execution/mod.rs:175-204`)
+There is no automatic fallback. An absent, unreadable, or unknown backend
+fails preflight.
 
-`ExecutionOutcome` contains conclusion, exit code, executed actions, logs, command-file bytes, summaries, outputs, environment URL, annotations, cache/artifact state, buildx/testcontainer state, and `cleaned`. Events cover step boundaries, logs, command files, result export, backend calls, and job completion. (`crates/velnor-runner/src/execution/backend.rs:587-646`)
+### Docker
 
-## Docker execution
+Docker requires the host Docker socket and a working systemd/cgroup-v2
+boundary. The job container owns the job environment; service containers,
+Docker actions, Buildx, and testcontainers operate inside the trusted host
+boundary. Cancellation removes owned job containers and cleanup reclaims
+services, networks, and BuildKit resources.
 
-Docker preflight requires the host Docker socket and verifies a systemd cgroup boundary. The Docker backend prepares image/environment/services and starts the job container. (`crates/velnor-runner/src/execution/docker.rs:20-81`)
+### MicroVM
 
-In the production runner wiring, the Docker backend receives `RunnerDockerEngine`; the execution world carries `/var/run/docker.sock`, a Docker engine, and no vsock. There is no second executor path. (`crates/velnor-runner/src/runner.rs:8051-8141`, `crates/velnor-runner/src/executor.rs:1340-1372`)
+MicroVM uses jailed Firecracker with Docker available inside the guest, never
+the host Docker socket. It requires `/dev/kvm`, verified packaged kernel/rootfs
+artifacts, a working jailer, isolated namespaces, per-isolation networking,
+and the production vsock transport.
 
-The engine starts the job environment, attaches services, exposes service aliases/ports, prepares workflow environment and state, then executes ordered steps. Cleanup removes services before the job container, aborts Docker leases, reclaims owned Docker resources, and cleans BuildKit/network state. (`crates/velnor-runner/src/executor.rs:1515-1709`, `crates/velnor-runner/src/executor.rs:4045-4133`, `crates/velnor-runner/src/executor.rs:3827-3905`)
+The plan is bound to job, isolation, generation, nonce, and plan-hash
+identities. Guest handshakes verify those identities and result digests.
+Snapshots are reused only when their identity and version match. Compiler
+cache is disabled for MicroVM. End-to-end cancellation is not currently wired
+for MicroVM.
 
-Step execution includes conditions, continue-on-error, timeouts, composite actions, JavaScript pre/post registration, checkout, script, Docker, and native step forms. Skipped steps are represented in execution state rather than silently omitted. (`crates/velnor-runner/src/executor.rs:918-1185`, `crates/velnor-runner/src/executor.rs:1769-1991`)
+## Slots and capacity
 
-## MicroVM execution
+`VELNOR_SLOTS` sets the number of daemon slots. Each slot registers its own
+ephemeral JIT runner and polls GitHub independently. A ready slot waits on the
+broker; REST queued-job listings are diagnostic and do not assign work.
 
-The microVM path is jailed Firecracker with Docker local to the guest. It rejects use of the host Docker socket. Preflight requires KVM, a verified packaged artifact set, and a working jailer. (`crates/velnor-runner/src/execution/firecracker.rs:1-20`, `crates/velnor-runner/src/execution/firecracker.rs:172-236`)
+Velnor limits both unassigned queue waiting and acquired-job capacity waiting.
+The defaults are 300 seconds for queue wait and 120 seconds for disk-capacity
+reservation; `VELNOR_QUEUE_WAIT_SECS` and `VELNOR_CAPACITY_WAIT_SECS` tune them
+within configured safety floors. A capacity timeout fails the GitHub job
+closed rather than oversubscribing the host.
 
-Preparation binds the plan identity to the isolation identity, validates the guest plan, loads artifacts, configures boot/network state, and cold-boots or restores only a matching golden snapshot. A restored snapshot with the wrong identity/version is not reused. (`crates/velnor-runner/src/execution/firecracker.rs:239-280`, `crates/velnor-runner/src/execution/firecracker.rs:724-744`, `crates/velnor-runner/src/execution/firecracker.rs:820-840`, `crates/velnor-runner/src/execution/firecracker.rs:1081-1098`)
+## Communication failures and limits
 
-Start establishes the guest through Firecracker’s API and vsock handshake. Execution sends a guest plan containing job/isolation/generation identity, plan hash, and an execution nonce. The driver verifies identities, hashes, ordering, result-export digests, stdio, and teardown acknowledgement; replayed or mismatched frames fail. (`crates/velnor-runner/src/execution/firecracker.rs:282-394`, `crates/velnor-runner/src/execution/firecracker.rs:842-1079`)
+Empty `204` or empty-success broker responses mean idle. Authentication and
+other non-success responses are errors, with credential refresh or backoff as
+appropriate. Acquisition and completion retry only classified transient
+failures. Completion stores the exact payload in a durable outbox before
+sending it; acknowledgement precedes outbox deletion, so a restart can replay
+the same completion.
 
-The production runner supplies no inline guest-plan escape hatch. Inline execution is allowed only when the world explicitly enables it, which is a test/probe facility. (`crates/velnor-runner/src/execution/mod.rs:279-309`, `crates/velnor-runner/src/execution/firecracker.rs:322-394`, `crates/velnor-runner/src/runner.rs:7297-7378`)
+Active-job cancellation arrives through the busy broker session. Docker
+cancellation is implemented; MicroVM cancellation is not end to end. Complete
+GitHub Actions parity, arbitrary guest feature parity, crash-resume of an
+executing job, and guaranteed cleanup after uncertain isolation teardown are
+not established capabilities.
 
-## Reporting, cancellation, cleanup
-
-The backend abstraction has cancellation methods for prepared, started, or
-executing phases and transitions a session to stopped before collection. In the
-active V2 runner path, Docker cancellation force-removes the job container;
-microVM cancellation is not wired end to end. Teardown removes exact resource
-paths and reports uncertain isolation teardown as an error.
-(`crates/velnor-runner/src/execution/backend.rs:882-1042`,
-`crates/velnor-runner/src/execution/docker.rs:101-119`,
-`crates/velnor-runner/src/execution/firecracker.rs:396-456`)
-
-The run-service completion payload carries plan/job identity, conclusion, outputs, step results, annotations, telemetry, environment URL, billing owner, and infrastructure-failure category. Completion retries are bounded to six attempts and preserve exact serialized bytes; only classified transient failures retry. (`crates/velnor-runner/src/protocol.rs:3209-3274`, `crates/velnor-runner/src/protocol.rs:2113-2207`)
-
-Acquire and completion are not infinite: acquire uses up to five attempts with bounded jitter; completion uses up to six attempts. A typed actions-run-service 404 can be treated as a remote terminal acknowledgement, while unrelated 404s are not silently accepted. (`crates/velnor-runner/src/protocol.rs:1986-2094`, `crates/velnor-runner/src/protocol.rs:1769-1820`, `crates/velnor-runner/src/protocol.rs:2113-2207`)
-
-## Explicit limits and design-only notes
-
-- Docker requires host Docker plus the tested systemd cgroup boundary. MicroVM requires KVM, packaged artifacts, jailer, and guest transport. Backend selection never falls back across isolation modes. (`crates/velnor-runner/src/execution/docker.rs:20-38`, `crates/velnor-runner/src/execution/firecracker.rs:172-236`, `crates/velnor-runner/src/execution/mod.rs:1-5`)
-- MicroVM support is intentionally narrower than “all Actions”: the executable-step planner permits supported script/checkout/native repository adapters and rejects unsupported action forms, cache actions, empty context, and host-socket mounts. (`crates/velnor-runner/src/runner.rs:7381-7462`, `crates/velnor-runner/src/runner.rs:7580-7623`)
-- Whole-plan timeout defaults to 360 minutes; the normalized plan enforces a minimum total timeout of 60 seconds and a minimum step timeout of one minute. (`crates/velnor-runner/src/execution/backend.rs:353-369`)
-- Trust policy controls host-Docker capability. Non-trusted execution disables shared Docker socket access and rejects user secrets. (`crates/velnor-runner/src/service.rs:193-195`, `crates/velnor-runner/src/runner.rs:6150-6167`)
-- Design-only / not established here: complete GitHub Actions parity, arbitrary guest feature parity, crash-resume of an executing job, and a cleanup guarantee after an uncertain teardown. The implementation exposes explicit validation and failure states instead.
+For operator diagnosis, distinguish stages: no broker delivery means scope,
+labels, registration, or connectivity; delivery without execution means
+acquisition or admission; local execution without GitHub state means lease,
+publisher, completion, or outbox recovery.

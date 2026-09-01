@@ -4,7 +4,7 @@ Audience: contributors changing Velnor code, interfaces, tests, packages, or
 operational behavior. This is the maintenance contract for the docs linked
 from [the index](../index.md).
 
-> Navigation: [← Evidence record](../verification/evidence-record-2026-09-01.md) · [Index](../index.md) · [Next: Start again →](../index.md)
+> Navigation: [← Development](development.md) · [Index](../index.md) · [Next: Start again →](../index.md)
 
 ## Choose the document type first
 
@@ -40,8 +40,7 @@ essay.
 
 The evidence vocabulary and document ownership table are in
 [index.md](../index.md). Source dependency law is enforced by
-`crates/velnor-client/tests/dependency_boundaries.rs`; runtime proof boundaries
-are summarized in [runtime-checking](../verification/runtime-checking.md).
+`crates/velnor-client/tests/dependency_boundaries.rs`.
 
 ## Procedure and API checklist
 

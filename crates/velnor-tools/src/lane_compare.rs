@@ -1,9 +1,7 @@
 //! `lane-compare`: fetch the GitHub-hosted and Velnor lanes of one workflow
 //! run via the GitHub API and diff their Checks-UI surface per step.
 //!
-//! Implements the repeatable comparison demanded by the future evidence gate
-//! in `docs/roadmap/future-direction.md` ("Preferred extraction method: the GitHub
-//! API"). The
+//! Implements a repeatable comparison using the GitHub API. The
 //! gate is **equal-or-better, never less informative**: any paired step where
 //! the GitHub lane shows information the Velnor lane lacks (a step missing
 //! entirely, an executed step that is not expandable, a divergent display
@@ -76,7 +74,7 @@ pub enum RunClass {
 }
 
 impl RunClass {
-    // docs/roadmap/future-direction.md: initial warm/no-change budgets.
+    // Initial warm/no-change budgets for each workload class.
     fn wall_budget_seconds(self) -> i64 {
         match self {
             Self::A => 150,
@@ -306,7 +304,7 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         report,
         "Known documented divergence (not gated): V2 jobs have no v1 log \
          archive, so the per-job raw-log download 404s on the Velnor lane; \
-         the `job-log` artifact is the workaround (see docs/roadmap/future-direction.md)."
+         the `job-log` artifact is the workaround."
     )?;
 
     let report_path = run_dir.join("report.md");

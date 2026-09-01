@@ -1,103 +1,133 @@
-# External integrations
+# Integration reference
 
-Status: current source inventory, reviewed 2026-09-01. Presence of a client or
-URL builder proves implementation intent and protocol shape; it does not prove
-that credentials, permissions, network access, or a live service are available.
+Velnor is a GitHub Actions runner. GitHub remains the scheduler and source of truth for workflows, jobs, runner registration, timelines, logs, and results. Velnor admits and executes jobs on a Linux host, then reports state back to GitHub.
 
-> Navigation: [← Execution](../guides/execution.md) · [Index](../index.md) · [Next: Interface reference →](interface.md)
+## Endpoint roles
 
-## Integration map
+| Integration | Role and direction |
+| --- | --- |
+| GitHub REST API | Velnor → GitHub: registration, runner-group lookup, runner listing/deletion, and scope validation. |
+| Runner broker | Bidirectional session protocol: Velnor creates a session, GitHub delivers runner messages, and Velnor polls and may acknowledge a job request. |
+| Run Service | Velnor → GitHub: acquire, renew, and complete the acquired job. |
+| Results Service | Velnor → GitHub: step state, logs, summaries, and live result feed. |
+| Distributed Task service | Velnor → GitHub: timeline and task-feed updates where supplied by the job contract. |
+| Actions cache | Velnor ↔ GitHub cache service when the job provides the cache endpoint and credentials. |
+| Repository Git service | Velnor → GitHub or an approved mirror: checkout over HTTPS Git. |
+| OIDC/repository APIs | Velnor-mediated job actions use the credentials and endpoints supplied by GitHub. |
+| Docker Engine | Velnor → local host Docker socket for the Docker backend. |
+| Firecracker/jailer | Velnor → local jailed VMM API and guest via AF_VSOCK for the MicroVM backend. |
 
-```text
-GitHub.com / GHES
-  ├─ REST: JIT registration, runner groups, runners, queued jobs, runs
-  ├─ Runner V2 broker: session, message poll, acknowledgement
-  ├─ Run Service: acquirejob, renewjob, completejob
-  ├─ Results Service: Twirp step updates, signed log/summary blobs, WebSocket feed
-  ├─ Actions cache: v1 Twirp and v2 Results Cache Service
-  └─ OIDC + repository APIs: provenance/attestation
+The CLI/API integration surface is separate: operators use local Unix sockets, not a public Velnor HTTP service.
 
-Node-local
-  ├─ Docker Engine: HTTP/1.1 over a per-job Unix-socket lease proxy
-  ├─ Firecracker: JSON/HTTP over a jailed Unix socket
-  ├─ Firecracker guest: AF_VSOCK host/guest protocol
-  └─ Git: HTTPS smart protocol v2 and local bare mirrors
+## Runner registration and scope
 
-Release infrastructure
-  ├─ GHCR: multi-architecture OCI job image and BuildKit registry cache
-  ├─ Fulcio/Rekor or GitHub-hosted signing: provenance signatures
-  └─ signed APT repository: external publication/installation path
-```
+`velnorctl configure` performs JIT registration for repository, organization, or enterprise scope. It uses the operator credential, runner name, labels, and selected runner group. Organization and enterprise registration requires an explicit group name or ID.
 
-## GitHub Actions control path
+The registration response supplies the runner identity and protocol endpoints. Each daemon slot registers its own ephemeral JIT runner before polling. Registration is HTTPS except loopback test endpoints; sensitive tokens and response bodies are redacted from errors.
 
-| Integration | What Velnor uses | Source |
+Repository scope targets one repository. Organization scope is constrained by the configured desired routing policy: live GitHub membership is evidence, not an implicit allowlist. Routing must agree on group, selected repositories, labels, and trust scope before the instance becomes ready.
+
+## Job communication
+
+The active path is:
+
+1. Velnor creates an authenticated broker session.
+2. Velnor long-polls the broker for a runner message.
+3. GitHub returns a job request reference, not the complete job.
+4. Velnor acknowledges busy when required, then calls Run Service `acquirejob`.
+5. Velnor validates identity, trust, capabilities, and action references.
+6. Velnor renews the Run Service lease while the job runs.
+7. Velnor executes using the explicitly selected Docker or MicroVM backend.
+8. Velnor sends step/timeline/log updates and uploads result data.
+9. Velnor calls `completejob`, retaining durable completion intent until GitHub acknowledges it.
+
+An empty successful broker response means idle. Broker authentication, authorization, missing-session, rate-limit, conflict, and server failures are errors; they are not idle polls. Acquire retries transient failures with bounds; permanent acquisition failures end the session.
+
+## Results, logs, cache, and artifacts
+
+Step status and live output use the Results Service. Timeline records and task-feed updates use the Distributed Task service. Signed blob URLs carry uploaded step/job logs and summaries. The live feed and uploaded log blobs have different wire formats: live lines are raw masked content; uploaded lines carry GitHub-compatible timestamps. Local console output is only a Velnor mirror.
+
+The Actions cache integration uses the endpoint and bearer credentials in the job contract. Cache keys and paths are admission- and policy-bound. MicroVM cache transfer uses digest-verified blobs over vsock; it does not use host-directory passthrough or the Docker socket.
+
+Artifact upload/download uses Results Service when runtime credentials provide the required backend identifiers. A same-host local artifact store is the fallback for supported local flows. Paths and archives are bounded and reject traversal or unsafe links.
+
+Velnor's immutable local CAS stores digest-addressed blobs and trees. It is an execution aid, not a replacement for GitHub's result, artifact, or cache services.
+
+## Troubleshooting publishing failures
+
+Use the acquired job's identity and endpoint data when narrowing a failure. The
+job contains `plan.plan_id`, `job_id`, and `timeline.id`. Its
+`SystemVssConnection` endpoint supplies the job-scoped access token and, when
+present, `ResultsServiceUrl` and `FeedStreamUrl`. Do not use the operator PAT
+for these calls. Never paste tokens or signed URLs into tickets or logs.
+
+Check these surfaces first, in order:
+
+1. `velnorctl status --json` — connection, readiness, backend, and alerts.
+2. `velnorctl get jobs` or `velnorctl get runs` — correlate the job with its
+   repository, workflow, plan, and job IDs.
+3. `velnorctl events`, `velnorctl logs JOB_ID`, and `velnorctl telemetry` —
+   inspect the local event/log/telemetry records for the same job ID. Also check
+   the instance log files (`daemon.log`, `lifecycle.log`, `registry.log`, and
+   `trace.jsonl`) under the configured log directory.
+
+Interpret the publishing path as follows:
+
+| Failure | Verify | First local evidence |
 | --- | --- | --- |
-| GitHub REST | GitHub.com and GHES URL roots; runner groups, JIT configs, runner listing/deletion, queued jobs, run inspection/cancel/rerun/dispatch. | `crates/velnor-runner/src/protocol.rs:459-647,915-965,1133-1426`; `crates/velnor-control/src/github.rs:46-148` |
-| JIT registration | OAuth client-credentials with a JWT bearer assertion; `generate-jitconfig`; name, labels, runner group, and scope. | `crates/velnor-runner/src/protocol.rs:915-965,1133-1158` |
-| Runner V2 broker | `POST /session`, `GET /message`, and `POST /acknowledge`; empty success means idle, while non-2xx is an error. | `crates/velnor-runner/src/protocol.rs:1858-1946`; [job flow](../guides/execution.md#from-broker-message-to-admission) |
-| Run Service | `POST /acquirejob`, `/renewjob`, and `/completejob`; delivery is acquired before execution and completion is retried with durable intent. | `crates/velnor-runner/src/protocol.rs:2007-2207`; `crates/velnor-runner/src/node/complete.rs:34-177` |
-| Results Service | VSS/Twirp step updates, signed step/job log and summary uploads, and a persistent WebSocket live-feed connection. | `crates/velnor-runner/src/protocol.rs:2246-2490,3693-4414`; `crates/velnor-runner/src/runner.rs:6601-6902` |
-| Runner protocol authority | Velnor pins `actions/runner` `v2.337.0`; upstream source remains the behavior authority for protocol changes. | [runner protocol reference](runner-protocol.md); `crates/velnor-runner/src/protocol.rs:29-38` |
+| Results Service step state or live feed is absent | `ResultsServiceUrl`, `FeedStreamUrl`, the endpoint access token, `plan.plan_id`, `job_id`, and the step ID from the acquired job; confirm the service URL is present and reachable. | `velnorctl logs JOB_ID`, `velnorctl events`, and `trace.jsonl`; look for Results Service or WebSocket connection errors. |
+| Distributed Task timeline is stale | `SystemVssConnection` access token plus `plan.plan_id`, `timeline.id`, and the timeline record ID. | `velnorctl logs JOB_ID` and `velnorctl events`; distinguish timeline-update errors from successful local step execution. |
+| Step/job blob or summary upload fails | Confirm the Results Service response supplied a non-empty signed blob URL; preserve its query string when issuing the upload, and check expiry/HTTPS/proxy handling. | `velnorctl logs JOB_ID`, `velnorctl events`, and `trace.jsonl`; compare the upload failure with the job/step ID. |
+| GitHub remains stale although local execution passed | Check lease renewal, Results Service/timeline publishing, `completejob`, and the durable completion outbox. | `velnorctl get jobs`, `velnorctl events`, `velnorctl telemetry`, then `daemon.log`/`lifecycle.log`. |
 
-GitHub supplies the workflow/job payload, including `SystemVssConnection`,
-job-scoped result credentials, variables, masks, endpoints, actions, steps,
-services, workspace, and context. Velnor must not substitute an operator token
-for the job credential. `crates/velnor-runner/src/job_message.rs:8-177`,
-`crates/velnor-runner/src/github_adapter.rs:204-266`.
+The WebSocket carries live masked lines; signed blob URLs carry uploaded log,
+summary, or artifact content. A live-feed failure can therefore leave the
+final uploaded log intact, and a signed-upload failure can leave live output
+visible. Treat them as separate failures. If a local projection is empty after
+restart, compare durable events with the bounded local log/telemetry views and
+check GitHub's job UI; these views are not an archival record.
 
-## Cache and artifact services
+## Execution backends
 
-| Integration | Role | Boundary |
-| --- | --- | --- |
-| Actions Cache v1/v2 | Serve or consume GitHub cache protocol when configured. | Bearer tokens are hashed into tenant namespaces. `VELNOR_ACTIONS_CACHE_URL` enables the service; `VELNOR_ACTIONS_CACHE_BIND` controls its listener, defaulting to `127.0.0.1:17933`. `crates/velnor-runner/src/gha_cache.rs:1-26,222-287,772-802` |
-| Velnor CAS | Store immutable blobs/trees by BLAKE3 digest. | Writes are atomic and reads verify digests; tree paths reject traversal/symlink hazards. `crates/velnor-cas/src/lib.rs:1-40,370-535,967-1084` |
-| Compiler cache | Select Kache, sccache, or off according to admitted policy. | Trust scope and job ownership bound the cache; microVM plans force compiler cache off. `crates/velnor-runner/src/container.rs:70-96`, `crates/velnor-runner/src/github_adapter.rs:39-105` |
-| GHCR | Publish/pull the multi-architecture workload image and use registry-backed BuildKit cache in release CI. | OCI digests and release metadata are verified; GHCR availability is external. `.github/workflows/release.yml:358-443,810-827`; `crates/velnor-runner/src/release.rs:655-700` |
+### Docker
 
-MicroVM cache movement uses digest-verified blobs over vsock. It does not use
-host-directory passthrough, virtio-fs, or the host Docker socket.
-`crates/velnor-runner/src/execution/cache_transport.rs:1-68`.
+The Docker backend requires the host Docker socket and a verified cgroup/systemd boundary. A per-job lease proxy applies ownership labels and rejects privileged, host-bind, and device escapes outside the permitted trust boundary. Job and action containers are removed during cancellation/teardown.
 
-## Node-local engines
+### MicroVM
 
-| Integration | Protocol and ownership | Source |
-| --- | --- | --- |
-| Docker Engine | Host backend talks to `/var/run/docker.sock`; jobs use a Velnor lease proxy that injects ownership labels, forces the jobs cgroup, and rejects privileged/host-bind/device escapes. | `crates/velnor-runner/src/execution/docker.rs:20-37`; `crates/velnor-runner/src/docker_lease.rs:1-16,1089-1303` |
-| Firecracker | Jailed VMM uses JSON/HTTP over a per-job API Unix socket; artifacts and versions are pinned and hash-verified. | `crates/velnor-runner/src/execution/unix_api.rs:1-68`; `crates/velnor-runner/src/execution/artifacts.rs:81-118,461-506` |
-| Guest agent | AF_VSOCK only. Identity, readiness, plan delivery, stdio, cancellation, results, and teardown are versioned and fenced by nonce/plan hash/generation. | `crates/velnor-runner/src/bin/velnor-guest-agent.rs:1-37`; `crates/velnor-model/src/vsock_protocol.rs:12-253` |
-| Git | Checkout uses HTTPS smart protocol v2. Optional bare mirrors use exclusive locks; credentials and URLs are not persisted in the mirror. | `crates/velnor-runner/src/checkout.rs:360-470,543-674`; `crates/velnor-runner/src/git_mirror.rs:1-61,102-155` |
+The MicroVM backend requires KVM, verified Firecracker and jailer artifacts, isolated namespaces/networking, and a working vsock guest agent. The guest handshake checks identity, generation, isolation, and absence of job credentials. Plans and blobs cross vsock with versioned, size-bounded, checksum-verified frames.
 
-## Provenance and release services
-
-Attestation uses GitHub OIDC and repository APIs, restricts subjects to approved
-distribution files, hashes subjects with SHA-256, and writes a provenance bundle.
-Signing can use public-good Fulcio/Rekor or GitHub-hosted signing endpoints.
-`crates/velnor-runner/src/attestation.rs:53-145,252-320,427-557`.
-
-Release CI builds native amd64/arm64 binaries and Debian packages, a
-multi-platform GHCR image, and guest artifacts. The release record binds source,
-binary, Debian, OCI, manifest, and package identities; the signed APT repository
-is the publication authority. `.github/workflows/release.yml:103-176,356-454,810-827`;
-`crates/velnor-runner/src/release.rs:655-692,1577-1604`.
+There is no automatic fallback between backends. MicroVM currently supports a narrower action/runtime surface and does not provide fully end-to-end cancellation parity with Docker.
 
 ## Credentials and trust
 
-- Daemon registration uses `GITHUB_TOKEN`/`VELNOR_URL`; packaged installation
-  keeps the token in operator-owned `/etc/velnor/secrets.env` with mode `0600`,
-  never in argv. `crates/velnor-runner/debian/velnor.env:4-15`,
-  `crates/velnor-runner/debian/velnor-daemon.service:16-32`.
-- Job execution credentials come from GitHub's job endpoint data and are
-  injected only after admission; the run-service token used to acquire/renew
-  is extracted earlier. Non-trusted jobs containing user secrets are rejected when
-  the selected backend requires stronger trust. `crates/velnor-runner/src/runtime_env.rs:108-197`,
-  `crates/velnor-runner/src/runner.rs:6155-6167`.
-- MicroVM guest readiness requires absence of job credentials; the host sends
-  the plan over vsock after that handshake. `crates/velnor-runner/src/execution/guest_agent.rs:19-82`.
+The operator PAT is for registration and runner administration. Job credentials come from GitHub's acquired payload and are scoped to that job: token, runtime token, OIDC material, cache credentials, Results Service data, and endpoint authorization. Velnor never substitutes the operator PAT for these values.
 
-## Deliberately absent integrations
+Admission happens before checkout, downloads, leases, credential injection, or execution. User secrets are rejected for non-trusted scopes. Secret values and mask hints are removed from job dumps and masked output. MicroVM reusable guests must not contain job credentials.
 
-No implementation evidence exists for S3/object storage, Redis, PostgreSQL or
-MySQL, Kubernetes, SSH-based runner transport, or an external message queue.
-Do not add those names to architecture diagrams until a source-owned adapter,
-configuration contract, test surface, and data/security review exist.
+## Node-local integrations
+
+| Component | Current boundary |
+| --- | --- |
+| Git | HTTPS smart protocol v2; optional bare mirrors use locking and do not persist checkout credentials. |
+| Docker | Local Unix socket, mediated by Velnor's per-job lease boundary. |
+| Firecracker | Local jailed Unix API socket; artifacts and versions are verified before use. |
+| Guest agent | AF_VSOCK protocol for identity, plan delivery, stdio, telemetry, results, cancellation, and teardown. |
+
+Velnor has no current adapter for S3/object storage, Redis, PostgreSQL/MySQL, Kubernetes, SSH runner transport, or an external message queue.
+
+## Interruption behavior
+
+Broker polling errors back off; authentication failures trigger credential/session recovery. A lost runner registration cancels the affected job. Active jobs have a separate broker cancellation poller. Docker cancellation tears down containers; MicroVM cancellation is currently limited.
+
+Completion is the durable boundary: Velnor records the payload locally, submits it, records remote acknowledgement, and only then removes the outbox entry. If the process fails before acknowledgement, recovery can retry the same completion payload. If GitHub has already accepted completion, a terminal remote observation prevents treating it as a new job result.
+
+For operator diagnosis, distinguish the endpoint that failed:
+
+| Symptom | First boundary to inspect |
+| --- | --- |
+| Runner never appears online | REST registration, runner group/scope, credentials, and local health. |
+| GitHub job queued, no Velnor activity | Labels/routing, runner readiness, broker session, and broker poll errors. |
+| Request received but no execution | Run Service acquisition, admission/capability rejection, capacity, and backend preflight. |
+| Local execution succeeded, GitHub stale | Lease renewal, Results Service/timeline uploads, `completejob`, and the local completion outbox. |
+| Logs missing only after restart | Local projection rehydration and bounded log retention; compare durable events and GitHub-side logs. |

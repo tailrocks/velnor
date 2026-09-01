@@ -1,0 +1,176 @@
+# Troubleshooting
+
+Diagnose in lifecycle order. Stop at the first stage whose healthy signal is
+missing. Use read-only commands unless an explicit operator action is required
+by the surrounding service guide.
+
+## 1. GitHub configuration
+
+Healthy: the workflow job uses labels Velnor actually advertises, and its
+repository/workflow is in the configured trust and routing policy.
+
+Inspect the workflow `runs-on`, repository, workflow, runner group, and labels;
+then compare with `velnorctl status --json`, `get runners`, `get hosts`, and
+`get instances`.
+
+If GitHub leaves the job queued and Velnor has no delivery event, this is a
+configuration or matching problem—not an executor failure. Common causes are
+wrong labels, wrong runner group, an unselected repository/workflow, or a
+policy mismatch.
+
+## 2. Eligibility and admission
+
+Healthy: a delivered job becomes acquired, locally claimed, and admitted
+before checkout, downloads, credentials, or execution.
+
+Inspect `velnorctl get jobs`, `get runs`, `events`, and `telemetry`. Check the
+configured backend and capability manifest. Admission resolves the complete
+action closure and rejects unsupported, unpinned, untrusted, or over-limit
+work before side effects.
+
+Distinguish rejection here from execution failure: there should be no backend
+start or checkout activity. Unknown actions, unsupported action metadata,
+capability mismatch, trust-policy violation, oversized/deep action graphs, and
+forbidden secrets are likely causes.
+
+## 3. Authentication and connectivity
+
+Healthy: health reports GitHub/control connectivity; a slot has a live runner
+registration and can maintain its broker session.
+
+Inspect `status --json`, health files, `broker.log`, `registry.log`, and recent
+events. Broker `204`/empty `2xx` means idle. `401`, `403`, `404`, `409`, `429`,
+and `5xx` are failures, not idle polls. Registration and lease renewal use
+separate HTTPS requests.
+
+Refresh or verify the operator credential and endpoint configuration. A lost
+registration or failed renewal can cancel active work. Transient transport
+failures back off; repeated failures can quarantine recovery. Do not diagnose
+“no jobs” from an authentication error.
+
+## 4. Job delivery and acquisition
+
+Healthy: the broker long-poll returns a job reference, Velnor acknowledges it
+when required, then acquires the full job from the run service.
+
+Inspect `broker.log`, `daemon.log`, events, and the job/run records. A broker
+message without acquisition means delivery worked but run-service acquisition
+did not. Acquisition `404`, `409`, or `422` means the remote job is no longer
+available; retryable transport, timeout, `408`, `429`, and `5xx` failures retain
+the session and retry.
+
+Likely causes: expired or already claimed work, invalid session, endpoint
+failure, authentication failure, or a drained slot. A queued GitHub job with
+no broker message belongs to eligibility/configuration, not this stage.
+
+## 5. Capacity and reservation
+
+Healthy: health shows ready capacity and permits; the job acquires a disk/
+resource reservation within the configured wait bound.
+
+Inspect `status --json`, `get slots`, `get reservations`, `get leases`, events,
+and telemetry. `VELNOR_SLOTS` limits concurrent slots. The unassigned queue
+wait defaults to 300 seconds (floor 15); acquired-job capacity wait defaults to
+120 seconds. A capacity timeout fails the GitHub job.
+
+No ready slot means admission may be valid but work cannot start. Distinguish
+this from eligibility by confirming the job was acquired and from backend
+failure by confirming no `start` phase occurred. Causes include all slots busy,
+stale slot health, disk pressure, or insufficient configured capacity.
+
+## 6. Action preparation and checkout
+
+Healthy: the job plan is normalized, actions are admitted, workspace paths and
+credentials are prepared, and checkout begins.
+
+Inspect job events, local logs, and GitHub checkout-step output. Unknown
+`uses:` forms, unsupported JavaScript/Docker/composite metadata, invalid refs,
+unsafe paths, missing checkout credentials, or LFS requirements can fail here.
+
+A failure before the first step/backend log is preparation. A checkout failure
+after backend start is execution setup, not GitHub scheduling. Persisted
+checkout credentials are intended to be removed during cleanup; inspect logs if
+cleanup reports failure.
+
+## 7. Backend execution
+
+Healthy: the selected backend completes `preflight → reserve → prepare → start
+→ execute/cancel → collect → teardown` with no fallback.
+
+Inspect `status --json` for backend/executor readiness, `get jobs`, local logs,
+and GitHub step logs. Docker requires the host Docker socket and the verified
+host boundary. MicroVM requires KVM, verified artifacts, jailer, and vsock; it
+rejects the Docker socket. Unknown backend values fail closed.
+
+Backend start/preflight errors are infrastructure failures. A step exit status
+is workload failure. Cancellation is a separate terminal path. MicroVM
+cancellation is not end-to-end equivalent to the Docker path; do not infer
+successful guest termination from a host cancellation request alone.
+
+## 8. Logs, timeline, and live status
+
+Healthy: local events/logs advance and GitHub receives masked live lines,
+timeline updates, and uploaded logs as applicable.
+
+Inspect `velnorctl events`, `logs SUBJECT`, `telemetry`, `daemon.log`, and the
+GitHub job's live log/timeline. Local log records are bounded (16,384 records or
+16 MiB); event watches retain 4,096 items; cursors expire. Resnapshot when a
+cursor expires. Forensic and trace writers are best effort.
+
+If local execution advances but GitHub's view does not, this is a publishing
+or connectivity problem. If GitHub has logs but local logs are empty after a
+restart, projection rehydration is a known limitation. CLI `logs --step` and
+`--failed` currently do not narrow output.
+
+## 9. Artifacts and cache
+
+Healthy: validated paths are materialized, local artifact handling completes,
+and Results Service credentials are present when remote upload/download is
+expected.
+
+Inspect the artifact/cache step in GitHub, job logs, events, and telemetry.
+Unsafe archive paths, unknown cache subpaths, missing runtime credentials, or
+backend-specific capability limits can fail this stage. Same-host local
+artifact fallback does not prove that GitHub received the artifact.
+
+## 10. Result reporting
+
+Healthy: publishers drain, Velnor posts completion to the run service, receives
+remote acknowledgement, then clears in-flight state.
+
+Inspect completion events, `daemon.log`, telemetry, job/run state, and outbox
+age. A local success without GitHub completion means the outbox or remote
+acknowledgement path is still pending. Completion retries transient failures;
+a typed remote terminal response can mean GitHub already considers the job
+terminal.
+
+Do not delete completion/outbox evidence while diagnosing. It is the recovery
+proof that separates “posted,” “acknowledged,” and “cleaned up.”
+
+## 11. Cleanup and recovery
+
+Healthy: teardown runs after collection, in-flight state is cleared only after
+the completion decision, and restart preserves durable journal/outbox evidence.
+
+Inspect health files, `lifecycle.log`, events, outbox age, journal errors, and
+systemd logs. Corrupt, legacy, newer, or ownership-inconsistent state fails
+closed and remains for inspection. A stale slot should be fenced while sibling
+slots continue when possible.
+
+On drain, idle slots exit at a poll boundary and active jobs are allowed to
+finish subject to service stop limits. Controller restart is not itself proof
+that slot workers stopped. Query/log projections may be empty after recreation
+even while durable events remain; use those durable events plus GitHub state to
+reconstruct what happened.
+
+## Quick distinction table
+
+| Observation | Most likely stage | Confirm with |
+| --- | --- | --- |
+| GitHub queued; no Velnor delivery | Configuration/eligibility | workflow labels, policy, runners, health |
+| Delivery event; no acquired job | Acquisition | broker/run logs, job events |
+| Acquired; no backend start | Admission/capacity/preparation | admission telemetry, reservations, logs |
+| Backend started; step fails | Execution | backend and step logs |
+| Local logs advance; GitHub stale | Publishing/reporting | Results/timeline logs, outbox, GitHub view |
+| Completion local; GitHub pending | Result acknowledgement | completion events and outbox |
+| Empty views after restart | Projection durability limit | durable events, journal, GitHub state |

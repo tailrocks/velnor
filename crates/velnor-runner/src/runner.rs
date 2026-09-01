@@ -99,8 +99,7 @@ struct PendingJitRegistration {
     runner_id: Option<i64>,
 }
 
-// Idle-slot health (see docs/verification/evidence-record-2026-09-01.md, 2026-06-11
-// zombie-fleet incident).
+// Idle-slot health protects against broker/registry split-brain and stale slots.
 // Broker poll success alone is NOT health: GitHub's runner registry can drop
 // or offline a runner while its broker session still answers 204. Idle slots
 // therefore (a) proactively refresh OAuth credentials well inside the ~1h

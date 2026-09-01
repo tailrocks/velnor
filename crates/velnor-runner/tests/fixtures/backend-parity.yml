@@ -1,17 +1,10 @@
 # Canonical extra fixture workflow. Copy into tailrocks/velnor-actions-fixture
 # as .github/workflows/backend-parity.yml. Does not add a repository-controlled
 # backend input. Pool selection (docker vs microvm) is operator execution.toml.
-# lanes remains velnor | github | both.
 
 name: backend-parity
 on:
   workflow_dispatch:
-    inputs:
-      lanes:
-        description: velnor (default) | github | both
-        type: choice
-        default: velnor
-        options: [velnor, github, both]
   pull_request:
   push:
     branches: [main]

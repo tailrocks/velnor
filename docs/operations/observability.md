@@ -1,154 +1,168 @@
-# Observability and evidence
+# Observability
 
-Status: current implementation map, reviewed 2026-09-01. Velnor has several
-observation planes with different durability and disclosure rules. A log, event,
-telemetry record, health file, or green test is not automatically proof that a
-job or fleet is healthy.
+Velnor exposes local, read-only operator views. They answer different questions
+and have different retention. A healthy local view does not prove that GitHub
+accepted a result.
 
-> Navigation: [← Operator guide](../guides/operator.md) · [Index](../index.md) · [Next: Security and data →](security-and-data.md)
+> Navigation: [← Operator guide](../guides/operator.md) · [Index](../index.md) · [Troubleshooting](../troubleshooting.md)
 
-## Five observation planes
-
-| Plane | Purpose | Current storage/transport |
-| --- | --- | --- |
-| Lifecycle events | Explain resource/job state transitions and recovery intent. | Sanitized SQLite event windows; bounded cursors and resnapshot on expiry. |
-| Job logs | Show step output and failure context. | Runner forensic files, Results Service uploads, live WebSocket feed, and a bounded local log service. |
-| Performance telemetry | Explain queue, tool, cache, compile, link, test, artifact, lease, and retention timings. | Versioned NDJSON with an opaque cursor; bounded ring/file; optional OTLP export. |
-| Health/metrics | Prove current control, registration, capacity, executor, and process state. | Atomic health and controller-metrics snapshots plus systemd status. |
-| Evidence reports | Capture reproducible fixture/host/package observations. | `velnor-tools`, shell wrappers, test fixtures, and dated Markdown/TSV records. |
-
-The implementation intentionally keeps these planes separate. Do not use a raw
-log line as a lifecycle transition, or a telemetry timestamp as a completion
-acknowledgement.
-
-## Job observation sequence
-
-```text
-RunQueued
-  → job.acquired + sanitized admission row
-  → RunAdmitted
-  → capacity/lease/step/backend telemetry
-  → step timelines + live/uploaded logs
-  → job.transition.* + completion outcome
-  → durable completion outbox ack / terminal observation
-```
-
-The runner records queue/admission/capacity facts before execution; executor
-events cover tool preparation, cache lookup, compile/link/test, and artifact
-materialization. Reporting failures are visible and best-effort; they do not
-silently turn an execution failure into success. `crates/velnor-runner/src/runner.rs:5310-5400,5985-6028,6601-6902`,
-`crates/velnor-runner/src/executor.rs:1189-1337`,
-`crates/velnor-control/src/store/records.rs:2173-2258`.
-
-## Telemetry contract
-
-Each envelope contains:
-
-```text
-schema_version, run_id, action_key_digest?, lane, repo, trust_domain,
-event, ts_logical, ts_wall, fields
-```
-
-Event-specific fields include queue duration, tool/cache timings, compiler/link/
-test exit data, artifact digest, wait state, plan counts, lease generation,
-consumer count, retention deadline, and trust-revocation reason. The schema is
-`velnor.telemetry.v1`; records are NDJSON and pages return `records`,
-`next_cursor`, and `dropped_before`. `crates/velnor-model/src/telemetry.rs:433-472,605-709`;
-`schemas/velnor.telemetry.v1.json:1-20`.
-
-Default limits are a 4,096-record ring and an 8 MiB telemetry file. Rotation
-advances the epoch; it is not a long-term archive. Valid in-memory records can
-remain available when file writing fails. `crates/velnor-model/src/telemetry.rs:779-815,1047-1127,1147-1221`.
-
-Runner tracing is a separate JSONL sink at `<config>/logs/trace.jsonl`, rotated
-at 32 MiB with one `.1` generation. With the `otel` feature and
-`VELNOR_OTLP_ENDPOINT`, spans can be exported over HTTP; exporter failure does
-not fail the runner. `crates/velnor-runner/src/telemetry.rs:1-12,101-159`.
-
-## Logs and wire destinations
-
-The same job output has intentionally different formats:
-
-| Destination | Contract |
-| --- | --- |
-| Live Results Service WebSocket | Raw masked lines; GitHub renders the timestamp column. |
-| Uploaded step/job blob | UTC round-trip timestamp with seven fractional digits, one space, then masked content. |
-| Timeline feed | Raw masked content. |
-| Local forensic file | Velnor-owned diagnostic format; files are `lifecycle.log`, `broker.log`, `registry.log`, and `daemon.log`. |
-
-Mixing raw feed lines with timestamped blob lines changes GitHub UI/download
-semantics. Runner forensic logs rotate at 32 MiB with one `.1` file.
-`crates/velnor-runner/src/slot_log.rs:1-12,77-181`;
-`docs/reference/interface.md` (log channel contract).
-
-## Health and metrics
-
-Health combines control/journal/GitHub/routing/group state, desired/actual/
-registered capacity, permits, executor readiness, queue/outbox age, canary,
-backend, and lifecycle state. Health JSON is written atomically; the socket is
-an optional fast path with file fallback. A journal/control failure is
-`NotReady`; a GitHub/routing/group/capacity shortfall is `Degraded`; zero ready
-slots or permits is `NotReady`. `crates/velnor-model/src/node.rs:136-285`;
-`crates/velnor-runner/src/node/health.rs:1-74`.
-
-`controller-metrics.json` is a current snapshot containing process counts,
-reconcile p95, journal transaction/WAL bytes, and CPU buckets. `top` is not a
-metrics backend: it queries resource collections and renders them as a live
-view. `crates/velnor-runner/src/node/controller.rs:451-493`;
-`crates/velnorctl/src/commands.rs:122-136`.
-
-## Retention and durability
-
-| Store | Current bound | Important limit |
-| --- | --- | --- |
-| Control events | 30 days / 100,000 rows; bounded prune batches. | Retention may defer under leases, deadlines, reserve, or maintenance failure. |
-| Terminal jobs | 90 days / 20,000 durable rows. | This bounds durable store rows, not raw log/content retention; API projections may still be empty after service recreation. |
-| Control database | 512 MiB ceiling with SQLite WAL accounting. | Physical filesystem free space and external backups are separate. |
-| Telemetry | 4,096 records and 8 MiB file by default. | Rotation drops old generations; no archive is promised. |
-| Forensic/trace logs | 32 MiB active file plus one `.1`. | Writers are best effort and are not a universal secret-redaction boundary. |
-| Action journal | Checksummed WAL records, leases, consumers, and separate supersession retention. | Integrity/recovery record, not an output-content vault. Job-completion outbox belongs to the control journal, not this action journal. |
-
-Sources: `crates/velnor-control/src/store/retention.rs:177-249`,
-`crates/velnor-control/src/journal.rs:64-105,352-444`,
-`crates/velnor-action-journal/src/lib.rs:95-124`,
-`crates/velnor-action-journal/src/supersession.rs:24-30,492-674`.
-
-## Operator surfaces
+## First checks
 
 ```sh
-velnorctl get events --limit 100
-velnorctl logs RUN_OR_JOB --tail 200
-velnorctl telemetry --limit 100
-velnorctl top host
-velnorctl wait instance/default --for Ready --timeout 60
+velnorctl status
 velnorctl status --json
+velnorctl get hosts
+velnorctl get instances
+velnorctl get slots
+velnorctl get runners
+velnorctl get jobs
+velnorctl get runs
+velnorctl get queue
+velnorctl events
+velnorctl logs JOB_UID_OR_RUN_ID
+velnorctl telemetry
+velnorctl top host
+velnorctl top instances
+velnorctl top slots
+velnorctl top jobs
+velnorctl top storage
+velnorctl doctor --url https://github.com/ORG --name NAME --slots N
+velnorctl preflight --config-dir DIR --work-dir DIR
+velnorctl capabilities export
+velnorctl capabilities check JOB_MESSAGE.json
+velnorctl run list
+velnorctl run view RUN_ID
+velnorctl run watch RUN_ID
+velnorctl run logs RUN_ID
 ```
 
-The read API is `GET /v1/watch`, `GET /v1/logs/{subject}`, and
-`GET /v1/telemetry`; cursors are bounded and opaque. `wait` resnapshots if a
-watch cursor expires. `crates/velnor-client/src/http.rs:150-242`;
-`crates/velnorctl/src/http.rs:660-821`;
-`crates/velnorctl/src/lib.rs:776-831,1277-1306`.
+These are read-only views. `velnorctl top TARGET` requires one of `host`,
+`instances`, `slots`, `jobs`, or `storage`; it queries that resource collection
+and is not a metrics backend. `velnorctl wait` takes a snapshot, watches for changes,
+and resnapshots when its bounded cursor expires.
 
-Fixture and host evidence is produced by `velnor-tools fixture-readiness`,
-`fixture-report`, `scripts/live_host_doctor.sh`, and `scripts/target_verify.sh`. Fixtures mock
-GitHub and use synthetic files; they do not prove live service behavior.
-`crates/velnor-tools/src/main.rs:1048-1210,1257-1330,2732-2797`;
-`scripts/live_host_doctor.sh:6-76`.
+`RUN_ID` is a numeric workflow-run ID. `JOB_UID_OR_RUN_ID` is either that bare
+numeric run ID or the exact job UID; neither subject uses a `run/` or `job/`
+prefix.
 
-## Current gaps
+The control socket is normally `/run/velnor/<instance>/control.sock`. The
+admin socket is separate, but mutation routes are currently unsupported;
+`/v1/info` reports `mutations:false`. Reconciliation, storage mutation,
+diagnostics-bundle, and run mutation commands therefore cannot be used as
+operator actions today.
 
-- Query and log services are instantiated but not repopulated from normalized
-  rows after service recreation; storage catalog projection is likewise
-  in-memory. `crates/velnor-control/src/application.rs:30-52,220-254`.
-- Diagnostics has a bounded/redacted model, but the CLI currently reports the
-  bundle as unavailable. `crates/velnor-control/src/diagnostics.rs:1-148`;
-  `crates/velnorctl/src/lib.rs:1005-1020`.
-- Action-journal telemetry conversion exists, but a production telemetry sink
-  hookup is not established by the inspected source.
-- Compile telemetry currently reports `metrics_known=false` with zeroed
-  counters; no production critical-path emitter was found.
-  `crates/velnor-runner/src/executor.rs:1282-1313`.
-- Control-event sanitization is stronger than the forensic/tracing writers.
-  Do not send secrets or untrusted sensitive payloads to those sinks. See
-  [security and data](security-and-data.md).
+`doctor` checks registered runners against GitHub. `preflight` checks local
+configuration and execution prerequisites. Capability export/check inspects
+the strict capability manifest and a job message. Run list/view/watch/logs are
+read-only; run cancel, rerun, download, dispatch, and open are unavailable.
+Run watch currently treats its run identifier as a cursor and does not filter
+events by run identity.
+
+## Health
+
+The guardian writes an atomic `health.json` snapshot. An optional
+`health.sock` provides a one-request fast path; if it is absent or unusable,
+read the file. A missing or invalid file means health is unavailable, not
+healthy.
+
+For the packaged single-instance service, the exact paths are
+`/var/lib/velnor/health.json` and `/var/lib/velnor/health.sock`. For a templated
+instance named `NAME`, they are `/var/lib/velnor-NAME/health.json` and
+`/var/lib/velnor-NAME/health.sock`. These paths come from systemd's
+`StateDirectory`; custom `--config-dir` or storage settings can change the
+runtime directory, so use the instance's configured state directory when those
+settings are in use.
+
+Health includes control and journal state, GitHub connectivity, routing and
+runner-group proof, desired/actual/ready capacity, executor/backend readiness,
+queue and outbox age, lifecycle state, and alert codes.
+
+Interpret states carefully:
+
+- `ready`: control, journal, routing, registration, executor, and capacity
+  checks permit work.
+- `degraded`: Velnor is alive but a dependency, routing proof, registration,
+  or capacity condition is impaired.
+- `not_ready`: Velnor must not accept work, for example when control/journal is
+  unavailable or no slot/permit is ready.
+
+`controller-metrics.json` is a current local snapshot: process counts,
+reconcile timing, journal/WAL bytes, and CPU totals. Phase CPU buckets are
+currently zero; do not treat them as measured per-phase metrics. There is no
+Prometheus endpoint, dashboard, SSE endpoint, or HTTP health endpoint.
+
+## Jobs, events, logs, and telemetry
+
+Resource queries cover hosts, instances, slots, runners, jobs, runs, queue,
+events, reservations, and leases. Use the repository and workflow/job identity
+shown in a job or run record to correlate with GitHub. When local records are
+ambiguous, correlate timestamps with the GitHub workflow run and job ID; Velnor
+does not provide a separate dashboard correlation view.
+
+`velnorctl events` reads a bounded event stream. Watches retain at most 4,096
+items. Event cursors are opaque and expire; resnapshot before continuing.
+
+`velnorctl logs JOB_UID_OR_RUN_ID` reads bounded local log records (up to 16,384 records
+or 16 MiB). Log cursors expire with retention. `--step` and `--failed` are
+accepted by the CLI but currently do not filter results. Runner forensic files
+are `lifecycle.log`, `broker.log`, `registry.log`, and `daemon.log`; each has
+an active file and one rotated `.1` generation. These writers are best effort.
+
+GitHub receives separate log forms: live masked lines over the Results Service
+WebSocket, uploaded step/job blobs, and timeline feed updates. Local logs can
+show that publishing was attempted; GitHub is the authority for what it
+actually received and rendered.
+
+`velnorctl telemetry` returns versioned records with opaque cursors. A cursor is
+a continuation position, not a timestamp or record ID to interpret. When a page
+has more records, `next_cursor` tells the next request where to continue;
+`dropped_before` reports the oldest available position when retention has already
+discarded earlier records. Example response shape:
+
+```json
+{
+  "records": [{"cursor": "opaque", "kind": "..."}],
+  "next_cursor": "opaque",
+  "dropped_before": "opaque"
+}
+```
+
+The default bounds are 4,096 records and an 8 MiB file. Rotation drops old
+generations; telemetry is not an archive. If a cursor expires, start with a
+fresh snapshot/page.
+The optional trace file is `<config>/logs/trace.jsonl`, rotated at 32 MiB with
+one `.1`. OTLP (OpenTelemetry Protocol) export is optional: set
+`VELNOR_OTLP_ENDPOINT` to send traces to an OTLP collector; export failure does
+not stop the runner.
+
+## Durability and visibility limits
+
+The SQLite control journal durably stores events and recovery intent. Normal
+query, log, and storage projections are not fully rehydrated after service
+recreation, so a reopened service can have durable events while resource or
+log views are empty. Treat an empty projection after restart as a visibility
+limitation, not proof that no work occurred.
+
+Completion recovery uses local outbox state plus remote acknowledgement. An
+outbox entry is retained until GitHub acknowledges completion. Inspect local
+outbox age and completion-related events when execution succeeded locally but
+GitHub remains pending.
+
+There is no currently available diagnostics bundle command. Fixture reports and
+host-doctor scripts are maintainer/evidence tooling, use synthetic inputs in
+some cases, and are not live-service observability.
+
+## Correlating a GitHub job
+
+1. Copy the GitHub repository, workflow run, job, and queued/start timestamps.
+2. Query `velnorctl get runs`, `get jobs`, and `events`.
+3. Confirm runner, slot, labels, backend, admission, and completion state.
+4. Inspect `velnorctl logs JOB_UID_OR_RUN_ID` and `velnorctl telemetry` for the same
+   subject and time window.
+5. Compare GitHub's rendered logs/timeline/result with Velnor's local terminal
+   and outbox evidence.
+
+The broker delivers a job reference; the run service supplies the full job.
+Therefore a broker-delivery event without an acquired job is not execution,
+and local execution completion without remote acknowledgement is not GitHub
+completion.
