@@ -2,6 +2,8 @@
 
 This is the repository’s current development contract. Citations use `path:line`.
 
+> Navigation: [← Security and data](security-and-data.md) · [Index](index.md) · [Next: Runtime proof →](runtime-checking-proof.md)
+
 ## Current: build, test, lint, format
 
 The workspace has 12 members and uses Cargo resolver 3, Rust edition 2024, and a

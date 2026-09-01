@@ -25,6 +25,10 @@ claim of secure isolation merely because a backend test passes.
 
 ## Start here
 
+The complete newcomer route is maintained in the
+[documentation index](docs/index.md). Read that route in order; the shorter
+list below shows its main milestones.
+
 1. [Documentation index](docs/index.md) — reading paths, document ownership,
    and the `CURRENT`/`FUTURE` evidence vocabulary.
 2. [Architecture](docs/architecture.md) — responsibilities, boundaries,
@@ -35,7 +39,9 @@ claim of secure isolation merely because a backend test passes.
    Docker and Firecracker execution, cleanup, and result publication.
 5. [Interface reference](docs/interface-reference.md) — `velnorctl`, the local
    Unix API, resource schemas, errors, and runner protocol surfaces.
-6. [Operator guide](docs/operator-now.md) — package installation, service
+6. [Runner protocol](docs/runner-protocol-reference.md) — pinned upstream
+   V2 behavior and Velnor-specific compatibility boundaries.
+7. [Operator guide](docs/operator-now.md) — package installation, service
    setup, backend configuration, diagnostics, and recovery.
 
 Use the [glossary](docs/glossary.md) for project vocabulary and

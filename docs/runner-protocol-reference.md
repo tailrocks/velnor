@@ -5,6 +5,8 @@ broker/run-service V2 path in the upstream `actions/runner` source. This file
 is the input to `velnor-tools check-runner-reference`; the code and upstream
 source remain the behavioral authorities.
 
+> Navigation: [← Interface reference](interface-reference.md) · [Index](index.md) · [Next: Operator guide →](operator-now.md)
+
 ## Pinned release
 
 - latest release checked: `v2.337.0`

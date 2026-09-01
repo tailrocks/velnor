@@ -2,7 +2,11 @@
 
 Status: implemented runtime behavior only. Source and tests are the authority. Plan prose, design sketches, and future acceptance criteria are not runtime proof.
 
-The runtime rule is simple: validate before side effects, persist intent before executing the matching side effect, and fail closed when identity, freshness, integrity, or ownership cannot be proved.
+The runtime rule is simple: validate before side effects, persist intent before
+executing the matching side effect, and fail closed when identity, freshness,
+integrity, or ownership cannot be proved.
+
+> Navigation: [← Development](development-now.md) · [Index](index.md) · [Next: CI estate contract →](ci-estate-contract.md)
 
 ## Runtime path
 
@@ -90,4 +94,3 @@ Storage proof has two layers: CAS content-addressed integrity and durable accoun
 - `skip_preflight` and `--force-no-lease-check` are real explicit bypasses. They are not proof; their use must be treated as an operator-selected weaker mode: `crates/velnor-runner/src/runner.rs:4219-4225`; `crates/velnor-runner/src/cache.rs:147-168`.
 - Diagnostic logs and telemetry are bounded observability. They cannot establish readiness, ownership, completion, or storage durability: `crates/velnor-runner/src/slot_log.rs:73-91`; `crates/velnor-model/src/telemetry.rs:795-844`.
 - A design statement or acceptance target without a corresponding runtime authority above is not implemented behavior. This document intentionally records no roadmap behavior as live proof.
-

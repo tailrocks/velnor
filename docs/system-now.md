@@ -13,6 +13,8 @@ migration scaffold is explicitly temporary, not a compatibility promise.
 (`Cargo.toml:1-19`, `crates/velnor-model/src/lib.rs:1-5`,
 `crates/velnor-runner/src/lib.rs:1-63`)
 
+> Navigation: [← Architecture](architecture.md) · [Index](index.md) · [Next: Execution now →](execution-now.md)
+
 `velnor-runner` exposes the daemon entrypoint through `main`; the service entrypoint owns machine-invoked daemon plumbing, while operator commands live in `velnorctl`. Service roles are guardian, controller, slot, and transient job. (`crates/velnor-runner/src/main.rs:4-20`, `crates/velnor-runner/src/service.rs:1-12`, `crates/velnor-runner/src/service.rs:35-51`)
 
 Runtime topology:

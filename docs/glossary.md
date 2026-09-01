@@ -3,6 +3,8 @@
 Short definitions for newcomers. The linked documents contain the full
 behavior and proof limits.
 
+> Navigation: [← Index](index.md) · **Glossary** · [Next: Architecture →](architecture.md)
+
 | Term | Meaning in Velnor |
 | --- | --- |
 | Admission | The bounded, read-first validation stage that closes the job/action graph and checks capabilities before execution side effects. |

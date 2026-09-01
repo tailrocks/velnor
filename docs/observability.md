@@ -5,6 +5,8 @@ observation planes with different durability and disclosure rules. A log, event,
 telemetry record, health file, or green test is not automatically proof that a
 job or fleet is healthy.
 
+> Navigation: [← Operator guide](operator-now.md) · [Index](index.md) · [Next: Security and data →](security-and-data.md)
+
 ## Five observation planes
 
 | Plane | Purpose | Current storage/transport |

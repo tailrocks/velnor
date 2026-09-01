@@ -7,6 +7,8 @@ Rust, but do not yet know this repository. Read this explanation before the
 Status: current implementation map, inspected against the source tree on
 2026-09-01. A statement marked design-only is not a shipped guarantee.
 
+> Navigation: [← Glossary](glossary.md) · [Index](index.md) · [Next: System now →](system-now.md)
+
 ## What Velnor is responsible for
 
 GitHub remains the scheduler, workflow UI, repository authority, and source of

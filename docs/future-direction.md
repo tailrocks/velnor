@@ -5,6 +5,8 @@ descriptions live in [architecture](architecture.md), [system now](system-now.md
 and [execution now](execution-now.md). Nothing in this file is a shipped
 capability, readiness claim, or security proof.
 
+> Navigation: [← CI estate contract](ci-estate-contract.md) · [Index](index.md) · [Next: Evidence record →](evidence-record-2026-09-01.md)
+
 ## Boundaries that future work must preserve
 
 - GitHub remains the workflow scheduler, UI, and job source of truth.

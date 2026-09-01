@@ -11,6 +11,8 @@ means the parser accepts the command, but current code returns a plan, an
 unavailable error, or an unsupported-operation error; it does not perform the
 promised host/GitHub action.
 
+> Navigation: [← Runner protocol](runner-protocol-reference.md) · [Index](index.md) · [Next: Observability →](observability.md)
+
 ## Production install and start
 
 Use the signed apt repository and an exact package version. The repository/key

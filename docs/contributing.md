@@ -4,6 +4,8 @@ Audience: contributors changing Velnor code, interfaces, tests, packages, or
 operational behavior. This is the maintenance contract for the docs linked
 from [the index](index.md).
 
+> Navigation: [← Evidence record](evidence-record-2026-09-01.md) · [Index](index.md) · [Next: README / repeat →](../README.md)
+
 ## Choose the document type first
 
 Use one primary user need per document. The current set is pragmatic rather
@@ -13,10 +15,10 @@ reference needed to execute them, and interface/protocol pages are reference.
 
 | Need | Velnor form | Example |
 | --- | --- | --- |
-| Learn the system | Tutorial/onboarding | [README](../README.md), [architecture](architecture.md) |
+| Learn the project | Tutorial/onboarding | [README](../README.md) |
+| Understand the system | Explanation | [architecture](architecture.md), [system](system-now.md), [execution](execution-now.md), [security](security-and-data.md) |
 | Complete a task | How-to | [operator guide](operator-now.md), [development](development-now.md) |
 | Look up a contract | Reference | [interface reference](interface-reference.md), [runner protocol](runner-protocol-reference.md) |
-| Understand why | Explanation | [system](system-now.md), [execution](execution-now.md), [security](security-and-data.md) |
 
 This separation follows [Diátaxis](https://diataxis.fr/). Do not turn a
 reference table into a tutorial or bury an operational command inside a design

@@ -4,6 +4,8 @@ Status: current source inventory, reviewed 2026-09-01. Presence of a client or
 URL builder proves implementation intent and protocol shape; it does not prove
 that credentials, permissions, network access, or a live service are available.
 
+> Navigation: [← Execution now](execution-now.md) · [Index](index.md) · [Next: Interface reference →](interface-reference.md)
+
 ## Integration map
 
 ```text

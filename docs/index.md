@@ -13,7 +13,36 @@ application/model contract that is not necessarily public. `DESIGN-ONLY` and
 `OPEN/UNPROVEN` mark proof limits, not capabilities. `CURRENT`, `FUTURE`, and
 `HISTORICAL` remain the canonical document-status labels.
 
-## Reading paths
+> Navigation: [← README](../README.md) · **Index** · [Next: Glossary →](glossary.md)
+
+## Canonical newcomer path
+
+Read this route from top to bottom. Each step answers the question raised by
+the previous step. Use the role shortcuts below only when you already know
+which part you need.
+
+| Step | Page | What it answers | Continue to |
+| ---: | --- | --- | --- |
+| 0 | [README](../README.md) | What Velnor is, who it serves, and its boundary. | [Index](index.md) |
+| 1 | [This index](index.md) | How to read the docs and judge claims. | [Glossary](glossary.md) |
+| 2 | [Glossary](glossary.md) | What the recurring terms mean. | [Architecture](architecture.md) |
+| 3 | [Architecture](architecture.md) | Which components exist and why they are separated. | [System now](system-now.md) |
+| 4 | [System now](system-now.md) | How startup, processes, readiness, and restart work. | [Execution now](execution-now.md) |
+| 5 | [Execution now](execution-now.md) | How a broker delivery becomes an admitted job and result. | [Integrations](integrations.md) |
+| 6 | [Integrations](integrations.md) | Which GitHub, Docker, Firecracker, Git, and cache boundaries exist. | [Interface reference](interface-reference.md) |
+| 7 | [Interface reference](interface-reference.md) | Which CLI, Unix routes, schemas, and protocol calls are reachable. | [Runner protocol](runner-protocol-reference.md) |
+| 8 | [Runner protocol](runner-protocol-reference.md) | Which upstream Runner V2 behavior Velnor pins and where it differs. | [Operator guide](operator-now.md) |
+| 9 | [Operator guide](operator-now.md) | How to install, configure, inspect, and recover a node. | [Observability](observability.md) |
+| 10 | [Observability](observability.md) | Where events, logs, telemetry, health, and evidence appear. | [Security and data](security-and-data.md) |
+| 11 | [Security and data](security-and-data.md) | What is protected, persisted, redacted, and not proven. | [Development](development-now.md) |
+| 12 | [Development](development-now.md) | How to build, test, lint, package, and preserve boundaries. | [Runtime proof](runtime-checking-proof.md) |
+| 13 | [Runtime proof](runtime-checking-proof.md) | What repository checks actually establish. | [CI estate](ci-estate-contract.md) |
+| 14 | [CI estate contract](ci-estate-contract.md) | How fleet policy and live acceptance are separated. | [Future direction](future-direction.md) |
+| 15 | [Future direction](future-direction.md) | What remains open and what evidence would promote it. | [Evidence record](evidence-record-2026-09-01.md) |
+| 16 | [Evidence record](evidence-record-2026-09-01.md) | What is historical, measured, and still unproven. | [Contributing](contributing.md) |
+| 17 | [Contributing documentation](contributing.md) | How to maintain this route and its claims. | [README / repeat](../README.md) |
+
+## Role shortcuts
 
 - **Understand execution:** start with [execution-now.md](execution-now.md), then read [runtime-checking-proof.md](runtime-checking-proof.md).
 - **Understand the system:** read [architecture.md](architecture.md), then [system-now.md](system-now.md) and [interface-reference.md](interface-reference.md).

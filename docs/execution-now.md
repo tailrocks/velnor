@@ -2,6 +2,8 @@
 
 Code-backed lifecycle for one acquired Actions job. Citations use `path:line` and only cover the requested source set. “Design-only” marks behavior not proven by this implementation.
 
+> Navigation: [← System now](system-now.md) · [Index](index.md) · [Next: Integrations →](integrations.md)
+
 ## From broker message to admission
 
 The V2 broker delivers a `RunnerJobRequest` reference. The message carries plan/job identity, timeline, variables and masks, resources, steps, environment, workspace, actions, dependencies, and billing owner. (`crates/velnor-runner/src/protocol.rs:3157-3234`, `crates/velnor-runner/src/job_message.rs:10-68`)
