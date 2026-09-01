@@ -573,6 +573,43 @@ impl<C: Clock> LeaseManager<C> {
             .transpose()
     }
 
+    /// Validate the complete fencing token for a live producer lease.
+    ///
+    /// Callers that perform side effects before a terminal journal transition
+    /// must validate the action key, owner, generation, state, and deadline in
+    /// one journal read. Checking only [`LeaseStatus::Active`] would allow an
+    /// older owner to write while a later generation is active.
+    pub fn validate_active_lease(&mut self, lease: &ProducerLease) -> Result<(), JournalError> {
+        let now = self.clock.now();
+        self.expire_due_at(now)?;
+        let digest = lease.action.digest()?;
+        let row = self
+            .journal
+            .connection
+            .query_row(
+                "SELECT generation, owner, expires_at_ms, heartbeat_every_ms,
+                        lease_duration_ms, state, action_key_json
+                 FROM producer_leases WHERE action_key_digest = ?1",
+                [digest.to_string()],
+                lease_row_from_query,
+            )
+            .optional()?
+            .ok_or(JournalError::LeaseNotFound {
+                action_key_digest: digest.clone(),
+            })?;
+        verify_stored_action_key(&row.action_key_json, &digest)?;
+        if row.state != LeaseState::Active
+            || row.generation != lease.generation
+            || row.owner != lease.owner
+        {
+            return Err(JournalError::LeaseFenced);
+        }
+        if row.expires_at_ms <= sqlite_integer(now.as_millis())? {
+            return Err(JournalError::LeaseExpired);
+        }
+        Ok(())
+    }
+
     /// Acquire the single producer lease for an action.
     pub fn acquire(
         &mut self,
@@ -1671,6 +1708,29 @@ mod tests {
         );
         assert!(matches!(
             manager.renew(&mut lease.clone()),
+            Err(JournalError::LeaseFenced)
+        ));
+    }
+
+    #[test]
+    fn active_lease_validation_checks_owner_and_generation() {
+        let clock = TestClock::default();
+        let mut manager = LeaseManager::open(":memory:", clock).unwrap();
+        let lease = manager.acquire(&action(48), "worker-a", 100, 25).unwrap();
+
+        manager.validate_active_lease(&lease).unwrap();
+
+        let mut wrong_owner = lease.clone();
+        wrong_owner.owner = "worker-b".into();
+        assert!(matches!(
+            manager.validate_active_lease(&wrong_owner),
+            Err(JournalError::LeaseFenced)
+        ));
+
+        let mut wrong_generation = lease;
+        wrong_generation.generation += 1;
+        assert!(matches!(
+            manager.validate_active_lease(&wrong_generation),
             Err(JournalError::LeaseFenced)
         ));
     }

@@ -18,7 +18,7 @@ use std::{
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use velnor_action_journal::{ActionRecord, JournalError, LeaseManager, LeaseStatus};
+use velnor_action_journal::{ActionRecord, JournalError, LeaseManager};
 use velnor_action_model::{
     canonical_json_bytes, ActionKey, ActionResult, ActionState, Clock, Digest, ProducerLease,
     TrustClass,
@@ -34,6 +34,10 @@ const DEFAULT_HEARTBEAT_MS: u64 = 10_000;
 const DEFAULT_CACHE_QUOTA_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_CAPTURE_BYTES: u64 = 5 * 1024 * 1024 * 1024 + 16 * 1024 * 1024;
 const QUOTA_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ACCOUNTING_NODES: usize = 1_000_000;
+const MAX_ACCOUNTING_DEPTH: usize = 128;
+const MAX_ACCOUNTING_PATH_BYTES: usize = 16 * 1024;
+const MAX_ACCOUNTING_ENTRIES_PER_DIRECTORY: usize = 100_000;
 const OUTPUT_ROOT_DIGEST: &str = "output_root";
 const RESULT_DIGEST: &str = "compiler_cache_result";
 const ACCOUNTING_DIGEST: &str = "compiler_cache_physical_byte_accounting";
@@ -1258,9 +1262,35 @@ fn lease_reference(lease: &ProducerLease) -> String {
 }
 
 fn storage_size_bytes(root: &Path) -> Result<u64, CacheError> {
-    let mut pending = vec![root.to_path_buf()];
+    let root_path_bytes = root.to_string_lossy().len();
+    if root_path_bytes > MAX_ACCOUNTING_PATH_BYTES {
+        return Err(CacheError::InvalidMetadata(format!(
+            "compiler-cache accounting path exceeds {} bytes",
+            MAX_ACCOUNTING_PATH_BYTES
+        )));
+    }
+    let mut pending = vec![(root.to_path_buf(), 0_usize)];
+    let mut nodes = 1_usize;
     let mut total = 0_u64;
-    while let Some(path) = pending.pop() {
+    while let Some((path, depth)) = pending.pop() {
+        if nodes > MAX_ACCOUNTING_NODES {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache accounting exceeded {} nodes",
+                MAX_ACCOUNTING_NODES
+            )));
+        }
+        if depth > MAX_ACCOUNTING_DEPTH {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache accounting exceeded depth limit {}",
+                MAX_ACCOUNTING_DEPTH
+            )));
+        }
+        if path.to_string_lossy().len() > MAX_ACCOUNTING_PATH_BYTES {
+            return Err(CacheError::InvalidMetadata(format!(
+                "compiler-cache accounting path exceeds {} bytes",
+                MAX_ACCOUNTING_PATH_BYTES
+            )));
+        }
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
             return Err(CacheError::InvalidMetadata(format!(
@@ -1273,8 +1303,40 @@ fn storage_size_bytes(root: &Path) -> Result<u64, CacheError> {
                 CacheError::InvalidMetadata("storage byte count overflowed".into())
             })?;
         } else if metadata.is_dir() {
+            if depth == MAX_ACCOUNTING_DEPTH {
+                return Err(CacheError::InvalidMetadata(format!(
+                    "compiler-cache accounting reached directory depth limit {}",
+                    MAX_ACCOUNTING_DEPTH
+                )));
+            }
+            let mut entries = 0_usize;
             for entry in fs::read_dir(&path)? {
-                pending.push(entry?.path());
+                entries = entries.checked_add(1).ok_or_else(|| {
+                    CacheError::InvalidMetadata("compiler-cache entry count overflowed".into())
+                })?;
+                if entries > MAX_ACCOUNTING_ENTRIES_PER_DIRECTORY {
+                    return Err(CacheError::InvalidMetadata(format!(
+                        "compiler-cache directory exceeds {} entries",
+                        MAX_ACCOUNTING_ENTRIES_PER_DIRECTORY
+                    )));
+                }
+                let child = entry?.path();
+                if child.to_string_lossy().len() > MAX_ACCOUNTING_PATH_BYTES {
+                    return Err(CacheError::InvalidMetadata(format!(
+                        "compiler-cache accounting path exceeds {} bytes",
+                        MAX_ACCOUNTING_PATH_BYTES
+                    )));
+                }
+                nodes = nodes.checked_add(1).ok_or_else(|| {
+                    CacheError::InvalidMetadata("compiler-cache node count overflowed".into())
+                })?;
+                if nodes > MAX_ACCOUNTING_NODES {
+                    return Err(CacheError::InvalidMetadata(format!(
+                        "compiler-cache accounting exceeded {} nodes",
+                        MAX_ACCOUNTING_NODES
+                    )));
+                }
+                pending.push((child, depth + 1));
             }
         } else {
             return Err(CacheError::InvalidMetadata(format!(
@@ -1308,11 +1370,8 @@ impl<C: Clock> CompilerCacheService<C> {
         // obviously stale producer before it can allocate an orphan CAS
         // object; append_action_and_release remains the atomic final fence.
         journal.expire_due()?;
-        if journal.lease_status(&lease.action)? == Some(LeaseStatus::Active) {
-            Ok(())
-        } else {
-            Err(CacheError::Journal(JournalError::LeaseFenced))
-        }
+        journal.validate_active_lease(lease)?;
+        Ok(())
     }
 
     fn ensure_quota(&self, requested: u64) -> Result<(), CacheError> {
@@ -2277,6 +2336,61 @@ mod tests {
             Err(CacheError::Journal(JournalError::LeaseFenced))
         ));
         assert!(cache.lookup(&action_key).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_owner_and_generation_cannot_write_cas() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let stale_cache = service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-a",
+        );
+        let current_cache = service_with_owner(
+            &directory,
+            CompilerCachePolicy::Kache,
+            WrapperDeclaration::default(),
+            "worker-b",
+        );
+        let action_key = key(49);
+        let stale_lease = stale_cache.begin(&action_key).await.expect("stale lease");
+        stale_cache
+            .abandon(&stale_lease)
+            .await
+            .expect("abandon stale lease");
+        let current_lease = current_cache
+            .begin(&action_key)
+            .await
+            .expect("current lease");
+        assert_eq!(current_lease.owner, "worker-b");
+        assert!(current_lease.generation > stale_lease.generation);
+
+        let size_before = storage_size_bytes(stale_cache.storage_root()).expect("storage size");
+        assert!(matches!(
+            stale_cache
+                .publish(stale_lease, result(action_key.clone()))
+                .await,
+            Err(CacheError::Journal(JournalError::LeaseFenced))
+        ));
+        assert_eq!(
+            storage_size_bytes(stale_cache.storage_root()).expect("storage size after fence"),
+            size_before
+        );
+
+        current_cache
+            .abandon(&current_lease)
+            .await
+            .expect("abandon current lease");
+    }
+
+    #[test]
+    fn storage_accounting_rejects_overlong_root_path() {
+        let root = PathBuf::from("x".repeat(MAX_ACCOUNTING_PATH_BYTES + 1));
+        assert!(matches!(
+            storage_size_bytes(&root),
+            Err(CacheError::InvalidMetadata(message)) if message.contains("path exceeds")
+        ));
     }
 
     #[tokio::test]
