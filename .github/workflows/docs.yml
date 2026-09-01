@@ -56,7 +56,7 @@ jobs:
           test -s "$public/llms-full.txt"
           grep -q '<title>Velnor Documentation</title>' "$public/index.html"
           grep -q 'Security and data contract' "$public/operations/security-and-data/index.html"
-          jq -e 'type == "array" and all(.[]; (type == "object" and (.id | type == "string") and (.url | type == "string") and (.title | type == "string") and (.structuredData | type == "object")))' "$public/api/search"
+          jq -e 'type == "object" and .type == "advanced" and (.index | type == "object")' "$public/api/search"
 
           test ! -e "$public/docs"
           if find "$public" -type f ! -path "$public/assets/*" -print0 | xargs -0 grep -nE '(^|["( ])(/docs([/?#" )]|$)|%2[Ff]docs)' >/tmp/velnor-docs-links; then
