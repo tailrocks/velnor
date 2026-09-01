@@ -27,7 +27,7 @@ jobs:
       scope: ${{ steps.plan.outputs.scope }}
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -44,11 +44,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout workflow data
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Checkout trusted policy
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         continue-on-error: true
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
@@ -72,14 +72,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Restore "Bun package (velnor)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.bun/install/cache
@@ -102,11 +102,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Run Docker checks
         env:
           CI_SCOPE: ${{ needs.plan.outputs.scope }}
@@ -123,12 +123,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Restore Documentation cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.npm
@@ -151,25 +151,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-deny
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-deny
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust dependency policy" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -193,25 +193,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (unit-collector)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -235,25 +235,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-action-journal)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -277,25 +277,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-action-model)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -319,25 +319,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-cache-service)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -361,25 +361,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-cas)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -403,25 +403,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-client)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -445,25 +445,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-control)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -487,25 +487,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-model)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -529,25 +529,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-render)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -571,25 +571,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-runner)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -613,25 +613,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-tools)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -655,25 +655,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnorctl)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -698,14 +698,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Restore "Bun package (velnor)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.bun/install/cache
@@ -729,11 +729,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Run Docker checks
         env:
           CI_SCOPE: ${{ needs.plan.outputs.scope }}
@@ -751,12 +751,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Restore Documentation cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.npm
@@ -780,25 +780,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-deny
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-deny
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust dependency policy" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -823,25 +823,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (unit-collector)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -866,25 +866,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-action-journal)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -909,25 +909,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-action-model)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -952,25 +952,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-cache-service)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -995,25 +995,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-cas)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1038,25 +1038,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-client)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1081,25 +1081,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-control)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1124,25 +1124,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-model)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1167,25 +1167,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-render)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1210,25 +1210,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-runner)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1253,25 +1253,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnor-tools)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -1296,25 +1296,25 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up cargo-nextest
-        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: nextest
           fallback: none
       - name: Set up sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.16.0
       - name: Set up mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
         with:
           make-default: true
       - name: Restore "Rust crate (velnorctl)" cache
         id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
