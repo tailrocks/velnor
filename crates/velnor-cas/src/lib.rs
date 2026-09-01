@@ -7,7 +7,7 @@
 
 use std::{
     fs::{self, File},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,7 +17,6 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::{
     ffi::{OsStr, OsString},
-    io::{Seek, SeekFrom},
     os::unix::ffi::OsStringExt,
     sync::Arc,
 };
@@ -28,11 +27,16 @@ use unicode_normalization::UnicodeNormalization;
 use velnor_action_model::{canonical_json_bytes, Digest, DigestError};
 
 const MAX_TREE_ENTRIES: usize = 100_000;
+const MAX_TREE_DIRECTORIES: usize = 100_000;
+const MAX_TREE_NODES: usize = 200_000;
+const MAX_TREE_DIRECTORY_ENTRIES: usize = 100_000;
 const MAX_TREE_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_TREE_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_TREE_PATH_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TREE_PATH_DEPTH: usize = 256;
 const MAX_TREE_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_FULL_READ_BYTES: u64 = 64 * 1024 * 1024;
+const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Normalized reason for a cache miss or rejected object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,7 +455,7 @@ impl CasStore {
         let bucket = self.open_bucket(&digest, true)?;
         let object_name = &digest.as_str()[2..];
         if let Some(file) = open_existing_object(&bucket, object_name, &digest)? {
-            let _ = self.get(&digest)?;
+            self.verify_object_bounded(&digest, bytes.len() as u64)?;
             return Ok((digest, file_accounting(&file, true)));
         }
 
@@ -503,7 +507,7 @@ impl CasStore {
                     }
                     return Err(cleanup_error.into());
                 }
-                let _ = self.get(&digest)?;
+                self.verify_object_bounded(&digest, bytes.len() as u64)?;
                 let accounting = self.object_accounting(&digest, true);
                 return Ok((digest, accounting));
             }
@@ -536,7 +540,7 @@ impl CasStore {
         let digest = Digest::from_bytes(bytes);
         let path = self.checked_object_path(&digest)?;
         if path.exists() {
-            let _ = self.get(&digest)?;
+            self.verify_object_bounded(&digest, bytes.len() as u64)?;
             return Ok((digest, self.object_accounting(&digest, true)));
         }
 
@@ -579,7 +583,7 @@ impl CasStore {
             Ok(()) => {}
             Err(_error) if path.exists() => {
                 let _ = fs::remove_file(&temp);
-                let _ = self.get(&digest)?;
+                self.verify_object_bounded(&digest, bytes.len() as u64)?;
                 let accounting = self.object_accounting(&digest, true);
                 return Ok((digest, accounting));
             }
@@ -595,19 +599,192 @@ impl CasStore {
         Ok((digest.clone(), self.object_accounting(&digest, false)))
     }
 
-    /// Read and verify an object in full.
-    pub fn get(&self, digest: &Digest) -> Result<Vec<u8>, CasError> {
+    fn put_file_with_limit(
+        &self,
+        source: &mut File,
+        max_bytes: u64,
+    ) -> Result<(Digest, u64), CasError> {
+        let metadata = source.metadata()?;
+        if !metadata.file_type().is_file() {
+            return Err(CasError::UnsafePath(
+                "tree source entry is not a regular file".into(),
+            ));
+        }
+        let expected_bytes = metadata.len();
+        if expected_bytes > max_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "tree file is {expected_bytes} bytes, exceeding the {max_bytes}-byte limit"
+            )));
+        }
+
+        source.seek(SeekFrom::Start(0))?;
+        let (digest, read_bytes) = digest_reader(source, max_bytes)?;
+        if read_bytes != expected_bytes {
+            return Err(CasError::InvalidManifest(
+                "tree source changed while it was being read".into(),
+            ));
+        }
+        source.seek(SeekFrom::Start(0))?;
+        self.put_reader_with_digest(source, &digest, read_bytes, max_bytes)?;
+        Ok((digest, read_bytes))
+    }
+
+    #[cfg(unix)]
+    fn put_reader_with_digest<R: Read>(
+        &self,
+        reader: &mut R,
+        expected: &Digest,
+        expected_bytes: u64,
+        max_bytes: u64,
+    ) -> Result<(), CasError> {
+        let bucket = self.open_bucket(expected, true)?;
+        let object_name = &expected.as_str()[2..];
+        if open_existing_object(&bucket, object_name, expected)?.is_some() {
+            self.verify_object_bounded(expected, max_bytes)?;
+            return Ok(());
+        }
+
+        let temp_name = format!(
+            ".{}.{}.tmp",
+            expected,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let mut file = open_created_file(&bucket, OsStr::new(&temp_name))?;
+        let (actual, written_bytes) = match copy_reader_with_digest(reader, &mut file, max_bytes) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(file);
+                let _ = remove_temp_secure(&bucket, &temp_name);
+                return Err(error);
+            }
+        };
+        if written_bytes != expected_bytes || actual != *expected {
+            drop(file);
+            let _ = remove_temp_secure(&bucket, &temp_name);
+            return Err(CasError::Corrupt {
+                expected: expected.clone(),
+                actual,
+            });
+        }
+        if let Err(error) = file.sync_all() {
+            drop(file);
+            let _ = remove_temp_secure(&bucket, &temp_name);
+            return Err(error.into());
+        }
+        drop(file);
+
+        match rustix::fs::renameat_with(
+            &bucket,
+            &temp_name,
+            &bucket,
+            object_name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => bucket.sync_all()?,
+            Err(error) if error == rustix::io::Errno::EXIST => {
+                remove_temp_secure(&bucket, &temp_name)?;
+                self.verify_object_bounded(expected, max_bytes)?;
+            }
+            Err(error) => {
+                let cleanup = remove_temp_secure(&bucket, &temp_name);
+                if let Err(cleanup_error) = cleanup {
+                    return Err(cleanup_error.into());
+                }
+                return Err(io::Error::from(error).into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn put_reader_with_digest<R: Read>(
+        &self,
+        reader: &mut R,
+        expected: &Digest,
+        expected_bytes: u64,
+        max_bytes: u64,
+    ) -> Result<(), CasError> {
+        let path = self.checked_object_path(expected)?;
+        if path.exists() {
+            self.verify_object_bounded(expected, max_bytes)?;
+            return Ok(());
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| CasError::InvalidManifest("CAS object has no parent".into()))?;
+        fs::create_dir_all(parent)?;
+        let temp = parent.join(format!(
+            ".{}.{}.tmp",
+            expected,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        let (actual, written_bytes) = match copy_reader_with_digest(reader, &mut file, max_bytes) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(file);
+                let _ = fs::remove_file(&temp);
+                return Err(error);
+            }
+        };
+        if written_bytes != expected_bytes || actual != *expected {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(CasError::Corrupt {
+                expected: expected.clone(),
+                actual,
+            });
+        }
+        file.sync_all()?;
+        drop(file);
+        match fs::rename(&temp, &path) {
+            Ok(()) => sync_directory(parent)?,
+            Err(error) if path.exists() => {
+                fs::remove_file(&temp)?;
+                self.verify_object_bounded(expected, max_bytes)?;
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temp);
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_object_bounded(&self, digest: &Digest, max_bytes: u64) -> Result<u64, CasError> {
         let mut file = self.open_object(digest)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let actual = Digest::from_bytes(&bytes);
+        let size = file.metadata()?.len();
+        if size > max_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "CAS object {digest} is {size} bytes, exceeding the {max_bytes}-byte limit"
+            )));
+        }
+        let (actual, read_bytes) = digest_reader(&mut file, max_bytes)?;
         if actual != *digest {
             return Err(CasError::Corrupt {
                 expected: digest.clone(),
                 actual,
             });
         }
-        Ok(bytes)
+        Ok(read_bytes)
+    }
+
+    /// Read and verify an object in full when it fits the bounded read API.
+    ///
+    /// Use [`Self::stream`] for larger objects. This keeps accidental full
+    /// reads from allocating multi-gigabyte buffers.
+    pub fn get(&self, digest: &Digest) -> Result<Vec<u8>, CasError> {
+        let mut file = self.open_object(digest)?;
+        read_verified_bytes(&mut file, digest, MAX_FULL_READ_BYTES)
     }
 
     /// Open a reader that verifies the object when EOF is reached.
@@ -664,20 +841,14 @@ impl CasStore {
         }
 
         let mut entries = Vec::new();
-        let mut total_bytes = 0_u64;
+        let mut budget = TreeTraversalBudget::new(TreeTraversalLimits::production());
         #[cfg(unix)]
         {
             let root_dir = open_existing_secure_directory(root)?;
-            collect_directory_tree(
-                &root_dir,
-                Path::new(""),
-                self,
-                &mut entries,
-                &mut total_bytes,
-            )?;
+            collect_directory_tree(&root_dir, Path::new(""), self, &mut entries, &mut budget)?;
         }
         #[cfg(not(unix))]
-        collect_directory_tree_path(root, root, self, &mut entries, &mut total_bytes)?;
+        collect_directory_tree_path(root, root, self, &mut entries, &mut budget)?;
 
         self.put_tree(&TreeManifest { entries })
     }
@@ -686,7 +857,7 @@ impl CasStore {
     pub fn validate_tree(&self, root_digest: &Digest) -> Result<TreeManifest, CasError> {
         let manifest = self.read_tree_manifest(root_digest)?;
         for entry in &manifest.entries {
-            self.get(&entry.digest)?;
+            self.verify_object_bounded(&entry.digest, MAX_TREE_FILE_BYTES)?;
         }
         Ok(manifest)
     }
@@ -828,22 +999,7 @@ impl CasStore {
             )));
         }
 
-        let mut bytes = Vec::new();
-        let mut limited = file.take(max_bytes.saturating_add(1));
-        limited.read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > max_bytes {
-            return Err(CasError::InvalidManifest(format!(
-                "CAS object {digest} exceeds the {max_bytes}-byte limit"
-            )));
-        }
-        let actual = Digest::from_bytes(&bytes);
-        if actual != *digest {
-            return Err(CasError::Corrupt {
-                expected: digest.clone(),
-                actual,
-            });
-        }
-        Ok(bytes)
+        read_verified_bytes(file, digest, max_bytes)
     }
 
     fn open_object(&self, digest: &Digest) -> Result<File, CasError> {
@@ -943,6 +1099,87 @@ impl CasStore {
             };
             metadata_accounting(&metadata, shared)
         }
+    }
+}
+
+fn digest_reader<R: Read>(reader: &mut R, max_bytes: u64) -> Result<(Digest, u64), CasError> {
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    let mut total = 0_u64;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Ok((Digest::from_hash(hasher.finalize()), total));
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| CasError::InvalidManifest("stream byte count overflowed".into()))?;
+        if total > max_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "stream exceeds the {max_bytes}-byte limit"
+            )));
+        }
+        hasher.update(&buffer[..count]);
+    }
+}
+
+fn copy_reader_with_digest<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    max_bytes: u64,
+) -> Result<(Digest, u64), CasError> {
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    let mut total = 0_u64;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Ok((Digest::from_hash(hasher.finalize()), total));
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| CasError::InvalidManifest("stream byte count overflowed".into()))?;
+        if total > max_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "stream exceeds the {max_bytes}-byte limit"
+            )));
+        }
+        writer.write_all(&buffer[..count])?;
+        hasher.update(&buffer[..count]);
+    }
+}
+
+fn read_verified_bytes<R: Read>(
+    mut reader: R,
+    expected: &Digest,
+    max_bytes: u64,
+) -> Result<Vec<u8>, CasError> {
+    let mut bytes = Vec::new();
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    let mut total = 0_u64;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            let actual = Digest::from_hash(hasher.finalize());
+            if actual != *expected {
+                return Err(CasError::Corrupt {
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+            return Ok(bytes);
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| CasError::InvalidManifest("object byte count overflowed".into()))?;
+        if total > max_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "CAS object {expected} exceeds the {max_bytes}-byte limit"
+            )));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        hasher.update(&buffer[..count]);
     }
 }
 
@@ -1176,22 +1413,145 @@ fn open_existing_secure_directory(path: &Path) -> io::Result<File> {
     Ok(current)
 }
 
+#[derive(Clone, Copy)]
+struct TreeTraversalLimits {
+    max_entries: usize,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    max_path_bytes: u64,
+    max_path_depth: usize,
+    max_nodes: usize,
+    max_directories: usize,
+    max_directory_entries: usize,
+}
+
+impl TreeTraversalLimits {
+    const fn production() -> Self {
+        Self {
+            max_entries: MAX_TREE_ENTRIES,
+            max_file_bytes: MAX_TREE_FILE_BYTES,
+            max_total_bytes: MAX_TREE_TOTAL_BYTES,
+            max_path_bytes: MAX_TREE_PATH_BYTES,
+            max_path_depth: MAX_TREE_PATH_DEPTH,
+            max_nodes: MAX_TREE_NODES,
+            max_directories: MAX_TREE_DIRECTORIES,
+            max_directory_entries: MAX_TREE_DIRECTORY_ENTRIES,
+        }
+    }
+}
+
+struct TreeTraversalBudget {
+    limits: TreeTraversalLimits,
+    nodes: usize,
+    directories: usize,
+    directory_entries: usize,
+    total_path_bytes: u64,
+    total_file_bytes: u64,
+}
+
+impl TreeTraversalBudget {
+    fn new(limits: TreeTraversalLimits) -> Self {
+        Self {
+            limits,
+            nodes: 0,
+            directories: 0,
+            directory_entries: 0,
+            total_path_bytes: 0,
+            total_file_bytes: 0,
+        }
+    }
+
+    fn visit_node(&mut self, relative: &str, depth: usize) -> Result<(), CasError> {
+        if depth > self.limits.max_path_depth {
+            return Err(CasError::InvalidManifest(format!(
+                "tree path exceeds the {}-component depth limit: '{relative}'",
+                self.limits.max_path_depth
+            )));
+        }
+        self.nodes = self
+            .nodes
+            .checked_add(1)
+            .ok_or_else(|| CasError::InvalidManifest("tree node count overflowed".into()))?;
+        if self.nodes > self.limits.max_nodes {
+            return Err(CasError::InvalidManifest(format!(
+                "tree contains too many nodes (limit {})",
+                self.limits.max_nodes
+            )));
+        }
+        self.directory_entries = self.directory_entries.checked_add(1).ok_or_else(|| {
+            CasError::InvalidManifest("tree directory-entry count overflowed".into())
+        })?;
+        if self.directory_entries > self.limits.max_directory_entries {
+            return Err(CasError::InvalidManifest(format!(
+                "tree contains too many directory entries (limit {})",
+                self.limits.max_directory_entries
+            )));
+        }
+        self.total_path_bytes = self
+            .total_path_bytes
+            .checked_add(relative.len() as u64)
+            .ok_or_else(|| CasError::InvalidManifest("tree path byte count overflowed".into()))?;
+        if self.total_path_bytes > self.limits.max_path_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "tree paths exceed the {}-byte limit",
+                self.limits.max_path_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn visit_directory(&mut self) -> Result<(), CasError> {
+        self.directories = self
+            .directories
+            .checked_add(1)
+            .ok_or_else(|| CasError::InvalidManifest("tree directory count overflowed".into()))?;
+        if self.directories > self.limits.max_directories {
+            return Err(CasError::InvalidManifest(format!(
+                "tree contains too many directories (limit {})",
+                self.limits.max_directories
+            )));
+        }
+        Ok(())
+    }
+
+    fn reserve_file(&mut self, current_files: usize, bytes: u64) -> Result<(), CasError> {
+        if current_files >= self.limits.max_entries {
+            return Err(CasError::InvalidManifest(format!(
+                "tree contains too many entries (limit {})",
+                self.limits.max_entries
+            )));
+        }
+        if bytes > self.limits.max_file_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "tree file is {bytes} bytes, exceeding the {}-byte limit",
+                self.limits.max_file_bytes
+            )));
+        }
+        self.total_file_bytes = self
+            .total_file_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| CasError::InvalidManifest("tree file byte count overflowed".into()))?;
+        if self.total_file_bytes > self.limits.max_total_bytes {
+            return Err(CasError::InvalidManifest(format!(
+                "tree files exceed the {}-byte limit",
+                self.limits.max_total_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(unix)]
 fn collect_directory_tree(
     directory: &File,
     relative_root: &Path,
     cas: &CasStore,
     entries: &mut Vec<TreeEntry>,
-    total_bytes: &mut u64,
+    budget: &mut TreeTraversalBudget,
 ) -> Result<(), CasError> {
-    let mut names = Vec::new();
     for entry in rustix::fs::Dir::read_from(directory).map_err(io::Error::from)? {
         let entry = entry.map_err(io::Error::from)?;
-        names.push(OsString::from_vec(entry.file_name().to_bytes().to_vec()));
-    }
-    names.sort();
-
-    for name in names {
+        let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
         if name == OsStr::new(".") || name == OsStr::new("..") {
             continue;
         }
@@ -1204,43 +1564,36 @@ fn collect_directory_tree(
                 relative.display()
             ))
         })?;
+        canonical_manifest_path(relative)?;
+        let depth = relative_root.components().count() + 1;
+        budget.visit_node(relative, depth)?;
         match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
             rustix::fs::FileType::Directory => {
+                budget.visit_directory()?;
                 let child = open_directory_child(directory, &name).map_err(|error| {
                     CasError::UnsafePath(format!(
                         "tree source directory could not be opened without following links: {} ({error})",
                         relative
                     ))
                 })?;
-                collect_directory_tree(&child, Path::new(relative), cas, entries, total_bytes)?;
+                collect_directory_tree(&child, Path::new(relative), cas, entries, budget)?;
             }
             rustix::fs::FileType::RegularFile => {
-                if entries.len() >= MAX_TREE_ENTRIES {
-                    return Err(CasError::InvalidManifest(format!(
-                        "tree contains too many entries (limit {MAX_TREE_ENTRIES})"
-                    )));
-                }
                 let file = open_regular_tree_source(directory, &name, relative)?;
-                let mut bytes = Vec::new();
-                file.take(MAX_TREE_FILE_BYTES.saturating_add(1))
-                    .read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_TREE_FILE_BYTES {
-                    return Err(CasError::InvalidManifest(format!(
-                        "tree file {relative} exceeds the {MAX_TREE_FILE_BYTES}-byte limit"
-                    )));
-                }
-                *total_bytes = total_bytes.checked_add(bytes.len() as u64).ok_or_else(|| {
-                    CasError::InvalidManifest("tree file byte count overflowed".into())
-                })?;
-                if *total_bytes > MAX_TREE_TOTAL_BYTES {
-                    return Err(CasError::InvalidManifest(format!(
-                        "tree files exceed the {MAX_TREE_TOTAL_BYTES}-byte limit"
-                    )));
-                }
+                let size = file.metadata()?.len();
+                budget.reserve_file(entries.len(), size)?;
                 let mode = stat.st_mode & 0o777;
+                let mut file = file;
+                let (digest, read_bytes) =
+                    cas.put_file_with_limit(&mut file, budget.limits.max_file_bytes)?;
+                if read_bytes != size {
+                    return Err(CasError::InvalidManifest(format!(
+                        "tree source changed while reading: {relative}"
+                    )));
+                }
                 entries.push(TreeEntry {
                     path: relative.to_owned(),
-                    digest: cas.put(&bytes)?,
+                    digest,
                     class: if mode & 0o111 != 0 {
                         FileClass::Executable
                     } else {
@@ -1290,13 +1643,10 @@ fn collect_directory_tree_path(
     current: &Path,
     cas: &CasStore,
     entries: &mut Vec<TreeEntry>,
-    total_bytes: &mut u64,
+    budget: &mut TreeTraversalBudget,
 ) -> Result<(), CasError> {
-    let mut names = fs::read_dir(current)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<Result<Vec<_>, _>>()?;
-    names.sort();
-    for name in names {
+    for entry in fs::read_dir(current)? {
+        let name = entry?.file_name();
         let path = current.join(&name);
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
@@ -1305,8 +1655,18 @@ fn collect_directory_tree_path(
                 path.display()
             )));
         }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| CasError::InvalidManifest(error.to_string()))?
+            .to_str()
+            .ok_or_else(|| CasError::InvalidManifest("tree source path is not UTF-8".into()))?
+            .replace('\\', "/");
+        canonical_manifest_path(&relative)?;
+        let depth = Path::new(&relative).components().count();
+        budget.visit_node(&relative, depth)?;
         if metadata.is_dir() {
-            collect_directory_tree_path(root, &path, cas, entries, total_bytes)?;
+            budget.visit_directory()?;
+            collect_directory_tree_path(root, &path, cas, entries, budget)?;
             continue;
         }
         if !metadata.is_file() {
@@ -1315,29 +1675,19 @@ fn collect_directory_tree_path(
                 path.display()
             )));
         }
-        if entries.len() >= MAX_TREE_ENTRIES {
+        let mut file = open_readonly_nofollow(&path)?;
+        let size = file.metadata()?.len();
+        budget.reserve_file(entries.len(), size)?;
+        let (digest, read_bytes) =
+            cas.put_file_with_limit(&mut file, budget.limits.max_file_bytes)?;
+        if read_bytes != size {
             return Err(CasError::InvalidManifest(format!(
-                "tree contains too many entries (limit {MAX_TREE_ENTRIES})"
+                "tree source changed while reading: {relative}"
             )));
         }
-        let bytes = fs::read(&path)?;
-        *total_bytes = total_bytes
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| CasError::InvalidManifest("tree file byte count overflowed".into()))?;
-        if *total_bytes > MAX_TREE_TOTAL_BYTES {
-            return Err(CasError::InvalidManifest(format!(
-                "tree files exceed the {MAX_TREE_TOTAL_BYTES}-byte limit"
-            )));
-        }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|error| CasError::InvalidManifest(error.to_string()))?
-            .to_str()
-            .ok_or_else(|| CasError::InvalidManifest("tree source path is not UTF-8".into()))?
-            .replace('\\', "/");
         entries.push(TreeEntry {
             path: relative,
-            digest: cas.put(&bytes)?,
+            digest,
             class: FileClass::Runtime,
             mode: 0o644,
         });
@@ -1451,32 +1801,9 @@ fn open_existing_object(
 
 #[cfg(unix)]
 fn digest_file_handle(file: &File, max_bytes: u64) -> Result<Digest, CasError> {
-    let size = file.metadata()?.len();
-    if size > max_bytes {
-        return Err(CasError::InvalidManifest(format!(
-            "materialized file is {size} bytes, exceeding the {max_bytes}-byte limit"
-        )));
-    }
     let mut reader = file.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            return Ok(Digest::from_hash(hasher.finalize()));
-        }
-        total = total.checked_add(count as u64).ok_or_else(|| {
-            CasError::InvalidManifest("materialized file byte count overflowed".into())
-        })?;
-        if total > max_bytes {
-            return Err(CasError::InvalidManifest(format!(
-                "materialized file exceeds the {max_bytes}-byte limit"
-            )));
-        }
-        hasher.update(&buffer[..count]);
-    }
+    digest_reader(&mut reader, max_bytes).map(|(digest, _)| digest)
 }
 
 #[cfg(unix)]
@@ -1488,26 +1815,7 @@ fn copy_verified_file(
 ) -> Result<(), CasError> {
     let mut reader = source.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        total = total.checked_add(count as u64).ok_or_else(|| {
-            CasError::InvalidManifest("materialized file byte count overflowed".into())
-        })?;
-        if total > max_bytes {
-            return Err(CasError::InvalidManifest(format!(
-                "materialized file exceeds the {max_bytes}-byte limit"
-            )));
-        }
-        destination.write_all(&buffer[..count])?;
-        hasher.update(&buffer[..count]);
-    }
-    let actual = Digest::from_hash(hasher.finalize());
+    let (actual, _) = copy_reader_with_digest(&mut reader, destination, max_bytes)?;
     if actual != *expected {
         return Err(CasError::Corrupt {
             expected: expected.clone(),
@@ -1887,6 +2195,33 @@ mod tests {
         (temp, store)
     }
 
+    #[cfg(unix)]
+    fn collect_with_limits(
+        root: &Path,
+        store: &CasStore,
+        limits: TreeTraversalLimits,
+    ) -> Result<Vec<TreeEntry>, CasError> {
+        let root_dir = open_existing_secure_directory(root)?;
+        let mut entries = Vec::new();
+        let mut budget = TreeTraversalBudget::new(limits);
+        collect_directory_tree(&root_dir, Path::new(""), store, &mut entries, &mut budget)?;
+        Ok(entries)
+    }
+
+    #[cfg(unix)]
+    fn generous_test_limits() -> TreeTraversalLimits {
+        TreeTraversalLimits {
+            max_entries: 16,
+            max_file_bytes: 1024,
+            max_total_bytes: 4096,
+            max_path_bytes: 4096,
+            max_path_depth: 16,
+            max_nodes: 32,
+            max_directories: 16,
+            max_directory_entries: 32,
+        }
+    }
+
     #[test]
     fn round_trip_and_stream_verify() {
         let (_temp, store) = store();
@@ -1896,6 +2231,134 @@ mod tests {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"hello cas");
+    }
+
+    #[test]
+    fn directory_capture_streams_multiple_fixed_size_chunks() {
+        let (temp, store) = store();
+        let root = temp.path().join("streamed-tree");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("large-file");
+        let bytes = vec![0x5a; STREAM_BUFFER_BYTES * 3 + 17];
+        fs::write(&source, &bytes).unwrap();
+
+        let tree = store.put_directory_tree(&root).unwrap();
+        let manifest = store.validate_tree(&tree).unwrap();
+
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(store.get(&manifest.entries[0].digest).unwrap(), bytes);
+    }
+
+    #[test]
+    fn oversized_sparse_file_is_rejected_before_streaming_or_allocation() {
+        let (temp, store) = store();
+        let root = temp.path().join("oversized-tree");
+        fs::create_dir(&root).unwrap();
+        let source = File::create(root.join("oversized")).unwrap();
+        source
+            .set_len(MAX_TREE_FILE_BYTES + 1)
+            .expect("sparse file should be supported by the test filesystem");
+
+        let error = store.put_directory_tree(&root).unwrap_err();
+
+        assert!(matches!(error, CasError::InvalidManifest(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversal_rejects_directory_entry_budget_before_recursion() {
+        let (temp, store) = store();
+        let root = temp.path().join("entry-budget");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("first"), b"a").unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+
+        let mut limits = generous_test_limits();
+        limits.max_directory_entries = 1;
+        let error = collect_with_limits(&root, &store, limits).unwrap_err();
+
+        assert!(matches!(error, CasError::InvalidManifest(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversal_rejects_node_and_directory_budgets_before_recursion() {
+        let (temp, store) = store();
+        let root = temp.path().join("node-budget");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/file"), b"a").unwrap();
+
+        let mut node_limits = generous_test_limits();
+        node_limits.max_nodes = 1;
+        let node_error = collect_with_limits(&root, &store, node_limits).unwrap_err();
+        assert!(matches!(node_error, CasError::InvalidManifest(_)));
+
+        let mut directory_limits = generous_test_limits();
+        directory_limits.max_directories = 0;
+        let directory_error = collect_with_limits(&root, &store, directory_limits).unwrap_err();
+        assert!(matches!(directory_error, CasError::InvalidManifest(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversal_rejects_file_count_and_byte_budgets_before_storage() {
+        let (temp, store) = store();
+        let root = temp.path().join("file-budget");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("first"), b"ab").unwrap();
+        fs::write(root.join("second"), b"cd").unwrap();
+
+        let mut count_limits = generous_test_limits();
+        count_limits.max_entries = 1;
+        let count_error = collect_with_limits(&root, &store, count_limits).unwrap_err();
+        assert!(matches!(count_error, CasError::InvalidManifest(_)));
+
+        let mut byte_limits = generous_test_limits();
+        byte_limits.max_total_bytes = 3;
+        let byte_error = collect_with_limits(&root, &store, byte_limits).unwrap_err();
+        assert!(matches!(byte_error, CasError::InvalidManifest(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversal_rejects_depth_and_path_budgets_before_recursion() {
+        let (temp, store) = store();
+        let root = temp.path().join("path-budget");
+        fs::create_dir_all(root.join("one/two")).unwrap();
+        fs::write(root.join("one/two/file"), b"a").unwrap();
+
+        let mut depth_limits = generous_test_limits();
+        depth_limits.max_path_depth = 2;
+        let depth_error = collect_with_limits(&root, &store, depth_limits).unwrap_err();
+        assert!(matches!(depth_error, CasError::InvalidManifest(_)));
+
+        let mut path_limits = generous_test_limits();
+        path_limits.max_path_bytes = 3;
+        let path_error = collect_with_limits(&root, &store, path_limits).unwrap_err();
+        assert!(matches!(path_error, CasError::InvalidManifest(_)));
+    }
+
+    #[test]
+    fn validate_tree_rejects_corrupt_file_object_without_loading_it() {
+        let (_temp, store) = store();
+        let digest = store.put(b"original").unwrap();
+        let root = store
+            .put_tree(&TreeManifest {
+                entries: vec![TreeEntry {
+                    path: "file".into(),
+                    digest: digest.clone(),
+                    class: FileClass::Runtime,
+                    mode: 0o644,
+                }],
+            })
+            .unwrap();
+        let path = store.object_path(&digest);
+        fs::write(&path, b"tampered").unwrap();
+
+        let error = store.validate_tree(&root).unwrap_err();
+
+        assert!(matches!(error, CasError::Corrupt { .. }));
     }
 
     #[test]
