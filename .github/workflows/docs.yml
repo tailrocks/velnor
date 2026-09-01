@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions:
   contents: read
@@ -14,14 +20,18 @@ env:
   DOCS_SITE_URL: https://velnor.tailrocks.com
 
 concurrency:
-  group: docs-${{ github.ref }}
+  group: docs-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: Build documentation
-    runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push' || github.event_name == 'pull_request') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     permissions:
       contents: read
       pages: write
@@ -44,7 +54,8 @@ jobs:
     name: Deploy documentation
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ${{ 'ubuntu-26.04' }}
+    timeout-minutes: 20
     permissions:
       pages: write
       id-token: write
@@ -59,6 +70,7 @@ jobs:
     name: Verify deployed documentation
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: deploy
-    runs-on: ubuntu-24.04
+    runs-on: ${{ 'ubuntu-26.04' }}
+    timeout-minutes: 10
     steps:
       - run: /usr/bin/curl --fail --silent --show-error --location "$DOCS_SITE_URL/docs" | /usr/bin/grep -q 'Velnor'
