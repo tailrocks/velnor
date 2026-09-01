@@ -54,7 +54,7 @@ expected_values=(
   "status ok"
   "audit ok"
   "doctor ok"
-  'Run `scripts/fixture_smoke.sh`'
+  "Run \`scripts/fixture_smoke.sh\`"
   "scripts/fixture_status.sh"
   "ls -1 .velnor-live-evidence"
 )

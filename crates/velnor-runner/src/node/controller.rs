@@ -3235,6 +3235,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(feature = "test-support")]
     async fn reconcile_with_runner_config_fixture(
         prepare_runner_config: impl FnOnce(&Path),
     ) -> anyhow::Result<SlotRecord> {
@@ -3544,6 +3545,7 @@ mod tests {
         assert!(matches!(result, Ok(Ok(()))));
     }
 
+    #[cfg(feature = "test-support")]
     async fn reconciliation_lookup_error_pacing(
         status: u16,
         headers: &[(&'static str, String)],
