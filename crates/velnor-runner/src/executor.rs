@@ -15610,7 +15610,7 @@ esac
                 source_path: None,
                 inputs: [(
                     "filters".into(),
-                    "construct:\n  - 'docker/construct/**'\n  - '.github/workflows/construct.yml'\ndocs:\n  - 'docs/**'\n".into(),
+                    "construct:\n  - 'docker/construct/**'\n  - '.github/workflows/construct.yml'\ndocs:\n  - 'content/docs/**'\n".into(),
                 )]
                 .into(),
                 env: Vec::new(),
