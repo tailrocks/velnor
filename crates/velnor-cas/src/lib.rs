@@ -1837,7 +1837,10 @@ fn collect_directory_tree(
                 let file = open_regular_tree_source(directory, &name, relative)?;
                 let size = file.metadata()?.len();
                 budget.reserve_file(entries.len(), size)?;
-                let mode = stat.st_mode & 0o777;
+                #[cfg(target_os = "linux")]
+                let mode: u32 = stat.st_mode & 0o777;
+                #[cfg(not(target_os = "linux"))]
+                let mode: u32 = u32::from(stat.st_mode & 0o777);
                 let mut file = file;
                 let (digest, read_bytes) =
                     cas.put_file_with_limit(&mut file, budget.limits.max_file_bytes)?;
@@ -1854,7 +1857,7 @@ fn collect_directory_tree(
                     } else {
                         FileClass::Runtime
                     },
-                    mode: u32::from(mode),
+                    mode,
                 });
             }
             _ => {
