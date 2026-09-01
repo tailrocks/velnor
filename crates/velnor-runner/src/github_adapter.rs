@@ -89,36 +89,73 @@ pub(crate) fn github_cargo_target_store_host(
     temp_host: &std::path::Path,
     trust_scope: &str,
 ) -> PathBuf {
-    let Some(repository) = job_variable(job, "github.repository").filter(|value| !value.is_empty())
+    let ephemeral = || {
+        temp_host
+            .join("_velnor/ephemeral/targets")
+            .join(crate::container::sanitize_store_key(&job.job_id))
+    };
+    let Some(repository_raw) =
+        job_variable(job, "github.repository").filter(|value| !value.trim().is_empty())
     else {
         eprintln!(
             "forensics.lifecycle: persistent target store refused: missing github.repository"
         );
-        return temp_host
-            .join("_velnor/ephemeral/targets")
-            .join(crate::container::sanitize_store_key(&job.job_id));
+        return ephemeral();
+    };
+    let Some(repository) = target_path_component(repository_raw) else {
+        eprintln!(
+            "forensics.lifecycle: persistent target store refused: invalid github.repository"
+        );
+        return ephemeral();
     };
     let workflow = job_variable(job, "github.workflow_ref")
         .and_then(|value| value.split('@').next())
-        .and_then(|value| value.strip_prefix(&format!("{repository}/")))
+        .and_then(|value| value.strip_prefix(&format!("{repository_raw}/")))
         .or_else(|| job_variable(job, "github.workflow"))
-        .filter(|value| !value.is_empty());
+        .and_then(target_path_component);
     let Some(workflow) = workflow else {
         eprintln!(
             "forensics.lifecycle: persistent target store refused: missing github.workflow_ref and github.workflow"
         );
-        return temp_host
-            .join("_velnor/ephemeral/targets")
-            .join(crate::container::sanitize_store_key(&job.job_id));
+        return ephemeral();
+    };
+    let Some(job_name) = target_path_component(&job.job_display_name) else {
+        eprintln!("forensics.lifecycle: persistent target store refused: invalid job display name");
+        return ephemeral();
     };
     crate::storage::append_legacy_trust(
         crate::container::cargo_target_store_host(temp_host),
         &cargo_target_trust_scope_from(Some(trust_scope)),
     )
     .join(CARGO_TARGET_GENERATION)
-    .join(crate::container::sanitize_store_key(repository))
-    .join(crate::container::sanitize_store_key(workflow))
-    .join(crate::container::sanitize_store_key(&job.job_display_name))
+    .join(repository)
+    .join(workflow)
+    .join(job_name)
+}
+
+/// Convert one external identity into the existing one-directory-name form.
+/// Slashes are encoded by the established store-key sanitizer, but traversal
+/// components, controls, truncation, and empty identities fail closed instead
+/// of silently aliasing another target bucket.
+fn target_path_component(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || value.len() > 128
+        || value.chars().any(char::is_control)
+        || value
+            .split(['/', '\\'])
+            .any(|part| matches!(part, "." | ".."))
+    {
+        return None;
+    }
+    let key = crate::container::sanitize_store_key(value);
+    let mut components = std::path::Path::new(&key).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return None;
+    }
+    Some(key)
 }
 
 pub(crate) fn cargo_target_trust_scope() -> String {
@@ -1105,6 +1142,32 @@ mod tests {
             std::path::Path::new("/velnor/work/job/temp/_velnor/ephemeral/targets/job-1")
         );
         assert!(!host.to_string_lossy().contains("_velnor_targets"));
+    }
+
+    #[test]
+    fn target_bucket_refuses_traversal_in_repository_workflow_or_job() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Rust",
+            "requestId": 42,
+            "variables": {
+                "github.workflow": { "value": "../escape", "isSecret": false },
+                "github.repository": { "value": "tailrocks/../escape", "isSecret": false }
+            }
+        }))
+        .unwrap();
+        let host = github_cargo_target_store_host(
+            &job,
+            std::path::Path::new("/velnor/work/job/temp"),
+            "trusted",
+        );
+        assert_eq!(
+            host,
+            std::path::Path::new("/velnor/work/job/temp/_velnor/ephemeral/targets/job-1")
+        );
     }
 
     #[test]

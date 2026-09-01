@@ -309,6 +309,18 @@ impl NoFollowDir {
 
 #[cfg(unix)]
 impl NoFollowDestinationDir {
+    /// Open an existing absolute directory without resolving any symlink in
+    /// the path. Snapshot publication uses this for the store root: the root
+    /// is runner-owned, but it must still be descriptor-bound before any
+    /// generation or pointer mutation.
+    pub(crate) fn open_absolute_no_follow(path: &Path) -> Result<Self> {
+        let root = NoFollowDir::open_absolute(path)?;
+        Ok(Self {
+            file: root.file,
+            display_path: root.display_path,
+        })
+    }
+
     /// Opens a workflow-relative destination below a trusted configured root.
     ///
     /// Canonicalization is intentionally limited to `trusted_root`. The untrusted
@@ -1336,6 +1348,13 @@ impl NoFollowDir {
 
 #[cfg(not(unix))]
 impl NoFollowDestinationDir {
+    pub(crate) fn open_absolute_no_follow(path: &Path) -> Result<Self> {
+        bail!(
+            "secure artifact destination copying is unsupported on this platform for {}",
+            path.display()
+        )
+    }
+
     pub fn open_trusted_rooted_destination(trusted_root: &Path, relative: &Path) -> Result<Self> {
         bail!(
             "secure trusted-rooted artifact destination copying is unsupported on this platform for {} below {}",

@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -177,6 +177,7 @@ fn run_gc(
         max_total_bytes: args.max_size_bytes,
         class_budgets,
         in_use_scopes,
+        protected_paths: pointer_protected_target_generations(work_root),
     };
     let candidates = select_eviction_candidates(&listing, &policy);
 
@@ -414,8 +415,10 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             kind: CacheStore::Targets,
             path: targets,
             scope_prefix: Vec::new(),
-            scope_depth: if targets_legacy { 4 } else { 3 },
-            candidate_depth: if targets_legacy { 4 } else { 3 },
+            // The existing job bucket remains the ownership scope. Immutable
+            // target generations are one directory below it.
+            scope_depth: if targets_legacy { 5 } else { 4 },
+            candidate_depth: if targets_legacy { 6 } else { 5 },
             gc_managed: true,
             emergency_managed: true,
         },
@@ -610,8 +613,8 @@ pub(crate) fn reclaim_work_root(
     // Publish/snapshot leases under one filesystem-wide coordinator. A daemon
     // starting a job cannot race between this snapshot and candidate deletion.
     let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
-    let mut protected = in_use_scopes.clone();
-    protected.extend(crate::capacity::active_scopes(
+    let mut active_scopes = in_use_scopes.clone();
+    active_scopes.extend(crate::capacity::active_scopes(
         run_root,
         Duration::from_secs(24 * 3600),
     )?);
@@ -622,9 +625,10 @@ pub(crate) fn reclaim_work_root(
         max_age: Duration::ZERO,
         max_total_bytes: None,
         class_budgets: BTreeMap::new(),
-        in_use_scopes: protected,
+        in_use_scopes: active_scopes,
+        protected_paths: pointer_protected_target_generations(work_root),
     };
-    entries.retain(|entry| !in_use(entry, &policy));
+    entries.retain(|entry| !in_use(entry, &policy) && !protected(entry, &policy));
     entries.sort_by(|left, right| {
         reclaim_priority(left.store)
             .cmp(&reclaim_priority(right.store))
@@ -664,9 +668,35 @@ pub(crate) fn reclaim_work_root(
 }
 
 fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
-    let _entry_lock = (candidate.store == CacheStore::ActionsCache)
-        .then(|| CacheEntryLock::exclusive(&candidate.path))
-        .transpose()?;
+    let lock_path = if candidate.store == CacheStore::Targets {
+        candidate.path.parent().unwrap_or(&candidate.path)
+    } else {
+        &candidate.path
+    };
+    let _entry_lock = (matches!(
+        candidate.store,
+        CacheStore::ActionsCache | CacheStore::Targets
+    ))
+    .then(|| CacheEntryLock::exclusive(lock_path))
+    .transpose()?;
+    if candidate.store == CacheStore::Targets {
+        if !target_generation_is_complete(&candidate.path) {
+            bail!(
+                "target generation changed or became incomplete before removal: {}",
+                candidate.path.display()
+            );
+        }
+        let parent = candidate
+            .path
+            .parent()
+            .context("target generation has no parent")?;
+        let name = candidate
+            .path
+            .file_name()
+            .context("target generation has no name")?;
+        let parent = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(parent)?;
+        return parent.remove_tree_entry(name);
+    }
     fs::remove_dir_all(&candidate.path)
         .with_context(|| format!("remove cache candidate {}", candidate.path.display()))
 }
@@ -725,10 +755,42 @@ fn collect_candidates(
     depth: usize,
     entries: &mut Vec<CacheEntry>,
 ) -> Result<()> {
-    if !path.exists() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("stat {}", path.display())),
+    };
+    if !metadata.is_dir() {
         return Ok(());
     }
     if depth >= store.candidate_depth {
+        if store.kind == CacheStore::Targets {
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+            {
+                return Ok(());
+            }
+            let Some((bytes, modified)) = target_generation_size(path) else {
+                return Ok(());
+            };
+            if bytes > 0 {
+                entries.push(CacheEntry {
+                    path: path.to_path_buf(),
+                    store: store.kind,
+                    scope: store
+                        .scope_prefix
+                        .iter()
+                        .cloned()
+                        .chain(scope_parts(&store.path, path, store.scope_depth))
+                        .filter(|part| part != ".")
+                        .collect(),
+                    bytes,
+                    modified,
+                });
+            }
+            return Ok(());
+        }
         let (bytes, modified) = size_and_modified(path)?;
         if bytes > 0 {
             entries.push(CacheEntry {
@@ -883,6 +945,7 @@ pub(crate) struct EvictionPolicy {
     pub(crate) max_total_bytes: Option<u64>,
     pub(crate) class_budgets: BTreeMap<CacheStore, u64>,
     pub(crate) in_use_scopes: BTreeSet<String>,
+    pub(crate) protected_paths: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -906,17 +969,19 @@ pub(crate) fn select_eviction_candidates(
 ) -> Vec<EvictionCandidate> {
     let mut candidates: BTreeMap<PathBuf, EvictionCandidate> = BTreeMap::new();
 
-    for entry in entries.iter().filter(|entry| !in_use(entry, policy)) {
+    for entry in entries
+        .iter()
+        .filter(|entry| !in_use(entry, policy) && !protected(entry, policy))
+    {
         if is_older_than(entry.modified, policy.now, policy.max_age) {
             add_candidate(&mut candidates, entry, "older-than-max-age");
         }
     }
 
     let mut target_scopes: BTreeMap<String, Vec<&CacheEntry>> = BTreeMap::new();
-    for entry in entries
-        .iter()
-        .filter(|entry| entry.store == CacheStore::Targets && !in_use(entry, policy))
-    {
+    for entry in entries.iter().filter(|entry| {
+        entry.store == CacheStore::Targets && !in_use(entry, policy) && !protected(entry, policy)
+    }) {
         target_scopes
             .entry(entry.scope_key())
             .or_default()
@@ -943,7 +1008,7 @@ pub(crate) fn select_eviction_candidates(
             let mut remaining = total;
             let mut oldest: Vec<&CacheEntry> = entries
                 .iter()
-                .filter(|entry| !in_use(entry, policy))
+                .filter(|entry| !in_use(entry, policy) && !protected(entry, policy))
                 .collect();
             oldest.sort_by(|left, right| {
                 left.modified
@@ -971,7 +1036,9 @@ pub(crate) fn select_eviction_candidates(
             .sum();
         let mut oldest: Vec<&CacheEntry> = entries
             .iter()
-            .filter(|entry| entry.store == *store && !in_use(entry, policy))
+            .filter(|entry| {
+                entry.store == *store && !in_use(entry, policy) && !protected(entry, policy)
+            })
             .collect();
         oldest.sort_by(|left, right| {
             left.modified
@@ -988,6 +1055,10 @@ pub(crate) fn select_eviction_candidates(
     }
 
     candidates.into_values().collect()
+}
+
+fn protected(entry: &CacheEntry, policy: &EvictionPolicy) -> bool {
+    policy.protected_paths.contains(&entry.path)
 }
 
 fn add_candidate(
@@ -1033,6 +1104,116 @@ fn is_older_than(modified: SystemTime, now: SystemTime, max_age: Duration) -> bo
     now.duration_since(modified).is_ok_and(|age| age > max_age)
 }
 
+fn target_generation_is_complete(path: &Path) -> bool {
+    target_generation_size(path).is_some()
+}
+
+fn target_generation_size(path: &Path) -> Option<(u64, SystemTime)> {
+    let generation = crate::fs_copy::NoFollowDir::open_absolute(path).ok()?;
+    let marker = generation
+        .open_source(Path::new(".velnor-target-complete-v1"))
+        .ok()??;
+    if !matches!(marker, crate::fs_copy::NoFollowSource::File(_)) {
+        return None;
+    }
+    let Some(crate::fs_copy::NoFollowSource::Directory(data)) =
+        generation.open_source(Path::new("data")).ok()?
+    else {
+        return None;
+    };
+    secure_target_tree_size(&data).ok()
+}
+
+fn secure_target_tree_size(directory: &crate::fs_copy::NoFollowDir) -> Result<(u64, SystemTime)> {
+    let mut bytes = 0u64;
+    let mut newest = SystemTime::UNIX_EPOCH;
+    directory.for_each_entry_filtered(
+        |_| true,
+        |entry| match entry.source {
+            crate::fs_copy::NoFollowSource::File(file) => {
+                let metadata = file.metadata().context("inspect target generation file")?;
+                if !metadata.is_file() {
+                    bail!("target generation contains a non-regular file");
+                }
+                bytes = bytes.saturating_add(metadata.len());
+                newest = newest.max(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+                Ok(())
+            }
+            crate::fs_copy::NoFollowSource::Directory(directory) => {
+                let (child_bytes, child_newest) = secure_target_tree_size(&directory)?;
+                bytes = bytes.saturating_add(child_bytes);
+                newest = newest.max(child_newest);
+                Ok(())
+            }
+        },
+    )?;
+    Ok((bytes, newest))
+}
+
+fn current_pointer_generation(path: &Path) -> Option<String> {
+    let directory = crate::fs_copy::NoFollowDir::open_absolute(path).ok()?;
+    let Some(crate::fs_copy::NoFollowSource::File(pointer)) =
+        directory.open_source(Path::new("current")).ok()?
+    else {
+        return None;
+    };
+    let mut bytes = Vec::new();
+    pointer
+        .take(129)
+        .read_to_end(&mut bytes)
+        .ok()
+        .filter(|_| bytes.len() <= 128)?;
+    let value = String::from_utf8(bytes).ok()?;
+    let mut lines = value.lines();
+    let generation = lines.next()?.to_string();
+    (lines.next().is_none()
+        && value.ends_with('\n')
+        && !generation.is_empty()
+        && generation.len() <= 128
+        && generation
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then_some(generation)
+}
+
+fn pointer_protected_target_generations(work_root: &Path) -> BTreeSet<PathBuf> {
+    let mut protected = BTreeSet::new();
+    for store in store_roots(work_root)
+        .into_iter()
+        .filter(|store| store.kind == CacheStore::Targets)
+    {
+        collect_pointer_protected(&store.path, store.scope_depth, &mut protected);
+    }
+    protected
+}
+
+fn collect_pointer_protected(path: &Path, depth: usize, protected: &mut BTreeSet<PathBuf>) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    if depth == 0 {
+        let Some(generation) = current_pointer_generation(path) else {
+            return;
+        };
+        let generation_path = path.join(generation);
+        if target_generation_is_complete(&generation_path) {
+            protected.insert(generation_path);
+        }
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            collect_pointer_protected(&entry.path(), depth - 1, protected);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,6 +1242,7 @@ mod tests {
             max_total_bytes: None,
             class_budgets: BTreeMap::new(),
             in_use_scopes: BTreeSet::new(),
+            protected_paths: BTreeSet::new(),
         }
     }
 
@@ -1197,6 +1379,61 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, PathBuf::from("/cache/idle"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_gc_ignores_incomplete_and_symlink_generations() {
+        let temp_root =
+            fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let root = temp_root.join(format!("velnor-target-gc-{}", uuid::Uuid::new_v4()));
+        let store = root.join("targets");
+        let class = store
+            .join("workspace-v4-success-only")
+            .join("repo")
+            .join("workflow")
+            .join("job");
+        let complete = class.join("target-generation-complete");
+        fs::create_dir_all(complete.join("data")).unwrap();
+        fs::write(complete.join("data/output"), b"output").unwrap();
+        fs::write(complete.join(".velnor-target-complete-v1"), b"complete\n").unwrap();
+
+        let incomplete = class.join("target-generation-incomplete");
+        fs::create_dir_all(incomplete.join("data")).unwrap();
+        fs::write(incomplete.join("data/output"), b"incomplete").unwrap();
+
+        let malformed = class.join("target-generation-malformed");
+        fs::create_dir_all(&malformed).unwrap();
+        fs::write(malformed.join(".velnor-target-complete-v1"), b"complete\n").unwrap();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, malformed.join("data")).unwrap();
+
+        let store_root = StoreRoot {
+            kind: CacheStore::Targets,
+            path: store.clone(),
+            scope_prefix: Vec::new(),
+            scope_depth: 4,
+            candidate_depth: 5,
+            gc_managed: true,
+            emergency_managed: true,
+        };
+        let mut entries = Vec::new();
+        assert!(target_generation_is_complete(&complete));
+        collect_candidates(&store_root, &store, 0, &mut entries).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, complete);
+
+        fs::write(class.join("current"), "target-generation-complete\n").unwrap();
+        let mut policy = policy();
+        let mut protected = BTreeSet::new();
+        collect_pointer_protected(&class, 0, &mut protected);
+        policy.protected_paths = protected;
+        policy.keep_newest_per_target_scope = 0;
+        // The current generation remains protected even when retention asks to
+        // evict every target generation.
+        assert!(select_eviction_candidates(&entries, &policy).is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
