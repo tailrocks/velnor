@@ -1,5 +1,5 @@
 import { loader } from 'fumadocs-core/source'
-import { remarkMdxMermaid } from 'fumadocs-core/mdx-plugins'
+import { remarkMdxMermaid, remarkStructure } from 'fumadocs-core/mdx-plugins'
 import { lucideIconsPlugin } from 'fumadocs-core/source/lucide-icons'
 import { defineDocs } from 'fumadocs-mdx/macro'
 import { docsRoute } from './shared'
@@ -12,7 +12,7 @@ export const docs = defineDocs({
       includeProcessedMarkdown: true,
     },
     mdxOptions: {
-      remarkPlugins: [remarkMdxMermaid],
+      remarkPlugins: [remarkMdxMermaid, [remarkStructure, { exportAs: 'structuredData' }]],
     },
   },
 })
