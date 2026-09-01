@@ -1,0 +1,9 @@
+# Generated ownership state; do not edit.
+schema = 1
+.github/ci/policy.sh	70597ddcea5af8ca
+.github/ci/project.toml	b41b5a0ad852130f
+.github/ci/run.sh	9511d2962df87cfa
+.github/workflows/ci-main.yml	779edf27ae837132
+.github/workflows/ci-pr.yml	84cd821aba0e90ec
+.github/workflows/maintenance.yml	05934a71a8bbe286
+.github/workflows/nightly.yml	cfb64f49579c9179
