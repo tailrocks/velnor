@@ -11,6 +11,7 @@ type MermaidState =
 export function Mermaid({ chart }: { readonly chart: string }) {
   const { resolvedTheme } = useTheme()
   const id = useId().replaceAll(':', '')
+  const titleId = `mermaid-title-${id}`
   const [state, setState] = useState<MermaidState>({ status: 'loading', svg: null })
 
   useEffect(() => {
@@ -28,7 +29,11 @@ export function Mermaid({ chart }: { readonly chart: string }) {
         return mermaid.render(`mermaid-${id}`, chart.replaceAll('\\n', '\n'))
       })
       .then(({ svg }) => {
-        if (active) setState({ status: 'ready', svg })
+        const accessibleSvg = svg.replace(
+          /<svg\b([^>]*)>/,
+          `<svg$1 role="img" aria-labelledby="${titleId}"><title id="${titleId}">Mermaid diagram</title>`,
+        )
+        if (active) setState({ status: 'ready', svg: accessibleSvg })
       })
       .catch((error: unknown) => {
         if (import.meta.env.DEV) {
@@ -47,8 +52,23 @@ export function Mermaid({ chart }: { readonly chart: string }) {
   }
 
   return (
-    <pre aria-busy={state.status === 'loading'} data-mermaid-fallback>
-      <code>{chart}</code>
-    </pre>
+    <div
+      aria-busy={state.status === 'loading'}
+      data-mermaid-fallback
+      data-mermaid-error={state.status === 'error' ? '' : undefined}
+    >
+      <p
+        aria-live="polite"
+        data-mermaid-status
+        role={state.status === 'error' ? 'alert' : 'status'}
+      >
+        {state.status === 'loading'
+          ? 'Loading diagram…'
+          : 'This diagram could not be rendered. Showing the source instead.'}
+      </p>
+      <pre>
+        <code>{chart}</code>
+      </pre>
+    </div>
   )
 }

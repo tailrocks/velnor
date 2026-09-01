@@ -17,11 +17,24 @@ export const Route = createRootRoute({
       {
         title: 'Velnor Documentation',
       },
+      {
+        name: 'description',
+        content: 'Research-grade Linux GitHub Actions runner documentation for Velnor.',
+      },
+      {
+        name: 'theme-color',
+        content: '#121212',
+      },
     ],
     links: [
       {
         rel: 'stylesheet',
         href: appCss,
+      },
+      {
+        rel: 'icon',
+        type: 'image/svg+xml',
+        href: '/favicon.svg',
       },
     ],
   }),
