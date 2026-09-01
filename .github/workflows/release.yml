@@ -1155,4 +1155,4 @@ jobs:
       source-ref: ${{ needs.release_gate.outputs.tag_ref }}
 
   # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
-  # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).
+  # tailrocks/homebrew-velnor tap + push token exist (docs/future-direction.md).

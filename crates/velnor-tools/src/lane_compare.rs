@@ -1,8 +1,9 @@
 //! `lane-compare`: fetch the GitHub-hosted and Velnor lanes of one workflow
 //! run via the GitHub API and diff their Checks-UI surface per step.
 //!
-//! Implements the repeatable comparison demanded by `docs/comparison.md`
-//! ("Preferred extraction method: the GitHub API") and master-plan P4.1. The
+//! Implements the repeatable comparison demanded by the future evidence gate
+//! in `docs/future-direction.md` ("Preferred extraction method: the GitHub
+//! API"). The
 //! gate is **equal-or-better, never less informative**: any paired step where
 //! the GitHub lane shows information the Velnor lane lacks (a step missing
 //! entirely, an executed step that is not expandable, a divergent display
@@ -10,7 +11,8 @@
 //! ANSI where GitHub has them) is a `WORSE` row and fails strict mode.
 //!
 //! Data sources (V2 jobs have no v1 log archive — `runs/{id}/logs` contains
-//! no Velnor per-step files and `jobs/{id}/logs` 404s, see master-plan P4.3):
+//! no Velnor per-step files and `jobs/{id}/logs` 404s, as recorded in the
+//! evidence record):
 //! - step metadata: `actions/runs/{id}/jobs` (numbers, names, conclusions,
 //!   started/completed),
 //! - per-step expandability: the job page HTML `<check-step …>` elements
@@ -74,7 +76,7 @@ pub enum RunClass {
 }
 
 impl RunClass {
-    // VELNOR_PROJECTS_SETUP.md §2.11 initial warm/no-change budgets.
+    // docs/future-direction.md: initial warm/no-change budgets.
     fn wall_budget_seconds(self) -> i64 {
         match self {
             Self::A => 150,
@@ -304,7 +306,7 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         report,
         "Known documented divergence (not gated): V2 jobs have no v1 log \
          archive, so the per-job raw-log download 404s on the Velnor lane; \
-         the `job-log` artifact is the workaround (master-plan P4.3)."
+         the `job-log` artifact is the workaround (see docs/future-direction.md)."
     )?;
 
     let report_path = run_dir.join("report.md");
@@ -552,7 +554,7 @@ fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
 
 /// Download every `job-log` artifact of the run and concatenate their text
 /// content. Several Velnor jobs in one run all upload an artifact named
-/// `job-log` (per-job naming is master-plan P4.4), so the content check is
+/// `job-log` (per-job naming remains future work), so the content check is
 /// lane-level rather than per-job.
 fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
     let payload = gh_api_bytes(&format!(
@@ -995,7 +997,7 @@ fn analyze_lane_log(text: &str) -> LaneLogStats {
 }
 
 /// Strip the `.NET "o"` blob prefix (`YYYY-MM-DDTHH:MM:SS.fffffffZ `) GitHub
-/// stores on every downloaded log line — see docs/log-format-contract.md.
+/// stores on every downloaded log line — see docs/interface-reference.md.
 fn strip_blob_timestamp(line: &str) -> Option<&str> {
     let bytes = line.as_bytes();
     if bytes.len() < 28 {

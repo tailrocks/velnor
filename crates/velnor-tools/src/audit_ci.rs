@@ -1,4 +1,4 @@
-//! Estate CI contract auditor (`VELNOR_PROJECTS_SETUP.md` §2.0–§2.12).
+//! Estate CI contract auditor (`docs/ci-estate-contract.md`).
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -39,7 +39,7 @@ fn has_truthful_both_lane_contract(text: &str) -> bool {
         || has_explicit_velnor_capability_gate(text)
 }
 const SHA_LEN: usize = 40;
-const FLEET_MAP_FILE: &str = "VELNOR_PROJECTS_SETUP.md";
+const FLEET_MAP_FILE: &str = "docs/ci-estate-contract.md";
 const FLEET_MAP_START: &str = "<!-- fleet-map:start -->";
 const FLEET_MAP_END: &str = "<!-- fleet-map:end -->";
 const LEGACY_RUNNER_GROUP_DOCTOR: &str = "scripts/runner_group_doctor.sh";
@@ -4411,11 +4411,11 @@ jobs:
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         assert!(!root.join("scripts/runner_group_doctor.sh").exists());
 
-        let migration =
-            fs::read_to_string(root.join("docs/org-fleet-migration.md")).expect("migration guide");
-        let active_incident = migration
-            .split_once("## Allowlist drift incident (2026-08-24)")
-            .and_then(|(_, section)| section.split_once("## Rollback"))
+        let evidence = fs::read_to_string(root.join("docs/evidence-record-2026-09-01.md"))
+            .expect("evidence record");
+        let active_incident = evidence
+            .split_once("### 2026-08-24: organization allowlist drift")
+            .and_then(|(_, section)| section.split_once("### "))
             .map(|(section, _)| section)
             .expect("allowlist drift incident section");
         assert!(!active_incident.contains("runner_group_doctor.sh"));
@@ -4479,11 +4479,12 @@ gh api --method PUT orgs/tailrocks/actions/runner-groups/3/repositories/7
 ```
 "#;
         let mut findings = Vec::new();
-        audit_legacy_runner_group_text("docs/example.md", text, &mut findings);
+        audit_legacy_runner_group_text("fixture-test-input.txt", text, &mut findings);
 
         assert_eq!(findings.len(), 2, "{findings:?}");
         assert!(findings.iter().all(|finding| {
-            finding.rule == "legacy-runner-group-surface" && finding.file == "docs/example.md"
+            finding.rule == "legacy-runner-group-surface"
+                && finding.file == "fixture-test-input.txt"
         }));
     }
 
@@ -4499,7 +4500,7 @@ gh api --method PUT orgs/tailrocks/actions/runner-groups/3/repositories/7
 ```
 "#;
         let mut findings = Vec::new();
-        audit_legacy_runner_group_text("docs/example.md", text, &mut findings);
+        audit_legacy_runner_group_text("fixture-test-input.txt", text, &mut findings);
 
         assert!(findings.is_empty(), "{findings:?}");
     }
@@ -4513,7 +4514,7 @@ scripts/runner_group_doctor.sh
 ```
 "#;
         let mut findings = Vec::new();
-        audit_legacy_runner_group_text("docs/example.md", text, &mut findings);
+        audit_legacy_runner_group_text("fixture-test-input.txt", text, &mut findings);
 
         assert!(findings.is_empty(), "{findings:?}");
     }
