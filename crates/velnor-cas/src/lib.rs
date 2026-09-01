@@ -17,7 +17,7 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::{
     ffi::{OsStr, OsString},
-    os::unix::ffi::OsStringExt,
+    os::unix::ffi::{OsStrExt, OsStringExt},
     sync::Arc,
 };
 
@@ -38,6 +38,7 @@ const MAX_TREE_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FULL_READ_BYTES: u64 = 64 * 1024 * 1024;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_RECLAIM_OBJECTS: usize = 1_000_000;
+#[cfg(not(unix))]
 const MAX_RECLAIM_PATH_BYTES: usize = 16 * 1024;
 
 /// Normalized reason for a cache miss or rejected object.
@@ -1067,11 +1068,14 @@ impl CasStore {
             )));
         }
         let mut reclaimed = 0_u64;
-        for (digest, path, bytes) in objects {
+        for (digest, _path, bytes) in objects {
             if reachable.contains(&digest) {
                 continue;
             }
-            fs::remove_file(&path)?;
+            #[cfg(unix)]
+            self.remove_object_secure(&digest)?;
+            #[cfg(not(unix))]
+            fs::remove_file(self.object_path(&digest))?;
             reclaimed = reclaimed.checked_add(bytes).ok_or_else(|| {
                 CasError::InvalidManifest("CAS reclaimed byte count overflowed".into())
             })?;
@@ -1079,6 +1083,103 @@ impl CasStore {
         Ok(reclaimed)
     }
 
+    #[cfg(unix)]
+    fn remove_object_secure(&self, digest: &Digest) -> Result<(), CasError> {
+        let bucket = self.open_bucket(digest, false)?;
+        match rustix::fs::unlinkat(&bucket, &digest.as_str()[2..], rustix::fs::AtFlags::empty()) {
+            Ok(()) => {
+                bucket.sync_all()?;
+                Ok(())
+            }
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(error) => Err(io::Error::from(error).into()),
+        }
+    }
+
+    #[cfg(unix)]
+    fn inventory_objects(&self) -> Result<Vec<(Digest, PathBuf, u64)>, CasError> {
+        let mut objects = Vec::new();
+        for bucket in rustix::fs::Dir::read_from(&self.root_dir).map_err(io::Error::from)? {
+            let bucket = bucket.map_err(io::Error::from)?;
+            let bucket_name = OsString::from_vec(bucket.file_name().to_bytes().to_vec());
+            if bucket_name == OsStr::new(".") || bucket_name == OsStr::new("..") {
+                continue;
+            }
+            let bucket_name_bytes = bucket_name.as_bytes();
+            if bucket_name_bytes.len() != 2 || !bucket_name_bytes.iter().copied().all(is_hex_byte) {
+                return Err(CasError::UnsafePath(format!(
+                    "CAS bucket name is invalid: {}",
+                    String::from_utf8_lossy(bucket_name_bytes)
+                )));
+            }
+            let bucket_stat = rustix::fs::statat(
+                &self.root_dir,
+                &bucket_name,
+                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+            )
+            .map_err(io::Error::from)?;
+            if !rustix::fs::FileType::from_raw_mode(bucket_stat.st_mode).is_dir() {
+                return Err(CasError::UnsafePath(format!(
+                    "CAS bucket is not a regular directory: {}",
+                    String::from_utf8_lossy(bucket_name_bytes)
+                )));
+            }
+            let bucket_dir =
+                open_directory_child(&self.root_dir, &bucket_name).map_err(CasError::Io)?;
+            for object in rustix::fs::Dir::read_from(&bucket_dir).map_err(io::Error::from)? {
+                let object = object.map_err(io::Error::from)?;
+                let object_name = OsString::from_vec(object.file_name().to_bytes().to_vec());
+                if object_name == OsStr::new(".") || object_name == OsStr::new("..") {
+                    continue;
+                }
+                let object_name_bytes = object_name.as_bytes();
+                if object_name_bytes.len() != 62
+                    || !object_name_bytes.iter().copied().all(is_hex_byte)
+                {
+                    return Err(CasError::UnsafePath(format!(
+                        "CAS object name is invalid: {}",
+                        String::from_utf8_lossy(object_name_bytes)
+                    )));
+                }
+                let object_stat = rustix::fs::statat(
+                    &bucket_dir,
+                    &object_name,
+                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                )
+                .map_err(io::Error::from)?;
+                if !rustix::fs::FileType::from_raw_mode(object_stat.st_mode).is_file() {
+                    return Err(CasError::UnsafePath(format!(
+                        "CAS object is not a regular file: {}",
+                        String::from_utf8_lossy(object_name_bytes)
+                    )));
+                }
+                let mut digest_text = String::with_capacity(64);
+                digest_text.push_str(std::str::from_utf8(bucket_name_bytes).map_err(|error| {
+                    CasError::UnsafePath(format!("CAS bucket name is not UTF-8: {error}"))
+                })?);
+                digest_text.push_str(std::str::from_utf8(object_name_bytes).map_err(|error| {
+                    CasError::UnsafePath(format!("CAS object name is not UTF-8: {error}"))
+                })?);
+                if objects.len() >= MAX_RECLAIM_OBJECTS {
+                    return Err(CasError::InvalidManifest(format!(
+                        "CAS reclaim inventory exceeds the {MAX_RECLAIM_OBJECTS}-object limit"
+                    )));
+                }
+                objects.push((
+                    Digest::parse(digest_text)?,
+                    self.root
+                        .join(OsStr::from_bytes(bucket_name_bytes))
+                        .join(OsStr::from_bytes(object_name_bytes)),
+                    u64::try_from(object_stat.st_size).map_err(|_| {
+                        CasError::InvalidManifest("CAS object size is negative".into())
+                    })?,
+                ));
+            }
+        }
+        Ok(objects)
+    }
+
+    #[cfg(not(unix))]
     fn inventory_objects(&self) -> Result<Vec<(Digest, PathBuf, u64)>, CasError> {
         let metadata = fs::symlink_metadata(&self.root)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
