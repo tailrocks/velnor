@@ -1,0 +1,17 @@
+{
+  "projectName": "velnor",
+  "mode": "file-router",
+  "typescript": true,
+  "tailwind": false,
+  "packageManager": "bun",
+  "git": true,
+  "install": true,
+  "intent": false,
+  "addOnOptions": {},
+  "projectPreset": "blank",
+  "includeExamples": false,
+  "routerOnly": false,
+  "version": 1,
+  "framework": "react",
+  "chosenAddOns": []
+}

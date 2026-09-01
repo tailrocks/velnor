@@ -11536,7 +11536,7 @@ fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
 /// Fleet health probe: list this daemon's registered runners on GitHub and
 /// fail (non-zero exit) when none are healthy, so a systemd timer surfaces a
 /// dead fleet loudly instead of jobs queueing in silence (see
-/// docs/guides/operator.md).
+/// content/docs/guides/operator.mdx).
 fn doctor_host_docker_reclaim(
     backend: Option<velnor_model::ExecutionBackendKind>,
     mut docker: impl FnMut(&[String]) -> Result<String>,
