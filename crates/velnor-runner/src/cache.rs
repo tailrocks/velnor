@@ -1577,8 +1577,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn target_gc_rechecks_current_under_publisher_lock() {
-        let root =
-            std::env::temp_dir().join(format!("velnor-target-race-{}", uuid::Uuid::new_v4()));
+        let temp_root =
+            fs::canonicalize(std::env::temp_dir()).expect("canonicalize temporary test root");
+        let root = temp_root.join(format!("velnor-target-race-{}", uuid::Uuid::new_v4()));
         let scope = root.join("targets/trusted/workspace/repo/workflow/job");
         let generation = scope.join("target-generation-race");
         fs::create_dir_all(generation.join("data")).unwrap();
