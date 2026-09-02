@@ -59,34 +59,106 @@ jobs:
             policy=.github/ci/policy.sh
           fi
           bash "$policy"
-  group-rust:
-    name: Rust
+  group-unit-bun-velnor:
+    name: "Bun / Packages / Bun package (velnor)"
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust.yml
+    uses: ./.github/workflows/ci-bun-velnor.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
-  group-bun:
-    name: "Bun / Packages"
+  group-unit-docker:
+    name: "Docker / Images / Docker"
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-bun.yml
+    uses: ./.github/workflows/ci-docker-docker.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
-  group-docker:
-    name: "Docker / Images"
+  group-unit-docs:
+    name: "Documentation / Documentation"
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-docker.yml
+    uses: ./.github/workflows/ci-docs-docs.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
-  group-docs:
-    name: Documentation
+  group-unit-rust-policy:
+    name: "Rust / Rust dependency policy"
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-docs.yml
+    uses: ./.github/workflows/ci-rust-policy.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-unit-collector:
+    name: "Rust / unit-collector"
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-rust-unit-collector.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-action-journal:
+    name: "Rust / velnor-action-journal"
+    needs: [plan, policy, group-unit-rust-velnor-action-model, group-unit-rust-velnor-model]
+    uses: ./.github/workflows/ci-rust-velnor-action-journal.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-action-model:
+    name: "Rust / velnor-action-model"
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-rust-velnor-action-model.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-cache-service:
+    name: "Rust / velnor-cache-service"
+    needs: [plan, policy, group-unit-rust-velnor-action-journal, group-unit-rust-velnor-action-model, group-unit-rust-velnor-cas]
+    uses: ./.github/workflows/ci-rust-velnor-cache-service.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-cas:
+    name: "Rust / velnor-cas"
+    needs: [plan, policy, group-unit-rust-velnor-action-model]
+    uses: ./.github/workflows/ci-rust-velnor-cas.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-client:
+    name: "Rust / velnor-client"
+    needs: [plan, policy, group-unit-rust-velnor-model]
+    uses: ./.github/workflows/ci-rust-velnor-client.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-control:
+    name: "Rust / velnor-control"
+    needs: [plan, policy, group-unit-rust-velnor-action-journal, group-unit-rust-velnor-model]
+    uses: ./.github/workflows/ci-rust-velnor-control.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-model:
+    name: "Rust / velnor-model"
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-rust-velnor-model.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-render:
+    name: "Rust / velnor-render"
+    needs: [plan, policy, group-unit-rust-velnor-model]
+    uses: ./.github/workflows/ci-rust-velnor-render.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-runner:
+    name: "Rust / velnor-runner"
+    needs: [plan, policy, group-unit-rust-velnor-action-model, group-unit-rust-velnor-cache-service, group-unit-rust-velnor-control, group-unit-rust-velnor-model]
+    uses: ./.github/workflows/ci-rust-velnor-runner.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnor-tools:
+    name: "Rust / velnor-tools"
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-rust-velnor-tools.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+  group-unit-rust-velnorctl:
+    name: "Rust / velnorctl"
+    needs: [plan, policy, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner]
+    uses: ./.github/workflows/ci-rust-velnorctl.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   required:
     name: required
-    if: ${{ always() && needs['plan'].result == 'success' && needs['policy'].result == 'success' && needs['group-bun'].result == 'success' && needs['group-docker'].result == 'success' && needs['group-docs'].result == 'success' && needs['group-rust'].result == 'success' }}
-    needs: [plan, policy, group-bun, group-docker, group-docs, group-rust]
+    if: ${{ always() && needs['plan'].result == 'success' && needs['policy'].result == 'success' && needs['group-unit-bun-velnor'].result == 'success' && needs['group-unit-docker'].result == 'success' && needs['group-unit-docs'].result == 'success' && needs['group-unit-rust-policy'].result == 'success' && needs['group-unit-rust-unit-collector'].result == 'success' && needs['group-unit-rust-velnor-action-journal'].result == 'success' && needs['group-unit-rust-velnor-action-model'].result == 'success' && needs['group-unit-rust-velnor-cache-service'].result == 'success' && needs['group-unit-rust-velnor-cas'].result == 'success' && needs['group-unit-rust-velnor-client'].result == 'success' && needs['group-unit-rust-velnor-control'].result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && needs['group-unit-rust-velnor-render'].result == 'success' && needs['group-unit-rust-velnor-runner'].result == 'success' && needs['group-unit-rust-velnor-tools'].result == 'success' && needs['group-unit-rust-velnorctl'].result == 'success' }}
+    needs: [plan, policy, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-action-journal, group-unit-rust-velnor-action-model, group-unit-rust-velnor-cache-service, group-unit-rust-velnor-cas, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnorctl]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
