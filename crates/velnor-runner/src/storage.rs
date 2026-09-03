@@ -108,10 +108,10 @@ pub fn cache_class_path(legacy_work_root: &Path, class: &str, legacy_name: &str)
     prefer_canonical_or_existing_legacy(canonical, legacy)
 }
 
-/// Resolve a trust-scoped cache path without consulting process-global trust
-/// state. Compiler caches use this boundary because the admitted trust class
-/// belongs to the job plan, while the other stores retain [`cache_class_path`]
-/// and their existing operator-selected scope.
+/// Resolve a trust-scoped store path without consulting process-global trust
+/// state. Executable and build stores use this boundary because the admitted
+/// trust class belongs to the job plan, while other stores retain
+/// [`cache_class_path`] and their existing operator-selected scope.
 pub fn cache_class_path_for_trust(
     legacy_work_root: &Path,
     trust_scope: &str,

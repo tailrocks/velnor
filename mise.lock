@@ -124,6 +124,45 @@ checksum = "sha256:b75c287b89df1fbfe033a98df058a94cd1f5119dab6ff56e4916e5a1597c7
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-pc-windows-msvc.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/467472280"
 
+[[tools."aqua:oven-sh/bun"]]
+version = "1.4.0"
+backend = "aqua:oven-sh/bun"
+
+[tools."aqua:oven-sh/bun"."platforms.linux-arm64"]
+checksum = "sha256:4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e"
+url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip"
+url_api = "https://api.github.com/repos/oven-sh/bun/releases/assets/521567814"
+
+[tools."aqua:oven-sh/bun"."platforms.linux-arm64-musl"]
+checksum = "sha256:576300ce33ff16ffcd455bf178c2f095f9df845c6cc3d0284ba1c96ca0e80473"
+url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64-musl.zip"
+url_api = "https://api.github.com/repos/oven-sh/bun/releases/assets/521567810"
+
+[tools."aqua:oven-sh/bun"."platforms.linux-x64"]
+checksum = "sha256:2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452"
+url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip"
+url_api = "https://api.github.com/repos/oven-sh/bun/releases/assets/521567984"
+
+[tools."aqua:oven-sh/bun"."platforms.linux-x64-musl"]
+checksum = "sha256:83b5f12fd258dd8d4fdcaea65ede954366aa717dab399e20093ecab280d54e7a"
+url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-musl.zip"
+url_api = "https://api.github.com/repos/oven-sh/bun/releases/assets/521569626"
+
+[tools."aqua:oven-sh/bun"."platforms.macos-arm64"]
+checksum = "sha256:c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381"
+url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-aarch64.zip"
+url_api = "https://api.github.com/repos/oven-sh/bun/releases/assets/521568975"
+
+[tools."aqua:oven-sh/bun"."platforms.macos-x64"]
+checksum = "sha256:1d0211b8f1dc991182344687ad15e72ee86f154845a5f7fa477994cd341dd9b0"
+url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-x64.zip"
+url_api = "https://api.github.com/repos/oven-sh/bun/releases/assets/521569492"
+
+[tools."aqua:oven-sh/bun"."platforms.windows-x64"]
+checksum = "sha256:e6f093d39da486b20262ca8cdd5ed6a9e8bc9c2f275b78e6d3a0c5b28cc95901"
+url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-windows-x64.zip"
+url_api = "https://api.github.com/repos/oven-sh/bun/releases/assets/521572497"
+
 [[tools.cargo-binstall]]
 version = "1.22.0"
 backend = "aqua:cargo-bins/cargo-binstall"

@@ -9,17 +9,13 @@ use crate::action::{
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
-use velnor_cache_service::{
-    resolve_backend, CacheAdmissionError, CompilerCacheBackend, CompilerCachePolicy,
-    WrapperDeclaration,
-};
 
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
 // Approved composites introduced v8; the native GitHub App token adapter is v9;
-// Kache v0.14.2 admission is v10.
-pub const MANIFEST_VERSION: u32 = 10;
+// Kache v0.14.2 admission is v10; mr-boxington-action v1.2.0 admission is v11.
+pub const MANIFEST_VERSION: u32 = 11;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
 
@@ -275,19 +271,23 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Literal("disable_annotations", &["false"]),
     InputRule::Forbidden("token"),
 ];
-const KACHE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["v0.14.2"]),
-    InputRule::Literal("github-cache", &["false"]),
-    InputRule::Literal("cache-executables", &["false"]),
-    InputRule::Literal("pr-comment", &["false"]),
-    InputRule::Literal("max-size", &["20GiB"]),
-    InputRule::Forbidden("token"),
-    InputRule::Forbidden("sync"),
-    InputRule::Forbidden("warm"),
-    InputRule::Forbidden("manifest-key"),
-    InputRule::Forbidden("namespace"),
-    InputRule::Forbidden("min-compile-ms"),
-    InputRule::Forbidden("cache-key-prefix"),
+const MR_BOXINGTON_INPUTS: &[InputRule] = &[
+    InputRule::Literal("backend", &["local", "github", "server"]),
+    InputRule::Any("version"),
+    InputRule::Any("github-token"),
+    InputRule::Any("cache-key"),
+    InputRule::Any("restore-keys"),
+    InputRule::Any("cache-generation"),
+    InputRule::Literal("save-on-workflow-dispatch", &["true", "false"]),
+    InputRule::Any("toolchain"),
+    InputRule::Any("max-size"),
+    InputRule::Literal("cache-links", &["auto", "true", "false"]),
+    InputRule::Any("server-url"),
+    InputRule::Any("namespace"),
+    InputRule::Any("token"),
+    InputRule::Any("token-file"),
+    InputRule::Any("oidc-audience"),
+    InputRule::Literal("server-mode", &["read-write", "read-only", "write-only"]),
 ];
 const RUST_CACHE_INPUTS: &[InputRule] = &[
     InputRule::Any("shared-key"),
@@ -420,6 +420,17 @@ pub static ACTIONS: &[ActionCapability] = &[
         inputs: &[],
         notes: "pinned Docker action; generic Docker execution with a closed identity and input surface",
     },
+    ActionCapability {
+        repository: "jdx/mr-boxington-action",
+        adapter: NativeActionAdapter::ApprovedComposite,
+        allowed_refs: &[allowed(
+            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
+            "v1.2.0",
+        )],
+        allowed_subpaths: &[],
+        inputs: MR_BOXINGTON_INPUTS,
+        notes: "pinned Node24 main/post action; generic fetched-action execution with a closed identity and input surface",
+    },
     capability!(
         "actions/checkout",
         Checkout,
@@ -550,12 +561,6 @@ pub static ACTIONS: &[ActionCapability] = &[
         Sccache,
         SCCACHE_REFS,
         SCCACHE_INPUTS
-    ),
-    capability!(
-        "kunobi-ninja/kache-action",
-        Kache,
-        &[allowed("49398d37113c616fdb61be434cb497e3c2c8f3e6", "v1")],
-        KACHE_INPUTS
     ),
     capability!("rui314/setup-mold", SetupMold, MOLD_REFS, &[]),
     capability!(
@@ -1354,60 +1359,25 @@ fn validate_attestation_permissions(
     }
 }
 
-pub fn compiler_cache_declaration(job: &AgentJobRequestMessage) -> WrapperDeclaration {
-    let mut declaration = WrapperDeclaration::default();
-    for step in job.steps.iter().filter(|step| step.enabled) {
-        let repository = step
-            .reference
+pub fn declares_sccache(job: &AgentJobRequestMessage) -> bool {
+    job.steps.iter().filter(|step| step.enabled).any(|step| {
+        step.reference
             .as_ref()
-            .and_then(|reference| reference.name.as_deref());
-        declaration.sccache |= repository
-            .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"));
-        declaration.kache |=
-            repository.is_some_and(|name| name.eq_ignore_ascii_case("kunobi-ninja/kache-action"));
-    }
-    declaration
+            .and_then(|reference| reference.name.as_deref())
+            .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"))
+    })
 }
 
-/// Resolve the daemon-owned compiler-cache policy for the production runner.
-/// Auto is intentionally passed to the service resolver: no wrapper declaration
-/// selects Kache, while an explicit sccache declaration remains supported.
-pub fn compiler_cache_backend(
-    job: &AgentJobRequestMessage,
-) -> Result<CompilerCacheBackend, CacheAdmissionError> {
-    resolve_backend(CompilerCachePolicy::Auto, &compiler_cache_declaration(job))
-}
-
-/// Reject compiler-cache ownership that cannot cross the MicroVM guest boundary.
-///
-/// The broker can represent environment variables in several shapes. All
-/// supported job, job-container, variable, and step locations are collected by
-/// the same recursive walker before this decision is made. Docker does not call
-/// this validator and retains its existing compiler-cache behavior.
-pub(crate) fn validate_microvm_compiler_cache(
-    job: &AgentJobRequestMessage,
-) -> Result<(), CacheAdmissionError> {
-    let declaration = compiler_cache_declaration(job);
-    if declaration.sccache && declaration.kache {
-        return Err(CacheAdmissionError::ConflictingWrappers);
-    }
-
+pub(crate) fn validate_microvm_compiler_cache(job: &AgentJobRequestMessage) -> anyhow::Result<()> {
     if let Some(name) = compiler_cache_environment_names(job)
         .into_iter()
         .find(|name| is_compiler_cache_environment(name))
     {
-        return Err(CacheAdmissionError::MicroVmEnvironmentUnsupported { name });
+        anyhow::bail!("MicroVM does not support explicit compiler-cache environment `{name}`");
     }
-
-    if declaration.sccache || declaration.kache {
-        let declared = if declaration.sccache {
-            CompilerCacheBackend::Sccache
-        } else {
-            CompilerCacheBackend::Kache
-        };
-        return Err(CacheAdmissionError::MicroVmTransportUnavailable { declared });
+    if declares_sccache(job) {
+        anyhow::bail!("MicroVM does not support explicit mozilla-actions/sccache-action");
     }
-
     Ok(())
 }
 
@@ -1430,44 +1400,13 @@ fn compiler_cache_environment_names(job: &AgentJobRequestMessage) -> Vec<String>
 
 fn is_compiler_cache_environment(name: &str) -> bool {
     let upper = name.to_ascii_uppercase().replace('-', "_");
-    upper == "RUSTC_WRAPPER" || upper.starts_with("SCCACHE_") || upper.starts_with("KACHE_")
+    upper == "RUSTC_WRAPPER" || upper.starts_with("SCCACHE_")
 }
 
 fn validate_compiler_cache_topology(
     job: &AgentJobRequestMessage,
     violations: &mut Vec<CapabilityViolation>,
 ) {
-    let wrappers = job
-        .steps
-        .iter()
-        .filter(|step| step.enabled)
-        .filter_map(|step| {
-            step.reference
-                .as_ref()
-                .and_then(|reference| reference.name.as_deref())
-        })
-        .filter(|repository| {
-            repository.eq_ignore_ascii_case("mozilla-actions/sccache-action")
-                || repository.eq_ignore_ascii_case("kunobi-ninja/kache-action")
-        })
-        .collect::<Vec<_>>();
-    if wrappers
-        .iter()
-        .any(|repository| repository.eq_ignore_ascii_case("mozilla-actions/sccache-action"))
-        && wrappers
-            .iter()
-            .any(|repository| repository.eq_ignore_ascii_case("kunobi-ninja/kache-action"))
-    {
-        violations.push(violation(
-            "job preflight",
-            "compiler-cache",
-            "mixed",
-            "compiler-cache.backend",
-            "sccache+kache",
-            vec!["sccache".into(), "kache".into()],
-        ));
-    }
-
     let mut environment = compiler_cache_environment_names(job);
     environment.sort_unstable();
     environment.dedup();
@@ -1482,11 +1421,7 @@ fn validate_compiler_cache_topology(
             || upper.starts_with("SCCACHE_MEMCACHED")
             || upper.starts_with("SCCACHE_GCS")
             || upper.starts_with("SCCACHE_AZURE")
-            || upper.starts_with("SCCACHE_WEBDAV")
-            || upper == "KACHE_CACHE_DIR"
-            || upper.starts_with("KACHE_S3_")
-            || upper.starts_with("KACHE_REMOTE")
-            || upper.starts_with("KACHE_PLANNER");
+            || upper.starts_with("SCCACHE_WEBDAV");
         if forbidden {
             violations.push(violation(
                 "job preflight",
@@ -1886,11 +1821,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_ten_and_structurally_immutable() {
-        // Kache v0.14.2 changes the accepted capability surface and requires a
-        // new manifest version so stale workflow inputs fail closed.
-        assert_eq!(MANIFEST_VERSION, 10);
-        assert_eq!(MANIFEST.version, 10);
+    fn compiled_manifest_is_version_eleven_and_structurally_immutable() {
+        // Mr Boxington action admission changes the accepted capability surface
+        // and requires a new version so stale workflow inputs fail closed.
+        assert_eq!(MANIFEST_VERSION, 11);
+        assert_eq!(MANIFEST.version, 11);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
@@ -2482,6 +2417,56 @@ mod tests {
     }
 
     #[test]
+    fn mr_boxington_runs_as_pinned_generic_node_action_for_all_backends() {
+        const SHA: &str = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
+
+        for backend in ["local", "github", "server"] {
+            validate_resolved_action(
+                "cache",
+                "jdx/mr-boxington-action",
+                SHA,
+                None,
+                &BTreeMap::from([("backend".to_string(), backend.to_string())]),
+            )
+            .unwrap();
+        }
+
+        let backend_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            SHA,
+            None,
+            &BTreeMap::from([("backend".to_string(), "unknown".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            backend_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "with.backend"
+        );
+
+        let ref_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            "1111111111111111111111111111111111111111",
+            None,
+            &BTreeMap::from([("backend".to_string(), "local".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            ref_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "ref"
+        );
+
+        assert!(crate::action::native_action_adapter("jdx/mr-boxington-action").is_none());
+    }
+
+    #[test]
     fn reusable_workflow_validation_enforces_identity_ref_and_inputs() {
         let publish_sha = "041f17a6d32f8fd2a8ef03c2a63be58346993136";
         // Approved identity + immutable ref + no inputs is admitted.
@@ -2601,7 +2586,6 @@ mod tests {
             NativeActionAdapter::PathsFilter,
             NativeActionAdapter::Mise,
             NativeActionAdapter::Sccache,
-            NativeActionAdapter::Kache,
             NativeActionAdapter::SetupMold,
             NativeActionAdapter::SetupJust,
             NativeActionAdapter::RustCache,
@@ -3060,37 +3044,6 @@ mod tests {
     }
 
     #[test]
-    fn dual_cache_wrappers_rejected() {
-        let mut target = job(
-            "mozilla-actions/sccache-action",
-            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
-            serde_json::json!({}),
-        );
-        let kache_step = job(
-            "kunobi-ninja/kache-action",
-            Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
-            serde_json::json!({
-                "version": "v0.14.2",
-                "github-cache": "false",
-                "cache-executables": "false",
-                "pr-comment": "false",
-                "max-size": "20GiB"
-            }),
-        )
-        .steps
-        .remove(0);
-        target.steps.push(kache_step);
-        let errors = violations(&target);
-        assert!(errors
-            .iter()
-            .any(|error| error.field == "compiler-cache.backend"));
-        assert_eq!(
-            compiler_cache_backend(&target),
-            Err(CacheAdmissionError::ConflictingWrappers)
-        );
-    }
-
-    #[test]
     fn remote_cache_env_rejected_but_legacy_gha_flag_tolerated() {
         let mut target = job(
             "mozilla-actions/sccache-action",
@@ -3108,33 +3061,5 @@ mod tests {
         assert!(!errors
             .iter()
             .any(|error| error.field == "env.SCCACHE_GHA_ENABLED"));
-    }
-
-    #[test]
-    fn backend_selection_matches_single_wrapper_or_default_kache() {
-        let sccache = job(
-            "mozilla-actions/sccache-action",
-            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
-            serde_json::json!({}),
-        );
-        let kache = job(
-            "kunobi-ninja/kache-action",
-            Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
-            serde_json::json!({}),
-        );
-        let mut default_job = sccache.clone();
-        default_job.steps.clear();
-        assert_eq!(
-            compiler_cache_backend(&sccache),
-            Ok(CompilerCacheBackend::Sccache)
-        );
-        assert_eq!(
-            compiler_cache_backend(&kache),
-            Ok(CompilerCacheBackend::Kache)
-        );
-        assert_eq!(
-            compiler_cache_backend(&default_job),
-            Ok(CompilerCacheBackend::Kache)
-        );
     }
 }

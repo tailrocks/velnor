@@ -7,7 +7,6 @@ use crate::{
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
-    compiler_action::CompilerActionSession,
     container::{JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
@@ -1368,7 +1367,6 @@ pub(crate) struct DockerJobEngine<R> {
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
-    compiler_cache: Option<Arc<velnor_cache_service::ProductionCompilerCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1399,7 +1397,6 @@ where
             docker_lease: None,
             job_network_guard: None,
             lifecycle_telemetry: None,
-            compiler_cache: None,
         }
     }
 
@@ -1445,14 +1442,6 @@ where
 
     pub fn with_job_environment_started(mut self, started: bool) -> Self {
         self.job_environment_started = started;
-        self
-    }
-
-    pub(crate) fn with_compiler_cache_service(
-        mut self,
-        service: velnor_cache_service::ProductionCompilerCache,
-    ) -> Self {
-        self.compiler_cache = Some(Arc::new(service));
         self
     }
 
@@ -2079,38 +2068,13 @@ where
                     };
                     let step_timeout =
                         effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
-                    let cache_execution = self
-                        .compiler_cache
-                        .as_ref()
-                        .and_then(|service| {
-                            CompilerActionSession::new(
-                                Arc::clone(service),
-                                container,
-                                &step.script,
-                                &env,
-                                step_timeout,
-                            )
-                            .transpose()
-                        })
-                        .transpose()?;
-                    let step_result = if let Some(session) = cache_execution {
-                        session
-                            .execute(
-                                &mut self.runner,
-                                exec_args.args(),
-                                exec_args.process_env(),
-                                &mut on_output,
-                            )?
-                            .result
-                    } else {
-                        self.runner.run_streaming_timeout_with_env(
-                            "docker",
-                            exec_args.args(),
-                            exec_args.process_env(),
-                            step_timeout,
-                            &mut on_output,
-                        )?
-                    };
+                    let step_result = self.runner.run_streaming_timeout_with_env(
+                        "docker",
+                        exec_args.args(),
+                        exec_args.process_env(),
+                        step_timeout,
+                        &mut on_output,
+                    )?;
                     if let (Some(compiler), Some(compile_started), Some(telemetry)) =
                         (compiler, compile_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -2762,7 +2726,6 @@ where
             }
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
-            NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
             NativeActionAdapter::SetupMold => {
                 self.native_setup_mold(_container, action, state, timeout)
             }
@@ -2845,15 +2808,6 @@ where
                     _container,
                     state,
                     "stats=$(sccache --show-stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## sccache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; fi; sccache --stop-server 2>/dev/null || true",
-                    timeout,
-                )?;
-                Ok(native_command_result(result, StepCommandState::default()))
-            }
-            NativeActionAdapter::Kache => {
-                let result = self.native_shell(
-                    _container,
-                    state,
-                    "stats=$(kache stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## Kache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; kache report --format github >> \"$GITHUB_STEP_SUMMARY\" 2>/dev/null || true; fi",
                     timeout,
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -3042,21 +2996,6 @@ where
     ) -> Result<StepExecutionResult> {
         let result = self.native_shell(container, state, &sccache_setup_script(), timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
-    }
-
-    fn native_kache(
-        &mut self,
-        container: &JobContainerSpec,
-        _action: &NativeActionInvocation,
-        state: &JobExecutionState,
-        timeout: Duration,
-    ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &kache_setup_script(), timeout)?;
-        let mut command_state = StepCommandState::default();
-        command_state.set_env("KACHE_CACHE_DIR".into(), "/var/cache/kache".into());
-        command_state.set_env("KACHE_MAX_SIZE".into(), "20GiB".into());
-        command_state.set_env("RUSTC_WRAPPER".into(), "kache".into());
-        Ok(native_command_result(result, command_state))
     }
 
     fn native_setup_mold(
@@ -4049,15 +3988,17 @@ where
                 container.temp_host.display()
             )
         })?;
-        // Resolve the same trust-scoped runtime used for mounts and env so
-        // Plan 066's shared cache root is initialized without crossing scopes.
-        let cache_runtime = container.compiler_cache_runtime();
-        if let Some(cache_host) = cache_runtime.host_path() {
+        if let Some(cache_host) = &container.mbx_store_host {
             fs::create_dir_all(cache_host).with_context(|| {
                 format!(
-                    "create shared compiler-cache directory for {}",
+                    "create Mr Boxington store for {}",
                     container.temp_host.display()
                 )
+            })?;
+        }
+        if let Some(cache_host) = &container.sccache_store_host {
+            fs::create_dir_all(cache_host).with_context(|| {
+                format!("create sccache store for {}", container.temp_host.display())
             })?;
         }
         // The temp dir is bind-mounted over the job container's /tmp. A plain
@@ -4809,8 +4750,8 @@ fn parse_mise_environment(
 fn sccache_setup_script() -> String {
     // Mirror mozilla-actions/sccache-action: ensure the sccache binary is present
     // (download the release if the job image doesn't ship it), then start the
-    // server. The workflow sets RUSTC_WRAPPER=sccache, so the binary MUST exist on
-    // PATH or every rustc/clippy invocation fails with
+    // server. Velnor selects RUSTC_WRAPPER=sccache only when this explicit
+    // action is present, so the binary MUST exist on PATH or every invocation fails with
     // "could not execute process `sccache ...`: No such file or directory".
     // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
     // Velnor injects let sccache use the GitHub Actions cache backend.
@@ -4826,9 +4767,11 @@ sccache --version | grep -F 'sccache 0.16.0'
 SCCACHE_LOCAL_DIR=/var/cache/sccache
 mkdir -p "$SCCACHE_LOCAL_DIR" 2>/dev/null || true
 if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
   echo "SCCACHE_DIR=$SCCACHE_LOCAL_DIR" >> "$GITHUB_ENV"
   echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
 fi
+export RUSTC_WRAPPER=sccache
 export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
 export SCCACHE_GHA_ENABLED=false
 export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
@@ -4837,24 +4780,6 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 # Best-effort: cargo will auto-start the server on first use anyway.
 sccache --start-server 2>/dev/null || true
-"#
-    .to_string()
-}
-
-fn kache_setup_script() -> String {
-    r#"set -e
-command -v kache >/dev/null 2>&1 || { echo 'kache v0.14.2 must be preinstalled in the job image' >&2; exit 1; }
-kache --version | grep -F 'kache 0.14.2'
-mkdir -p /var/cache/kache
-export KACHE_CACHE_DIR=/var/cache/kache
-export KACHE_MAX_SIZE=20GiB
-export RUSTC_WRAPPER=kache
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo 'KACHE_CACHE_DIR=/var/cache/kache' >> "$GITHUB_ENV"
-  echo 'KACHE_MAX_SIZE=20GiB' >> "$GITHUB_ENV"
-  echo 'RUSTC_WRAPPER=kache' >> "$GITHUB_ENV"
-fi
-kache stats >/dev/null
 "#
     .to_string()
 }
@@ -5047,7 +4972,6 @@ fn native_post_condition(
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
         // Sccache post step stops the server (always run, matches GitHub's behavior).
         NativeActionAdapter::Sccache => Some("always()"),
-        NativeActionAdapter::Kache => Some("always()"),
         // GitHub's setup-buildx post removes the builder it created.
         NativeActionAdapter::DockerSetupBuildx => Some("always()"),
         // GitHub's login-action post logs out (drops registry credentials).
@@ -13196,20 +13120,6 @@ mod tests {
     }
 
     #[test]
-    fn compiler_cache_setup_scripts_never_download_tools() {
-        let sccache = sccache_setup_script();
-        let kache = kache_setup_script();
-        for script in [&sccache, &kache] {
-            assert!(!script.contains("curl"));
-            assert!(!script.contains("wget"));
-        }
-        assert!(sccache.contains("0.16.0"));
-        assert!(kache.contains("0.14.2"));
-        assert!(!sccache.contains("node"));
-        assert!(!kache.contains("node"));
-    }
-
-    #[test]
     fn host_docker_commands_are_pinned_to_the_package_socket() {
         let mut command = Command::new("sh");
         command.env("DOCKER_HOST", "tcp://docker.example:2376");
@@ -13284,18 +13194,6 @@ mod tests {
             ],
         )
         .expect("shell -c belongs to docker exec payload");
-    }
-
-    #[test]
-    fn compiler_cache_post_actions_always_run() {
-        assert_eq!(
-            native_post_condition(NativeActionAdapter::Sccache, None),
-            Some("always()")
-        );
-        assert_eq!(
-            native_post_condition(NativeActionAdapter::Kache, None),
-            Some("always()")
-        );
     }
 
     #[test]
@@ -14753,11 +14651,9 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            mbx_store_host: None,
+            sccache_store_host: None,
         }
     }
 
@@ -18912,36 +18808,6 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             0
         );
 
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn native_kache_exports_compile_environment_to_later_steps() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::Native {
-            step_id: "kache".into(),
-            display_name: String::new(),
-            invocation: NativeActionInvocation {
-                git_ref: String::new(),
-                adapter: NativeActionAdapter::Kache,
-                cache_kind: None,
-                source_path: None,
-                inputs: BTreeMap::new(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
-        let results = executor
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
-            .unwrap();
-
-        assert_eq!(results[0].state.env["RUSTC_WRAPPER"], "kache");
-        assert_eq!(results[0].state.env["KACHE_CACHE_DIR"], "/var/cache/kache");
-        assert_eq!(results[0].state.env["KACHE_MAX_SIZE"], "20GiB");
         fs::remove_dir_all(temp).unwrap();
     }
 
