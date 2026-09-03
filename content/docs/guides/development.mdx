@@ -77,11 +77,11 @@ Ownership is layered:
   [`crates/velnor-model/Cargo.toml:1-20`](../../crates/velnor-model/Cargo.toml)
   [`crates/velnor-action-model/Cargo.toml:1-16`](../../crates/velnor-action-model/Cargo.toml)
 - `velnor-cas` owns digest-verified content-addressed storage; the crash-safe
-  action journal is limited to the action and shared models; cache service owns
-  lease-safe compiler caching over journal, action model, and CAS.
+  action journal is limited to the action and shared models. Docker Rust build
+  outputs are owned by the image-pinned Mr Boxington store rather than another
+  Velnor compiler-cache crate.
   [`crates/velnor-cas/Cargo.toml:1-20`](../../crates/velnor-cas/Cargo.toml)
   [`crates/velnor-action-journal/Cargo.toml:1-24`](../../crates/velnor-action-journal/Cargo.toml)
-  [`crates/velnor-cache-service/Cargo.toml:1-20`](../../crates/velnor-cache-service/Cargo.toml)
 - `velnor-control` owns daemon-side application services and directly consumes
   only the journal and shared model. `velnor-client` owns the transport contract
   and consumes only the shared model. `velnor-render` owns output renderers and
@@ -91,7 +91,7 @@ Ownership is layered:
   [`crates/velnor-render/Cargo.toml:1-17`](../../crates/velnor-render/Cargo.toml)
 - `velnorctl` owns operator composition and the Axum adapter; it currently uses
   the runner library as an explicitly interim execution facade. `velnor-runner`
-  owns the daemon/runtime binaries and consumes control, cache, action, and model
+  owns the daemon/runtime binaries and consumes control, action, and model
   crates. `velnor-tools` owns maintainer policy/verification tooling; the
   `unit-collector` tool owns structured Cargo evidence collection
   (`tools/unit-collector/src/main.rs:1-41`).

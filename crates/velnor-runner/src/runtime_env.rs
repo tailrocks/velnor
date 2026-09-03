@@ -22,14 +22,6 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         ("AGENT_TOOLSDIRECTORY".to_string(), "/__tool".to_string()),
         ("RUNNER_WORKSPACE".to_string(), "/__w".to_string()),
         ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
-        (
-            "SCCACHE_CACHE_SIZE".to_string(),
-            std::env::var("VELNOR_SCCACHE_CACHE_SIZE").unwrap_or_else(|_| "20G".to_string()),
-        ),
-        (
-            "SCCACHE_BASEDIRS".to_string(),
-            "/__w:/github/home".to_string(),
-        ),
     ];
 
     let repository = job.variable("github.repository");
@@ -432,6 +424,7 @@ fn environment_value(value: &Value) -> String {
 }
 
 fn is_protected_default_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
     name.starts_with("GITHUB_")
         || name.starts_with("RUNNER_")
         || name.starts_with("ACTIONS_")
@@ -440,7 +433,7 @@ fn is_protected_default_env(name: &str) -> bool {
             name,
             "MISE_LOCKFILE" | "MISE_LOCKED" | "MISE_LOCKED_VERIFY_PROVENANCE"
         )
-        || name == "SCCACHE_BASEDIRS"
+        || (upper.starts_with("MBX_") && upper != "MBX_DISABLE")
 }
 
 fn configured_cache_url(url: Option<&str>, has_job_token: bool) -> Option<&str> {
@@ -725,10 +718,6 @@ mod tests {
         assert!(env.contains(&("CARGO_TERM_COLOR".into(), "always".into())));
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "1".into())));
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "0".into())));
-        assert!(env.contains(&("SCCACHE_CACHE_SIZE".into(), "20G".into())));
-        assert!(env.contains(&("SCCACHE_BASEDIRS".into(), "/__w:/github/home".into())));
-        assert!(!env.contains(&("SCCACHE_BASEDIRS".into(), "/untrusted/override".into())));
-        assert!(env.contains(&("SCCACHE_DIR".into(), "/var/cache/sccache".into())));
         assert!(env.contains(&("GITHUB_REF".into(), "refs/heads/main".into())));
         assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
         assert!(env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));

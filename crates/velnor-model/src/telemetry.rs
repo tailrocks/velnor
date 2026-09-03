@@ -1722,7 +1722,7 @@ mod tests {
             ("hit".into(), json!(false)),
             ("lookup_ms".into(), json!(1)),
             ("physical_bytes_known".into(), json!(false)),
-            ("store".into(), json!("kache")),
+            ("store".into(), json!("mbx")),
         ]));
         let serialized = serde_json::to_value(unknown).expect("serialize unknown accounting");
         assert_eq!(serialized["fields"]["physical_bytes_known"], false);
@@ -1735,7 +1735,7 @@ mod tests {
             ("newly_allocated_bytes".into(), json!(23)),
             ("physical_bytes_known".into(), json!(true)),
             ("shared_bytes".into(), json!(11)),
-            ("store".into(), json!("kache")),
+            ("store".into(), json!("mbx")),
         ]));
         assert_eq!(
             serde_json::to_value(known).expect("serialize known accounting")["fields"]
@@ -1749,14 +1749,14 @@ mod tests {
                 ("lookup_ms".into(), json!(1)),
                 ("physical_bytes_known".into(), json!(false)),
                 ("shared_bytes".into(), json!(11)),
-                ("store".into(), json!("kache")),
+                ("store".into(), json!("mbx")),
             ]),
             BTreeMap::from([
                 ("hit".into(), json!(true)),
                 ("lookup_ms".into(), json!(1)),
                 ("physical_bytes_known".into(), json!(true)),
                 ("shared_bytes".into(), json!(11)),
-                ("store".into(), json!("kache")),
+                ("store".into(), json!("mbx")),
             ]),
         ] {
             assert!(TelemetryEnvelope::new(TelemetryEnvelopeInput {
@@ -1779,7 +1779,7 @@ mod tests {
         let required_cache_fields = BTreeMap::from([
             ("hit".into(), json!(true)),
             ("lookup_ms".into(), json!(1)),
-            ("store".into(), json!("kache")),
+            ("store".into(), json!("mbx")),
         ]);
         let required_artifact_fields = BTreeMap::from([
             ("digest".into(), json!("abc")),
@@ -1797,7 +1797,7 @@ mod tests {
                     ("hit".into(), json!(false)),
                     ("lookup_ms".into(), json!(1)),
                     ("physical_bytes_known".into(), json!(false)),
-                    ("store".into(), json!("kache")),
+                    ("store".into(), json!("mbx")),
                 ])),
             ),
             (
@@ -1808,7 +1808,7 @@ mod tests {
                     ("newly_allocated_bytes".into(), json!(0)),
                     ("physical_bytes_known".into(), json!(true)),
                     ("shared_bytes".into(), json!(0)),
-                    ("store".into(), json!("kache")),
+                    ("store".into(), json!("mbx")),
                 ])),
             ),
             (
@@ -1849,7 +1849,7 @@ mod tests {
             ("newly_allocated_bytes".into(), json!(23)),
             ("physical_bytes_known".into(), json!(true)),
             ("shared_bytes".into(), json!(11)),
-            ("store".into(), json!("kache")),
+            ("store".into(), json!("mbx")),
         ])))
         .expect("serialize known telemetry wire");
         for (case, mutation) in [

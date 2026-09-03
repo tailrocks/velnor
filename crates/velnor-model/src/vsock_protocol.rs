@@ -11,8 +11,8 @@ use crate::job_summary::JobConclusion;
 
 /// Protocol version. Mismatch fails closed.
 ///
-/// Version 6 adds the required compiler-cache descriptor to `GuestJobPlan`.
-pub const PROTOCOL_VERSION: u16 = 6;
+/// Version 7 removes the retired compiler-cache descriptor from `GuestJobPlan`.
+pub const PROTOCOL_VERSION: u16 = 7;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
 /// stdout stream tag in [`VsockMessage::Stdio`].
