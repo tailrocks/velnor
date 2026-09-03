@@ -1,5 +1,6 @@
 [tools]
 actionlint = "1.7.12"
+"aqua:oven-sh/bun" = "1.4.0"
 cargo-binstall = "1.22.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"

@@ -21,7 +21,6 @@ mod cache;
 mod capacity;
 mod checkout;
 mod command_files;
-mod compiler_action;
 mod config;
 mod container;
 mod docker_lease;

@@ -71,23 +71,6 @@ checksum = "sha256:974484518ebd6dbe18f356fd5446171c43dc590d7189c53e7482b36c3af88
 url = "https://github.com/fornwall/rust-script/releases/download/0.36.0/rust-script-x86_64-unknown-linux-gnu.tar.gz"
 url_api = "https://api.github.com/repos/fornwall/rust-script/releases/assets/283099032"
 
-[[tools."github:kunobi-ninja/kache"]]
-version = "0.14.2"
-backend = "github:kunobi-ninja/kache"
-specifiers = ["0.14.2"]
-
-[tools."github:kunobi-ninja/kache"."platforms.linux-arm64"]
-checksum = "sha256:2892fd7d6243ec791879c5538691ddc501934ae8a70f5bdf497567eafcce1d39"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/512934148"
-provenance = "github-attestations"
-
-[tools."github:kunobi-ninja/kache"."platforms.linux-x64"]
-checksum = "sha256:8cc4a3eb1621268732c030b3c74bbf3066fae905e4ed0f27e32aeca836b3e95a"
-url = "https://github.com/kunobi-ninja/kache/releases/download/v0.14.2/kache-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/kunobi-ninja/kache/releases/assets/512934175"
-provenance = "github-attestations"
-
 [[tools.hadolint]]
 version = "2.15.1"
 backend = "aqua:hadolint/hadolint"
@@ -134,6 +117,24 @@ url_api = "https://api.github.com/repos/rui314/mold/releases/assets/395509405"
 checksum = "sha256:a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d"
 url = "https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz"
 url_api = "https://api.github.com/repos/rui314/mold/releases/assets/395509419"
+
+[[tools.mr-boxington]]
+version = "1.6.0"
+backend = "github:jdx/mr-boxington"
+specifiers = ["1.6.0"]
+
+[tools.mr-boxington."platforms.linux-arm64"]
+checksum = "sha256:5fd146c4bfe68162036eea9fe63e8d65086f453b607ba5cf9bccc974e26473e3"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.6.0/mbx-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/542909652"
+provenance = "github-attestations"
+
+[tools.mr-boxington."platforms.linux-x64"]
+checksum = "sha256:4f706e48bbaafcf8ac4178b9a8b63c1d3f399b5b9b8024a13c3f769d77f4a19a"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.6.0/mbx-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/542909670"
+provenance = "github-attestations"
+provenance_verified = true
 
 [[tools.node]]
 version = "26.5.0"

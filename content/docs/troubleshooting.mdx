@@ -137,6 +137,22 @@ Unsafe archive paths, unknown cache subpaths, missing runtime credentials, or
 backend-specific capability limits can fail this stage. Same-host local
 artifact fallback does not prove that GitHub received the artifact.
 
+For Rust failures on the Docker backend, run `mbx doctor` in the job and check
+that `/var/cache/mbx` is writable. Managed targets are under
+`/var/cache/mbx/targets`; the packaged host path is
+`/var/cache/velnor/v1/TRUST_CLASS/compiler/mbx/REPOSITORY_ID`. Confirm the
+repository ID and `untrusted`, `trusted`, or `release` partition before
+comparing jobs. Cargo registry and Git source caches are separate, so a warm
+registry does not imply a warm Mr Boxington store.
+
+Set `MBX_DISABLE=1` in the workflow to reproduce with plain Cargo outside Mr
+Boxington. An explicit `mozilla-actions/sccache-action` is the only supported
+alternative and also disables Mr Boxington; the default does not set
+`RUSTC_WRAPPER`. Kache and the old compiler-cache service are unavailable.
+MicroVM jobs never receive this Docker integration. Mr Boxington discovers
+cgroup resources automatically, so avoid diagnosing its behavior from assumed
+hardcoded CPU or memory values.
+
 ## 10. Result reporting
 
 Healthy: publishers drain, Velnor posts completion to the run service, receives

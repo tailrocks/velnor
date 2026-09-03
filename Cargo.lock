@@ -3609,21 +3609,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "velnor-cache-service"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "velnor-action-journal",
- "velnor-action-model",
- "velnor-cas",
-]
-
-[[package]]
 name = "velnor-cas"
 version = "0.1.0"
 dependencies = [
@@ -3732,7 +3717,6 @@ dependencies = [
  "url",
  "uuid",
  "velnor-action-model",
- "velnor-cache-service",
  "velnor-control",
  "velnor-model",
  "wiremock",

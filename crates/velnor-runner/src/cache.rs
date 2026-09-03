@@ -7,8 +7,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use crate::container::StoreTrustClass;
 use anyhow::{bail, Context, Result};
-use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
 
 use crate::{
     args::{CacheArgs, CacheCommand, CacheGcArgs},
@@ -446,18 +446,28 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         },
     ];
     for trust_class in [
-        GuestCompilerCacheTrustClass::Untrusted,
-        GuestCompilerCacheTrustClass::Trusted,
-        GuestCompilerCacheTrustClass::Release,
+        StoreTrustClass::Untrusted,
+        StoreTrustClass::Trusted,
+        StoreTrustClass::Release,
     ] {
+        let trust_scope = match trust_class {
+            StoreTrustClass::Untrusted => "untrusted",
+            StoreTrustClass::Trusted => "trusted",
+            StoreTrustClass::Release => "release",
+        };
         for (kind, path) in [
+            (
+                CacheStore::Mbx,
+                crate::storage::cache_class_path_for_trust(
+                    work_root,
+                    trust_scope,
+                    "compiler/mbx",
+                    "_velnor_mbx",
+                ),
+            ),
             (
                 CacheStore::Sccache,
                 crate::container::sccache_host(work_root, trust_class),
-            ),
-            (
-                CacheStore::Kache,
-                crate::container::kache_host(work_root, trust_class),
             ),
         ] {
             stores.push(StoreRoot {
@@ -755,7 +765,7 @@ fn reclaim_priority(store: CacheStore) -> u8 {
         CacheStore::Targets => 2,
         CacheStore::Cargo => 3,
         CacheStore::Mise => 4,
-        CacheStore::Sccache | CacheStore::Kache => 5,
+        CacheStore::Mbx | CacheStore::Sccache => 5,
     }
 }
 
@@ -914,8 +924,8 @@ pub(crate) enum CacheStore {
     Targets,
     ActionsCache,
     Artifacts,
+    Mbx,
     Sccache,
-    Kache,
 }
 
 impl fmt::Display for CacheStore {
@@ -926,8 +936,8 @@ impl fmt::Display for CacheStore {
             Self::Targets => "targets",
             Self::ActionsCache => "actions-cache",
             Self::Artifacts => "artifacts",
+            Self::Mbx => "mbx",
             Self::Sccache => "sccache",
-            Self::Kache => "kache",
         })
     }
 }

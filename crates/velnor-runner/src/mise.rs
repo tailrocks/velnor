@@ -36,7 +36,7 @@ use anyhow::{bail, Context, Result};
 /// exact version admitted by `manifest.rs`. There is no field in `mise.lock`
 /// for the mise binary itself (the lock pins *tools*), so this constant is the
 /// authoritative committed record of the fleet pin.
-pub const FLEET_PINNED_MISE_VERSION: &str = "2026.8.3";
+pub const FLEET_PINNED_MISE_VERSION: &str = "2026.9.1";
 
 /// Config file names mise recognizes, each paired with its adjacent lock name.
 /// Ordered by mise's own precedence (nearest, most specific first).
@@ -632,6 +632,14 @@ backend = "aqua:protocolbuffers/protobuf/protoc"
         let dockerfile = include_str!("../../../docker/job-ubuntu.Dockerfile");
         assert!(dockerfile.contains("COPY docker/job-mise.lock /opt/mise/config/mise.lock"));
         assert!(!dockerfile.contains("/opt/mise/config/config.lock"));
+        assert!(dockerfile.contains("MISE_VERSION=\"v2026.9.1\""));
+        assert!(dockerfile.contains("PATH=/opt/mbx/bin:"));
+        assert!(dockerfile.contains("XDG_DATA_HOME=/opt exec"));
+        assert!(dockerfile.contains("mbx doctor"));
+        assert!(!dockerfile.contains("RUSTC_WRAPPER="));
+        assert!(!dockerfile.contains("SCCACHE_DIR="));
+        assert!(dockerfile.contains("mise exec -- sccache --version"));
+        assert!(!dockerfile.contains("mise exec -- kache"));
     }
 
     #[test]
