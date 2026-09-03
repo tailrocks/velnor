@@ -8055,33 +8055,6 @@ fn execute_script_job_inner(
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
         .with_trust_scope(trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
-    if container.compiler_cache_service {
-        let root = container
-            .compiler_cache_service_root
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("compiler-cache service is enabled without a root"))?;
-        let mut config = velnor_cache_service::CompilerCacheConfig::new(
-            root,
-            format!("{}:{}", container.daemon_id, container.name),
-        );
-        config.trust_class = match container.compiler_cache_trust_class {
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted => {
-                velnor_action_model::TrustClass::Untrusted
-            }
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted => {
-                velnor_action_model::TrustClass::Trusted
-            }
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release => {
-                velnor_action_model::TrustClass::Release
-            }
-        };
-        let service = velnor_cache_service::CompilerCacheService::open_production(
-            config,
-            velnor_cache_service::WrapperDeclaration::default(),
-        )
-        .context("open structured compiler-cache service")?;
-        executor = executor.with_compiler_cache_service(service);
-    }
     // Adopt the pre-create thread's lease guard so the in-container docker
     // socket stays proxied until THIS executor's job cleanup drops it.
     if let Some(lease) = environment_lease {
@@ -11587,7 +11560,6 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .unwrap_or(0);
     let (cache_logical, cache_physical) =
         crate::cache::accounting_summary(&cache_root).unwrap_or((0, 0));
-    probe_compiler_cache(&cache_root, &args.name)?;
     let client = RegistrationClient::new()?;
     let runners = client
         .list_runners(&scope, pat)
@@ -11755,51 +11727,6 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn probe_compiler_cache(cache_root: &Path, owner: &str) -> Result<()> {
-    use velnor_action_model::TrustClass;
-    use velnor_cache_service::{
-        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
-        KACHE_VERSION, SCCACHE_VERSION,
-    };
-
-    println!(
-        "compiler-cache: policy=auto backend=kache version={KACHE_VERSION}; rollback=sccache version={SCCACHE_VERSION}"
-    );
-    let mut failures = Vec::new();
-    for trust_class in [
-        TrustClass::Untrusted,
-        TrustClass::Trusted,
-        TrustClass::Release,
-    ] {
-        let mut config = CompilerCacheConfig::new(cache_root, owner);
-        config.trust_class = trust_class;
-        config.policy = CompilerCachePolicy::Auto;
-        match CompilerCacheService::open_production(config, WrapperDeclaration::default())
-            .and_then(|service| service.probe_restore_path())
-        {
-            Ok(probe) if probe.writable && probe.regular_round_trip => println!(
-                "compiler-cache: trust={trust_class:?} path={} writable=true round_trip=true",
-                probe.path.display()
-            ),
-            Ok(probe) => failures.push(format!(
-                "{trust_class:?}: path={} writable={} round_trip={}",
-                probe.path.display(),
-                probe.writable,
-                probe.regular_round_trip
-            )),
-            Err(error) => failures.push(format!("{trust_class:?}: {error}")),
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        bail!(
-            "compiler-cache restore probe failed: {}; refusing degraded cache startup",
-            failures.join("; ")
-        )
-    }
 }
 
 pub async fn status(args: StatusArgs) -> Result<()> {
@@ -12621,7 +12548,7 @@ mod tests {
         assert!(text.contains("unsupported capability"), "{text}");
         assert!(text.contains("execution.context_data"), "{text}");
         assert!(text.contains("received '<empty>'"), "{text}");
-        assert!(text.contains("manifest version 10"), "{text}");
+        assert!(text.contains("manifest version 11"), "{text}");
     }
 
     #[test]
@@ -18096,11 +18023,9 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            mbx_store_host: None,
+            sccache_store_host: None,
         }
     }
 

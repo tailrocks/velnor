@@ -91,7 +91,6 @@ impl From<JobExecutionSummary> for NormalizedJobSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container::Shell;
 
     fn container_spec(root: &std::path::Path) -> JobContainerSpec {
         JobContainerSpec {
@@ -116,117 +115,9 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
-            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: crate::container::StoreTrustClass::Release,
+            mbx_store_host: None,
+            sccache_store_host: None,
         }
-    }
-
-    #[test]
-    fn normalized_plan_can_wrap_current_executor_step_surface() {
-        let root = std::env::temp_dir().join("velnor-plan-test");
-        let step = ExecutableStep::Script(crate::script_step::ScriptStep {
-            id: "check".into(),
-            display_name: String::new(),
-            script: "cargo check".into(),
-            shell: Shell::Bash,
-            working_directory_container: "/__w".into(),
-            env: Vec::new(),
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        });
-        let plan = NormalizedJobPlan {
-            identity: JobIdentity {
-                plan_id: "plan".into(),
-                job_id: "job".into(),
-                request_id: Some("request".into()),
-                name: "check".into(),
-                display_name: "Check".into(),
-                workflow_name: Some("CI".into()),
-                repository: Some("ChainArgos/java-monorepo".into()),
-                run_id: Some("1".into()),
-                run_attempt: Some("1".into()),
-            },
-            github_report: Some(GitHubReportTarget {
-                run_service_url: "https://run.actions.githubusercontent.com/jobs/1/".into(),
-                billing_owner_id: Some("42".into()),
-                system_connection_token: Some("token".into()),
-                timeline_id: Some("timeline".into()),
-                mask_values: vec!["token".into()],
-            }),
-            execution: JobExecutionPlan {
-                runner_labels: vec!["hetzner-sentry-ci".into()],
-                workspace_container: "/__w".into(),
-                workspace_host: root.join("workspace"),
-                temp_host: root.join("temp"),
-                home_host: root.join("home"),
-                actions_host: root.join("actions"),
-                tools_host: root.join("tools"),
-                job_container: container_spec(&root),
-                services: Vec::new(),
-                env: Vec::new(),
-                context_data: Vec::new(),
-                defaults: NormalizedRunDefaults {
-                    shell: Some("bash".into()),
-                    working_directory: None,
-                },
-            },
-            steps: vec![step],
-            outputs: BTreeMap::new(),
-        };
-
-        assert!(plan.is_github_reported());
-        assert_eq!(plan.steps.len(), 1);
-        assert_eq!(
-            plan.identity.repository.as_deref(),
-            Some("ChainArgos/java-monorepo")
-        );
-        let validated = crate::execution::ValidatedPlan::from_normalized(&plan);
-        assert_eq!(validated.job_id, "job");
-        assert_eq!(validated.steps[0].id, "check");
-        assert_eq!(validated.steps[0].script, "cargo check");
-        assert!(validated.steps[0].action.is_none());
-        assert!(validated.outputs.is_empty());
-        assert_eq!(validated.job_container_image, "ubuntu:24.04");
-        assert_eq!(validated.workspace, "/__w");
-        assert_eq!(
-            validated.env,
-            vec![
-                ("RUSTC_WRAPPER".into(), "sccache".into()),
-                ("SCCACHE_CACHE_SIZE".into(), "20G".into()),
-                ("SCCACHE_DIR".into(), "/var/cache/sccache".into()),
-                ("SCCACHE_GHA_ENABLED".into(), "false".into()),
-            ]
-        );
-        assert!(!validated.buildx);
-        assert!(!validated.testcontainers);
-        let guest = validated.to_guest("job", 1);
-        assert_eq!(guest.steps[0].script, "cargo check");
-        assert_eq!(guest.workspace, "/__w");
-        assert_eq!(guest.compiler_cache, validated.compiler_cache);
-        assert_eq!(
-            guest.compiler_cache.backend,
-            velnor_model::guest_plan::GuestCompilerCacheBackend::Sccache
-        );
-        assert_eq!(
-            guest.compiler_cache.trust_class,
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
-        );
-        assert_eq!(
-            guest.compiler_cache.protocol_version,
-            velnor_model::guest_plan::GuestCompilerCacheDescriptor::PROTOCOL_VERSION
-        );
-        assert_eq!(
-            guest.compiler_cache.transport_namespace,
-            velnor_model::guest_plan::GuestCompilerCacheDescriptor::TRANSPORT_NAMESPACE
-        );
-        assert!(!guest
-            .encode()
-            .unwrap()
-            .windows(11)
-            .any(|w| w == b"docker.sock"));
     }
 }

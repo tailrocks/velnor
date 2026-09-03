@@ -118,6 +118,37 @@ Docker actions, Buildx, and testcontainers operate inside the trusted host
 boundary. Cancellation removes owned job containers and cleanup reclaims
 services, networks, and BuildKit resources.
 
+#### Docker Rust acceleration
+
+The default job image pins Mr Boxington (`mbx`) 1.6.0 and runs
+`mbx setup --yes` while building the image. The generated Cargo launcher is
+first on `PATH`, so workflow steps continue to invoke plain `cargo`; those
+commands transparently enter Mr Boxington. There is no default
+`RUSTC_WRAPPER`. Mr Boxington discovers the container's cgroup constraints and
+available resources instead of Velnor hardcoding CPU or memory values for it.
+
+Velnor mounts the job's host-persistent Mr Boxington cache and managed target
+directories at `/var/cache/mbx`. The host store is partitioned by the admitted
+`untrusted`, `trusted`, or `release` trust class and then by numeric GitHub
+repository ID. Missing or invalid repository identity fails closed
+to a job-ephemeral store. This prevents compiled state from one repository or
+trust boundary becoming an input to another. Trust partitioning is a cache
+reuse boundary, not encryption or protection from a compromised host.
+
+Mr Boxington owns garbage collection inside this store. Velnor supplies the
+current limits: 20 GiB for its cache, 30 GiB for managed targets, and 50 GiB
+combined. These limits operate inside Velnor's global disk-capacity admission
+and accounting; they do not increase host capacity. Cargo registry and Git
+source persistence remain separate stores and are unaffected by Mr Boxington's
+GC.
+
+To use the supported alternative, declare
+`mozilla-actions/sccache-action` explicitly in the workflow. Velnor then uses
+the action's sccache path and sets `MBX_DISABLE=1`; it does not combine the two
+accelerators. To disable Mr Boxington without selecting sccache, set
+`MBX_DISABLE=1` in the workflow. Kache and the former Velnor compiler-cache
+service are not available.
+
 ### MicroVM
 
 MicroVM uses jailed Firecracker with Docker available inside the guest, never
@@ -128,8 +159,9 @@ and the production vsock transport.
 The plan is bound to job, isolation, generation, nonce, and plan-hash
 identities. Guest handshakes verify those identities and result digests.
 Snapshots are reused only when their identity and version match. Compiler
-cache is disabled for MicroVM. End-to-end cancellation is not currently wired
-for MicroVM.
+cache is disabled for MicroVM. The Docker Mr Boxington integration, its mount,
+and explicit sccache alternative are not provided to MicroVM jobs. End-to-end
+cancellation is not currently wired for MicroVM.
 
 ## Slots and capacity
 

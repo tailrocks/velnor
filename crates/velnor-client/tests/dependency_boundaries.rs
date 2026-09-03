@@ -15,12 +15,11 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 12] = [
+const WORKSPACE_PACKAGES: [&str; 11] = [
     "velnor-model",
     "velnor-action-model",
     "velnor-cas",
     "velnor-action-journal",
-    "velnor-cache-service",
     "velnor-control",
     "velnor-client",
     "velnor-render",
@@ -378,7 +377,6 @@ fn velnor_client_depends_only_on_velnor_model() {
     );
     for forbidden in [
         "velnor-action-journal",
-        "velnor-cache-service",
         "velnor-control",
         "velnor-runner",
         "axum",
@@ -408,7 +406,6 @@ fn velnor_client_transitively_never_reaches_daemon_internals() {
         "velnor-action-model",
         "velnor-cas",
         "velnor-action-journal",
-        "velnor-cache-service",
         "velnor-control",
         "velnor-runner",
         "velnorctl",
@@ -454,17 +451,6 @@ fn crate_dependency_direction_matches_approved_graph() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from(["velnor-action-model".to_owned(), "velnor-model".to_owned(),]),
         "action journal is constrained to foundational model crates"
-    );
-    assert_eq!(
-        members_only(&graph["velnor-cache-service"])
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "velnor-action-journal".to_owned(),
-            "velnor-action-model".to_owned(),
-            "velnor-cas".to_owned(),
-        ]),
-        "cache service is constrained to foundational storage crates"
     );
     assert_velnor_control_direct_dependencies(&metadata, &cargo_metadata_resolved());
     assert_eq!(members_only(&graph["velnor-render"]), vec!["velnor-model"]);
@@ -514,7 +500,6 @@ fn shared_crates_never_depend_on_clap_or_axum() {
         "velnor-action-model",
         "velnor-cas",
         "velnor-action-journal",
-        "velnor-cache-service",
         "velnor-control",
         "velnor-client",
         "velnor-render",

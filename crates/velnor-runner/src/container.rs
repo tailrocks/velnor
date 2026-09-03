@@ -7,9 +7,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use velnor_cache_service::{CompilerCacheBackend, CompilerCacheRuntime};
-use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
-
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -23,6 +20,13 @@ fn is_docker_control_env(name: &str) -> bool {
     name.eq_ignore_ascii_case("DOCKER_HOST")
         || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreTrustClass {
+    Untrusted,
+    Trusted,
+    Release,
 }
 
 #[derive(Debug, Clone)]
@@ -55,47 +59,39 @@ pub struct JobContainerSpec {
     /// one would make rename(2) across `target` return EXDEV even though the
     /// same workflow succeeds on GitHub-hosted runners.
     pub cargo_target_host: Option<PathBuf>,
-    /// Exactly one compiler-cache store is exposed to a job.
-    pub compiler_cache_backend: CompilerCacheBackend,
-    /// Trust namespace admitted for compiler-cache entries. The selected
-    /// namespace remains below the daemon-shared Plan 066 cache root, so slots
-    /// share warm entries without crossing trust boundaries.
-    pub compiler_cache_trust_class: GuestCompilerCacheTrustClass,
-    /// Host-operator opt-in for the structured service-owned compiler path.
-    /// Existing wrapper backends remain unchanged when this is false.
-    pub compiler_cache_service: bool,
-    pub compiler_cache_service_root: Option<PathBuf>,
+    /// Trust namespace admitted for executable and build stores.
+    pub store_trust_class: StoreTrustClass,
+    /// Docker-only Mr Boxington store. `None` for MicroVM jobs.
+    pub mbx_store_host: Option<PathBuf>,
+    /// Docker-only explicit sccache action store.
+    pub sccache_store_host: Option<PathBuf>,
 }
 
 impl JobContainerSpec {
-    pub(crate) fn compiler_cache_runtime(&self) -> CompilerCacheRuntime {
-        if self.compiler_cache_service {
-            return CompilerCacheRuntime::off();
-        }
-        match self.compiler_cache_backend {
-            CompilerCacheBackend::Sccache => CompilerCacheRuntime::new(
-                CompilerCacheBackend::Sccache,
-                sccache_host(&self.temp_host, self.compiler_cache_trust_class),
-            ),
-            CompilerCacheBackend::Kache => CompilerCacheRuntime::new(
-                CompilerCacheBackend::Kache,
-                kache_host(&self.temp_host, self.compiler_cache_trust_class),
-            ),
-            CompilerCacheBackend::Off => CompilerCacheRuntime::off(),
-        }
-    }
-
-    fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
-        let runtime = self.compiler_cache_runtime();
-        let (Some(host), Some(container)) = (runtime.host_path(), runtime.container_path()) else {
-            return;
-        };
-        args.extend(["-v".into(), self.mount_arg(host, container)]);
-    }
-
-    fn append_compiler_cache_environment(&self, args: &mut Vec<String>) {
-        for (name, value) in &self.compiler_cache_runtime().environment().variables {
-            args.extend(["-e".into(), format!("{name}={value}")]);
+    fn append_rust_acceleration(&self, args: &mut Vec<String>) {
+        if let Some(host) = &self.mbx_store_host {
+            args.extend(["-v".into(), self.mount_arg(host, "/var/cache/mbx")]);
+            for setting in [
+                "MBX_CACHE_DIR=/var/cache/mbx",
+                "MBX_TARGET_ROOT=/var/cache/mbx/targets",
+                "MBX_GC_AUTO=true",
+                "MBX_GC_MAX_SIZE=20GiB",
+                "MBX_TARGET_MAX_SIZE=30GiB",
+                "MBX_GC_MAX_TOTAL_SIZE=50GiB",
+            ] {
+                args.extend(["-e".into(), setting.into()]);
+            }
+        } else if let Some(host) = &self.sccache_store_host {
+            args.extend(["-v".into(), self.mount_arg(host, "/var/cache/sccache")]);
+            for setting in [
+                "MBX_DISABLE=1",
+                "RUSTC_WRAPPER=sccache",
+                "SCCACHE_DIR=/var/cache/sccache",
+                "SCCACHE_CACHE_SIZE=20G",
+                "SCCACHE_GHA_ENABLED=false",
+            ] {
+                args.extend(["-e".into(), setting.into()]);
+            }
         }
     }
 
@@ -232,16 +228,12 @@ impl JobContainerSpec {
                 self.docker_host_path(&self.workspace_host).display()
             ),
         ];
-        self.append_compiler_cache_mount(&mut args);
         for (name, value) in &self.env {
             if is_docker_control_env(name) {
                 continue;
             }
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        // Daemon-owned compiler-cache variables are appended after workflow
-        // variables so a job cannot replace the selected wrapper or store.
-        self.append_compiler_cache_environment(&mut args);
         self.append_ownership_labels(&mut args);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
@@ -270,6 +262,12 @@ impl JobContainerSpec {
         // and daemon resource options so the job cannot be displaced from the
         // network shared with its workflow services.
         args.extend(["--network".into(), self.network.clone()]);
+
+        // Daemon-owned acceleration mounts and variables must follow both
+        // workflow environment and expanded container options. A trusted job
+        // may add options, but cannot redirect a persistent store or stack
+        // sccache with the image's mbx shim.
+        self.append_rust_acceleration(&mut args);
 
         // PID 1 tails a live console file instead of /dev/null, so
         // `docker logs <job-container>` mirrors the GitHub UI step output.
@@ -520,7 +518,6 @@ impl JobContainerSpec {
             "node".into(),
         ];
         self.append_ownership_labels(&mut args);
-        self.append_compiler_cache_mount(&mut args);
         self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
@@ -529,7 +526,7 @@ impl JobContainerSpec {
             }
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        self.append_compiler_cache_environment(&mut args);
+        self.append_rust_acceleration(&mut args);
         self.append_job_cgroup_parent(&mut args);
         if !path_prepend.is_empty() {
             let path = path_prepend
@@ -631,7 +628,6 @@ impl JobContainerSpec {
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
         self.append_ownership_labels(&mut args);
-        self.append_compiler_cache_mount(&mut args);
         self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
@@ -640,7 +636,7 @@ impl JobContainerSpec {
             }
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        self.append_compiler_cache_environment(&mut args);
+        self.append_rust_acceleration(&mut args);
         self.append_job_cgroup_parent(&mut args);
         if let Some(entrypoint) = entrypoint {
             args.extend(["--entrypoint".into(), entrypoint.into()]);
@@ -786,7 +782,7 @@ impl JobContainerSpec {
             |repository| {
                 cargo_executable_store_host_for_scope(
                     &self.temp_host,
-                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    store_trust_namespace(self.store_trust_class),
                     &repository,
                 )
             },
@@ -797,7 +793,7 @@ impl JobContainerSpec {
         match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
             (Some(repository), Some(slot)) => mise_executable_store_host_for_scope(
                 &self.temp_host,
-                compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                store_trust_namespace(self.store_trust_class),
                 &repository,
             )
             .join("slots")
@@ -825,7 +821,7 @@ impl JobContainerSpec {
             |repository| {
                 mise_binary_store_host_for_scope(
                     &self.temp_host,
-                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    store_trust_namespace(self.store_trust_class),
                     &repository,
                 )
             },
@@ -838,7 +834,7 @@ impl JobContainerSpec {
             |repository| {
                 playwright_browser_store_host_for_scope(
                     &self.temp_host,
-                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    store_trust_namespace(self.store_trust_class),
                     &repository,
                 )
             },
@@ -1106,29 +1102,20 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
-pub(crate) fn sccache_host(temp_host: &Path, trust_class: GuestCompilerCacheTrustClass) -> PathBuf {
+pub(crate) fn sccache_host(temp_host: &Path, trust_class: StoreTrustClass) -> PathBuf {
     crate::storage::cache_class_path_for_trust(
         &daemon_store_root(temp_host),
-        compiler_cache_trust_namespace(trust_class),
+        store_trust_namespace(trust_class),
         "compiler/sccache",
         "_velnor_sccache",
     )
 }
 
-pub(crate) fn kache_host(temp_host: &Path, trust_class: GuestCompilerCacheTrustClass) -> PathBuf {
-    crate::storage::cache_class_path_for_trust(
-        &daemon_store_root(temp_host),
-        compiler_cache_trust_namespace(trust_class),
-        "compiler/kache",
-        "_velnor_kache",
-    )
-}
-
-fn compiler_cache_trust_namespace(trust_class: GuestCompilerCacheTrustClass) -> &'static str {
+fn store_trust_namespace(trust_class: StoreTrustClass) -> &'static str {
     match trust_class {
-        GuestCompilerCacheTrustClass::Untrusted => "untrusted",
-        GuestCompilerCacheTrustClass::Trusted => "trusted",
-        GuestCompilerCacheTrustClass::Release => "release",
+        StoreTrustClass::Untrusted => "untrusted",
+        StoreTrustClass::Trusted => "trusted",
+        StoreTrustClass::Release => "release",
     }
 }
 
@@ -1271,7 +1258,7 @@ fn playwright_browser_store_host_for_scope(
 
 /// Resolve the daemon-shared store root from a job temp dir
 /// (`…/work/slot-N/<job>/temp` → `…/work`).
-fn daemon_store_root(temp_host: &Path) -> PathBuf {
+pub(crate) fn daemon_store_root(temp_host: &Path) -> PathBuf {
     let per_slot_root = if temp_host.file_name().is_some_and(|name| name == "temp") {
         if let Some(job_dir) = temp_host.parent() {
             if job_dir.file_name().is_some_and(|name| name == "tmp") {
@@ -1387,10 +1374,9 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
-            compiler_cache_backend: CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class: GuestCompilerCacheTrustClass::Trusted,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: StoreTrustClass::Trusted,
+            mbx_store_host: Some(PathBuf::from("/tmp/_velnor_mbx/trusted")),
+            sccache_store_host: None,
         }
     }
 
@@ -1408,6 +1394,46 @@ mod tests {
                 "velnor-net-1",
             ]
         );
+    }
+
+    #[test]
+    fn default_job_mounts_only_mbx_with_bounded_gc() {
+        let args = spec().start_args();
+        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
+        assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
+        assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
+        assert!(!args.contains(&"MBX_DISABLE=1".into()));
+    }
+
+    #[test]
+    fn daemon_acceleration_environment_follows_trusted_container_options() {
+        let mut job = spec();
+        job.options = vec!["-e".into(), "MBX_CACHE_DIR=/untrusted-override".into()];
+        let args = job.start_args();
+        let override_index = args
+            .iter()
+            .position(|arg| arg == "MBX_CACHE_DIR=/untrusted-override")
+            .unwrap();
+        let policy_index = args
+            .iter()
+            .position(|arg| arg == "MBX_CACHE_DIR=/var/cache/mbx")
+            .unwrap();
+        assert!(policy_index > override_index);
+    }
+
+    #[test]
+    fn explicit_sccache_is_mutually_exclusive_with_mbx() {
+        let mut job = spec();
+        job.mbx_store_host = None;
+        job.sccache_store_host = Some("/tmp/_velnor_sccache/trusted".into());
+        let args = job.start_args();
+        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(&"RUSTC_WRAPPER=sccache".into()));
+        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
+        assert!(args.contains(&"SCCACHE_GHA_ENABLED=false".into()));
+        assert!(args.contains(&"MBX_DISABLE=1".into()));
+        assert!(!args.iter().any(|arg| arg.contains("/var/cache/mbx")));
     }
 
     fn container_test_temp(name: &str) -> PathBuf {
@@ -1435,57 +1461,6 @@ mod tests {
         assert_eq!(repair_cargo_git_store(&cargo).unwrap(), 0);
 
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn compiler_cache_mounts_are_mutually_exclusive() {
-        let mut job = spec();
-        let sccache = job.start_args().join(" ");
-        assert!(sccache.contains("/var/cache/sccache"));
-        assert!(!sccache.contains("/var/cache/kache"));
-
-        job.compiler_cache_backend = CompilerCacheBackend::Kache;
-        let kache = job.start_args().join(" ");
-        assert!(kache.contains("/var/cache/kache"));
-        assert!(!kache.contains("/var/cache/sccache"));
-        assert!(kache.contains("RUSTC_WRAPPER=kache"));
-
-        job.compiler_cache_backend = CompilerCacheBackend::Off;
-        let off = job.start_args().join(" ");
-        assert!(!off.contains("/var/cache/sccache"));
-        assert!(!off.contains("/var/cache/kache"));
-    }
-
-    #[test]
-    fn compiler_cache_stores_have_distinct_canonical_classes() {
-        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
-        assert_eq!(
-            sccache_host(temp, GuestCompilerCacheTrustClass::Trusted),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
-        );
-        assert_eq!(
-            kache_host(temp, GuestCompilerCacheTrustClass::Trusted),
-            PathBuf::from("/var/lib/velnor/work/_velnor_kache/trusted")
-        );
-    }
-
-    #[test]
-    fn compiler_cache_hosts_use_each_typed_trust_namespace() {
-        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
-        for (trust_class, namespace) in [
-            (GuestCompilerCacheTrustClass::Untrusted, "untrusted"),
-            (GuestCompilerCacheTrustClass::Trusted, "trusted"),
-            (GuestCompilerCacheTrustClass::Release, "release"),
-        ] {
-            assert_eq!(
-                sccache_host(temp, trust_class),
-                PathBuf::from(format!("/var/lib/velnor/work/_velnor_sccache/{namespace}"))
-            );
-            assert_eq!(
-                kache_host(temp, trust_class),
-                PathBuf::from(format!("/var/lib/velnor/work/_velnor_kache/{namespace}"))
-            );
-        }
     }
 
     #[test]
@@ -1589,14 +1564,14 @@ mod tests {
         assert_eq!(
             sccache_host(
                 Path::new("/var/lib/velnor/work/slot-3/job-9/temp"),
-                GuestCompilerCacheTrustClass::Trusted,
+                StoreTrustClass::Trusted,
             ),
             PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
         assert_eq!(
             sccache_host(
                 Path::new("/var/lib/velnor/work/slot-7/job-1/temp"),
-                GuestCompilerCacheTrustClass::Trusted,
+                StoreTrustClass::Trusted,
             ),
             PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
@@ -1616,7 +1591,7 @@ mod tests {
         );
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(
             &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
@@ -1647,7 +1622,7 @@ mod tests {
         assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
-        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
@@ -1737,6 +1712,7 @@ mod tests {
         spec.home_host = "/runner/work/job-1/home".into();
         spec.actions_host = "/runner/work/job-1/actions".into();
         spec.tools_host = "/runner/work/job-1/tools".into();
+        spec.mbx_store_host = Some("/runner/work/_velnor_mbx/trusted".into());
         spec.docker_host_work_dir = Some("/daemon/work".into());
 
         let args = spec.start_args();
@@ -1745,7 +1721,7 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
-        assert!(args.contains(&"/daemon/work/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(&"/daemon/work/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
@@ -2055,7 +2031,7 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
@@ -2203,7 +2179,7 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));

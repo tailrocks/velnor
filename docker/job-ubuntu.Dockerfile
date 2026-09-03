@@ -81,7 +81,7 @@ ENV HOME=/root \
     MISE_DATA_DIR=/opt/mise \
     MISE_CACHE_DIR=/opt/mise/cache \
     MISE_CONFIG_DIR=/opt/mise/config \
-    PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:$PATH \
+    PATH=/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:$PATH \
     MISE_LOCKFILE=1 \
     MISE_LOCKED=1 \
     MISE_LOCKED_VERIFY_PROVENANCE=1 \
@@ -99,15 +99,13 @@ ENV HOME=/root \
 # (docker/job-mise.toml + docker/job-mise.lock) installed fail-closed. The only
 # network bootstrap is the mise binary itself; every language and executable
 # comes from `mise install --locked` against pinned URLs/checksums. Native mise
-# aliases are preferred; alternate backends are explicit in job-mise.toml only
-# where the native registry has no suitable tool (for example Kache).
+# aliases are preferred; alternate backends are explicit in job-mise.toml only.
 COPY docker/job-mise.toml /opt/mise/config/config.toml
 COPY docker/job-mise.toml /opt/mise/config/mise.toml
 COPY docker/job-mise.lock /opt/mise/config/mise.lock
 COPY rust-toolchain.toml /opt/mise/config/rust-toolchain.toml
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/sccache-build \
     --mount=type=secret,id=mise_github_token,required=true \
     mkdir -p /opt/mise/bin && \
     : > /tmp/mise-empty.toml && \
@@ -115,24 +113,32 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml && \
     # Baked bootstrap of the mise binary at the fleet-pinned version. This is
     # the read-only /opt/mise/bin bootstrap; runtime never rewrites it.
-    curl -fsSL https://mise.run | MISE_VERSION="v2026.8.14" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
+    curl -fsSL https://mise.run | MISE_VERSION="v2026.9.1" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
     mise trust /opt/mise/config/mise.toml && \
-    # Install the native compiler cache first. Cargo-backed mise tools may
-    # compile during installation, so the wrapper must already be executable.
+    # Fail-closed, non-interactive install of the locked toolchain.
     MISE_GITHUB_TOKEN="$(cat /run/secrets/mise_github_token)" \
-    mise install --locked --yes sccache && \
-    mise reshim && \
-    # Fail-closed, non-interactive install of the remaining locked toolchain.
-    MISE_GITHUB_TOKEN="$(cat /run/secrets/mise_github_token)" \
-    RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache-build \
     mise install --locked --yes && \
     mise reshim && \
+    # Install upstream's stable Cargo launcher without activating an interactive
+    # shell. XDG_DATA_HOME places it at /opt/mbx/bin, first on the image PATH.
+    XDG_DATA_HOME=/opt mise exec -- mbx setup --yes && \
+    mbx_real="$(mise which mbx)" && \
+    printf '#!/bin/sh\nXDG_DATA_HOME=/opt exec %s "$@"\n' "$mbx_real" > /opt/mbx/bin/mbx && \
+    chmod 0755 /opt/mbx/bin/mbx && \
+    test "$(command -v cargo)" = /opt/mbx/bin/cargo && \
+    test "$(command -v mbx)" = /opt/mbx/bin/mbx && \
+    test "$(cat /opt/mbx/bin/mbx-target)" = "$mbx_real" && \
+    cargo --version && \
+    MBX_DISABLE=1 cargo --version && \
+    mbx --version | grep -F '1.6.0' && \
+    mbx doctor && \
+    test -z "${RUSTC_WRAPPER:-}" && \
+    mise exec -- sccache --version | grep -F 'sccache 0.16.0' && \
+    ! command -v kache && \
     mise exec -- rustc --version && \
     mise exec -- node --version && \
     mise exec -- npm --version && \
     mise exec -- python3 --version && \
-    mise exec -- sccache --version && \
-    mise exec -- kache --version && \
     mise exec -- hadolint --version && \
     mise exec -- cargo nextest --version && \
     mise exec -- rust-script --version && \
