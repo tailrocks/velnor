@@ -24,3 +24,4 @@ target-job-payloads/
 .source/
 __unconfig*
 todos.json
+.amp/portals/*
