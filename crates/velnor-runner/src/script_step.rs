@@ -13,12 +13,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Internal metadata passed to the structured compiler-cache boundary. The
-/// shell still applies these entries to PATH at execution time; this value
-/// lets the cache key bind to the same GITHUB_PATH state without including
-/// per-step command-file paths.
-pub(crate) const COMPILER_ACTION_PATH_ENV: &str = "VELNOR_COMPILER_ACTION_PATH";
-
 #[derive(Debug, Clone)]
 pub struct ScriptStep {
     pub id: String,
@@ -798,17 +792,7 @@ impl ScriptStepPlan {
             script_container_path: format!("/__t/{script_name}"),
             shell: step.shell,
             working_directory_container: step.working_directory_container.clone(),
-            env: {
-                let mut env = command_files.env();
-                if !path_prepend.is_empty() {
-                    env.push((
-                        COMPILER_ACTION_PATH_ENV.to_owned(),
-                        serde_json::to_string(path_prepend)
-                            .context("serialize effective GITHUB_PATH entries")?,
-                    ));
-                }
-                env
-            },
+            env: command_files.env(),
             command_files,
         })
     }
@@ -1133,13 +1117,6 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&plan.script_host_path).unwrap(),
             "export PATH='/opt/bin':'/path/with'\\''quote':\"$PATH\"\ntool --version\n"
-        );
-        assert_eq!(
-            plan.env
-                .iter()
-                .find(|(name, _)| name == COMPILER_ACTION_PATH_ENV)
-                .map(|(_, value)| value.as_str()),
-            Some(r#"["/opt/bin","/path/with'quote"]"#)
         );
         fs::remove_dir_all(temp).unwrap();
     }

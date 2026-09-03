@@ -6,7 +6,6 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use velnor_model::guest_plan::GuestCompilerCacheBackend;
 use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMessage};
 
 use super::artifacts::hex_sha256;
@@ -337,21 +336,7 @@ pub fn execute_guest_plan(
     events: &mut Vec<ExecutionEvent>,
     host_docker: bool,
 ) -> Result<i32, String> {
-    plan.validate_compiler_cache().map_err(|error| {
-        guest_capability_error(
-            "guest.compiler_cache",
-            &error,
-            "valid compiler-cache descriptor and environment",
-        )
-    })?;
     if !host_docker {
-        if plan.compiler_cache.backend != GuestCompilerCacheBackend::Off {
-            return Err(guest_capability_error(
-                "guest.compiler_cache.backend",
-                &format!("{:?}", plan.compiler_cache.backend),
-                "compiler-cache RPC/client unavailable; guest execution is disabled",
-            ));
-        }
         validate_guest_plan(plan)?;
     }
     if let Some((conclusion, exit_code)) = plan.planned_conclusion() {
@@ -537,7 +522,7 @@ impl<'a> GuestDockerTeardown<'a> {
             .collect();
         let mut state = JobExecutionState::new_with_context(&base_env, &plan.context_data);
         let mut code = 0_i32;
-        for (step_index, step) in plan.steps.iter().enumerate() {
+        for step in &plan.steps {
             self.events.push(ExecutionEvent::StepStarted {
                 step_id: step.id.clone(),
             });
@@ -590,15 +575,6 @@ impl<'a> GuestDockerTeardown<'a> {
                 .into_iter()
                 .map(|(name, value)| velnor_model::GuestEnvVar { name, value })
                 .collect();
-            plan.compiler_cache
-                .validate_compiler_cache_overrides(&resolved_step.env)
-                .map_err(|error| {
-                    guest_capability_error(
-                        &format!("guest.steps[{step_index}].env"),
-                        &error,
-                        "no compiler-cache variables conflicting with the descriptor",
-                    )
-                })?;
             let script = super::guest_actions::guest_step_script(&resolved_step)?;
             let mut exec = vec!["exec".into()];
             if !resolved_step.working_directory.is_empty() {
@@ -673,23 +649,6 @@ impl<'a> GuestDockerTeardown<'a> {
                     &mut command_state,
                 )?;
             }
-            let command_env = command_state
-                .env
-                .iter()
-                .map(|(name, value)| velnor_model::GuestEnvVar {
-                    name: name.clone(),
-                    value: value.clone(),
-                })
-                .collect::<Vec<_>>();
-            plan.compiler_cache
-                .validate_compiler_cache_overrides(&command_env)
-                .map_err(|error| {
-                    guest_capability_error(
-                        "guest.GITHUB_ENV",
-                        &error,
-                        "no compiler-cache variables conflicting with the descriptor",
-                    )
-                })?;
             for (name, value) in &command_state.outputs {
                 self.events.push(ExecutionEvent::Output {
                     name: name.clone(),
@@ -791,13 +750,6 @@ impl Drop for GuestDockerTeardown<'_> {
 }
 
 pub(crate) fn validate_guest_plan(plan: &GuestJobPlan) -> Result<(), String> {
-    plan.validate_compiler_cache().map_err(|error| {
-        guest_capability_error(
-            "guest.compiler_cache",
-            &error,
-            "valid descriptor and matching environment",
-        )
-    })?;
     if let Some(cache_digest) = plan.cache_digest.as_deref()
         && !cache_digest.is_empty()
     {
@@ -1402,7 +1354,6 @@ mod tests {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            compiler_cache: velnor_model::guest_plan::GuestCompilerCacheDescriptor::off(),
             command_files: Vec::new(),
             outputs: vec![velnor_model::GuestOutput {
                 name: "result".into(),
