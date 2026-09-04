@@ -2692,8 +2692,8 @@ claims, leases, and generation fencing remain the ownership proof.
 
 This is the final evidence section. It supersedes older counts and the artifact-callsite
 blocked status above. The runner tip verified here is
-`cade1dfc9fe2cf0441499d4bc6bc1c57c99b0b7e`; the verifier tip is
-`ba69155c094e9c6758de9fb785412314c9a587bc`. Every runner build/test below came from
+`111ed1d3332d100a291bae600e748b9201717ff6`; the verifier tip is
+`58034296daaffa15c09430f61796900fcaeecb6b`. Every runner build/test below came from
 `git archive <SHA> | tar -x` of the stated immutable commit.
 
 ### T-001 capability surface — executable and manifest-derived
@@ -2745,7 +2745,7 @@ this turn.
 
 Focused comparison evidence: container tests were `45 passed` on `7b0bfd7` versus `44 passed`
 on the unmodified storage baseline `c881402`; cache tests were `34 passed` on both, with eight
-test threads. The final runner snapshot passes the serial library gate with `1567 passed, 1
+test threads. The final runner snapshot passes the serial library gate with `1576 passed, 1
 ignored`. Full parallel runner suites at both comparison snapshots stalled in the same controller/
 wiremock harness after about seven minutes and were stopped; that is a harness limitation, not a
 claimed pass or a code failure. Serial execution is the accepted gate for this repository.
@@ -2763,7 +2763,7 @@ fail-closed/ephemeral fallback for missing repository identity.
 `source_sha` and `capability_id`; `source_sha` remains a required full lowercase commit SHA for
 provenance. Baseline and fixture coverage therefore remain bound to content while still proving
 which runner produced the export. The final immutable refresh from runner
-`cade1dfc9fe2cf0441499d4bc6bc1c57c99b0b7e` reports manifest version `12`, crate version
+`111ed1d3332d100a291bae600e748b9201717ff6` reports manifest version `12`, crate version
 `0.1.250`, capability ID
 `23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and leaves the fixture
 clean. Readiness passed against that archive; a baseline-only audit still fails closed when no
@@ -2773,20 +2773,20 @@ runner source/export is supplied.
 
 | Gate | Immutable source | Result |
 | --- | --- | --- |
-| `cargo fmt --all -- --check` | runner `cade1df` | pass |
-| `cargo check --workspace --all-targets --features velnor-runner/test-support --locked` | runner `cade1df` | pass; 3 crates compiled |
-| `cargo clippy --workspace --all-targets --features velnor-runner/test-support --locked -- -D warnings` | runner `cade1df` | pass; `cargo clippy: No issues found` |
-| `cargo test -p velnor-runner --lib --features test-support --locked -- --test-threads=1` | runner `cade1df` | pass; 1567 passed, 1 ignored (59.53s) |
-| `cargo test -p velnor-tools --locked -- --test-threads=1` | runner `cade1df` | pass; 187 passed (6.01s) |
-| `just refresh-capability-baseline` + readiness audit | runner archive `cade1df`, fixture `ba69155` | pass; v12 / ID `23749db8…` |
-| `python3 .github/scripts/test_audits.py` | fixture `ba69155` | pass; 38 tests |
-| `just capability-contract` | fixture `ba69155` | pass |
-| `just python-check` | fixture `ba69155` | pass |
+| `cargo fmt --all -- --check` | runner `111ed1d` | pass |
+| `cargo check --workspace --all-targets --features velnor-runner/test-support --locked` | runner `111ed1d` | pass; 3 crates compiled |
+| `cargo clippy --workspace --all-targets --features velnor-runner/test-support --locked -- -D warnings` | runner `111ed1d` | pass; `cargo clippy: No issues found` |
+| `cargo test -p velnor-runner --lib --features test-support --locked -- --test-threads=1` | runner `111ed1d` | pass; 1576 passed, 1 ignored (44.00s) |
+| `cargo test -p velnor-tools --locked -- --test-threads=1` | runner `111ed1d` | pass; 187 passed (5.73s) |
+| `just refresh-capability-baseline` + readiness audit | runner archive `111ed1d`, fixture `5803429` | pass; v12 / ID `23749db8…` |
+| `python3 .github/scripts/test_audits.py` | fixture `5803429` | pass; 38 tests |
+| `just capability-contract` | fixture `5803429` | pass |
+| `just python-check` | fixture `5803429` | pass |
 
 ### Shared-tree boundary note
 
 The final shared runner tip also contains concurrent-lead commits
-`7ed4883`, `cade1df`, `506847b`, `575097a`, `d285d0f`, and `d500aab` touching files that this turn was instructed not
+`7ed4883`, `cade1df`, `7c32055`, `111ed1d`, `9149e67`, `506847b`, `575097a`, `d285d0f`, and `d500aab` touching files that this turn was instructed not
 to edit (`executor.rs` and `execution/**`, plus related runner integration). They were already
 on the shared remote and were not authored or reverted here. The exact remaining forbidden-file
 patches are recorded above and in §18; this report does not misstate the final tree as
