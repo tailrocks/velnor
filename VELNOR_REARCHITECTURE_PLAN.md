@@ -2880,14 +2880,19 @@ The shared branch now contains four bounded follow-ups from the post-handoff aud
 - `b665fae` makes `ReadyProof` an opaque model capability. Its deserializer routes every wire
   value through `try_new`, so an all-false or partially false serialized proof cannot satisfy a
   readiness check; the existing JSON shape remains unchanged.
-- `ac85ea1` adds the graceful half of microVM cancellation: a guest `Cancel` is sent over the
-  session before the bounded jailer termination fallback. The integrated runner check passed.
+- `ac85ea1` adds a microVM guest-cancel hook, but a read-only review found the jailer is
+  registered before that hook while cancellation fan-out preserves registration order. The
+  graceful guest stop is therefore not proven at this tip; the ordering fix remains in the other
+  lead's reserved `execution/firecracker.rs` and `execution/cancel.rs`.
+- `931ac8a` wires recovery of a durable provisional acquire through the `renewjob` ownership
+  oracle. It is integrated, but its transport and controller call sites remain part of the other
+  lead's runner boundary.
 
-The fixture baseline was refreshed to `ac85ea191966ec631bf4c16e21d85589fb3fff6d` and pushed as
-`034e354`; its readiness refresh passed, and the full fixture gate at the preceding integrated
-tip passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
+The fixture baseline is synchronized to `e6a55beaec6759912e38d51199dfd32248973396`; its latest
+generated export was already present on the shared fixture branch, and the full fixture gate at
+that integrated tip passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
 formatting, workspace, capability, and L2 closure checks.
 
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
-mixed native/JavaScript post-action ordering, and the production cancellation-token wiring remain
-in the other lead's reserved `runner.rs`, `executor.rs`, and `execution/**` worktrees.
+mixed native/JavaScript post-action ordering, and the microVM registration order remain in the
+other lead's reserved `runner.rs`, `executor.rs`, and `execution/**` worktrees.
