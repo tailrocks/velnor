@@ -2692,8 +2692,8 @@ claims, leases, and generation fencing remain the ownership proof.
 
 This is the final evidence section. It supersedes older counts and the artifact-callsite
 blocked status above. The runner tip verified here is
-`d8fcfb2637a2fd1882e93777540bc39188ed7a47`; the verifier tip is
-`1de3da3f8540aa8c8ca236059e4163a48c58133c`. Every runner build/test below came from
+`f4ccf9c3867cfd386052080d4d36a0b598ebb37e`; the verifier tip is
+`705a77b9a86b48981646ada461ae2d2df2d0f0fd`. Every runner build/test below came from
 `git archive <SHA> | tar -x` of the stated immutable commit.
 
 ### T-001 capability surface — executable and manifest-derived
@@ -2763,7 +2763,7 @@ fail-closed/ephemeral fallback for missing repository identity.
 `source_sha` and `capability_id`; `source_sha` remains a required full lowercase commit SHA for
 provenance. Baseline and fixture coverage therefore remain bound to content while still proving
 which runner produced the export. The final immutable refresh from runner
-`d8fcfb2637a2fd1882e93777540bc39188ed7a47` reports manifest version `12`, crate version
+`f4ccf9c3867cfd386052080d4d36a0b598ebb37e` reports manifest version `12`, crate version
 `0.1.250`, capability ID
 `23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and leaves the fixture
 clean. Readiness passed against that archive; a baseline-only audit still fails closed when no
@@ -2773,20 +2773,20 @@ runner source/export is supplied.
 
 | Gate | Immutable source | Result |
 | --- | --- | --- |
-| `cargo fmt --all -- --check` | runner `d8fcfb2` | pass |
-| `cargo check --workspace --all-targets --features velnor-runner/test-support --locked` | runner `d8fcfb2` | pass; 2 crates compiled |
-| `cargo clippy --workspace --all-targets --features velnor-runner/test-support --locked -- -D warnings` | runner `d8fcfb2` | pass; `cargo clippy: No issues found` |
-| `cargo test -p velnor-runner --lib --features test-support --locked -- --test-threads=1` | runner `d8fcfb2` | pass; 1576 passed, 1 ignored (27.08s) |
-| `cargo test -p velnor-tools --locked -- --test-threads=1` | runner `d8fcfb2` | pass; 187 passed (4.88s) |
-| `just refresh-capability-baseline` + readiness audit | runner archive `d8fcfb2`, fixture `1de3da3` | pass; v12 / ID `23749db8…` |
-| `python3 .github/scripts/test_audits.py` | fixture `1de3da3` | pass; 38 tests |
-| `just capability-contract` | fixture `1de3da3` | pass |
-| `just python-check` | fixture `1de3da3` | pass |
+| `cargo fmt --all -- --check` | runner `f4ccf9c` | pass |
+| `cargo check --workspace --all-targets --features velnor-runner/test-support --locked` | runner `f4ccf9c` | pass; 3 crates compiled |
+| `cargo clippy --workspace --all-targets --features velnor-runner/test-support --locked -- -D warnings` | runner `f4ccf9c` | pass; `cargo clippy: No issues found` |
+| `cargo test -p velnor-runner --lib --features test-support --locked -- --test-threads=1` | runner `f4ccf9c` | pass; 1576 passed, 1 ignored (40.15s) |
+| `cargo test -p velnor-tools --locked -- --test-threads=1` | runner `f4ccf9c` | pass; 187 passed (4.89s) |
+| `just refresh-capability-baseline` + readiness audit | runner archive `f4ccf9c`, fixture `705a77b` | pass; v12 / ID `23749db8…` |
+| `python3 .github/scripts/test_audits.py` | fixture `705a77b` | pass; 38 tests |
+| `just capability-contract` | fixture `705a77b` | pass |
+| `just python-check` | fixture `705a77b` | pass |
 
 ### Shared-tree boundary note
 
 The final shared runner tip also contains concurrent-lead commits
-`7ed4883`, `cade1df`, `7c32055`, `111ed1d`, `9149e67`, `d8fcfb2`, `506847b`, `575097a`, `d285d0f`, and `d500aab` touching files that this turn was instructed not
+`7ed4883`, `cade1df`, `7c32055`, `111ed1d`, `9149e67`, `d8fcfb2`, `f4ccf9c`, `506847b`, `575097a`, `d285d0f`, and `d500aab` touching files that this turn was instructed not
 to edit (`executor.rs` and `execution/**`, plus related runner integration). They were already
 on the shared remote and were not authored or reverted here. The exact remaining forbidden-file
 patches are recorded above and in §18; this report does not misstate the final tree as
