@@ -2299,3 +2299,71 @@ cleanup, and inherited credentials from a reused workspace, none of which were t
 path. The guest lane should call the same Rust checkout over the guest command channel rather than
 maintaining a second implementation in shell where every fix must be made twice. That is BC-23's
 shape again: a second implementation of a thing that already exists, drifting silently.
+
+### BC-17 addressed — one derived host budget, and honest counter-evidence
+
+`dd43606`, `03e77ef`. The budget is now derived rather than assumed:
+`HostBudget::observe(root, parallelism)` takes the **minimum** of `available_parallelism`, every
+cgroup v2 `cpu.max` from the unified root down the `/proc/self/cgroup` chain (so an ancestor quota
+is not missed), `cpuset.cpus.effective`, and the `velnor-jobs.slice` quota; memory is the minimum
+of `MemTotal` and every applicable `memory.max`. The root is injectable, so tests drive synthetic
+`/proc` and `/sys/fs/cgroup` trees. An unobservable value becomes
+`Observation::Unobservable(reason)` and is never cached and never replaced — downstream then emits
+**nothing**: no `--cpus`, no `CARGO_BUILD_JOBS`, no scheduler sizing, asserted by test. That
+follows the pattern the Docker fact cache established.
+
+`per_slot(slots)` floors the share so N slots always fit inside the budget, and the derived values
+are injected after workflow env and createOptions: `--cpus`, `CARGO_BUILD_JOBS`, `MAKEFLAGS`,
+`MBX_SCHEDULER_CPUS`, `MBX_SCHEDULER_MEMORY`, plus a `VELNOR_JOB_BUDGET` string carrying the
+derivation.
+
+**Two of my premises were wrong, and the agent corrected them from source.** The slice at
+`host_cpus × 95%` is a deliberate *aggregate* ceiling for all jobs, not a per-slot allowance — its
+own test says so (`tests/node_arch.rs:265`) — and dividing it by slots would idle the host at
+`--slots 1`. The real defect was that nothing divided the budget **for the container**. And mbx's
+pool is machine-wide *by design*, one permit pool under the cache dir; what it cannot do is see
+the slice quota, which is why the per-slot cap is expressed as `CARGO_BUILD_JOBS` rather than by
+shrinking the pool. That was checked against mbx v1.7.0's `config.rs` and
+`docs/configuration.md`, which document exactly that `CARGO_BUILD_JOBS` caps one build's permits
+without shrinking the machine-wide pool.
+
+Precedence: the daemon budget wins over a workflow-set value and a declared limit may only narrow,
+never widen — a workflow cannot see the host it shares — and the override is *named* in the
+`VELNOR_JOB_BUDGET` notice rather than applied silently.
+
+**The measurement is counter-evidence, and it is recorded as such.** Four concurrent cold
+`cargo check` runs in separate worktrees, two repetitions: `-j18` each took 126.3 s and 119.2 s;
+the capped `-j4` each took 147.4 s and 142.9 s — the cap costs roughly 17-20% on this host. The
+agent did not dress that up, and the explanation is sound: this host is macOS, so it has **no
+cgroup quota and no `velnor-jobs.slice`**, and therefore cannot reproduce the CFS-throttling
+condition the change exists to prevent. What was measured is the cost side of the trade with none
+of the benefit, and with mbx absent so the machine-wide permit pool that hands an idle sibling's
+share back was not in play.
+
+It also correctly reported that the benchmark's `rust/concurrent-jobs` scenario has **no power for
+this defect**: its measured iteration is a warm no-op `cargo check`, and the two
+identical-by-construction conditions differed 2×, which bounds the noise above any effect.
+
+**This is therefore an open question, not a settled improvement.** Settling it needs a Linux host
+with the slice quota in place, mbx installed, and the runner-driven benchmark scenarios — the same
+infrastructure gap that blocks the acquisition and persistent-host half of the matrix. Recorded in
+§12 as a decision requiring evidence rather than claimed as a win.
+
+The duplicated `DaemonArgs` declaration is partly closed: the `velnorctl` side is aligned to the
+daemon's declarations and a guard test now fails if `job_cpus`, `job_memory`, `job_peak_bytes`,
+`node_action_image` or `emergency_reserve_bytes` diverge again — negative-checked by reverting one
+default and confirming the failure. Full unification still needs `service.rs`.
+
+### Corrections to my own coordination notes
+
+- **`709583a` does not build.** I cited it to several agents as the last good tip; a clean archive
+  of it fails with 13 errors, because `executor.rs` there already calls a newer `container.rs`
+  API. Snapshot SHAs must be chosen by testing them, not by trusting a note.
+- **The `velnor-runner` lib test suite is badly flaky under parallelism**, 21 to 46 failures
+  across runs with an identical failure list with and without a given change. Only
+  `--test-threads=1` is stable. The cause is that many tests mutate process environment
+  concurrently — a real hygiene defect that undermines every gate this program runs, and it should
+  be fixed rather than worked around indefinitely.
+- The shared worktree's branch ref diverged from origin, carrying a duplicate of a commit already
+  pushed. Verified the duplicate's trees are identical to the pushed version, so a rebase dropping
+  it is correct; routed to the agent that holds the tree rather than reconciled underneath it.
