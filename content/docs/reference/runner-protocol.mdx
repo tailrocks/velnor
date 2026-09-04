@@ -196,9 +196,11 @@ The upstream runner's usual model sends a cancellation request to the worker,
 allows the worker to handle it, and escalates to process termination after a
 timeout.
 
-Velnor's active V2 path differs. Its Docker cancellation path directly
-terminates the relevant host-side job/action containers. The Firecracker path
-does not provide full end-to-end equivalence to upstream worker cancellation.
+Velnor's Docker path now follows the same shape: one cancellation token per job,
+requested from the broker message, re-evaluating step conditions so `always()`
+and `cancelled()` work still runs, and escalating to termination after a grace
+taken from the server's message. The Firecracker path does not yet provide
+end-to-end equivalence, because the guest is not driven from that token.
 Velnor still drains publishers, collects available state, and attempts terminal
 completion, but operators must not assume identical graceful step cancellation
 or cleanup timing.

@@ -95,7 +95,7 @@ check GitHub's job UI; these views are not an archival record.
 
 ### Docker
 
-The Docker backend requires the host Docker socket and a verified cgroup/systemd boundary. A per-job lease proxy applies ownership labels and rejects privileged, host-bind, and device escapes outside the permitted trust boundary. Job and action containers are removed during cancellation/teardown.
+The Docker backend requires the host Docker socket and a verified cgroup/systemd boundary. A per-job lease proxy applies ownership labels and rejects privileged, host-bind, and device escapes outside the permitted trust boundary. Job and action containers are removed during teardown. Cancellation terminates them rather than removing them, so removal is teardown’s responsibility on every path.
 
 ### MicroVM
 
@@ -122,7 +122,7 @@ Velnor has no current adapter for S3/object storage, Redis, PostgreSQL/MySQL, Ku
 
 ## Interruption behavior
 
-Broker polling errors back off; authentication failures trigger credential/session recovery. A lost runner registration cancels the affected job. Active jobs have a separate broker cancellation poller. Docker cancellation tears down containers; MicroVM cancellation is currently limited.
+Broker polling errors back off; authentication failures trigger credential/session recovery. A lost runner registration cancels the affected job. Active jobs have a separate broker cancellation poller. Docker cancellation drives one job cancellation token: the running step’s work is terminated on request, and the job and service containers on escalation, so post steps still see a live container. MicroVM cancellation is currently limited — the guest is not driven from that token.
 
 Completion is the durable boundary: Velnor records the payload locally, submits it, records remote acknowledgement, and only then removes the outbox entry. If the process fails before acknowledgement, recovery can retry the same completion payload. If GitHub has already accepted completion, a terminal remote observation prevents treating it as a new job result.
 

@@ -5818,13 +5818,24 @@ async fn handle_job_request(
             registration_lost.clone(),
         )
         .await?;
+        // One token per job, installed as the active token for the job's whole
+        // scope so every host process spawned under it registers its process
+        // group with the thing that can actually terminate it. The poller
+        // drives this token; the executor reads it, which is what makes
+        // `cancelled()` and the `success()`/`failure()` pair truthful.
+        let job_cancellation = crate::execution::cancel::JobCancellation::new(None);
+        let _job_cancellation_active =
+            crate::execution::cancel::set_active(job_cancellation.clone());
         let cancellation = start_broker_cancellation_poll(
             broker_cancellation.broker,
             broker_cancellation.session_id,
             broker_cancellation.disable_update,
-            job.job_id.clone(),
-            job_container_name(&job),
-            canceled.clone(),
+            JobCancellationWatch {
+                job_id: job.job_id.clone(),
+                job_container_name: job_container_name(&job),
+                canceled: canceled.clone(),
+                cancellation: job_cancellation.clone(),
+            },
             broker_cancellation.stored,
         );
 
@@ -6068,6 +6079,11 @@ async fn handle_job_request(
         // here so this async control path can emit its one post-execution
         // PlanSummary before sending run-service completion.
         let execution_telemetry_admission = telemetry_admission.clone();
+        // Recorded the moment the job container exists, so the containers are
+        // torn down however execution ends — including the cancellation path,
+        // which previously produced `teardown: None` and left them running.
+        let teardown_slot: TeardownSlot = Arc::new(Mutex::new(None));
+        let execution_teardown_slot = Arc::clone(&teardown_slot);
         let job_result = run_on_job_execution_thread(&job.job_id, move || {
             execute_script_job(
                 &config_dir,
@@ -6087,6 +6103,7 @@ async fn handle_job_request(
                 daemon_id,
                 reserved_bytes,
                 execution_telemetry_admission,
+                &execution_teardown_slot,
             )
         })
         .await;
@@ -6132,7 +6149,12 @@ async fn handle_job_request(
                         // mirror after the step publishers drain below, so a
                         // canceled job still persists its partial log.
                         step_logs: Vec::new(),
-                        teardown: None,
+                        // The recorded owner, not `None`: a cancelled job still
+                        // has containers to tear down.
+                        teardown: teardown_slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone(),
                         timings: ExecutionTimings::default(),
                         executed_physical_actions: None,
                     }
@@ -6670,15 +6692,29 @@ fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
     github_api_error_status(error) == Some(404)
 }
 
+/// What the cancellation poller needs to know about the job it is watching, as
+/// opposed to the broker it polls. Grouped so a caller cannot pair one job's id
+/// with another job's cancellation token.
+struct JobCancellationWatch {
+    job_id: String,
+    job_container_name: String,
+    canceled: Arc<AtomicBool>,
+    cancellation: crate::execution::cancel::JobCancellation,
+}
+
 fn start_broker_cancellation_poll(
     broker: BrokerClient,
     session_id: String,
     disable_update: bool,
-    job_id: String,
-    job_container_name: String,
-    canceled: Arc<AtomicBool>,
+    watch: JobCancellationWatch,
     stored: StoredRunnerConfig,
 ) -> JoinHandle<()> {
+    let JobCancellationWatch {
+        job_id,
+        job_container_name,
+        canceled,
+        cancellation,
+    } = watch;
     tokio::spawn(async move {
         let mut broker = broker;
         let mut error_streak: u32 = 0;
@@ -6706,6 +6742,8 @@ fn start_broker_cancellation_poll(
                             sanitized_retry_error(&error)
                         );
                         canceled.store(true, Ordering::SeqCst);
+                        cancellation
+                            .request(crate::execution::cancel::CancelReason::RegistrationLost);
                         kill_job_container(&job_container_name);
                         break;
                     }
@@ -6784,6 +6822,15 @@ fn start_broker_cancellation_poll(
                 continue;
             }
             canceled.store(true, Ordering::SeqCst);
+            // The server's own grace, when it sent one, decides how long the
+            // job has before escalation — not a fixed local constant.
+            if let Some(grace) = serde_json::from_str::<JobCancelMessage>(&message.body)
+                .ok()
+                .and_then(|cancel| cancel.grace())
+            {
+                cancellation.set_forced_after(grace);
+            }
+            cancellation.request(crate::execution::cancel::CancelReason::ServerRequested);
             kill_job_container(&job_container_name);
             break;
         }
@@ -7485,6 +7532,37 @@ fn live_masked_lines(job: &AgentJobRequestMessage, log: &StepLog) -> Vec<String>
 struct JobCancelMessage {
     #[serde(default, rename = "JobId", alias = "jobId")]
     job_id: Option<String>,
+    /// Upstream's `JobCancelMessage` carries the grace period alongside the id
+    /// (`src/Sdk/DTWebApi/WebApi/JobCancelMessage.cs`). Velnor discarded it and
+    /// used a fixed delay, so a server that asked for a longer or shorter wind
+    /// down did not get one.
+    #[serde(default, rename = "Timeout", alias = "timeout")]
+    timeout: Option<String>,
+}
+
+impl JobCancelMessage {
+    /// The server-supplied grace as a duration. Upstream serialises a .NET
+    /// `TimeSpan`, so accept both `hh:mm:ss` and a bare number of seconds, and
+    /// treat anything unparseable as absent rather than as zero — a zero grace
+    /// would silently turn a graceful cancellation into an immediate kill.
+    fn grace(&self) -> Option<Duration> {
+        let raw = self.timeout.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if let Ok(seconds) = raw.parse::<f64>() {
+            return (seconds.is_finite() && seconds >= 0.0)
+                .then(|| Duration::from_secs_f64(seconds));
+        }
+        let mut parts = raw.split(':');
+        let hours: u64 = parts.next()?.parse().ok()?;
+        let minutes: u64 = parts.next()?.parse().ok()?;
+        let seconds: f64 = parts.next()?.parse().ok()?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
+        Some(Duration::from_secs(hours * 3600 + minutes * 60) + Duration::from_secs_f64(seconds))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -7612,6 +7690,7 @@ fn execute_script_job(
     daemon_id: String,
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
+    teardown_slot: &TeardownSlot,
 ) -> Result<ScriptJobResult> {
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -7635,6 +7714,7 @@ fn execute_script_job(
         reserved_bytes,
         telemetry_admission,
         execution_backend,
+        teardown_slot,
     );
     if result.is_err()
         && let Err(e) = fs::remove_dir_all(&job_dir)
@@ -8125,6 +8205,7 @@ fn execute_script_job_inner(
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
     execution_backend: velnor_model::ExecutionBackendKind,
+    teardown_slot: &TeardownSlot,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         return execute_microvm_script_job(
@@ -8460,7 +8541,7 @@ fn execute_script_job_inner(
         }
         log
     });
-    let mut executor = DockerJobEngine::new(command_runner)
+    let mut executor = DockerJobEngine::inert(command_runner)
         .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
@@ -8647,7 +8728,7 @@ fn execute_script_job_inner(
                 order: post_order,
             });
         }
-        let mut service_executor = DockerJobEngine::new(command_runner);
+        let mut service_executor = DockerJobEngine::inert(command_runner);
         service_executor.cleanup_services(&plan.execution.job_container)?;
         let stop_log = StepLog {
             step_id: stop_step_id,
@@ -8725,11 +8806,14 @@ fn execute_script_job_inner(
                 .saturating_add(eager_checkout_plans.len()),
         ),
         step_logs: all_step_logs,
-        teardown: Some(TeardownHandle {
-            container: plan.execution.job_container,
-            job_dir: job_dir.to_path_buf(),
-            services_removed,
-        }),
+        teardown: record_teardown_owner(
+            teardown_slot,
+            TeardownHandle {
+                container: plan.execution.job_container,
+                job_dir: job_dir.to_path_buf(),
+                services_removed,
+            },
+        ),
         timings: ExecutionTimings {
             first_step_ms: Some(first_step_ms),
             checkout_ms: Some(duration_ms(checkout_duration)),
@@ -8834,6 +8918,25 @@ struct TeardownHandle {
     services_removed: bool,
 }
 
+/// Where the teardown owner is recorded the moment the job container exists.
+///
+/// Returning the handle only in `Ok` made cleanup a property of *succeeding*:
+/// a cancelled or failed job took the error path, `teardown` was `None`, and
+/// `start_post_completion_teardown` was never called, so the workspace and its
+/// containers leaked. Recording it in a cell the caller also holds makes the
+/// cleanup contract independent of how execution ends.
+type TeardownSlot = Arc<Mutex<Option<TeardownHandle>>>;
+
+/// Record the teardown owner and hand back the same handle for the success
+/// path. The caller reads the slot on every other path, so cleanup runs whether
+/// the job succeeded, failed or was cancelled.
+fn record_teardown_owner(slot: &TeardownSlot, handle: TeardownHandle) -> Option<TeardownHandle> {
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle.clone());
+    Some(handle)
+}
+
 impl TeardownHandle {
     fn run(self, job_claim: &JobClaim, forensics: &SlotForensics) -> Result<()> {
         let TeardownHandle {
@@ -8843,7 +8946,7 @@ impl TeardownHandle {
         } = self;
         // Keep the duplicate-job claim owned by this teardown until every
         // cleanup operation, including BuildKit cleanup, has completed.
-        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
         let cleanup = if services_removed {
             executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
@@ -8864,7 +8967,7 @@ impl TeardownHandle {
             .name("velnor-buildkit-cleanup".into())
             .spawn(move || -> Result<()> {
                 worker_forensics.lifecycle("buildkit-teardown-deferred-start");
-                let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+                let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
                 let result = executor
                     .cleanup_job_buildkit(&worker_container)
                     .context("BuildKit teardown");
@@ -9001,7 +9104,7 @@ struct PrecreatedJobEnvironment {
 impl PrecreatedJobEnvironment {
     fn spawn(container: crate::container::JobContainerSpec) -> Self {
         Self::spawn_with(container, |container| {
-            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+            let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
             let result = executor.start_job_environment(container);
             // Hand the guard out of the thread-local executor BEFORE it is
             // dropped; the running container keeps using the proxied socket.
@@ -9074,7 +9177,7 @@ impl Drop for PrecreatedJobEnvironment {
         if self.claimed || !self.join() {
             return;
         }
-        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
         // Hand the pre-create thread's guard to the cleanup executor: its
         // cleanup drops the guard only AFTER the abandoned environment's
         // container is removed, so the proxy never dies under a live mount.
@@ -13639,6 +13742,84 @@ mod tests {
         assert_ne!(slot1, slot2, "same-PID slots must not retry in lockstep");
         assert!(slot_retry_delay(30, 1) <= Duration::from_secs(600 + 16));
         assert!(slot_retry_delay(1, 1) >= Duration::from_secs(5));
+    }
+
+    /// A cancelled or failed job still owns containers. Recording the teardown
+    /// owner when the container exists — rather than returning it only from the
+    /// success path — is what keeps cleanup independent of how the job ended.
+    #[cfg(unix)]
+    #[test]
+    fn the_teardown_owner_survives_a_failed_execution() {
+        let slot: TeardownSlot = Arc::new(Mutex::new(None));
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "nothing owns teardown before the container exists"
+        );
+
+        let temp =
+            std::env::temp_dir().join(format!("velnor-teardown-owner-{}", uuid::Uuid::new_v4()));
+        let handle = TeardownHandle {
+            container: lease_test_container_spec(&temp),
+            job_dir: temp.join("job"),
+            services_removed: false,
+        };
+        let returned = record_teardown_owner(&slot, handle.clone());
+
+        // The success path still gets the handle back...
+        assert_eq!(
+            returned.map(|owned| owned.job_dir),
+            Some(handle.job_dir.clone())
+        );
+        // ...and every other path can recover the same owner from the slot,
+        // which is what the cancellation path reads instead of `None`.
+        assert_eq!(
+            slot.lock().unwrap().clone().map(|owned| owned.job_dir),
+            Some(handle.job_dir)
+        );
+    }
+
+    /// The server's grace is honoured, and the shapes upstream can send are
+    /// all accepted. A malformed value must be *absent*, never zero: a zero
+    /// grace would turn a graceful cancellation into an immediate kill.
+    #[test]
+    fn server_cancellation_grace_is_parsed_not_discarded() {
+        let parse = |body: &str| {
+            serde_json::from_str::<JobCancelMessage>(body)
+                .expect("cancel message parses")
+                .grace()
+        };
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"00:05:00"}"#),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"01:00:30.5"}"#),
+            Some(Duration::from_secs_f64(3630.5))
+        );
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"90"}"#),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(parse(r#"{"JobId":"j"}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":""}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":"garbage"}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":"-5"}"#), None);
+    }
+
+    /// A grace that arrives after escalation has begun must not extend a
+    /// cancellation that is already counting down.
+    #[test]
+    fn a_late_grace_cannot_extend_a_running_escalation() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        token.set_forced_after(Duration::from_secs(120));
+        assert_eq!(token.forced_after(), Duration::from_secs(120));
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        token.set_forced_after(Duration::from_secs(3600));
+        assert_eq!(
+            token.forced_after(),
+            Duration::from_secs(120),
+            "a late grace must not extend an escalation already under way"
+        );
     }
 
     #[test]

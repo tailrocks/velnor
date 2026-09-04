@@ -188,8 +188,18 @@ failures. Completion stores the exact payload in a durable outbox before
 sending it; acknowledgement precedes outbox deletion, so a restart can replay
 the same completion.
 
-Active-job cancellation arrives through the busy broker session. Docker
-cancellation is implemented; MicroVM cancellation is not end to end. Complete
+Active-job cancellation arrives through the busy broker session and drives one
+cancellation token for the job. Requesting it makes `cancelled()` true and
+`success()`/`failure()` false, stops ordinary remaining steps from being
+dispatched, and walks the step's own work — its host process tree, Docker action
+sidecar and BuildKit builder — down a termination ladder. The job and service
+containers deliberately survive that request so `always()` and `cancelled()`
+post steps run against a container that still exists, and are terminated on
+escalation. The escalation grace comes from the server's cancellation message
+when it sends one.
+
+MicroVM cancellation is not end to end: the guest is not yet driven from that
+token. Complete
 GitHub Actions parity, arbitrary guest feature parity, crash-resume of an
 executing job, and guaranteed cleanup after uncertain isolation teardown are
 not established capabilities.

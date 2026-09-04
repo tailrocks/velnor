@@ -1815,7 +1815,10 @@ enum CompletionResponseClass {
 fn classify_completion_response(status: u16, body: &str) -> CompletionResponseClass {
     match status {
         200..=299 => CompletionResponseClass::Accepted,
-        404 if is_run_service_job_not_found(body) => {
+        // The upstream client classifies a failed run-service response from
+        // the body's `statusCode`, not the outer HTTP status. Keep 2xx and
+        // status-less transport handling ahead of this branch.
+        status if status != 0 && is_run_service_job_not_found(body) => {
             CompletionResponseClass::RemoteObservedTerminal
         }
         status if is_retriable_completion_status(status) => {
@@ -7833,6 +7836,30 @@ mod tests {
                     .to_string(),
             ),
             CompletionResponseClass::RemoteObservedTerminal
+        );
+        assert_eq!(
+            classify_completion_response(
+                500,
+                &upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                    .to_string(),
+            ),
+            CompletionResponseClass::RemoteObservedTerminal
+        );
+        assert_eq!(
+            classify_completion_response(
+                404,
+                &upstream_run_service_error_body("actions-run-service", 500, "server error")
+                    .to_string(),
+            ),
+            CompletionResponseClass::PermanentFailure
+        );
+        assert_eq!(
+            classify_completion_response(
+                204,
+                &upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                    .to_string(),
+            ),
+            CompletionResponseClass::Accepted
         );
         // An unrelated service emitting the same envelope is not proof that
         // this job is terminal: upstream gates on `source` too.

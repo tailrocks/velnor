@@ -254,7 +254,11 @@ define_telemetry_contracts! {
             "cause" => String,
             "ms" => NonNegativeInteger,
         ],
-        optional: []
+        optional: [
+            "stage" => String,
+            "wait_reason" => String,
+            "stage_started_unix_ms" => NonNegativeInteger,
+        ]
     },
     CriticalPath => "critical_path" {
         lane: None,

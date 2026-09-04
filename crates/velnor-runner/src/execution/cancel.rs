@@ -260,6 +260,33 @@ impl std::fmt::Debug for TerminationTarget {
 }
 
 impl TerminationTarget {
+    /// The escalation level at which this target may be terminated.
+    ///
+    /// Not everything a cancelled job holds may die at the first request. The
+    /// job container and its service containers must outlive cancellation long
+    /// enough for `always()` and `cancelled()` post steps to run *against a
+    /// container that still exists* — upstream stops them in an `always()` post
+    /// step, "Stop containers"
+    /// (`src/Runner.Worker/ContainerOperationProvider.cs:57-63`), not on the
+    /// cancellation callback. Everything that is the current step's own work —
+    /// its host process tree, its Docker-action sidecar, its BuildKit builder —
+    /// dies immediately, which is what upstream's
+    /// `step.ExecutionContext.CancelToken()` does
+    /// (`src/Runner.Worker/StepsRunner.cs:181-186`).
+    ///
+    /// This is why Velnor previously recorded post-step cleanup as a *failure*:
+    /// the container was already gone when the post step ran.
+    #[must_use]
+    pub const fn terminate_at(&self) -> CancelLevel {
+        match self {
+            Self::Container {
+                role: ContainerRole::Job | ContainerRole::Service,
+                ..
+            } => CancelLevel::Forced,
+            _ => CancelLevel::Requested,
+        }
+    }
+
     /// Stable identity used for deduplication and log lines.
     #[must_use]
     pub fn key(&self) -> String {
@@ -548,7 +575,9 @@ struct Inner {
     reason: Mutex<Option<CancelReason>>,
     /// Delay from the first request to forced escalation, seeded from the
     /// server-supplied cancel timeout.
-    forced_after: Duration,
+    /// Millis until forced escalation. Mutable because the grace arrives with
+    /// the server's cancellation message, after the token exists.
+    forced_after_ms: AtomicU64,
     registry: Mutex<Registry>,
     next_id: AtomicU64,
     /// Set once so repeated cancellation never starts a second fan-out.
@@ -567,6 +596,21 @@ struct Inner {
 /// code path cannot execute a step without one.
 #[derive(Clone)]
 pub struct JobCancellation(Arc<Inner>);
+
+impl Default for JobCancellation {
+    /// A **live** token that nobody has cancelled.
+    ///
+    /// `JobExecutionState` derives `Default` for builder and test construction,
+    /// so this exists to satisfy that, not to be a general constructor. It is
+    /// deliberately live rather than recording: if a real job ever ran on a
+    /// defaulted token and were then cancelled, a recording token would log the
+    /// termination and kill nothing, which is exactly the silent-inertness this
+    /// work exists to remove. A live token that is never cancelled behaves as a
+    /// job with no cancellation source, which is honest.
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
 
 impl std::fmt::Debug for JobCancellation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -623,7 +667,9 @@ impl JobCancellation {
         Self(Arc::new(Inner {
             level: AtomicU8::new(CancelLevel::None.as_u8()),
             reason: Mutex::new(None),
-            forced_after,
+            forced_after_ms: AtomicU64::new(
+                u64::try_from(forced_after.as_millis()).unwrap_or(u64::MAX),
+            ),
             registry: Mutex::new(Registry::default()),
             next_id: AtomicU64::new(0),
             fan_out_started: AtomicBool::new(false),
@@ -639,7 +685,7 @@ impl JobCancellation {
     /// (`src/Runner.Worker/ExecutionContext.cs:436`, `:1384-1395`).
     #[must_use]
     pub fn unlinked(&self) -> Self {
-        Self::with_forced_delay(self.0.forced_after, self.0.live)
+        Self::with_forced_delay(self.forced_after(), self.0.live)
     }
 
     /// Current escalation level.
@@ -673,7 +719,24 @@ impl JobCancellation {
     /// How long after the first request the token escalates to `Forced`.
     #[must_use]
     pub fn forced_after(&self) -> Duration {
-        self.0.forced_after
+        Duration::from_millis(self.0.forced_after_ms.load(Ordering::SeqCst))
+    }
+
+    /// Replace the grace before escalation with the one the server asked for.
+    ///
+    /// Upstream's `JobCancelMessage` carries a timeout and the listener honours
+    /// it; Velnor discarded the field and always used its own default, so a
+    /// server asking for a longer wind-down did not get one. Ignored once the
+    /// escalation timer is already running, so a late message cannot extend a
+    /// cancellation that is already counting down.
+    pub fn set_forced_after(&self, grace: Duration) {
+        if self.0.fan_out_started.load(Ordering::SeqCst) {
+            return;
+        }
+        self.0.forced_after_ms.store(
+            u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 
     /// Request cancellation, running the termination fan-out once.
@@ -716,6 +779,11 @@ impl JobCancellation {
         self.0
             .level
             .store(CancelLevel::Forced.as_u8(), Ordering::SeqCst);
+        // Escalation means "kill what the request deliberately spared". Setting
+        // the level alone would leave the job and service containers alive
+        // until something else happened to sweep, which is the leak this level
+        // exists to close.
+        self.fan_out_once();
     }
 
     /// Register a target with the fan-out. The registration removes it on drop.
@@ -777,7 +845,7 @@ impl JobCancellation {
 
     fn spawn_fan_out(&self) {
         let token = self.clone();
-        let forced_after = self.0.forced_after;
+        let forced_after = self.forced_after();
         let spawned = std::thread::Builder::new()
             .name("velnor-cancel-ladder".into())
             .spawn(move || {
@@ -814,10 +882,25 @@ impl JobCancellation {
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A target is eligible only once the escalation has reached the
+            // level it is allowed to die at, so a plain cancellation request
+            // does not destroy the container the post steps still need.
+            //
+            // An explicit fan-out on an uncancelled token is a teardown sweep,
+            // not a no-op: floor the comparison at `Requested` so a caller that
+            // reaches for the ladder directly still gets the step-scoped
+            // targets it asked for.
+            let level = match CancelLevel::from_u8(self.0.level.load(Ordering::SeqCst)) {
+                CancelLevel::None => CancelLevel::Requested,
+                level => level,
+            };
             let pending: Vec<(u64, TerminationTarget)> = registry
                 .targets
                 .iter()
-                .filter(|(id, _)| !registry.terminated.contains(id))
+                .filter(|(id, target)| {
+                    !registry.terminated.contains(id)
+                        && target.terminate_at().as_u8() <= level.as_u8()
+                })
                 .map(|(id, target)| (*id, target.clone()))
                 .collect();
             for (id, _) in &pending {
@@ -1010,7 +1093,26 @@ mod tests {
                 Ok(())
             }),
         });
+        // At `Requested` the step's own work dies and the containers the post
+        // steps still need survive; forcing reaches the rest. Asserting both
+        // phases is the contract, not just that the fan-out visits everything.
         token.fan_out_once();
+        let after_request: Vec<String> = token
+            .outcomes()
+            .into_iter()
+            .map(|outcome| outcome.target)
+            .collect();
+        assert_eq!(
+            after_request,
+            vec![
+                "container:velnor-buildkit-1".to_string(),
+                "pgid:4242".to_string(),
+                "hook:vsock-cancel".to_string(),
+            ],
+            "a cancellation request must not destroy the job or service containers"
+        );
+        // `force` fans out on its own; calling it is the whole escalation.
+        token.force();
         let reached: Vec<String> = token
             .outcomes()
             .into_iter()
@@ -1019,12 +1121,13 @@ mod tests {
         assert_eq!(
             reached,
             vec![
-                "container:velnor-job-1",
-                "container:velnor-service-1-postgres",
                 "container:velnor-buildkit-1",
                 "pgid:4242",
                 "hook:vsock-cancel",
-            ]
+                "container:velnor-job-1",
+                "container:velnor-service-1-postgres",
+            ],
+            "the step's own work dies on request; the containers post steps need die on escalation, and every class is reached exactly once"
         );
         assert!(hook_ran.load(Ordering::SeqCst));
     }
@@ -1146,7 +1249,25 @@ mod tests {
         let token = JobCancellation::recording(None);
         token.request(CancelReason::ServerRequested);
         assert!(token.outcomes().is_empty());
-        let _late = token.register(TerminationTarget::Container {
+
+        // A step-scoped target that appears after the request lost a race; it
+        // must not be leaked just because the fan-out already ran.
+        let _late = token.register(TerminationTarget::ProcessGroup {
+            pgid: 4242,
+            label: "late-step".into(),
+        });
+        assert_eq!(
+            token
+                .outcomes()
+                .into_iter()
+                .map(|outcome| outcome.target)
+                .collect::<Vec<_>>(),
+            vec!["pgid:4242"]
+        );
+
+        // A service container registered just as late still survives the
+        // request, because post steps run against it, and dies on escalation.
+        let _late_service = token.register(TerminationTarget::Container {
             name: "velnor-service-1-redis".into(),
             role: ContainerRole::Service,
         });
@@ -1156,7 +1277,21 @@ mod tests {
                 .into_iter()
                 .map(|outcome| outcome.target)
                 .collect::<Vec<_>>(),
-            vec!["container:velnor-service-1-redis"]
+            vec!["pgid:4242"],
+            "a service container must outlive a cancellation request"
+        );
+        token.force();
+        assert_eq!(
+            token
+                .outcomes()
+                .into_iter()
+                .map(|outcome| outcome.target)
+                .collect::<Vec<_>>(),
+            vec![
+                "pgid:4242".to_string(),
+                "container:velnor-service-1-redis".to_string()
+            ],
+            "escalation must reach the container the request spared, exactly once"
         );
     }
 
