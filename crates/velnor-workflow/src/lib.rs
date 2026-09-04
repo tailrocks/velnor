@@ -979,7 +979,7 @@ pub fn scan_repository(root: &Path, runners: RunnerMode) -> Result<ProjectConfig
         default_branch: "main".to_owned(),
         runners,
         github_runner: "ubuntu-24.04".to_owned(),
-        velnor_labels: vec!["self-hosted".to_owned(), "velnor".to_owned()],
+        velnor_labels: vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
         release_enabled: false,
         release_reason: "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy.".to_owned(),
         release: None,
@@ -7058,7 +7058,7 @@ mod tests {
         assert!(crate_workflow.contains("name: GitHub\n"));
         assert!(crate_workflow.contains("name: Velnor\n"));
         assert!(crate_workflow.contains("runs-on: ubuntu-24.04"));
-        assert!(crate_workflow.contains("runs-on: [self-hosted, velnor]"));
+        assert!(crate_workflow.contains("runs-on: [self-hosted, velnor-target-mvp]"));
         assert!(crate_workflow.contains("CI_SCOPE: ${{ inputs.scope }}"));
     }
 
@@ -7358,7 +7358,7 @@ mod tests {
         assert!(github.contains("  github-"));
         assert!(!github.contains("\n  velnor-"));
         assert!(github.contains("runs-on: ubuntu-24.04"));
-        assert!(!github.contains("runs-on: [self-hosted, velnor]"));
+        assert!(!github.contains("runs-on: [self-hosted, velnor-target-mvp]"));
 
         let velnor = WorkflowIr::from_config(&must(
             scan_repository(&fixture_root(), RunnerMode::Velnor),
@@ -7368,7 +7368,7 @@ mod tests {
         assert!(!velnor.contains("  github-"));
         assert!(velnor.contains("  velnor-"));
         assert!(velnor.contains("runs-on: ubuntu-24.04"));
-        assert!(velnor.contains("runs-on: [self-hosted, velnor]"));
+        assert!(velnor.contains("runs-on: [self-hosted, velnor-target-mvp]"));
         assert!(velnor
             .contains("if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push'"));
 
@@ -7380,7 +7380,7 @@ mod tests {
         assert!(both.contains("  github-"));
         assert!(both.contains("  velnor-"));
         assert!(both.contains("runs-on: ubuntu-24.04"));
-        assert!(both.contains("runs-on: [self-hosted, velnor]"));
+        assert!(both.contains("runs-on: [self-hosted, velnor-target-mvp]"));
         assert!(both.contains("name: Save \"Rust crate (fixture)\" cache"));
         assert_ne!(github, velnor);
         assert_ne!(velnor, both);
@@ -7403,14 +7403,14 @@ mod tests {
                 }
                 RunnerMode::Velnor => {
                     assert!(workflow.contains("ubuntu-24.04"));
-                    assert!(workflow.contains("runs-on: [self-hosted, velnor]"));
+                    assert!(workflow.contains("runs-on: [self-hosted, velnor-target-mvp]"));
                     assert!(!workflow.contains("  github-"));
                     assert!(workflow.contains("  velnor-"));
                     assert!(workflow.contains("github.ref == 'refs/heads/main'"));
                 }
                 RunnerMode::Both => {
                     assert!(workflow.contains("runs-on: ubuntu-24.04"));
-                    assert!(workflow.contains("runs-on: [self-hosted, velnor]"));
+                    assert!(workflow.contains("runs-on: [self-hosted, velnor-target-mvp]"));
                     assert!(workflow.contains("  github-"));
                     assert!(workflow.contains("  velnor-"));
                 }
@@ -8357,13 +8357,13 @@ mod tests {
         assert!(pr.contains("pull_request:"));
         assert!(pr.contains("merge_group:"));
         assert!(pr.contains("runs-on: ubuntu-24.04"));
-        assert!(pr.contains("runs-on: [self-hosted, velnor]"));
+        assert!(pr.contains("runs-on: [self-hosted, velnor-target-mvp]"));
         assert!(pr.contains("  github-"));
         assert!(pr.contains("  velnor-"));
         assert!(main.contains("push:"));
         assert!(main.contains("workflow_dispatch:"));
         assert!(main.contains("refs/heads/main"));
-        assert!(main.contains("runs-on: [self-hosted, velnor]"));
+        assert!(main.contains("runs-on: [self-hosted, velnor-target-mvp]"));
         assert!(!nightly.contains("name: required"));
         assert!(nightly.contains("schedule:"));
         assert_eq!(
