@@ -1444,3 +1444,470 @@ rendering constraint, and nothing tests the coupling.
 
 Both are RC-3 in miniature: a contract recovered by re-parsing a rendering rather than read
 through the serialiser that wrote it.
+
+## 15. Red-team review of the target architecture
+
+Full review in `.rearch/reports/21-redteam.md`. It changes the plan materially, and the
+central finding invalidates the shape of the proposal rather than a detail of it.
+
+### The typestate cannot enforce a cross-process invariant
+
+Velnor is a three-tier **process** fleet: a controller spawns one slot process per slot
+(`node/controller.rs:2208` spawns `current_exe() slot --slot-index N --generation G`), and each
+slot process admits one job at a time (`main.rs:15`). The state the synthesis wants to hold in
+Rust types does not live in one address space — it lives on disk as `Clone + Serialize +
+Deserialize` records with **all fields public** (`journal.rs:300-362`), rehydrated through
+`materialized_state()` (`journal.rs:1045`).
+
+**Seven of the eleven compiler-checked invariants therefore do not hold**, and the failures are
+not incidental:
+
+- **I-1 (fencing an occupied slot is a signature error)** — fencing is a controller decision
+  taken over a *deserialised* `SlotRecord`; `Occupied` exists in a different process. BC-5 is
+  narrowed to a staleness window, not eliminated.
+- **I-3 (`SendClaim` non-`Clone`, consumed by `send()`)** — there are two send paths in two
+  process roles (`runner.rs:10564` versus `:827`/`:10677`); the real uniqueness token is the
+  `OutboxRecord`, which is `Clone + Deserialize` with public fields.
+- **I-5 (`From<Job<Acked>> for JobState`)** — a trait implementation cannot make a disk write
+  happen.
+- **I-11 (no fail-open path)** — false at head; see below.
+- **I-13 (`TrustClass` has no `Default`)** — the derivation it depends on is not implementable
+  as specified; see below.
+- **I-20 (`Redacted<String>`)** — a newtype cannot redact a `String` nested inside a
+  `Serialize` payload such as `trace.jsonl` or a job dump. This needs a serializer, not a type.
+- **I-23 (validator-only construction)** — `ReadyProof::try_new` (`journal.rs:335`) validates
+  four caller-supplied booleans taken off a public-field `Deserialize` record. It is a claim,
+  not evidence.
+
+The correction is not to abandon the typestate but to stop expecting the compiler to carry an
+invariant across a process boundary. Anything crossing that boundary needs a durable mechanism —
+schema-versioned events, fencing tokens checked on read, and validators that derive rather than
+accept. Where the type system genuinely does apply, it still should.
+
+### Live defects the red team found
+
+**A trust split-brain, reachable through the documented hardening step.**
+`github_adapter.rs:223` reads the trust scope from the CLI argument, while
+`cargo_target_trust_scope()` (`:211`) reads `std::env::var` directly and feeds six store paths.
+The shipped unit sets `VELNOR_TRUST_SCOPE=trusted` (`debian/velnor.env:42`). So
+`velnor-runner service --trust-scope public` — the documented way to harden a pool — yields the
+Docker socket correctly withheld and the compiler stores still **trusted**, which is precisely
+the fork-to-trusted poisoning the flag exists to prevent. There are three defaults, not two:
+`service.rs:193-195` declares `trusted` with an `env =` binding, `velnorctl/runtime.rs:71-72`
+declares `public` with none, so `velnorctl` cannot observe the variable at all. The gate also
+governs container options (`:504`), **privileged service containers** (`:514`) and host port
+publishing (`:536`, `:568`) — wider than the socket alone. Dispatched as T-015.
+
+**Expression evaluation is still fail-open at head.** `executor.rs:11577 resolve_expressions`
+does `Err(_) => rendered.push_str(&rest[start..…])`, emitting the raw `${{ … }}` span into the
+shell. Its own comment assigns the fix to "the lifecycle work package" while the synthesis
+assigns it to the semantics package — it is in neither. A **third** expression implementation
+also survives: `action.rs:1513 render_composite_expression` and `:1538` are textual and never
+call the new evaluator.
+
+**`TrustClass` cannot be derived as specified.** `head_repository_id` does not exist in the job
+message. Failing closed on its absence would make every `push` job a fork PR, every executable
+store read-only, and would destroy the Rust cache hot path — the opposite of this program's
+goal. The proposed enum is also non-disjoint (a release, on a tag, on the default branch matches
+four variants, and the namespace key would depend on match order), and `pull_request_target`
+and `workflow_run` have no representation at all. This is now an open design question, not a
+task.
+
+**The migration itself can lose a completion.** `journal.rs:1236` silently `continue`s on an
+undecodable event. An older controller replaying a new `CompletionUnresolvable` event skips it,
+materialises the outbox row as still pending, and re-drives the completion — a duplicate
+terminal send on a fenced generation, defeating the very invariant the change was meant to add.
+Terminal-affecting events must ride a `JOURNAL_SCHEMA_VERSION` bump (`journal.rs:28`, `:997`
+already hard-fails), not be added silently.
+
+**The single Docker I/O thread deadlocks cancellation.** A forty-minute `docker exec` occupies
+the facade's one I/O thread, so the cancellation path's `kill` cannot be driven until the exec
+it targets returns. Not a global bottleneck — the process model prevents that — but an
+intra-job one, landing on the hot path and the cancellation path simultaneously.
+
+**Deleting "one of the two `actions/cache` implementations" would delete a wire protocol.** They
+are not substitutes: `action.rs:176` and `executor.rs:5095` handle the *step*, while
+`gha_cache.rs` serves the v1 Twirp and v2 Results protocols that BuildKit's `type=gha` requires.
+
+### Corrections to the deletion list
+
+**Must not be deleted as written:** the second `actions/cache` implementation, above; the
+`velnorctl → velnor-runner` edge, because velnorctl runs *every* command through runner handlers
+(`runtime.rs:14`, `:16`, `:647`; `lib.rs:294-1309`) — deleting it deletes the CLI, and the
+motivation behind that proposal is fixed by unifying the clap trees instead;
+`GuestPlan::cancel_requested`, since `guest_plan.rs:140-165` is `deny_unknown_fields` and
+removing the field is a vsock wire break — delete it *after* the cancellation package, not
+before; `RunServiceJobJournalState`, a real fork where `runner.rs:11082` and `:11090` send
+different messages; and `normalize_checkout_mtimes`, which has a live caller at
+`checkout.rs:196`.
+
+**Incomplete as written:** the `velnor-cas` / `action-journal` / `action-model` / `supersession`
+/ `diagnostics` set is one connected component and must go together, along with the dead
+`velnor-runner/Cargo.toml:112` edge and the `dependency_boundaries.rs` entries; deleting
+`diagnostics.rs` leaves `velnorctl diagnostics` permanently a stub; and `DistributedTaskClient`
+is 15 methods with 3 live, not 16 of 19.
+
+**Missing from the list:** `ResolvedAction::javascript_invocation` (`action.rs:648`) and all
+`ExecutableStep::JavaScript` machinery, which has zero production construction sites;
+`NativeActionAdapter::ApprovedComposite` (`action.rs:115`), never matched outside the manifest
+and the enabling condition for the mr-boxington defect; `handoff.rs`'s
+`write_completion`/`read_completion`, a completion protocol that never had a caller; and the
+`std::env::var` at `github_adapter.rs:211`.
+
+### Capability-surface defects, confirmed and enlarged
+
+`jdx/mr-boxington-action` is admitted (`manifest.rs:424`) with no adapter (`action.rs:173-202`
+lists 26; the repository's own test asserts the absence at `manifest.rs:2466`), declares node24,
+and therefore reaches `runner.rs:9712 bail!` — admitted but unexecutable. The same shape applies
+to the four `ApprovedComposite` entries as a class, and `fsfe/reuse-action` (`:413`) is already
+mislabelled — it is a Docker action — while `manifest.rs:2604-2609` asserts only the reverse
+direction.
+
+The proposed invariant "a manifest entry with no adapter and a JavaScript runtime is a build
+failure" is **not implementable as stated**: the runtime is discovered at fetch time from
+`action.yml` (`action.rs:229-253`), so no build-time check can know it.
+
+Two further surface defects: `clean` and `fetch-tags` are admitted and honoured but absent from
+the tools list, so `target_audit` `bail!`s (`velnor-tools/src/main.rs:2279`); and
+`actions/setup-python` is advertised (`:2419`) with no manifest backing at all.
+
+### Ordering corrections
+
+Four packages were re-planned that have already landed: admission and pool partitioning in full,
+the expression evaluator, the Docker deadlines and fact cache, and the benchmark harness.
+
+Newly identified conflicts, none of which the synthesis listed:
+
+- **The verifier package versus Rust acceleration.** The fixture's own `.github/AGENTS.md`
+  *mandates* sccache in every Rust compile job, while the acceleration package deletes sccache.
+  The fixture policy has to change first or every fixture Rust job fails.
+- **Verifier, capability surface and acceleration** all own `velnor-tools/src/main.rs` and
+  `manifest.rs`.
+- **Trust derivation versus the one-site security controls** both gate the Docker socket, and
+  the argv-hardening work in flight will freeze on `trust_scope: &str` unless the trust type
+  lands first as a leaf.
+- **`JobStage` unification must precede the lifecycle package**, not follow it: a private
+  three-variant `JobStage` already exists in `runner.rs` from the landed admission work, so the
+  lifecycle package introducing its own would create a *fifth* stage vocabulary — reproducing
+  the very root cause it exists to remove.
+- The Docker package should split into a facade half that can start now and an Engine-abort half
+  that must follow cancellation; as listed it puts priority-2 work behind priority-4.
+
+### Confirmed sound — not to be second-guessed
+
+The seven-root-cause collapse and RC-1's formulation; RC-4's "delete the unsafe overload"
+remedy; the synchronous-facade resolution, which the process model makes more right than the
+synthesis knew; keeping the completion outbox, with its checksum-verified replay and three-point
+fence; `CompletionUnresolvable` and the disk-pressure total state machine; the verifier package
+going first and in parallel; and — named as the single highest-value item for the program's
+stated goal, and untouched at head — deriving a `HostBudget` from the cgroup quota and
+propagating it into the job as `CARGO_BUILD_JOBS` and the mbx scheduler's share. That is not
+P2 work. Dispatched as T-016.
+
+The landed admission fix is named as the model for how the remaining packages should land.
+
+### BC-28 partially resolved — the job image, measured rather than estimated
+
+Both images were actually built (the `mise_github_token` secret was obtainable via
+`gh auth token`), so these are measured unpacked sizes taken inside the running container, not
+computed figures. Baseline built from a `git archive` snapshot per the evidence rule.
+
+| Area | Before | After | Δ |
+| --- | --- | --- | --- |
+| clang/LLVM | 448 MiB | 128 MiB | −320 |
+| Docker Engine (dockerd, containerd, shim, runc) | 222 | 0 | −222 |
+| Docker client + Buildx | 111 (apt) | 98 (`docker:29-cli`) | −13 |
+| pyenv `-dev` deps, `libsqlite3-dev`, misc | — | — | −~128 |
+| **Whole image** | **4503 MiB** | **3820 MiB** | **−683 MiB (−15.2%)** |
+| installed packages | 377 | 313 | −64 |
+
+Each removal was confirmed rather than assumed: no `bindgen` in `Cargo.lock` and the mold
+adapter asserts no clang linker; jobs use the host Engine through the lease proxy and nothing
+starts a daemon; `MISE_PYTHON_COMPILE=0` plus an `install_only_stripped` CPython URL means
+Python is never compiled; `rusqlite` is `bundled`. Two facts only a real build could establish:
+Ubuntu 26.04 has **no `docker-cli` package**, and `docker-buildx` depends on `docker.io`, so
+removing only `docker.io` would have saved literally zero bytes — the client and Buildx now come
+from a digest-pinned `docker:29-cli`.
+
+**The layer inversion had a deeper cause than layer order.** `docker/job-mise.lock` *mirrors*
+the Rust channel, so any layer copying the lock is invalidated by a Rust bump regardless of
+where the `COPY` sits. A stage now strips that mirror — it is a bare version echo with no URL
+and no checksum, unlike every other entry — and the non-Rust toolchain layer is keyed on the
+stripped copy. Proven by simulating a 1.98.1 → 1.98.2 bump and rebuilding: the toolchain layer
+reported `CACHED` where previously that edit rebuilt everything.
+
+**Laziness was tried and the evidence rejected it.** Building the image without cosign showed it
+reinstalled anyway: mise's `exec_auto_install` makes *any* `mise exec` materialise the entire
+configured toolset, so a tool still listed in `job-mise.toml` is not lazy — it is deferred to
+the worst possible moment, the first `mise exec` of every job. Unblocking it requires either
+`exec_auto_install=false` fleet-wide, which changes tool resolution for every user workflow, or
+removing the tool from the mise config and giving its adapter a pinned source. hadolint is
+blocked differently: its adapter runs the binary directly instead of calling
+`locked_mise_install` as the cosign, mold and just adapters do — and that inconsistency is the
+real bug class. The browser and font stack stays because `playwright install-deps` at job time
+would need root apt with network, which the one-toolchain contract forbids.
+
+Version bumps taken and verified in the built image: gh 2.100.0, protoc 36.1, **mbx 1.7.0**,
+cargo-nextest 0.9.143, mise v2026.9.1. protoc 36's breaking changes are gated on edition 2026 or
+concern other languages, and this repository has no `.proto` files.
+
+**mbx 1.7.0 changes an assumption Velnor should know about.** 1.6.0 could let Cargo compile a
+dependent against metadata produced before a mid-compile source edit; 1.7.0 deletes the modeled
+outputs and **fails the build** instead. So any job that writes into the workspace while a cargo
+build runs — parallel steps, or a cache restore landing on sources — now gets a hard failure
+rather than a silent stale artifact. That is the correct behavior and it is also the same defect
+class as BC-14, fixed upstream. Its cache-key changes additionally mean the host-persistent
+`/var/cache/mbx` stores take a one-time warm-cache miss on the first job after this ships.
+
+| ID | Change | Commits |
+| --- | --- | --- |
+| T-012 | Job image reduced 4503 → 3820 MiB; layer invalidation inverted back; five tool versions bumped and reconciled across environments. | `f1e272f`, `709583a` |
+
+**Blocked, and the block is itself a finding.** sccache 0.16.0 → 0.17.0 and mold 2.41.0 →
+2.42.0 could not be taken, because both versions are also hardcoded in `executor.rs`
+(`:4866-4867` asserts `sccache 0.16.0` "must be preinstalled"; `MOLD_LOCKED_VERSION` at `:4972`,
+asserted at `:26795`) and in four workflow files. Bumping only `docker/` would break those
+adapters at job time.
+
+This is exactly the coupling the new pin-integrity gate exists to catch, and it does not yet
+cover it: the gate validates mise configs, lockfiles and the declared mirrors in
+`config/version-pins.json`, but not version constants embedded in Rust source. Extending it
+there is the follow-up that unblocks both bumps.
+
+Also stale and needing a follow-up: `README.md:8` and
+`content/docs/guides/execution.mdx:123` still name mbx 1.6.0.
+
+### Correction to BC-24 / BC-29 — the secret masker is not duplicated
+
+The security audit reported five redaction copies with three sentinels that "disagree
+materially". That is wrong, and I verified it in source rather than taking either side.
+
+There is exactly **one** secret masker: `Masker` (`runner.rs:7203`, `impl` at `:7208`) using
+aho-corasick with `MatchKind::LeftmostLongest` and the single sentinel `***`. `mask_all`,
+`mask_single_value`, `mask_value`, `mask_log_lines` and `mask_log_lines_with` are thin wrappers
+over it, three of them `#[cfg(test)]`. They agree, and there is nothing to collapse.
+
+The other `redact_*` functions are different jobs, not copies of it: `protocol.rs:297` strips
+credentials from a URL, `executor.rs:12258` redacts known-secret action *inputs* by name, and
+`manifest.rs:106`'s `[redacted]` is an error message about an unsupported capability input. A
+sentinel count across unrelated functions is not evidence of a duplicated masker.
+
+The real defect is narrower and therefore more actionable: **two durable sinks do not call the
+one masker.** The step summary is uploaded unmasked (`runner.rs:6880`, with `job_masks` already
+in scope at the call site), and annotations are published unmasked into both `CompleteJob`
+(`:10466`) and timeline records (`:10460`) through `run_service_annotation` (`:11395`). An audit
+of every other durable sink — step-log blob, combined job log, timeline feed, telemetry, job
+outputs — found all of them masking correctly, and upstream does not mask artifact bytes either,
+so that is not a divergence.
+
+This still belongs to RC-4 (a control correct at one construction site while another path
+bypasses it), but the remedy is to route two call sites through the existing masker, not to
+consolidate implementations that were never duplicated.
+
+### BC-25 enlarged — the cache client could never have worked
+
+Fixing the v1 query parsing uncovered two further defects in the same function, both of the same
+class, all now fixed (`1a49c0c`, `674ef1f`):
+
+- `keys_from_query` split the key list on a literal comma *before* decoding, but toolkit sends
+  `cache?keys=${encodeURIComponent(keys.join(','))}` and `encodeURIComponent` escapes a comma as
+  `%2C`. So the entire restore-key list arrived as one bogus key. Even with the `version`
+  parameter fixed, restore keys would never have matched.
+- A v1 miss returned HTTP 200 with `{"__typename":"NotFoundError"}`. The toolkit client
+  (`getCacheEntry`) treats **only 204** as a miss and throws `Cache not found.` on a 200 lacking
+  `archiveLocation`. Now 204 with an empty body.
+
+The wire contracts were fixed against `actions/toolkit` pinned at
+`193fa46c20fde8b0ed54194bc08b841c78c0776d`: v1 `ArtifactCacheEntry` is
+`{cacheKey, scope, cacheVersion, creationTime, archiveLocation}` with no `cacheId` or
+`cacheDownloadUrl` on it at all, and v2's `matched_key` is field 3 of
+`GetCacheEntryDownloadURLResponse`, which the client uses to compute
+`isRestoreKeyMatch = request.key !== response.matchedKey` — omitting it made every hit look like
+a restore-key hit, so the entry was re-saved every run.
+
+One contract was left alone on principle rather than guessed: the reserve response's `cacheId`
+is typed `number` in toolkit while Velnor returns a hex SHA-256 string. The JavaScript client
+only truthy-checks it, so it works there, but BuildKit's Go client would deserialize into an
+integer field. Establishing that would require pinning a third upstream repository, and changing
+it means reworking the content-addressed id scheme — reported, not guessed.
+
+The unread `CacheHit.size` field that was blocking the `-D warnings` gate turned out to be
+vestigial from a v1 response field the client never had. Deleted rather than allowed.
+
+### The `RUNNER_TEMP` symlink defect is fixed at the syscall
+
+`RUNNER_TEMP` is mode 1777 with predictable step-file names, and every step file was written and
+read by path. Confirmed exploitable with no race. Fixed by binding `RUNNER_TEMP` once to a
+directory descriptor and creating and reading every step file relative to it: writes stage into
+an `O_CREAT|O_EXCL|O_NOFOLLOW` temporary and rename into place, refusing a non-regular
+destination; reads use `statat(SYMLINK_NOFOLLOW)` plus `O_NOFOLLOW` and treat a non-regular file
+as an error rather than following it; and the summary size is now taken from the open descriptor,
+so the file measured is the file read. Existing `fs_copy.rs` primitives were reused rather than
+new ones written.
+
+A detail worth keeping: `NoFollowDir::open_absolute` refuses a symlink anywhere in the path,
+which fails on macOS because `/var` is itself a symlink. `RUNNER_TEMP` is a runner-configured
+root, so it is canonicalised once through `open_trusted_rooted_destination` while everything
+below it stays hostile — the same treatment the rest of the tree gives trusted roots.
+
+Deferred root cause, named: step-file names remain predictable, so a step can still *forge*
+another step's outputs by writing a regular file at the expected path. Unpredictable per-step
+directories would close that, and it needs a change in `executor.rs`, which asserts
+`GITHUB_OUTPUT=/__t/step1_output`.
+
+### Coordination defect — I double-assigned a file
+
+`script_step.rs` was assigned to two packages at once, and both edited it. Nothing was lost —
+the second agent merged onto the first's commit rather than clobbering it — but that was luck
+plus care, not the process working. Ownership claims in §7 must be checked before a package is
+dispatched, and a file already claimed must be either declined or explicitly handed over.
+
+The shared index remains the sharpest hazard: `git add <path> && git commit` sweeps whatever
+anyone else has staged. The rule is now `git commit -s -- <paths>`, and `git pull --rebase
+--autostash` is also discouraged, having flattened another agent's staged files to unstaged
+(content survived; only the staged distinction was lost).
+
+### Correction — upstream *does* parse stderr for workflow commands
+
+I told an agent that upstream never parsed stderr for workflow commands. That is wrong.
+`Runner.Worker/Handlers/ScriptHandler.cs:334-336` wires both streams into the output manager:
+`StepHost.OutputDataReceived += stdoutManager.OnDataReceived` and
+`StepHost.ErrorDataReceived += stderrManager.OnDataReceived`. Velnor parsing stderr matches
+upstream, and nothing was changed there. The agent verified it against the pinned source rather
+than accepting my instruction, which is the behavior this program needs.
+
+### BC-29 instance closed — workflow commands were a permissive re-implementation
+
+All five workflow-command findings were confirmed against upstream at `397b032` and fixed
+(`766b214`, `a3fcd59`, `6c7092f`, `8dc57ff`):
+
+- Leading whitespace is now trimmed before matching, as `ActionCommand.TryParseV2` does. Because
+  Velnor masks log lines from the registered mask set, the missing registration was exactly what
+  leaked the secret — `"  ::add-mask::$SECRET"` registered nothing and the value reached the log.
+- `add-mask` now masks each line of a multi-line value as well as the whole, matching
+  `AddMaskCommandExtension.ProcessCommand`, and warns on an all-whitespace value instead of
+  dropping it silently. A PEM key previously leaked line by line.
+- `stop-commands` tokens are validated the way `ActionCommandManager.ValidateStopToken` does —
+  rejecting an empty token, `pause-logging`, or any registered command name, and continuing to
+  process rather than stopping — with tokens longer than six characters registered as masks, the
+  `ACTIONS_ALLOW_UNSECURE_STOPCOMMAND_TOKENS` opt-in honoured, and resume matched by command
+  name rather than by an exact `::token::` string compare that indented or parameterised resume
+  lines defeated.
+- `::set-env::` and `::add-path::` are refused with upstream's exact error strings unless
+  `ACTIONS_ALLOW_UNSECURE_COMMANDS` is set. Because the refusal lives in the parser it covers
+  stdout and stderr at once.
+- `GITHUB_ENV` now blocks only `NODE_OPTIONS`, loudly, as `SetEnvFileCommand` does, instead of
+  silently dropping every `GITHUB_*` and `RUNNER_*` name.
+
+The enabling condition, stated by the agent and worth keeping: `workflow_command.rs` was written
+as a permissive re-implementation of the command grammar rather than a transcription of
+`ActionCommandManager` plus `ActionCommand`, so every *refusal* upstream performs — the
+registered-name gate, stop-token validation, the disabled commands, the block-list — was simply
+absent while every *effect* was implemented. That is RC-3 with a specific and dangerous shape:
+transcribing what a system does while omitting what it refuses to do.
+
+The remaining instance of the class is a **second, independent command grammar** in
+`executor.rs::rendered_output_line`, which has the same missing trim.
+
+### New security gap — the masker has no encoded variants
+
+Upstream registers eight encoders on the secret masker itself (`HostContext.cs:103-112`):
+`Base64StringEscape` with shift-1 and shift-2 variants, `CommandLineArgumentEscape`,
+`ExpressionStringEscape`, `JsonStringEscape`, `UriDataEscape`, `XmlDataEscape`,
+`TrimDoubleQuotes`, and `PowerShellPreAmpersandEscape`. Registering them on the masker means
+every value it holds, including anything added by `::add-mask::`, is masked in all those
+encodings.
+
+Velnor's `Masker` matches the literal value only, so a secret reaching a log base64-encoded,
+JSON-escaped or URI-escaped passes through unmasked. Same shape as the two unmasked sinks: the
+masker is correct and its coverage is not. Routed to the `runner.rs` owner.
+
+### Deferred, named
+
+- Upstream sets `CommandResult = TaskResult.Failed` when a command throws. Velnor's
+  `StepCommandState` has no such field, so a step emitting `::set-env::` now logs two errors and
+  still passes if the process exits 0. Needs a field plus a change in `executor.rs::absorb`.
+- Upstream reads the `ACTIONS_ALLOW_UNSECURE_*` opt-ins from the job `env:` context as well as
+  the process environment; `parse_workflow_commands` has no env context, so only the process half
+  is modelled and a workflow setting the flag in `env:` is refused.
+
+### BC-20 resolved on both sides — the lock-in is broken
+
+The Velnor half went first, so the fixture was never briefly failing an assertion that no
+longer reflected intent. `crates/velnor-tools/src/main.rs` no longer requires the fixture to
+contain `mozilla-actions/sccache-action@`, `SCCACHE_GHA_ENABLED:` and `cache-sccache:`. In
+their place, `fixture_rust_scenarios()` and `check_rust_scenarios()` walk the Rust suite **per
+job**: the default path is mandatory and must declare no compiler-cache environment, no
+sccache/mbx/kache action and no `target/` cache, while sccache is one of five scenarios.
+Forbidden declarations are matched against real `env` keys, step `uses` values and
+`actions/cache` `with.path` entries rather than substrings, so a scenario may still *read* a
+variable it must not *set*. The gate was proven to bite: against the old suite it reports all
+five scenarios missing; against the new one it passes (`7f3e14c`, `c3b5907`).
+
+The fixture now implements all five scenarios with their own evidence and comparator legs
+(`03e3020`, `0e51b36`): the default path with plain `cargo`; explicit sccache asserting
+`MBX_DISABLE=1` and no mbx store wherever the sccache store was mounted; the acceleration
+opt-out; cache interaction across source-cache, target-cache, source-change and lockfile-change;
+and four simultaneous shards per lane with a hard assertion that they actually overlapped.
+Crucially, `compiler_cache_wrapper` is **measured** in the evidence rather than assumed — a
+mismatch on the default path means Velnor leaked a wrapper into it.
+
+I also corrected the fixture policy that had codified the lock-in
+(`velnor-actions-fixture` `209ff57`): `.github/AGENTS.md` still read *"Rust compile jobs use
+mold and local-only sccache v0.16.0 with a 20 GiB bound"*, which would have re-created the
+defect on the next fixture change. It now states that the default Velnor Rust path is the
+baseline and sccache is one compatibility scenario.
+
+### The acceleration opt-out exists — correcting the verifier audit
+
+The claim that no workflow-level acceleration opt-out exists in Velnor is **wrong**.
+`crates/velnor-runner/src/runtime_env.rs:436` reads
+`|| (upper.starts_with("MBX_") && upper != "MBX_DISABLE")`: every `MBX_`-prefixed name is a
+protected runner-owned variable dropped from workflow-supplied environment
+(`runtime_env.rs:201-205`) **except** `MBX_DISABLE`, which is deliberately carved out and
+passed through into `job_runtime_env`, feeding `base_env` at `runner.rs:7853`. Velnor relies on
+that meaning internally (`container.rs:87`). The opt-out was undocumented and untested, not
+absent.
+
+Gap now recorded: **there is no test asserting the `MBX_DISABLE` passthrough.** One line of
+carve-out is all that stands between a supported opt-out and its silent removal.
+
+### New structural finding — acceleration is selected before conditions are evaluated
+
+An `if:`-guarded sccache step still switches the **whole job's** acceleration branch, because
+`manifest::declares_sccache` filters on `step.enabled`, which an `if:` expression does not
+clear. A matrix job containing a conditional sccache step therefore runs *every* variant on the
+compatibility branch. This forced the cache-interaction scenario to split `explicit-sccache`
+into its own job.
+
+The root cause is that acceleration selection is decided from *declared* steps at admission,
+before conditions are evaluated — so no workflow can mix accelerated and unaccelerated variants
+within one job. That is a real limitation of the admission-time model, not a bug in the
+condition evaluator, and it belongs with the trust/derivation work where the same
+"decide-at-admission from declared shape" pattern appears.
+
+### Fixture items now blocked on the capability baseline refresh
+
+These are correctly blocked rather than forced, because the readiness gate the verifier package
+built is doing its job: `validate_remote_uses` rejects any `uses:` for an action absent from the
+capability snapshot, and the audit already fails loudly with
+`coverage/velnor-capabilities.json source_sha is '2858e92…', but the Velnor build under test
+reports 'd4d6e93…'; the baseline is stale`.
+
+Required, in order: regenerate `coverage/velnor-capabilities.json` from the v11 build; move
+`EXPECTED_MANIFEST_VERSION` from 10 to 11; drop `EXPECTED_KACHE_REF`,
+`EXPECTED_KACHE_VERSION` and `validate_kache_contract`; add a `jdx/mr-boxington-action` row to
+`fixture-coverage.json` and `action-surface-coverage.json`; remove the
+`kunobi-ninja/kache-action` rows **and** the `compat.yml:cache-kache` job, which is now
+unadmittable because Velnor's manifest has no such action at all; and remove
+`mozilla-actions/sccache-action` from `MICROVM_SUPPORTED`, flipping that coverage row to
+`expected-unsupported` — `validate_microvm_compiler_cache` (`manifest.rs:1371-1385`) refuses
+microVM for a declared sccache action *or* any `RUSTC_WRAPPER`/`SCCACHE_*` environment, so the
+current `microvm: supported` claim is false.
+
+Once the baseline lands, the sixteen admitted mr-boxington inputs split cleanly: `backend=local`,
+`version`, `cache-key`, `restore-keys`, `cache-generation`, `save-on-workflow-dispatch`,
+`toolchain`, `max-size` and `cache-links` are exercisable from a sixth scenario; `github-token`,
+`server-url`, `namespace`, `token`, `token-file`, `oidc-audience` and `server-mode` select a
+remote cache backend and should be recorded `admission_only` under this fixture's local-only
+store policy.
