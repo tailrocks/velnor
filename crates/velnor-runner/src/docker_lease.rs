@@ -57,6 +57,369 @@ const MAX_LEASE_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
 const PROXY_COPY_BUFFER: usize = 64 * 1024;
 const PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const PROXY_MAX_UPGRADE_LIFETIME: Duration = Duration::from_secs(60 * 60);
+const MAX_OWNED_DOCKER_RESOURCES: usize = 1024;
+const MAX_OWNED_DOCKER_RESOURCE_ID: usize = 256;
+const MAX_CREATE_RESPONSE_BODY: usize = 64 * 1024;
+
+/// The proxy is a capability boundary, not a transparent Docker socket.
+/// Resource identifiers are added only after a successful create response and
+/// are shared by all connections belonging to this one job lease.
+#[derive(Clone)]
+struct DockerLeasePolicy {
+    resources: Arc<Mutex<OwnedDockerResources>>,
+}
+
+#[derive(Default)]
+struct OwnedDockerResources {
+    containers: BTreeSet<String>,
+    networks: BTreeSet<String>,
+    volumes: BTreeSet<String>,
+    execs: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockerResourceKind {
+    Container,
+    Network,
+    Volume,
+    Exec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorizedDockerRoute {
+    DaemonRead,
+    Create(DockerResourceKind),
+    Owned(DockerResourceKind),
+    Hijack(DockerResourceKind),
+}
+
+impl DockerLeasePolicy {
+    fn new(job_container: &str) -> Result<Self> {
+        let job_container = validate_owned_resource_id(job_container, "job container")?;
+        let mut containers = BTreeSet::new();
+        containers.insert(job_container);
+        Ok(Self {
+            resources: Arc::new(Mutex::new(OwnedDockerResources {
+                containers,
+                ..OwnedDockerResources::default()
+            })),
+        })
+    }
+
+    fn authorize(&self, request: &[u8]) -> Result<AuthorizedDockerRoute> {
+        let (method, target) = docker_request_line(request)?;
+        let path = canonical_docker_path(target)?;
+        let segments = docker_api_path_segments(&path)?;
+        let method = method.to_ascii_uppercase();
+        let upgrade = docker_upgrade_state(request)?;
+
+        if matches!(segments.as_slice(), ["_ping"] | ["version"] | ["info"])
+            && matches!(method.as_str(), "GET" | "HEAD")
+        {
+            return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
+        }
+        if segments.as_slice() == ["build"] && method == "POST" {
+            return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
+        }
+        if segments.as_slice() == ["images", "create"] && method == "POST" {
+            return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
+        }
+        if segments.as_slice() == ["images", "json"] && matches!(method.as_str(), "GET" | "HEAD") {
+            return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
+        }
+        if segments.len() == 3
+            && segments[0] == "images"
+            && segments[2] == "json"
+            && matches!(method.as_str(), "GET" | "HEAD")
+        {
+            return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
+        }
+        if segments.as_slice() == ["containers", "create"] && method == "POST" {
+            return authorize_docker_route(
+                AuthorizedDockerRoute::Create(DockerResourceKind::Container),
+                upgrade,
+            );
+        }
+        if segments.as_slice() == ["networks", "create"] && method == "POST" {
+            return authorize_docker_route(
+                AuthorizedDockerRoute::Create(DockerResourceKind::Network),
+                upgrade,
+            );
+        }
+        if segments.as_slice() == ["volumes", "create"] && method == "POST" {
+            return authorize_docker_route(
+                AuthorizedDockerRoute::Create(DockerResourceKind::Volume),
+                upgrade,
+            );
+        }
+
+        match segments.as_slice() {
+            ["containers", id] => {
+                self.require_owned(DockerResourceKind::Container, id)?;
+                if matches!(method.as_str(), "GET" | "HEAD") {
+                    return authorize_docker_route(
+                        AuthorizedDockerRoute::Owned(DockerResourceKind::Container),
+                        upgrade,
+                    );
+                }
+            }
+            ["containers", id, operation] => {
+                self.require_owned(DockerResourceKind::Container, id)?;
+                if operation == &"exec" && method == "POST" {
+                    return authorize_docker_route(
+                        AuthorizedDockerRoute::Create(DockerResourceKind::Exec),
+                        upgrade,
+                    );
+                }
+                if matches!(
+                    (method.as_str(), *operation),
+                    (
+                        "GET",
+                        "archive" | "changes" | "json" | "logs" | "stats" | "top" | "wait"
+                    ) | (
+                        "POST",
+                        "attach"
+                            | "kill"
+                            | "pause"
+                            | "restart"
+                            | "resize"
+                            | "start"
+                            | "stop"
+                            | "unpause"
+                            | "wait"
+                    )
+                ) {
+                    let route = if operation == &"attach" {
+                        AuthorizedDockerRoute::Hijack(DockerResourceKind::Container)
+                    } else {
+                        AuthorizedDockerRoute::Owned(DockerResourceKind::Container)
+                    };
+                    return authorize_docker_route(route, upgrade);
+                }
+            }
+            ["exec", id, operation] => {
+                self.require_owned(DockerResourceKind::Exec, id)?;
+                if operation == &"start" && method == "POST" {
+                    return authorize_docker_route(
+                        AuthorizedDockerRoute::Hijack(DockerResourceKind::Exec),
+                        upgrade,
+                    );
+                }
+                if operation == &"json" && matches!(method.as_str(), "GET" | "HEAD") {
+                    return authorize_docker_route(
+                        AuthorizedDockerRoute::Owned(DockerResourceKind::Exec),
+                        upgrade,
+                    );
+                }
+            }
+            ["networks", id] => {
+                self.require_owned(DockerResourceKind::Network, id)?;
+                if matches!(method.as_str(), "GET" | "HEAD") {
+                    return authorize_docker_route(
+                        AuthorizedDockerRoute::Owned(DockerResourceKind::Network),
+                        upgrade,
+                    );
+                }
+            }
+            ["networks", id, operation] => {
+                self.require_owned(DockerResourceKind::Network, id)?;
+                if matches!(operation.as_ref(), "connect" | "disconnect") && method == "POST" {
+                    self.require_owned_container_in_body(request)?;
+                    return authorize_docker_route(
+                        AuthorizedDockerRoute::Owned(DockerResourceKind::Network),
+                        upgrade,
+                    );
+                }
+            }
+            ["volumes", id] => {
+                self.require_owned(DockerResourceKind::Volume, id)?;
+                if matches!(method.as_str(), "GET" | "HEAD") {
+                    return authorize_docker_route(
+                        AuthorizedDockerRoute::Owned(DockerResourceKind::Volume),
+                        upgrade,
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        bail!("Docker lease denied {method} {path}: route is not an owned capability")
+    }
+
+    fn require_owned(&self, kind: DockerResourceKind, id: &str) -> Result<()> {
+        let id = validate_owned_resource_id(id, "Docker resource")?;
+        let resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        let owned = match kind {
+            DockerResourceKind::Container => resources.containers.contains(&id),
+            DockerResourceKind::Network => resources.networks.contains(&id),
+            DockerResourceKind::Volume => resources.volumes.contains(&id),
+            DockerResourceKind::Exec => resources.execs.contains(&id),
+        };
+        if owned {
+            Ok(())
+        } else {
+            bail!("Docker lease denied foreign {kind:?} resource {id:?}")
+        }
+    }
+
+    fn require_owned_container_in_body(&self, request: &[u8]) -> Result<()> {
+        let body = docker_request_body(request)?;
+        let value = parse_create_value(body).context("parse Docker network request")?;
+        let id = value
+            .get("Container")
+            .and_then(Value::as_str)
+            .context("Docker network request must name a container")?;
+        self.require_owned(DockerResourceKind::Container, id)
+    }
+
+    fn record_create_response(
+        &self,
+        kind: DockerResourceKind,
+        status: u16,
+        body: &[u8],
+    ) -> Result<()> {
+        if !(200..300).contains(&status) {
+            return Ok(());
+        }
+        let value = parse_create_value(body)
+            .context("parse successful Docker create response for ownership")?;
+        let identifier = match kind {
+            DockerResourceKind::Container
+            | DockerResourceKind::Network
+            | DockerResourceKind::Exec => value
+                .get("Id")
+                .or_else(|| value.get("ID"))
+                .and_then(Value::as_str),
+            DockerResourceKind::Volume => value.get("Name").and_then(Value::as_str),
+        }
+        .context("successful Docker create response omitted its resource identifier")?;
+        let identifier = validate_owned_resource_id(identifier, "created Docker resource")?;
+        let mut resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        let already_owned = match kind {
+            DockerResourceKind::Container => resources.containers.contains(&identifier),
+            DockerResourceKind::Network => resources.networks.contains(&identifier),
+            DockerResourceKind::Volume => resources.volumes.contains(&identifier),
+            DockerResourceKind::Exec => resources.execs.contains(&identifier),
+        };
+        if !already_owned && owned_resource_count(&resources) >= MAX_OWNED_DOCKER_RESOURCES {
+            bail!("Docker lease ownership registry is full");
+        }
+        match kind {
+            DockerResourceKind::Container => {
+                resources.containers.insert(identifier);
+            }
+            DockerResourceKind::Network => {
+                resources.networks.insert(identifier);
+            }
+            DockerResourceKind::Volume => {
+                resources.volumes.insert(identifier);
+            }
+            DockerResourceKind::Exec => {
+                resources.execs.insert(identifier);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn authorize_docker_route(
+    route: AuthorizedDockerRoute,
+    upgrade: bool,
+) -> Result<AuthorizedDockerRoute> {
+    if upgrade && !matches!(route, AuthorizedDockerRoute::Hijack(_)) {
+        bail!("Docker lease denied unowned upgrade/tunnel route");
+    }
+    Ok(route)
+}
+
+fn owned_resource_count(resources: &OwnedDockerResources) -> usize {
+    resources.containers.len()
+        + resources.networks.len()
+        + resources.volumes.len()
+        + resources.execs.len()
+}
+
+fn capture_response_bytes(captured: &mut Option<Vec<u8>>, bytes: &[u8]) -> Result<()> {
+    let Some(captured) = captured else {
+        return Ok(());
+    };
+    if bytes.len() > MAX_CREATE_RESPONSE_BODY.saturating_sub(captured.len()) {
+        bail!("Docker create response exceeds ownership capture limit");
+    }
+    captured.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn validate_owned_resource_id(id: &str, kind: &str) -> Result<String> {
+    let id = id.trim();
+    if id.is_empty()
+        || id.len() > MAX_OWNED_DOCKER_RESOURCE_ID
+        || id
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b'/')
+    {
+        bail!("invalid {kind} identifier");
+    }
+    Ok(id.to_owned())
+}
+
+fn docker_request_line(request: &[u8]) -> Result<(&str, &str)> {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .context("Docker API request is missing header terminator")?;
+    let header = std::str::from_utf8(&request[..header_end])
+        .context("Docker API request headers must be UTF-8")?;
+    let line = header.split_once("\r\n").map_or(header, |(line, _)| line);
+    let mut parts = line.split_ascii_whitespace();
+    let method = parts.next().context("Docker API request has no method")?;
+    let target = parts.next().context("Docker API request has no target")?;
+    let version = parts.next().context("Docker API request has no version")?;
+    if parts.next().is_some() || !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+        bail!("malformed Docker API request line");
+    }
+    Ok((method, target))
+}
+
+fn docker_request_body(request: &[u8]) -> Result<&[u8]> {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .context("Docker API request is missing header terminator")?;
+    Ok(&request[header_end..])
+}
+
+fn docker_api_path_segments(path: &str) -> Result<Vec<&str>> {
+    let mut segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        bail!("Docker API route contains an empty path segment");
+    }
+    if segments.first().is_some_and(|segment| {
+        segment.len() > 1 && segment.starts_with('v') && segment.as_bytes()[1].is_ascii_digit()
+    }) {
+        let version = segments.remove(0);
+        let valid = version
+            .strip_prefix('v')
+            .and_then(|version| version.split_once('.'))
+            .is_some_and(|(major, minor)| {
+                !major.is_empty()
+                    && !minor.is_empty()
+                    && major.chars().all(|ch| ch.is_ascii_digit())
+                    && minor.chars().all(|ch| ch.is_ascii_digit())
+            });
+        if !valid {
+            bail!("Docker API route has an invalid version prefix");
+        }
+    }
+    Ok(segments)
+}
 
 pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
     let mut hasher = Sha256::new();
@@ -1941,7 +2304,9 @@ fn bind_unix_lease(
         std::os::unix::net::UnixStream::pair().context("create job Docker lease shutdown wake")?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let conns = LeaseConnSet::new(Arc::clone(&shutdown));
+    let policy = Arc::new(DockerLeasePolicy::new(&job_id)?);
     let conns_thread = Arc::clone(&conns);
+    let policy_thread = Arc::clone(&policy);
     let listen_path_thread = listen_path.clone();
     let accept_thread = std::thread::Builder::new()
         .name(format!("velnor-docker-lease-{}", job_id))
@@ -1952,6 +2317,7 @@ fn bind_unix_lease(
                 job_id,
                 daemon_id,
                 conns_thread,
+                policy_thread,
                 listen_path_thread,
                 wake_reader,
             );
@@ -1973,6 +2339,7 @@ fn accept_loop(
     job_id: String,
     daemon_id: String,
     conns: Arc<LeaseConnSet>,
+    policy: Arc<DockerLeasePolicy>,
     listen_path: PathBuf,
     wake_reader: std::os::unix::net::UnixStream,
 ) {
@@ -2045,12 +2412,13 @@ fn accept_loop(
         let job_id = job_id.clone();
         let daemon_id = daemon_id.clone();
         let conns = Arc::clone(&conns);
+        let policy = Arc::clone(&policy);
         let _ = std::thread::Builder::new()
             .name("velnor-docker-lease-conn".into())
             .spawn(move || {
                 let _permit = permit;
                 if let Err(error) =
-                    handle_client_with(stream, &host_socket, &job_id, &daemon_id, conns)
+                    handle_client_with(stream, &host_socket, &job_id, &daemon_id, conns, policy)
                 {
                     eprintln!("Warning: job Docker lease proxy: {error:#}");
                 }
@@ -2072,6 +2440,7 @@ fn handle_client(
         job_id,
         daemon_id,
         LeaseConnSet::new(Arc::new(AtomicBool::new(false))),
+        Arc::new(DockerLeasePolicy::new(job_id)?),
     )
 }
 
@@ -2082,6 +2451,7 @@ fn handle_client_with(
     job_id: &str,
     daemon_id: &str,
     conns: Arc<LeaseConnSet>,
+    policy: Arc<DockerLeasePolicy>,
 ) -> Result<()> {
     use std::os::unix::net::UnixStream;
 
@@ -2110,13 +2480,24 @@ fn handle_client_with(
             remainder,
             mut budget,
         } = request;
+        let authorization = policy.authorize(&bytes)?;
         let request_method = http_request_method(&bytes)?.to_owned();
         let request_wants_close = http_request_wants_close(&bytes);
         let upgrade = request_is_upgrade(&bytes);
-        let forwarded = transform_request_buffer(bytes, &mut budget, |request| {
+        if upgrade && !matches!(authorization, AuthorizedDockerRoute::Hijack(_)) {
+            bail!("Docker lease denied unowned upgrade/tunnel route");
+        }
+        let forwarded = match transform_request_buffer(bytes, &mut budget, |request| {
             rewrite_docker_api_request(request, job_id, daemon_id)
-        })?;
-        let forwarded = transform_request_buffer(forwarded, &mut budget, without_expect_continue)?;
+        }) {
+            Ok(forwarded) => forwarded,
+            Err(error) => return Err(error),
+        };
+        let forwarded =
+            match transform_request_buffer(forwarded, &mut budget, without_expect_continue) {
+                Ok(forwarded) => forwarded,
+                Err(error) => return Err(error),
+            };
         if conns.is_shutdown() {
             return Ok(());
         }
@@ -2143,12 +2524,29 @@ fn handle_client_with(
                 .write_all(&forwarded)
                 .context("forward Docker API request through job lease")
             {
+                eprintln!("T004 host write error: {error:#}");
                 if conns.is_shutdown() {
                     return Ok(());
                 }
                 return Err(error);
             }
-            match forward_http_response(host, &mut host_buffer, &mut client, &request_method) {
+            let create_kind = match authorization {
+                AuthorizedDockerRoute::Create(kind) => Some(kind),
+                _ => None,
+            };
+            match forward_http_response_with_observer(
+                host,
+                &mut host_buffer,
+                &mut client,
+                &request_method,
+                create_kind.is_some(),
+                |status, body| {
+                    if let Some(kind) = create_kind {
+                        policy.record_create_response(kind, status, body)?;
+                    }
+                    Ok(())
+                },
+            ) {
                 Ok(reusable) => reusable,
                 Err(error) if error.downcast_ref::<GuestClosed>().is_some() => return Ok(()),
                 Err(error) => return Err(error),
@@ -2251,16 +2649,17 @@ fn http_request_wants_close(request: &[u8]) -> bool {
 
 #[cfg(unix)]
 fn request_is_upgrade(request: &[u8]) -> bool {
-    let Some(header_end) = request
+    docker_upgrade_state(request).unwrap_or(false)
+}
+
+fn docker_upgrade_state(request: &[u8]) -> Result<bool> {
+    let header_end = request
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .map(|index| index + 4)
-    else {
-        return false;
-    };
-    let Ok(header) = std::str::from_utf8(&request[..header_end]) else {
-        return false;
-    };
+        .context("Docker API request is missing header terminator")?;
+    let header = std::str::from_utf8(&request[..header_end])
+        .context("Docker API request headers must be UTF-8")?;
     let mut connection_upgrade = false;
     let mut supported_upgrade = false;
     let mut connection_headers = 0;
@@ -2270,20 +2669,38 @@ fn request_is_upgrade(request: &[u8]) -> bool {
             break;
         }
         let Some((name, value)) = line.split_once(':') else {
-            continue;
+            bail!("malformed Docker API request header");
         };
         if name.eq_ignore_ascii_case("upgrade") {
             upgrade_headers += 1;
+            if upgrade_headers > 1 {
+                bail!("Docker API request has duplicate Upgrade headers");
+            }
+            let value = value.trim();
+            if value.is_empty() {
+                bail!("Docker API request has an empty Upgrade header");
+            }
             supported_upgrade = value.trim().eq_ignore_ascii_case("tcp")
                 || value.trim().eq_ignore_ascii_case("h2c");
         } else if name.eq_ignore_ascii_case("connection") {
             connection_headers += 1;
+            if connection_headers > 1 {
+                bail!("Docker API request has duplicate Connection headers");
+            }
             connection_upgrade = value
                 .split(',')
                 .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
         }
     }
-    connection_headers == 1 && upgrade_headers == 1 && connection_upgrade && supported_upgrade
+    let has_upgrade_marker = upgrade_headers != 0 || connection_upgrade;
+    if !has_upgrade_marker {
+        return Ok(false);
+    }
+    if connection_headers != 1 || upgrade_headers != 1 || !connection_upgrade || !supported_upgrade
+    {
+        bail!("Docker API request has an unsupported or malformed upgrade");
+    }
+    Ok(true)
 }
 
 /// Copy both directions, propagating half-closes instead of full teardown.
@@ -2363,12 +2780,26 @@ fn proxy_until_closed(
 /// Forward framed ordinary HTTP responses while keeping the guest and Engine
 /// connections reusable. A response without HTTP framing remains a bounded
 /// one-shot fallback because its end is defined by host EOF.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn forward_http_response(
     host: &mut std::os::unix::net::UnixStream,
     host_buffer: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
     request_method: &str,
+) -> Result<bool> {
+    forward_http_response_with_observer(host, host_buffer, client, request_method, false, |_, _| {
+        Ok(())
+    })
+}
+
+#[cfg(unix)]
+fn forward_http_response_with_observer(
+    host: &mut std::os::unix::net::UnixStream,
+    host_buffer: &mut ResponseBuffer,
+    client: &mut std::os::unix::net::UnixStream,
+    request_method: &str,
+    capture_body: bool,
+    mut observe: impl FnMut(u16, &[u8]) -> Result<()>,
 ) -> Result<bool> {
     loop {
         let head = read_http_response_head(host, host_buffer, client, request_method)?;
@@ -2379,13 +2810,27 @@ fn forward_http_response(
             if (100..200).contains(&head.status) && head.status != 101 {
                 continue;
             }
+            observe(head.status, &[])?;
             return Ok(!head.close && head.status != 101);
         }
+        let mut captured = capture_body.then(Vec::new);
         if head.chunked {
-            forward_chunked_response(host, host_buffer, client)?;
+            forward_chunked_response_captured(host, host_buffer, client, &mut captured)?;
         } else if let Some(content_length) = head.content_length {
-            forward_exact_response_body(host, host_buffer, client, content_length)?;
+            if capture_body && content_length > MAX_CREATE_RESPONSE_BODY {
+                bail!("Docker create response exceeds ownership capture limit");
+            }
+            forward_exact_response_body_captured(
+                host,
+                host_buffer,
+                client,
+                content_length,
+                &mut captured,
+            )?;
         } else {
+            if capture_body {
+                bail!("Docker create response has no bounded body framing");
+            }
             if !host_buffer.is_empty() {
                 client
                     .write_all(host_buffer.as_slice())
@@ -2393,11 +2838,14 @@ fn forward_http_response(
                 host_buffer.clear();
             }
             forward_unframed_response(host, client)?;
+            observe(head.status, &[])?;
             return Ok(false);
         }
         if (100..200).contains(&head.status) && head.status != 101 {
             continue;
         }
+        let body = captured.as_deref().unwrap_or(&[]);
+        observe(head.status, body)?;
         return Ok(!head.close && head.status != 101);
     }
 }
@@ -2563,14 +3011,16 @@ fn read_http_response_head(
 }
 
 #[cfg(unix)]
-fn forward_exact_response_body(
+fn forward_exact_response_body_captured(
     host: &mut std::os::unix::net::UnixStream,
     buffered: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
     mut remaining: usize,
+    captured: &mut Option<Vec<u8>>,
 ) -> Result<()> {
     if !buffered.is_empty() && remaining != 0 {
         let take = remaining.min(buffered.len());
+        capture_response_bytes(captured, &buffered.as_slice()[..take])?;
         client
             .write_all(&buffered.as_slice()[..take])
             .context("forward buffered Docker API response body")?;
@@ -2587,6 +3037,7 @@ fn forward_exact_response_body(
         if read == 0 {
             bail!("host Docker API closed before response body finished");
         }
+        capture_response_bytes(captured, &scratch[..read])?;
         client
             .write_all(&scratch[..read])
             .context("forward Docker API response body")?;
@@ -2674,11 +3125,21 @@ fn validate_chunked_response_trailer(line: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn forward_chunked_response(
     host: &mut std::os::unix::net::UnixStream,
     buffered: &mut ResponseBuffer,
     client: &mut std::os::unix::net::UnixStream,
+) -> Result<()> {
+    forward_chunked_response_captured(host, buffered, client, &mut None)
+}
+
+#[cfg(unix)]
+fn forward_chunked_response_captured(
+    host: &mut std::os::unix::net::UnixStream,
+    buffered: &mut ResponseBuffer,
+    client: &mut std::os::unix::net::UnixStream,
+    captured: &mut Option<Vec<u8>>,
 ) -> Result<()> {
     loop {
         let line = read_response_line(host, buffered, client)?;
@@ -2693,7 +3154,7 @@ fn forward_chunked_response(
             .trim();
         let size = usize::from_str_radix(size_text, 16)
             .context("parse Docker API response chunk-size line")?;
-        forward_exact_response_body(host, buffered, client, size)?;
+        forward_exact_response_body_captured(host, buffered, client, size, captured)?;
         if size == 0 {
             loop {
                 let trailer = read_response_line(host, buffered, client)?;
@@ -3124,6 +3585,178 @@ mod tests {
             .filter(|arg| !arg.starts_with('-'))
             .map(String::as_str)
             .collect()
+    }
+
+    fn api_request(method: &str, target: &str, body: &[u8]) -> Vec<u8> {
+        format!(
+            "{method} {target} HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        )
+        .into_bytes()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_policy_denies_foreign_resources_and_unsafe_routes() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let requests = [
+            api_request("GET", "/v1.43/containers/foreign/json", b""),
+            api_request("POST", "/v1.43/containers/foreign/kill", b""),
+            api_request("DELETE", "/v1.43/containers/velnor-job-owned", b""),
+            api_request("POST", "/v1.43/containers/velnor-job-owned/rename", b""),
+            api_request("POST", "/v1.43/containers/velnor-job-owned/update", b"{}"),
+            api_request("GET", "/v1.43/exec/foreign/json", b""),
+            api_request("GET", "/v1.43/system/df", b""),
+        ];
+        for (index, request) in requests.into_iter().enumerate() {
+            let result = policy.authorize(&request);
+            assert!(
+                result.is_err(),
+                "foreign or unsafe Docker route {index} must be denied: {}",
+                String::from_utf8_lossy(&request)
+            );
+            let error = result.expect_err("checked above");
+            assert!(
+                error.to_string().contains("Docker lease denied"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_policy_allows_owned_routes_and_rejects_generic_upgrade() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        assert_eq!(
+            policy
+                .authorize(&api_request(
+                    "POST",
+                    "/v1.43/containers/velnor-job-owned/attach",
+                    b""
+                ))
+                .unwrap(),
+            AuthorizedDockerRoute::Hijack(DockerResourceKind::Container)
+        );
+        let mut upgrade = api_request("POST", "/v1.43/build", b"");
+        let header_end = upgrade
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        upgrade.splice(
+            header_end + 2..header_end + 2,
+            b"Connection: Upgrade\r\nUpgrade: h2c\r\n".iter().copied(),
+        );
+        let error = policy
+            .authorize(&upgrade)
+            .expect_err("generic Docker build upgrade must be denied");
+        assert!(error.to_string().contains("upgrade/tunnel"), "{error:#}");
+        assert!(policy
+            .authorize(&api_request("GET", "/v1.43/_ping", b""))
+            .is_ok());
+
+        let mut owned_upgrade = api_request("GET", "/v1.43/containers/velnor-job-owned/json", b"");
+        let header_end = owned_upgrade
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        owned_upgrade.splice(
+            header_end + 2..header_end + 2,
+            b"Connection: Upgrade\r\nUpgrade: h2c\r\n".iter().copied(),
+        );
+        let error = policy
+            .authorize(&owned_upgrade)
+            .expect_err("inspection must not become a generic upgrade tunnel");
+        assert!(error.to_string().contains("upgrade/tunnel"), "{error:#}");
+    }
+
+    #[test]
+    fn lease_policy_registers_only_successful_create_response_ids() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let create = api_request("POST", "/v1.43/containers/create", b"{}");
+        assert_eq!(
+            policy.authorize(&create).unwrap(),
+            AuthorizedDockerRoute::Create(DockerResourceKind::Container)
+        );
+        policy
+            .record_create_response(DockerResourceKind::Container, 500, br#"{"Id":"bad"}"#)
+            .unwrap();
+        assert!(policy
+            .authorize(&api_request("GET", "/v1.43/containers/bad/json", b""))
+            .is_err());
+        policy
+            .record_create_response(
+                DockerResourceKind::Container,
+                201,
+                br#"{"Id":"created-container"}"#,
+            )
+            .unwrap();
+        assert!(policy
+            .authorize(&api_request(
+                "GET",
+                "/v1.43/containers/created-container/json",
+                b""
+            ))
+            .is_ok());
+        assert!(policy
+            .authorize(&api_request("GET", "/v1.43/containers/foreign/json", b""))
+            .is_err());
+    }
+
+    #[test]
+    fn lease_policy_binds_exec_to_an_owned_container() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let body = br#"{"AttachStdout":true}"#;
+        let create = api_request("POST", "/v1.43/containers/velnor-job-owned/exec", body);
+        assert_eq!(
+            policy.authorize(&create).unwrap(),
+            AuthorizedDockerRoute::Create(DockerResourceKind::Exec)
+        );
+        policy
+            .record_create_response(DockerResourceKind::Exec, 201, br#"{"Id":"exec-owned"}"#)
+            .unwrap();
+        assert!(policy
+            .authorize(&api_request("POST", "/v1.43/exec/exec-owned/start", b"{}"))
+            .is_ok());
+        assert!(policy
+            .authorize(&api_request("POST", "/v1.43/exec/foreign/start", b"{}"))
+            .is_err());
+    }
+
+    #[test]
+    fn lease_policy_requires_owned_container_for_network_connect() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        policy
+            .record_create_response(DockerResourceKind::Network, 201, br#"{"Id":"net-owned"}"#)
+            .unwrap();
+        let foreign = api_request(
+            "POST",
+            "/v1.43/networks/net-owned/connect",
+            br#"{"Container":"foreign"}"#,
+        );
+        assert!(policy.authorize(&foreign).is_err());
+        let owned = api_request(
+            "POST",
+            "/v1.43/networks/net-owned/connect",
+            br#"{"Container":"velnor-job-owned"}"#,
+        );
+        assert!(policy.authorize(&owned).is_ok());
+        let duplicate = api_request(
+            "POST",
+            "/v1.43/networks/net-owned/connect",
+            br#"{"Container":"velnor-job-owned","Container":"foreign"}"#,
+        );
+        assert!(policy.authorize(&duplicate).is_err());
+    }
+
+    #[test]
+    fn lease_policy_rejects_encoded_route_separators() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request("GET", "/v1.43/containers/%2fetc/json", b"");
+        let error = policy
+            .authorize(&request)
+            .expect_err("encoded separators must not reach Docker");
+        assert!(error.to_string().contains("encoded path separator"));
     }
 
     fn assert_container_rms_are_singleton(calls: &[Vec<String>]) {
@@ -4444,7 +5077,9 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
             .unwrap();
             let second = read_http_request(&mut sock).unwrap();
             seen_tx.send(vec![first.bytes, second.bytes]).unwrap();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            sock.write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"Id\":\"created\"}",
+            )
                 .unwrap();
         });
 
@@ -4481,7 +5116,13 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
             String::from_utf8_lossy(&responses)
                 .matches("200 OK")
                 .count(),
-            2
+            1
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&responses)
+                .matches("201 Created")
+                .count(),
+            1
         );
         engine_thread.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -4532,7 +5173,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         });
 
         client
-            .write_all(b"POST /v1.43/containers/abc/start HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n")
+            .write_all(b"POST /v1.43/containers/job/start HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n")
             .unwrap();
         accepted_rx
             .recv_timeout(Duration::from_secs(2))
@@ -4600,7 +5241,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 
         client
             .write_all(
-                b"POST /v1.54/containers/abc/attach?stderr=1&stdout=1&stream=1 HTTP/1.1\r\n\
+                b"POST /v1.54/containers/job/attach?stderr=1&stdout=1&stream=1 HTTP/1.1\r\n\
                    Host: docker\r\n\
                    Connection: Upgrade\r\n\
                    Upgrade: tcp\r\n\
@@ -4671,7 +5312,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
         .unwrap();
         let mut client = UnixStream::connect(&listen_path).unwrap();
         client
-            .write_all(b"POST /v1.43/containers/abc/start HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n")
+            .write_all(b"POST /v1.43/containers/job/start HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n")
             .unwrap();
         accepted_rx
             .recv_timeout(Duration::from_secs(2))
