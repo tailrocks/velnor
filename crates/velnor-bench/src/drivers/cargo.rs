@@ -1519,10 +1519,11 @@ mod tests {
             trace_file_path_for_worker(&root, "test/concurrent", scratch.nonce, scratch.id, 1, 0),
             trace_file_path_for_worker(&root, "test/concurrent", scratch.nonce, scratch.id, 1, 1),
         ];
-        let harness = CargoWorkload {
+        let mut harness = CargoWorkload {
             plan: plan_for("rust/concurrent-jobs").expect("concurrent plan"),
             scenario: "rust/concurrent-jobs",
             scratch: ScratchOwner {
+                root: Some(root.clone()),
                 worktrees: vec![
                     OwnedWorktree {
                         path: first_workspace,
@@ -1534,6 +1535,7 @@ mod tests {
                     },
                 ],
                 targets: vec![first_target, second_target],
+                traces: trace_files.clone(),
                 ..scratch
             },
             package: None,
@@ -1570,7 +1572,21 @@ mod tests {
         );
         assert!(trace_files.iter().all(|path| path.exists()));
 
-        let _ = std::fs::remove_dir_all(root);
+        // The fixture workspaces are ordinary directories, so mark the Git
+        // portion already removed and exercise the same owned-path teardown
+        // used by the workload after the worker evidence is consumed.
+        for worktree in &mut harness.scratch.worktrees {
+            worktree.state = WorktreeState::Removed;
+        }
+        harness
+            .teardown(&mut context)
+            .expect("owned worker cleanup");
+        assert!(harness.scratch.worktrees.is_empty());
+        assert!(harness.scratch.targets.is_empty());
+        assert!(harness.scratch.traces.is_empty());
+        assert!(harness.scratch.root.is_none());
+        assert!(trace_files.iter().all(|path| !path.exists()));
+        assert!(!root.exists());
     }
 
     #[test]
