@@ -927,7 +927,9 @@ mod tests {
                     { "Key": { "lit": "CARGO_TERM_COLOR" }, "Value": { "lit": "always" } },
                     { "Key": { "lit": "CARGO_INCREMENTAL" }, "Value": { "value": 0 } },
                     { "Key": { "lit": "RENOVATE_ONBOARDING" }, "Value": { "value": false } },
-                    { "Key": { "lit": "GITHUB_REF" }, "Value": { "lit": "refs/heads/evil" } }
+                    { "Key": { "lit": "GITHUB_REF" }, "Value": { "lit": "refs/heads/evil" } },
+                    { "Key": { "lit": "MBX_DISABLE" }, "Value": { "lit": "1" } },
+                    { "Key": { "lit": "MBX_CACHE_DIR" }, "Value": { "lit": "/untrusted" } }
                 ]
             }]
         }))
@@ -939,5 +941,7 @@ mod tests {
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "0".into())));
         assert!(env.contains(&("RENOVATE_ONBOARDING".into(), "false".into())));
         assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
+        assert!(env.contains(&("MBX_DISABLE".into(), "1".into())));
+        assert!(!env.iter().any(|(name, _)| name == "MBX_CACHE_DIR"));
     }
 }
