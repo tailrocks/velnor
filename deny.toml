@@ -6,3 +6,26 @@ ignore = [
     # not on this path, and no fixed rsa release exists yet.
     "RUSTSEC-2023-0071",
 ]
+
+# Enumerated, not blanket. Every entry below is a licence that some crate in the
+# resolved graph can only be used under; nothing is allowed "just in case". If a
+# new dependency introduces a licence that is not listed, `cargo deny check`
+# fails and the choice becomes an explicit decision rather than a silent one.
+[licenses]
+allow = [
+    # The overwhelming majority of the graph: the Rust ecosystem dual licence.
+    "MIT",
+    "Apache-2.0",
+    # curve25519-dalek, ed25519-dalek and subtle are BSD-3-Clause only; matchit
+    # and aws-lc-sys carry a BSD-3-Clause term in a conjunctive expression.
+    "BSD-3-Clause",
+    # rustls-webpki, untrusted and simple_asn1 are ISC only; ring, aws-lc-rs and
+    # aws-lc-sys carry a mandatory ISC term ("ISC AND ...").
+    "ISC",
+    # The ICU4X crates (icu_*, litemap, tinystr, writeable, yoke, zerovec, ...)
+    # and unicode-ident, whose expression is "(MIT OR Apache-2.0) AND
+    # Unicode-3.0", so the Unicode term is not optional.
+    "Unicode-3.0",
+    # foldhash and zlib-rs are Zlib only.
+    "Zlib",
+]

@@ -70,7 +70,10 @@ grep -q "tailrocks/velnor-apt" "$docs"
 run = "actionlint"
 
 [tasks.deny]
-run = "cargo deny check advisories"
+# Run every section (advisories, bans, licenses, sources). Checking only
+# advisories once let a broken licence policy sit undetected in deny.toml,
+# because the section that would have failed was never executed.
+run = "cargo deny check"
 
 # Plan 039 tooling-law closure: policy generation remains fully offline. The
 # Generated per-org desired-policy JSONs use VELNOR_FLEET_POLICY_OUT_DIR. The
