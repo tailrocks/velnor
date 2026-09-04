@@ -103,7 +103,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/Cargo.toml` tokio feature set | opus-lead | claimed — T-003 |
 | `crates/velnor-runner/src/docker_lease.rs` (job Docker request authorization and unlabeled cleanup) | codex-lead | complete — T-004 (`3749065`) |
 | `crates/velnor-runner/src/cache.rs` (explicit storage context for reclaim enumeration) | codex-lead | complete — T-017 (`dd93963`) |
-| `crates/velnor-runner/src/manifest.rs` (Mr Boxington action-specific input literals) | codex-lead | claimed — T-018 |
+| `crates/velnor-runner/src/manifest.rs` (Mr Boxington action-specific input literals) | codex-lead | complete — T-018 (`8434d05`) |
 
 ## 8. Discovered bug classes
 
@@ -175,6 +175,7 @@ _Pending synthesis._
 | 2026-09-04 | Wave 1 investigations launched (I-01 … I-09). |
 | 2026-09-04 | Wave 2 investigations launched (I-10 … I-16). |
 | 2026-09-04 | I-02 (protocol/completion) and I-07 (dependency freshness) reported; bug classes BC-1 … BC-4 recorded. |
+| 2026-09-04 | T-018 narrowed Mr Boxington backend admission to the action's accepted `github`/`server` values and added a rejection proof for `local` (`8434d05`). |
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
