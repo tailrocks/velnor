@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use velnor_model::{ExitClass, SlotKind, SlotPhase, Timestamp};
 
 use super::error::{StoreError, StoreResult};
@@ -637,17 +637,19 @@ CREATE TABLE IF NOT EXISTS migration_lock (
 
 /// Create the version and lock tables and seed their single rows.
 pub(crate) fn ensure_meta_tables(conn: &Connection) -> StoreResult<()> {
-    conn.execute_batch(META_TABLES_SQL)?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    tx.execute_batch(META_TABLES_SQL)?;
     let now = rfc3339(Timestamp::now());
-    conn.execute(
+    tx.execute(
         "INSERT OR IGNORE INTO schema_version (singleton, version, updated_at) VALUES (0, 0, ?1)",
         [&now],
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT OR IGNORE INTO migration_lock (singleton, owner, acquired_at, heartbeat_at)
          VALUES (0, NULL, NULL, NULL)",
         [],
     )?;
+    tx.commit()?;
     Ok(())
 }
 

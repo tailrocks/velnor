@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use velnor_model::{ExitClass, Timestamp};
 
 pub mod error;
@@ -266,6 +266,20 @@ fn preflight_schema(conn: &Connection) -> StoreResult<()> {
         |row| row.get(0),
     )?;
     if has_schema_version {
+        let has_version_row: bool = conn
+            .query_row(
+                "SELECT 1 FROM schema_version WHERE singleton = 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if !has_version_row {
+            return Err(StoreError::new(ExitClass::Operation, "store.schema.incomplete")
+                .with_remediation(
+                    "schema_version exists without its singleton row; restore the database from a consistent backup",
+                ));
+        }
         migrations::current_version(conn)?;
     }
     Ok(())
@@ -530,6 +544,56 @@ mod tests {
         assert_eq!(user_version_after, user_version_before);
         assert_eq!(schema_version_after, schema_version_before);
         assert_eq!(migration_lock_tables_after, migration_lock_tables_before);
+    }
+
+    #[test]
+    fn missing_schema_version_row_fails_closed_before_setup() {
+        let temp = TempDb::new("missing-schema-row");
+        let conn = Connection::open(&temp.path).expect("open incomplete-schema fixture");
+        conn.execute_batch(
+            "PRAGMA auto_vacuum=NONE;
+             PRAGMA journal_mode=DELETE;
+             CREATE TABLE schema_version (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+                 version INTEGER NOT NULL,
+                 updated_at TEXT NOT NULL
+             );",
+        )
+        .expect("create incomplete-schema metadata");
+        let journal_mode_before: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode before open");
+        let auto_vacuum_before: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .expect("read auto-vacuum before open");
+        drop(conn);
+
+        let error = Store::open(&temp.path).expect_err("incomplete schema must block opening");
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+
+        let conn = Connection::open(&temp.path).expect("reopen incomplete-schema database");
+        let journal_mode_after: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode after open");
+        let auto_vacuum_after: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .expect("read auto-vacuum after open");
+        let schema_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
+            .expect("read schema rows after open");
+        let migration_lock_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'migration_lock'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migration metadata after open");
+
+        assert_eq!(journal_mode_after, journal_mode_before);
+        assert_eq!(auto_vacuum_after, auto_vacuum_before);
+        assert_eq!(schema_rows, 0);
+        assert_eq!(migration_lock_tables, 0);
     }
 
     #[test]
