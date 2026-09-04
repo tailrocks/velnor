@@ -2650,3 +2650,24 @@ format check still reports only pre-existing formatting in forbidden `execution/
 `execution/mod.rs`, and the already-landed tools surface file. BuildKit emergency reclaim remains
 deliberately disabled because no BuildKit lease spans its mutable content; `prune_owned_builder`
 is reserved for a future caller that proves that lease.
+
+## 19. Post-handoff concurrent follow-up
+
+After §18 was pushed, a concurrent worker advanced `perf/docker-rust-mbx` from
+`b7635a9` to `839c950`. The following commits changed paths that the
+continuation boundary explicitly reserved:
+
+- `506847b` applied the catalog constructor at
+  `executor.rs:9400-9408` and removed the named catalog-test exemption.
+- `575097a` changed the cancellation registry and termination fan-out in
+  `execution/cancel.rs`.
+- `d500aab` reordered modules in `execution/mod.rs` as required by
+  rustfmt.
+
+Those changes were not authored or applied by this worktree; §18 remains the
+exact patch report for the forbidden-file work requested from this lane. The
+same follow-up also fixed the four pre-existing `docker_lease.rs` clippy
+findings (`d285d0f`) and the allowed-file tools formatting issue
+(`839c950`). Final immutable-archive evidence for `839c950` is:
+`cargo fmt --check` pass, workspace check of 337 crates pass, clippy pass,
+and the serial runner library suite `1524 passed, 1 ignored`.
