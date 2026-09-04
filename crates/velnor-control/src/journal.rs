@@ -1096,8 +1096,9 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             slot_id,
             generation,
         } => {
+            let occupied = slot_has_active_job(&state, &slot_id);
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation {
+            if generation != slot.generation || occupied {
                 rejected = true;
             } else {
                 slot.phase = ActorPhase::Fenced;
@@ -3883,6 +3884,71 @@ mod tests {
             assert!(outcome.commands.is_empty());
             assert_eq!(outcome.state.slots[0].phase, ActorPhase::Fenced);
         }
+    }
+
+    #[test]
+    fn slot_stale_rejects_occupied_slot() {
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+
+        for phase in [
+            ActorPhase::Assigned,
+            ActorPhase::Starting,
+            ActorPhase::Running,
+            ActorPhase::Completing,
+        ] {
+            let state = FleetState {
+                slots: vec![SlotRecord {
+                    slot_id: slot_id.clone(),
+                    generation,
+                    phase: ActorPhase::Assigned,
+                    permit_held: true,
+                    ..SlotRecord::new(slot_id.clone())
+                }],
+                jobs: vec![JobRecord {
+                    job_id: job("job-1"),
+                    slot_id: slot_id.clone(),
+                    generation,
+                    attempt: 1,
+                    worker: "worker-1".to_owned(),
+                    phase,
+                    accepted_unix: 1,
+                    terminal_conclusion: None,
+                }],
+                ..FleetState::default()
+            };
+            let outcome = reduce(
+                state.clone(),
+                Event::SlotStale {
+                    slot_id: slot_id.clone(),
+                    generation,
+                },
+            );
+            assert!(outcome.rejected, "phase {phase:?}");
+            assert!(outcome.commands.is_empty());
+            assert_eq!(outcome.state, state);
+        }
+    }
+
+    #[test]
+    fn journal_slot_stale_rejection_preserves_running_job() {
+        let (_dir, mut journal) = open_tmp("occupied-slot-stale");
+        let slot_id = slot("scope-1");
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        let before = journal.load_state().unwrap();
+        let events_before = event_count(&journal);
+
+        let outcome = journal
+            .apply(Event::SlotStale {
+                slot_id,
+                generation,
+            })
+            .unwrap();
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+        assert_eq!(outcome.state, before);
+        assert_eq!(journal.load_state().unwrap(), before);
+        assert_eq!(event_count(&journal), events_before);
     }
 
     #[test]
