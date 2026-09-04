@@ -252,6 +252,12 @@ impl UnixControlClient {
         scale_to: Option<u32>,
     ) -> Result<MutationResponse, ClientError> {
         crate::unix::UnixEndpoint::from_instance(instance).map_err(ClientError::Endpoint)?;
+        if self.endpoint.instance() != instance {
+            return Err(ClientError::Invalid {
+                field: "instance".to_owned(),
+                message: "target instance does not match endpoint instance".to_owned(),
+            });
+        }
         validate_segment(operation, "operation")?;
         if reason.trim().is_empty() {
             return Err(ClientError::Invalid {
@@ -769,6 +775,29 @@ mod tests {
             endpoint.socket_path(SocketKind::Control),
             endpoint.socket_path(SocketKind::Admin)
         );
+    }
+
+    #[tokio::test]
+    async fn mutation_rejects_foreign_instance_before_connecting() {
+        let endpoint = UnixEndpoint::from_instance("primary").expect("endpoint");
+        let client = UnixControlClient::new(endpoint);
+        let error = client
+            .mutate_instance(
+                "secondary",
+                "cordon",
+                "maintenance",
+                "request-1",
+                None,
+                None,
+            )
+            .await
+            .expect_err("foreign instance must be rejected before transport");
+
+        assert!(matches!(
+            error,
+            ClientError::Invalid { field, message }
+                if field == "instance" && message == "target instance does not match endpoint instance"
+        ));
     }
 
     #[test]
