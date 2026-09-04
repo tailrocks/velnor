@@ -3664,3 +3664,13 @@ constructing its candidate merge trees. They are retained under
 `refs/archive/canonical/audit-merge-tree-*`; this keeps the canonical object
 database auditable (`git fsck --no-reflogs --unreachable` remains empty) and
 prevents even audit artifacts from becoming untracked garbage.
+
+## 57. Benchmark ownership-evidence hardening — 2026-09-05
+
+Commit `4c89615` makes degraded benchmark records require non-empty,
+duplicate-free requirements that the scenario actually declares. This removes
+forgeable degraded claims while preserving valid evidence. Commit `de9c20a`
+also makes Docker image-inspect parsing reject trailing fields and expands
+fail-closed recovery coverage for exact ID, name, owner, role, image, and
+resource shape. The `velnor-bench` package suite passes `112` tests, strict
+Clippy passes, and format/diff checks pass after both changes.
