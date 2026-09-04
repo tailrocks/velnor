@@ -6963,9 +6963,11 @@ fn start_step_log_publisher(
                     *step_line_counters.entry(log.step_id.clone()).or_insert(1) += line_count;
                 }
 
+                let masked_summary = mask_step_summary(&log.summary, &masker);
                 processed.push(ProcessedStepLog {
                     log,
                     lines,
+                    masked_summary,
                     live_chunk,
                 });
             }
@@ -6980,6 +6982,7 @@ fn start_step_log_publisher(
                 }
                 let log = processed_log.log;
                 let lines = processed_log.lines;
+                let masked_summary = processed_log.masked_summary;
 
                 // Send step completion via Twirp Results Service.
                 if let Some(client) = &twirp_client {
@@ -7043,9 +7046,19 @@ fn start_step_log_publisher(
                             );
                         }
                         // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
-                        if !log.summary.is_empty()
+                        // The bytes uploaded here are the MASKED summary: a
+                        // secret echoed into GITHUB_STEP_SUMMARY would
+                        // otherwise land in a durable blob in cleartext.
+                        // Upstream scrubs the file line by line before
+                        // queueing it (Runner.Worker/FileCommandManager.cs:256-267).
+                        if !masked_summary.is_empty()
                             && let Err(e) = client
-                                .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
+                                .upload_step_summary(
+                                    &plan_id,
+                                    &job_id,
+                                    &log.step_id,
+                                    &masked_summary,
+                                )
                                 .await
                         {
                             eprintln!(
@@ -7079,6 +7092,10 @@ type FeedWebSocket =
 struct ProcessedStepLog {
     log: StepLog,
     lines: Vec<String>,
+    /// `GITHUB_STEP_SUMMARY` content after the same masker that scrubs the
+    /// step log has been applied. The unmasked `log.summary` must never reach
+    /// the Results Service blob.
+    masked_summary: String,
     live_chunk: bool,
 }
 
@@ -7199,6 +7216,181 @@ impl MaskPatterns {
     }
 }
 
+/// Every encoding of a secret that the masker must also recognise.
+///
+/// `actions/runner` does not mask the verbatim secret only: `HostContext`
+/// registers eleven value encoders on the one `SecretMasker`
+/// (`Runner.Common/HostContext.cs:103-113`), and `SecretMasker.AddValue`
+/// stores the output of every registered encoder alongside the original
+/// (`Sdk/DTLogging/Logging/SecretMasker.cs`). Every value the masker holds —
+/// job secrets and anything added later by `::add-mask::` — is therefore
+/// masked in all of these forms. Bodies below follow
+/// `Sdk/DTLogging/Logging/ValueEncoders.cs` exactly; encoders that produce an
+/// empty string are dropped, matching `AddValue`'s
+/// `!String.IsNullOrEmpty(encodedValue)` guard.
+fn secret_value_encodings(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let encoded = [
+        base64_string_escape(value),
+        base64_string_escape_shift(value, 1),
+        base64_string_escape_shift(value, 2),
+        command_line_argument_escape(value),
+        expression_string_escape(value),
+        json_string_escape(value),
+        uri_data_escape(value),
+        xml_data_escape(value),
+        trim_double_quotes(value),
+        power_shell_pre_ampersand_escape(value),
+        power_shell_post_ampersand_escape(value),
+    ];
+    encoded
+        .into_iter()
+        .filter(|form| !form.is_empty() && form != value)
+        .collect()
+}
+
+/// `ValueEncoders.Base64StringEscape`.
+fn base64_string_escape(value: &str) -> String {
+    general_purpose::STANDARD.encode(value.as_bytes())
+}
+
+/// `ValueEncoders.Base64StringEscapeShift1` / `Shift2` via
+/// `Base64StringEscapeShift`. Base64 packs 6 bits per character, so a secret
+/// that follows a prefix of unknown length (`base64(user:password)`) lands on
+/// one of three byte offsets; upstream registers all three.
+fn base64_string_escape_shift(value: &str, shift: usize) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() > shift {
+        general_purpose::STANDARD.encode(&bytes[shift..])
+    } else {
+        general_purpose::STANDARD.encode(bytes)
+    }
+}
+
+/// `ValueEncoders.CommandLineArgumentEscape`: how environment variables are
+/// escaped on their way to `docker`.
+fn command_line_argument_escape(value: &str) -> String {
+    value.replace('"', "\\\"")
+}
+
+/// `ValueEncoders.ExpressionStringEscape`, i.e.
+/// `Expressions2.Sdk.ExpressionUtility.StringEscape`
+/// (`Sdk/DTExpressions2/Expressions2/Sdk/ExpressionUtility.cs:259-262`).
+fn expression_string_escape(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+/// `ValueEncoders.JsonStringEscape`: `JsonConvert.ToString` with the wrapping
+/// double quotes removed. Mirrors Newtonsoft's default escape table.
+fn json_string_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{8}' => escaped.push_str("\\b"),
+            '\u{c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            // Newtonsoft escapes the C0 controls plus NEL and the Unicode
+            // line/paragraph separators as \uXXXX with lower-case hex.
+            c if (c as u32) < 0x20 || c == '\u{85}' || c == '\u{2028}' || c == '\u{2029}' => {
+                escaped.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// `ValueEncoders.UriDataEscape`, i.e. `Uri.EscapeDataString`: everything
+/// outside RFC 3986 unreserved is percent-encoded from its UTF-8 bytes in
+/// upper-case hex. Upstream's segment chunking only works around a .NET size
+/// limit and does not change the output.
+fn uri_data_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                escaped.push(*byte as char);
+            }
+            other => escaped.push_str(&format!("%{other:02X}")),
+        }
+    }
+    escaped
+}
+
+/// `ValueEncoders.XmlDataEscape`, i.e. `SecurityElement.Escape`.
+fn xml_data_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '&' => escaped.push_str("&amp;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// `ValueEncoders.TrimDoubleQuotes`. Not a general trim: it yields the inner
+/// text only for a value longer than eight characters that both starts and
+/// ends with a double quote, and the empty string otherwise.
+fn trim_double_quotes(value: &str) -> String {
+    if value.chars().count() > 8 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// `ValueEncoders.PowerShellPreAmpersandEscape`. PowerShell can split a secret
+/// containing `&` across colour-code boundaries; this covers the leading
+/// section, and refuses to register a section shorter than six characters.
+fn power_shell_pre_ampersand_escape(value: &str) -> String {
+    if value.is_empty() || !value.contains('&') {
+        return String::new();
+    }
+    let section = match value.find("&+") {
+        Some(index) => &value[..index + 2],
+        None => &value[..value.rfind('&').expect("value contains '&'") + 1],
+    };
+    if section.chars().count() >= 6 {
+        section.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// `ValueEncoders.PowerShellPostAmpersandEscape`, the trailing counterpart.
+/// After `&+` upstream also skips the single character PowerShell colours.
+fn power_shell_post_ampersand_escape(value: &str) -> String {
+    if value.is_empty() || !value.contains('&') {
+        return String::new();
+    }
+    let section = match value.find("&+") {
+        Some(index) => {
+            let after = &value[index + 2..];
+            match after.chars().next() {
+                Some(colored) => &after[colored.len_utf8()..],
+                None => "",
+            }
+        }
+        None => &value[value.rfind('&').expect("value contains '&'") + 1..],
+    };
+    if section.chars().count() >= 6 {
+        section.to_owned()
+    } else {
+        String::new()
+    }
+}
+
 #[derive(Debug)]
 struct Masker {
     automaton: Option<AhoCorasick>,
@@ -7210,7 +7402,18 @@ impl Masker {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut masks: Vec<_> = masks.into_iter().filter(|mask| !mask.is_empty()).collect();
+        // Expand every registered value into the encodings upstream's
+        // SecretMasker also holds, so a secret that reaches a sink base64-,
+        // JSON-, URI- or XML-encoded is masked in that form too.
+        let mut masks: Vec<_> = masks
+            .into_iter()
+            .filter(|mask| !mask.is_empty())
+            .flat_map(|mask| {
+                let mut forms = secret_value_encodings(&mask);
+                forms.push(mask);
+                forms
+            })
+            .collect();
         masks.sort();
         masks.dedup();
         let automaton = if masks.is_empty() {
@@ -10423,6 +10626,10 @@ async fn complete_run_service_job(
         upload_results_job_log(job, &step_logs),
         upload_job_log_artifact(job, &step_logs),
     );
+    // Annotations ride the durable CompleteJob call in two places (per-step
+    // results and the job-level list); both are built through the one Masker
+    // so neither can publish a secret in cleartext.
+    let annotation_masks = MaskPatterns::new(job_secret_mask_values(job));
     let step_results = step_logs
         .iter()
         .map(|log| RunServiceStepResult {
@@ -10457,14 +10664,14 @@ async fn complete_run_service_job(
                 log.completed_at.clone()
             }),
             completed_log_lines: log.lines.len() as i64,
-            annotations: log.annotations.iter().map(run_service_annotation).collect(),
+            annotations: run_service_annotations(log, &annotation_masks.with_extra(&log.masks)),
         })
         .collect();
     let outputs = run_service_outputs(job_outputs, &job_secret_mask_values(job));
     let telemetry = run_service_telemetry(job, &step_logs);
     let annotations: Vec<RunServiceAnnotation> = step_logs
         .iter()
-        .flat_map(|log| log.annotations.iter().map(run_service_annotation))
+        .flat_map(|log| run_service_annotations(log, &annotation_masks.with_extra(&log.masks)))
         .collect();
     // Plan 066 terminal transition for an executed job. Idempotent token
     // keeps the refreshing-completion retry path from duplicating events.
@@ -11138,18 +11345,28 @@ fn run_service_telemetry(
 ) -> Vec<RunServiceTelemetry> {
     let masks = MaskPatterns::new(job_secret_mask_values(job));
     let mut seen = BTreeSet::new();
-    step_logs
-        .iter()
-        .flat_map(|log| log.telemetry.iter().map(move |telemetry| (log, telemetry)))
-        .map(|(log, telemetry)| {
-            let masker = masks.with_extra(&log.masks);
-            RunServiceTelemetry {
-                message: masker.mask(&telemetry.message),
+    let mut collected = Vec::new();
+    for log in step_logs {
+        let masker = masks.with_extra(&log.masks);
+        // Upstream builds one StepTelemetry per step and stops after the first
+        // _maxIssueCountInTelemetry entries, each cut to
+        // _maxIssueMessageLengthInTelemetry characters
+        // (Runner.Worker/ExecutionContext.cs:1281-1306). Velnor sent every
+        // entry at full length.
+        for telemetry in log.telemetry.iter().take(MAX_ISSUE_COUNT_IN_TELEMETRY) {
+            let entry = RunServiceTelemetry {
+                message: truncate_chars(
+                    &masker.mask(&telemetry.message),
+                    MAX_ISSUE_MESSAGE_LENGTH_IN_TELEMETRY,
+                ),
                 kind: telemetry.kind.clone(),
+            };
+            if seen.insert((entry.kind.clone(), entry.message.clone())) {
+                collected.push(entry);
             }
-        })
-        .filter(|telemetry| seen.insert((telemetry.kind.clone(), telemetry.message.clone())))
-        .collect()
+        }
+    }
+    collected
 }
 
 async fn publish_timeline_job_started(
@@ -11349,7 +11566,15 @@ fn timeline_records_for_step_logs(
                 finish_time.to_string(),
                 step_log_result(log),
             )
-            .with_issue_counts(log.error_count, log.warning_count, log.notice_count)
+            // Upstream increments ErrorCount/WarningCount/NoticeCount only
+            // while the type is still under _maxCountPerIssueType, so the
+            // published count is min(total, 10) — never the raw total
+            // (Runner.Worker/ExecutionContext.cs:836-841).
+            .with_issue_counts(
+                capped_issue_count(log.error_count),
+                capped_issue_count(log.warning_count),
+                capped_issue_count(log.notice_count),
+            )
         })
         .collect()
 }
@@ -11366,6 +11591,27 @@ fn mask_value(value: &str, masks: &[String]) -> String {
 
 fn mask_log_lines_with(lines: &[String], masker: &Masker) -> Vec<String> {
     lines.iter().map(|line| masker.mask(line)).collect()
+}
+
+/// Scrub `GITHUB_STEP_SUMMARY` content before it is uploaded.
+///
+/// Upstream reads the summary file a line at a time, masks each line and
+/// writes it to a `<file>-scrubbed` copy, and it is that copy — never the
+/// original — that is queued for attachment upload
+/// (`Runner.Worker/FileCommandManager.cs:256-284`). Masking per line rather
+/// than over the whole blob keeps a mask from spanning a newline, and the
+/// `ReadLine`/`WriteLine` pair normalises CRLF to LF and terminates the last
+/// line, both of which this reproduces.
+fn mask_step_summary(summary: &str, masker: &Masker) -> String {
+    if summary.is_empty() {
+        return String::new();
+    }
+    let mut scrubbed = String::with_capacity(summary.len());
+    for line in summary.lines() {
+        scrubbed.push_str(&masker.mask(line));
+        scrubbed.push('\n');
+    }
+    scrubbed
 }
 
 fn current_time_rfc3339() -> Result<String> {
@@ -11392,21 +11638,91 @@ fn infrastructure_failure_category(error: &anyhow::Error) -> Option<&'static str
     None
 }
 
-fn run_service_annotation(annotation: &StepAnnotation) -> RunServiceAnnotation {
+/// `ExecutionContext._maxIssueMessageLength` (`Runner.Worker/ExecutionContext.cs:146`).
+/// Annotations ride the durable `CompleteJob` call, and GitHub cannot forward a
+/// larger message on to a check annotation.
+const MAX_ISSUE_MESSAGE_LENGTH: usize = 4096;
+
+/// `ExecutionContext._maxCountPerIssueType` (`Runner.Worker/ExecutionContext.cs:144`).
+const MAX_COUNT_PER_ISSUE_TYPE: usize = 10;
+
+/// `ExecutionContext._maxIssueCountInTelemetry` (`Runner.Worker/ExecutionContext.cs:147`).
+const MAX_ISSUE_COUNT_IN_TELEMETRY: usize = 3;
+
+/// `ExecutionContext._maxIssueMessageLengthInTelemetry` (`Runner.Worker/ExecutionContext.cs:148`).
+const MAX_ISSUE_MESSAGE_LENGTH_IN_TELEMETRY: usize = 256;
+
+/// An issue count as upstream publishes it: the counter is only bumped while
+/// the type is under `_maxCountPerIssueType`, so it saturates at the cap.
+fn capped_issue_count(count: i32) -> i32 {
+    count.clamp(0, MAX_COUNT_PER_ISSUE_TYPE as i32)
+}
+
+/// Upstream slices a UTF-16 string; take the same count of characters without
+/// splitting one.
+fn truncate_chars(value: &str, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((index, _)) => value[..index].to_owned(),
+        None => value.to_owned(),
+    }
+}
+
+/// The annotations one step contributes to the durable `CompleteJob` payload.
+///
+/// Mirrors `ExecutionContext.AddIssue`
+/// (`Runner.Worker/ExecutionContext.cs:796-871`) in its order: mask the
+/// message, then truncate it, then attach the step number, then apply the
+/// per-type cap. Issues past the cap are never added to the record upstream,
+/// so they are dropped here too. Velnor has no embedded-context annotation
+/// list of its own — composite step state is folded into its parent by
+/// `StepCommandState::merge` before a `StepLog` exists — so upstream's
+/// "embedded contexts never upload a record" carve-out needs no analogue.
+fn run_service_annotations(log: &StepLog, masker: &Masker) -> Vec<RunServiceAnnotation> {
+    // Upstream sets Data["stepNumber"] from _record.Order whenever it is
+    // non-null; Velnor's StepLog spells "unset" as order 0.
+    let step_number = (log.order > 0).then_some(log.order as i64);
+    let mut counts = [0_usize; 3];
+    let mut kept = Vec::new();
+    for annotation in &log.annotations {
+        let slot = match annotation.level {
+            StepAnnotationLevel::Failure => 0,
+            StepAnnotationLevel::Warning => 1,
+            StepAnnotationLevel::Notice => 2,
+        };
+        if counts[slot] >= MAX_COUNT_PER_ISSUE_TYPE {
+            continue;
+        }
+        counts[slot] += 1;
+        kept.push(run_service_annotation(annotation, masker, step_number));
+    }
+    kept
+}
+
+fn run_service_annotation(
+    annotation: &StepAnnotation,
+    masker: &Masker,
+    step_number: Option<i64>,
+) -> RunServiceAnnotation {
     RunServiceAnnotation {
         level: match annotation.level {
             StepAnnotationLevel::Notice => RunServiceAnnotationLevel::Notice,
             StepAnnotationLevel::Warning => RunServiceAnnotationLevel::Warning,
             StepAnnotationLevel::Failure => RunServiceAnnotationLevel::Failure,
         },
-        message: annotation.message.clone(),
-        title: annotation.title.clone(),
-        path: annotation.path.clone(),
+        // Mask before the length cap, as upstream does, so truncation cannot
+        // cut a secret in half and leave a recognisable prefix behind.
+        message: truncate_chars(&masker.mask(&annotation.message), MAX_ISSUE_MESSAGE_LENGTH),
+        // Upstream only masks Issue.Message because its title and path live in
+        // the untyped Issue.Data bag. Velnor carries them as fields on the same
+        // durable payload, and `::error title=<secret>::` puts a secret there,
+        // so they are masked too rather than reopening the hole.
+        title: annotation.title.as_deref().map(|title| masker.mask(title)),
+        path: annotation.path.as_deref().map(|path| masker.mask(path)),
         start_line: annotation.start_line,
         end_line: annotation.end_line,
         start_column: annotation.start_column,
         end_column: annotation.end_column,
-        step_number: None,
+        step_number,
         is_infrastructure_issue: false,
     }
 }
@@ -15959,6 +16275,311 @@ jobs:
             "DeprecatedCommand: set-output *** ***"
         );
         assert_eq!(telemetry[0].kind, "ActionCommand");
+    }
+
+    /// A job carrying one secret variable, for the durable-sink masking tests.
+    fn masking_job(secret: &str) -> AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "SECRET_TOKEN": { "value": secret, "isSecret": true }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn masking_step_log() -> StepLog {
+        StepLog {
+            step_id: "step-1".into(),
+            display_name: String::new(),
+            order: 7,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: Vec::new(),
+            masks: vec!["step-secret".into()],
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        }
+    }
+
+    /// The exact `Masker` the step-log streaming loop builds before it uploads
+    /// a step summary.
+    fn upload_masker(job: &AgentJobRequestMessage, log: &StepLog) -> Masker {
+        MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks)
+    }
+
+    #[test]
+    fn step_summary_upload_bytes_carry_no_secret() {
+        let job = masking_job("job-secret");
+        let log = StepLog {
+            summary: "## Result\r\ntoken=job-secret\nstep=step-secret\n".into(),
+            ..masking_step_log()
+        };
+
+        // These are the bytes handed to TwirpResultsClient::upload_step_summary,
+        // which PUTs `content.as_bytes()` to the blob without further change.
+        let uploaded = mask_step_summary(&log.summary, &upload_masker(&job, &log)).into_bytes();
+
+        assert_eq!(
+            String::from_utf8(uploaded.clone()).unwrap(),
+            "## Result\ntoken=***\nstep=***\n"
+        );
+        assert!(!uploaded
+            .windows(b"job-secret".len())
+            .any(|window| window == b"job-secret"));
+        assert!(!uploaded
+            .windows(b"step-secret".len())
+            .any(|window| window == b"step-secret"));
+    }
+
+    #[test]
+    fn step_summary_upload_bytes_mask_encoded_secrets() {
+        let job = masking_job("job-secret");
+        let log = StepLog {
+            summary: format!(
+                "b64={}\njson={}\nuri={}\nxml={}\n",
+                base64_string_escape("job-secret"),
+                json_string_escape("job-\"secret"),
+                uri_data_escape("job-secret"),
+                xml_data_escape("job&secret"),
+            ),
+            ..masking_step_log()
+        };
+        let mut masks = job_secret_mask_values(&job);
+        masks.push("job-\"secret".into());
+        masks.push("job&secret".into());
+        let masker = MaskPatterns::new(masks).with_extra(&log.masks);
+
+        let uploaded = mask_step_summary(&log.summary, &masker);
+
+        assert_eq!(uploaded, "b64=***\njson=***\nuri=***\nxml=***\n");
+    }
+
+    #[test]
+    fn value_encoders_match_upstream_bodies() {
+        // Fixed vectors read off Sdk/DTLogging/Logging/ValueEncoders.cs.
+        assert_eq!(base64_string_escape("abc"), "YWJj");
+        assert_eq!(base64_string_escape_shift("abcd", 1), "YmNk");
+        assert_eq!(base64_string_escape_shift("abcd", 2), "Y2Q=");
+        // Shorter than the shift: upstream falls back to the whole value.
+        assert_eq!(base64_string_escape_shift("a", 2), "YQ==");
+        assert_eq!(command_line_argument_escape("a\"b"), "a\\\"b");
+        assert_eq!(expression_string_escape("a'b"), "a''b");
+        assert_eq!(json_string_escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+        assert_eq!(json_string_escape("a\u{1}b"), "a\\u0001b");
+        assert_eq!(uri_data_escape("a b/c~d"), "a%20b%2Fc~d");
+        assert_eq!(
+            xml_data_escape("<a&b'c\"d>"),
+            "&lt;a&amp;b&apos;c&quot;d&gt;"
+        );
+        // TrimDoubleQuotes is not a general trim.
+        assert_eq!(trim_double_quotes("\"0123456789\""), "0123456789");
+        assert_eq!(trim_double_quotes("\"short\""), "");
+        assert_eq!(trim_double_quotes("0123456789"), "");
+        // The PowerShell ampersand encoders refuse sections under six chars.
+        assert_eq!(
+            power_shell_pre_ampersand_escape("secretpart1&secretpart2&secretpart3"),
+            "secretpart1&secretpart2&"
+        );
+        assert_eq!(
+            power_shell_post_ampersand_escape("secretpart1&secretpart2&secretpart3"),
+            "secretpart3"
+        );
+        assert_eq!(
+            power_shell_pre_ampersand_escape("secretpart1&+secretpart2&secretpart3"),
+            "secretpart1&+"
+        );
+        assert_eq!(
+            power_shell_post_ampersand_escape("secretpart1&+secretpart2&secretpart3"),
+            "ecretpart2&secretpart3"
+        );
+        assert_eq!(power_shell_pre_ampersand_escape("a&b"), "");
+        assert_eq!(power_shell_pre_ampersand_escape("no-ampersand"), "");
+    }
+
+    #[test]
+    fn masker_covers_every_registered_encoding() {
+        let masker = Masker::new(["job-secret".to_owned()]);
+
+        assert_eq!(masker.mask("job-secret"), "***");
+        assert_eq!(masker.mask(&base64_string_escape("job-secret")), "***");
+        assert_eq!(
+            masker.mask(&base64_string_escape_shift("job-secret", 1)),
+            "***"
+        );
+        assert_eq!(
+            masker.mask(&base64_string_escape_shift("job-secret", 2)),
+            "***"
+        );
+        assert_eq!(masker.mask(&uri_data_escape("job-secret")), "***");
+    }
+
+    #[test]
+    fn completion_payload_bytes_carry_no_secret_in_annotations() {
+        let job = masking_job("job-secret");
+        let log = StepLog {
+            annotations: vec![StepAnnotation {
+                level: StepAnnotationLevel::Failure,
+                message: "failed with token job-secret".into(),
+                title: Some("job-secret leaked".into()),
+                path: Some("src/step-secret.rs".into()),
+                start_line: Some(1),
+                end_line: Some(1),
+                start_column: None,
+                end_column: None,
+            }],
+            ..masking_step_log()
+        };
+        let annotations = run_service_annotations(&log, &upload_masker(&job, &log));
+        let completion = crate::protocol::RunServiceCompleteJob {
+            plan_id: job.plan.plan_id.clone(),
+            job_id: job.job_id.clone(),
+            conclusion: TaskResult::Failed,
+            outputs: BTreeMap::new(),
+            step_results: Vec::new(),
+            annotations,
+            telemetry: Vec::new(),
+            environment_url: None,
+            billing_owner_id: None,
+            infrastructure_failure_category: None,
+        };
+
+        // Exactly what RunServiceClient::complete_job serializes and POSTs.
+        let payload = serde_json::to_vec(&completion).unwrap();
+        let body = String::from_utf8(payload).unwrap();
+
+        assert!(!body.contains("job-secret"), "leaked in payload: {body}");
+        assert!(!body.contains("step-secret"), "leaked in payload: {body}");
+        assert!(body.contains("failed with token ***"));
+        assert!(body.contains("*** leaked"));
+        assert!(body.contains("src/***.rs"));
+        assert!(body.contains("\"stepNumber\":7"));
+    }
+
+    #[test]
+    fn annotations_are_truncated_after_masking() {
+        let job = masking_job("job-secret");
+        let mut message = "job-secret".repeat(600);
+        message.push_str("tail");
+        let log = StepLog {
+            annotations: vec![StepAnnotation {
+                level: StepAnnotationLevel::Warning,
+                message,
+                title: None,
+                path: None,
+                start_line: None,
+                end_line: None,
+                start_column: None,
+                end_column: None,
+            }],
+            ..masking_step_log()
+        };
+
+        let annotations = run_service_annotations(&log, &upload_masker(&job, &log));
+
+        // 600 masked occurrences render as 1800 characters, well under the cap,
+        // proving the mask ran first: truncating the 6004-character original
+        // would have cut mid-secret and left "job-secre" visible.
+        assert_eq!(annotations[0].message, format!("{}tail", "***".repeat(600)));
+        assert!(!annotations[0].message.contains("job-secr"));
+
+        let long = StepLog {
+            annotations: vec![StepAnnotation {
+                level: StepAnnotationLevel::Warning,
+                message: "x".repeat(MAX_ISSUE_MESSAGE_LENGTH + 10),
+                title: None,
+                path: None,
+                start_line: None,
+                end_line: None,
+                start_column: None,
+                end_column: None,
+            }],
+            ..masking_step_log()
+        };
+        let annotations = run_service_annotations(&long, &upload_masker(&job, &long));
+        assert_eq!(annotations[0].message.len(), MAX_ISSUE_MESSAGE_LENGTH);
+    }
+
+    #[test]
+    fn annotations_are_capped_per_issue_type() {
+        let job = masking_job("job-secret");
+        let annotation = |level, index: usize| StepAnnotation {
+            level,
+            message: format!("issue-{index}"),
+            title: None,
+            path: None,
+            start_line: None,
+            end_line: None,
+            start_column: None,
+            end_column: None,
+        };
+        let mut annotations = Vec::new();
+        for index in 0..15 {
+            annotations.push(annotation(StepAnnotationLevel::Failure, index));
+            annotations.push(annotation(StepAnnotationLevel::Warning, index));
+            annotations.push(annotation(StepAnnotationLevel::Notice, index));
+        }
+        let log = StepLog {
+            annotations,
+            ..masking_step_log()
+        };
+
+        let published = run_service_annotations(&log, &upload_masker(&job, &log));
+
+        assert_eq!(published.len(), 3 * MAX_COUNT_PER_ISSUE_TYPE);
+        for level in [
+            RunServiceAnnotationLevel::Failure,
+            RunServiceAnnotationLevel::Warning,
+            RunServiceAnnotationLevel::Notice,
+        ] {
+            let level = serde_json::to_string(&level).unwrap();
+            let count = published
+                .iter()
+                .filter(|item| serde_json::to_string(&item.level).unwrap() == level)
+                .count();
+            assert_eq!(count, MAX_COUNT_PER_ISSUE_TYPE, "level {level}");
+        }
+        // The kept issues are the first ten of each type, as upstream keeps
+        // them: everything past the cap is never added to the record.
+        assert_eq!(published[0].message, "issue-0");
+        assert!(!published.iter().any(|item| item.message == "issue-10"));
+        // The published counters saturate at the cap too.
+        assert_eq!(capped_issue_count(15), 10);
+        assert_eq!(capped_issue_count(4), 4);
+    }
+
+    #[test]
+    fn telemetry_is_capped_and_truncated_per_step() {
+        let job = masking_job("job-secret");
+        let telemetry: Vec<_> = (0..5)
+            .map(|index| StepCommandTelemetry {
+                message: format!("{index}{}", "y".repeat(400)),
+                kind: "ActionCommand".into(),
+            })
+            .collect();
+        let log = StepLog {
+            telemetry,
+            ..masking_step_log()
+        };
+
+        let published = run_service_telemetry(&job, &[log]);
+
+        assert_eq!(published.len(), MAX_ISSUE_COUNT_IN_TELEMETRY);
+        for entry in &published {
+            assert_eq!(entry.message.len(), MAX_ISSUE_MESSAGE_LENGTH_IN_TELEMETRY);
+        }
     }
 
     fn legacy_mask_value(value: &str, masks: &[String]) -> String {
