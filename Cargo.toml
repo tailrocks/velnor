@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "crates/velnor-model",
-  "crates/velnor-action-model",
   "crates/velnor-control",
   "crates/velnor-client",
   "crates/velnor-render",
