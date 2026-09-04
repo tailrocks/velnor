@@ -1155,7 +1155,10 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
     if env::var("GITHUB_REF_TYPE").unwrap_or_else(|_| "tag".to_owned()) != "tag" {
         return Err(GeneratorError::usage("release ref is not a tag"));
     }
-    let branch = options.get("branch").map_or("main", String::as_str);
+    let branch = options
+        .get("branch")
+        .map(String::as_str)
+        .ok_or_else(|| GeneratorError::usage("release requires --branch"))?;
     if !valid_branch(branch) {
         return Err(GeneratorError::usage("invalid release branch"));
     }
