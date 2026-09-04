@@ -105,6 +105,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/cache.rs` (explicit storage context for reclaim enumeration) | codex-lead | complete — T-017 (`dd93963`) |
 | `crates/velnor-runner/src/manifest.rs` (Mr Boxington action-specific input literals) | codex-lead | complete — T-018 (`8434d05`) |
 | `crates/velnor-runner/src/action.rs` + `manifest.rs` (approved remote action runtime-kind classification) | codex-lead | claimed — T-019 |
+| `crates/velnor-workflow/**` + workspace registration (workflow generator/client) | codex-lead | claimed — T-020 |
 
 ## 8. Discovered bug classes
 
