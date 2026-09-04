@@ -141,6 +141,11 @@ impl Runner {
         &self.invocations
     }
 
+    /// Merge invocations collected by a completed worker.
+    pub(crate) fn merge(&mut self, worker: Self) {
+        self.invocations.extend(worker.invocations);
+    }
+
     /// Forget the recorded invocations, keeping the runner for the next sample.
     pub fn reset(&mut self) {
         self.invocations.clear();
@@ -266,6 +271,19 @@ mod tests {
         assert_eq!(runner.process_count(), 2);
         runner.reset();
         assert_eq!(runner.process_count(), 0);
+    }
+
+    #[test]
+    fn runner_merges_completed_worker_invocations() {
+        let mut parent = Runner::new();
+        let mut worker = Runner::new();
+        let _ = worker.capture("/bin/echo", &["worker"]);
+
+        parent.merge(worker);
+
+        assert_eq!(parent.process_count(), 1);
+        assert_eq!(parent.count_of("/bin/echo"), 1);
+        assert_eq!(parent.invocations()[0].stdout.trim(), "worker");
     }
 
     #[test]
