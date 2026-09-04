@@ -52,7 +52,7 @@ and printed its maximum as a "p95".
 
 ## Output schema
 
-One NDJSON record per scenario run, `velnor.bench.result.v1`:
+One NDJSON record per scenario run, `velnor.bench.result.v2`:
 
 ```
 schema, run_id, recorded_at_unix_ms, scenario, family, driver, runnability,
@@ -65,6 +65,16 @@ summaries { total_ms, stages_ms{}, checkout_phases_ms{}, lane_ms{},
             bytes_reused },
 notes[]
 ```
+
+`observations[].git` is tagged evidence, not an unqualified counter object:
+`{"status":"not_measured"}` for drivers without Git tracing,
+`{"status":"no_git_process"}` after the trace destination passes a Git
+preflight but the measured command emits no Git process, and
+`{"status":"observed","counters":{...},"successful":true|false}` when
+complete Trace2 lifecycles were observed. Concurrent workers may emit
+`status: "mixed"` with observed counters and explicit worker counts. A
+complete non-zero Git lifecycle remains observed with `successful: false`;
+malformed or incomplete evidence fails the run.
 
 Each summary carries `samples, min, max, mean, variance, p50, p95, p99`.
 
@@ -123,9 +133,12 @@ records span close events with busy/idle timings
 readable from `trace.jsonl` with no new sink.
 
 Byte and ref counters do **not** need a runner change: `gittrace` sets
-`GIT_TRACE2_EVENT` on the git processes it spawns and reads the documented
-event JSON back. For jobs the runner drives, the runner must set the same
-variable on its git children for those counters to appear.
+`GIT_TRACE2_EVENT` on the Git processes Cargo spawns and reads the documented
+event JSON back. Each measured worker first runs a traced Git preflight and
+clears that file before timing, so a missing post-command file is explicit
+`no_git_process` evidence rather than fabricated zero counters. For jobs the
+runner drives, the runner must set the same variable on its Git children for
+those counters to appear.
 
 ## Coverage inherited from the deleted script
 

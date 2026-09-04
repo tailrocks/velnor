@@ -5,7 +5,9 @@
 //! sets `GIT_TRACE2_EVENT` to a file and reads the counters back rather than
 //! asking the runner to compute them. Nothing here parses human-readable git
 //! output: only event JSON is read. An unrecognised but well-formed event is
-//! ignored rather than guessed at; incomplete evidence is rejected.
+//! ignored rather than guessed at; incomplete evidence is rejected. A complete
+//! process with a non-zero exit is retained as observed-but-unsuccessful
+//! evidence instead of being mistaken for a parser failure.
 
 use std::{
     collections::BTreeMap,
@@ -37,12 +39,6 @@ pub enum TraceError {
         exit_code: i64,
         atexit_code: i64,
     },
-    /// A process completed unsuccessfully.
-    NonZeroCompletion {
-        sid: String,
-        event: &'static str,
-        code: i64,
-    },
 }
 
 impl fmt::Display for TraceError {
@@ -72,9 +68,6 @@ impl fmt::Display for TraceError {
                 formatter,
                 "Git trace process {sid} has exit code {exit_code} but atexit code {atexit_code}"
             ),
-            Self::NonZeroCompletion { sid, event, code } => {
-                write!(formatter, "Git trace process {sid} has {event} code {code}")
-            }
         }
     }
 }
@@ -87,8 +80,7 @@ impl std::error::Error for TraceError {
             Self::Empty
             | Self::InvalidEvent { .. }
             | Self::IncompleteProcess { .. }
-            | Self::MismatchedCompletion { .. }
-            | Self::NonZeroCompletion { .. } => None,
+            | Self::MismatchedCompletion { .. } => None,
         }
     }
 }
@@ -114,7 +106,17 @@ pub struct GitCounters {
     pub processes: u64,
 }
 
-impl GitCounters {
+/// A complete trace stream and the outcome reported by its Git processes.
+///
+/// `successful` is separate from parse validity: a failed Git command still
+/// produced useful, attributable evidence when its lifecycle is complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GitTrace {
+    pub counters: GitCounters,
+    pub successful: bool,
+}
+
+impl GitTrace {
     /// Read a trace2 event file written by `GIT_TRACE2_EVENT`.
     ///
     /// # Errors
@@ -129,15 +131,81 @@ impl GitCounters {
 
     /// Parse a trace2 event stream (one JSON object per line).
     ///
-    /// Every line must be valid trace2 JSON, carry a process SID, and belong to
-    /// a process with a complete successful `version` → `exit` → `atexit`
-    /// lifecycle. This prevents an absent, truncated, or malformed file from
-    /// becoming fabricated zero counters.
+    /// Every line must be valid trace2 JSON, carry a process SID, and belong
+    /// to a process with a complete `version` → `exit` → `atexit` lifecycle.
+    /// A non-zero but matching completion code is retained in `successful`.
     ///
     /// # Errors
     /// The stream contains malformed events, an incomplete process lifecycle,
-    /// mismatched completion codes, or a nonzero completion code.
+    /// or mismatched completion codes.
     pub fn from_events(stream: &str) -> Result<Self, TraceError> {
+        GitCounters::parse_events(stream)
+    }
+}
+
+/// Evidence state stored on a benchmark observation.
+///
+/// `NoGitProcess` is only valid after the trace destination was independently
+/// proven writable immediately before the measured command. It is not a
+/// synonym for zero counters or a parser fallback. `Mixed` preserves the
+/// distinction when concurrent workers do not all invoke Git.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum GitEvidence {
+    /// This driver did not measure Git trace evidence.
+    NotMeasured,
+    /// The measured command produced no Git process trace after trace setup
+    /// had been validated.
+    NoGitProcess,
+    /// One or more Git processes emitted complete trace evidence.
+    Observed {
+        counters: GitCounters,
+        /// False means at least one traced Git process completed non-zero.
+        successful: bool,
+    },
+    /// Concurrent workers included both traced and Git-free workers.
+    Mixed {
+        counters: GitCounters,
+        /// False means at least one observed Git process completed non-zero.
+        successful: bool,
+        observed_workers: u64,
+        no_git_workers: u64,
+    },
+}
+
+impl GitEvidence {
+    /// Bytes received by observed Git processes, or zero when none were
+    /// observed. The evidence variant remains available to distinguish zero
+    /// bytes from no measurement.
+    #[must_use]
+    pub const fn received_bytes(&self) -> u64 {
+        match self {
+            Self::NotMeasured | Self::NoGitProcess => 0,
+            Self::Observed { counters, .. } | Self::Mixed { counters, .. } => {
+                counters.received_bytes
+            }
+        }
+    }
+}
+
+impl GitCounters {
+    /// Read a trace2 event file written by `GIT_TRACE2_EVENT`.
+    ///
+    /// # Errors
+    /// The file could not be read or its event stream is incomplete/invalid.
+    pub fn from_event_file(path: &Path) -> Result<Self, TraceError> {
+        GitTrace::from_event_file(path).map(|trace| trace.counters)
+    }
+
+    /// Parse a trace2 event stream and retain its completion status.
+    ///
+    /// # Errors
+    /// The file could not be read or its event stream is incomplete/invalid.
+    pub fn from_events(stream: &str) -> Result<Self, TraceError> {
+        GitTrace::from_events(stream).map(|trace| trace.counters)
+    }
+
+    fn parse_events(stream: &str) -> Result<GitTrace, TraceError> {
         if stream.trim().is_empty() {
             return Err(TraceError::Empty);
         }
@@ -260,6 +328,7 @@ impl GitCounters {
             }
         }
 
+        let mut successful = true;
         for (sid, process) in processes {
             let Some(exit_code) = process.exit_code else {
                 return Err(TraceError::IncompleteProcess {
@@ -280,15 +349,12 @@ impl GitCounters {
                     atexit_code,
                 });
             }
-            if exit_code != 0 {
-                return Err(TraceError::NonZeroCompletion {
-                    sid,
-                    event: "exit",
-                    code: exit_code,
-                });
-            }
+            successful &= exit_code == 0;
         }
-        Ok(counters)
+        Ok(GitTrace {
+            counters,
+            successful,
+        })
     }
 
     fn absorb_data(
@@ -513,17 +579,15 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_completion_is_rejected() {
-        let error = GitCounters::from_events(
+    fn nonzero_completion_is_retained_as_unsuccessful_evidence() {
+        let trace = GitTrace::from_events(
             r#"{"event":"version","sid":"sid-1","evt":"4"}
 {"event":"exit","sid":"sid-1","code":7}
 {"event":"atexit","sid":"sid-1","code":7}"#,
         )
-        .expect_err("nonzero completion must fail");
-        assert!(matches!(
-            error,
-            TraceError::NonZeroCompletion { code: 7, .. }
-        ));
+        .expect("complete nonzero lifecycle is parseable");
+        assert_eq!(trace.counters.processes, 1);
+        assert!(!trace.successful);
     }
 
     #[test]

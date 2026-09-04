@@ -19,14 +19,14 @@ use velnor_model::telemetry::TelemetryLane;
 
 use crate::{
     env::EnvironmentIdentity,
-    gittrace::GitCounters,
+    gittrace::GitEvidence,
     scenario::{Driver, Family, Requirement, Runnability},
     stage::{CheckoutPhase, Stage},
     stats::{Summary, TooFewSamples},
 };
 
 /// Stable discriminator for the result wire contract.
-pub const RESULT_SCHEMA: &str = "velnor.bench.result.v1";
+pub const RESULT_SCHEMA: &str = "velnor.bench.result.v2";
 
 /// Everything measured about one iteration of a scenario.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ pub struct Observation {
     /// Per-phase checkout breakdown, when the runner emitted the spans.
     pub checkout_phases_ms: BTreeMap<CheckoutPhase, u64>,
     pub resources: Resources,
-    pub git: GitCounters,
+    pub git: GitEvidence,
 }
 
 impl Observation {
@@ -397,7 +397,7 @@ mod tests {
                 docker_invocations: 2,
                 ..Resources::default()
             },
-            git: GitCounters::default(),
+            git: GitEvidence::NotMeasured,
         }
     }
 
@@ -440,6 +440,30 @@ mod tests {
         assert!(!line.contains('\n'));
         let parsed: BenchRecord = serde_json::from_str(&line).expect("deserialise");
         assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn git_evidence_serialization_retains_its_state() {
+        let evidence = GitEvidence::Observed {
+            counters: crate::gittrace::GitCounters {
+                received_bytes: 17,
+                processes: 1,
+                ..crate::gittrace::GitCounters::default()
+            },
+            successful: false,
+        };
+        let value = serde_json::to_value(&evidence).expect("serialize evidence");
+        assert_eq!(value["status"], "observed");
+        assert_eq!(value["successful"], false);
+        assert_eq!(
+            serde_json::from_value::<GitEvidence>(value).expect("deserialize evidence"),
+            evidence
+        );
+        assert_eq!(
+            serde_json::to_value(GitEvidence::NoGitProcess).expect("serialize no-Git state")
+                ["status"],
+            "no_git_process"
+        );
     }
 
     #[test]
@@ -576,7 +600,7 @@ mod tests {
             ]),
             checkout_phases_ms: BTreeMap::new(),
             resources: Resources::default(),
-            git: GitCounters::default(),
+            git: GitEvidence::NotMeasured,
         };
         assert_eq!(observation.lane_ms(TelemetryLane::Github), 60);
         assert_eq!(observation.lane_ms(TelemetryLane::Velnor), 40);
