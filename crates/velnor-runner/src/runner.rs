@@ -5812,6 +5812,7 @@ async fn handle_job_request(
         // backpressure while the run-service renewal keeps the job lease live,
         // then fail-close instead of hanging GitHub with zero steps.
         let capacity_wait_started = Instant::now();
+        let capacity_wait_started_unix_ms = unix_millis_now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let ops_job_uid = crate::ops::global().map(|_| job.job_id.clone());
         let mut emitted_pressure = false;
@@ -5851,21 +5852,17 @@ async fn handle_job_request(
                         emitted_pressure = true;
                     }
                     let wait_ms = u64::try_from(sleep.as_millis()).unwrap_or(u64::MAX);
-                    if wait_ms >= 1_000
-                        && let (Some(sink), Some(admission)) =
-                            (crate::ops::global(), telemetry_admission.as_ref())
-                    {
-                        let fields = BTreeMap::from([
-                            (
-                                "cause".to_owned(),
-                                Value::String("host_capacity".to_owned()),
-                            ),
-                            ("ms".to_owned(), Value::from(wait_ms)),
-                        ]);
-                        let _ = sink.emit_telemetry_for_admission(
-                            admission,
-                            TelemetryEvent::PassiveWait,
-                            fields,
+                    if wait_ms >= 1_000 {
+                        // Same structured shape as the two admission stages, so
+                        // "the host had no disk budget" and "a sibling held the
+                        // admission limiter" are distinguishable without parsing
+                        // a log line.
+                        emit_stage_wait_telemetry(
+                            telemetry_admission.as_ref(),
+                            JobStage::HostCapacityWait,
+                            WaitReason::HostDiskCapacity,
+                            wait_ms,
+                            capacity_wait_started_unix_ms,
                         );
                     }
                     eprintln!(
