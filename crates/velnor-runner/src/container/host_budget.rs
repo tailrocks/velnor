@@ -81,8 +81,15 @@ pub(crate) struct HostBudget {
 pub(crate) struct SlotBudget {
     pub(crate) slots: NonZeroU32,
     /// Whole CPUs this slot may keep busy. Compiler drivers count in whole
-    /// jobs, so the share is floored and never rounds up into the next slot.
+    /// jobs, so the share is floored for their concurrency setting. The
+    /// fractional remainder is retained in `docker_cpu_milli` for the hard
+    /// container limit; otherwise a sub-CPU slot would be rounded up here and
+    /// the aggregate slot budget could be exceeded.
     pub(crate) cpus: Observation<NonZeroU32>,
+    /// Fractional CPU share for Docker, in milli-CPUs. Unlike `cpus`, this may
+    /// be below one: Docker accepts `--cpus 0.5`, while Cargo still needs an
+    /// integer `CARGO_BUILD_JOBS` value.
+    pub(crate) docker_cpu_milli: Observation<u64>,
     pub(crate) memory_bytes: Observation<u64>,
     pub(crate) host: HostBudget,
 }
@@ -165,13 +172,16 @@ impl HostBudget {
     /// Divide the budget between `slots`.
     ///
     /// This is the whole point of the type: the slice quota is an aggregate,
-    /// so a slot gets `budget / slots`, not `budget`. The share floors at one
-    /// CPU because a slot that is admitted at all must be able to run one
-    /// compiler process.
+    /// so a slot gets `budget / slots`, not `budget`. Keep the fractional share
+    /// for Docker, and floor only the separate compiler-job count.
     pub(crate) fn per_slot(&self, slots: NonZeroU32) -> SlotBudget {
-        let cpus = match &self.cpu_milli {
+        let docker_cpu_milli = match &self.cpu_milli {
+            Observation::Observed(milli) => Observation::Observed(milli / u64::from(slots.get())),
+            Observation::Unobservable(reason) => Observation::Unobservable(reason.clone()),
+        };
+        let cpus = match &docker_cpu_milli {
             Observation::Observed(milli) => {
-                let share = milli / u64::from(slots.get()) / 1000;
+                let share = milli / 1000;
                 let share = u32::try_from(share).unwrap_or(u32::MAX).max(1);
                 Observation::Observed(NonZeroU32::new(share).unwrap_or(NonZeroU32::MIN))
             }
@@ -186,6 +196,7 @@ impl HostBudget {
         SlotBudget {
             slots,
             cpus,
+            docker_cpu_milli,
             memory_bytes,
             host: self.clone(),
         }
@@ -200,8 +211,16 @@ impl SlotBudget {
         let Some(container_cpus) = container_cpus else {
             return self;
         };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let cap = container_cpus.max(1.0).floor() as u32;
+        let Some(cap_milli) = cpu_milli_from_cpus(container_cpus) else {
+            return self;
+        };
+        if let Observation::Observed(cpus) = self.docker_cpu_milli {
+            self.docker_cpu_milli = Observation::Observed(cpus.min(cap_milli));
+        } else {
+            self.docker_cpu_milli = Observation::Observed(cap_milli);
+        }
+
+        let cap = u32::try_from(cap_milli / 1000).unwrap_or(u32::MAX);
         let cap = NonZeroU32::new(cap).unwrap_or(NonZeroU32::MIN);
         if let Observation::Observed(cpus) = self.cpus {
             self.cpus = Observation::Observed(cpus.min(cap));
@@ -216,9 +235,10 @@ impl SlotBudget {
     /// Without it the container inherits the whole aggregate slice quota, so
     /// four slots each believe they may use 95% of the host.
     pub(crate) fn docker_cpu_option(&self) -> Option<[String; 2]> {
-        self.cpus
+        self.docker_cpu_milli
             .value()
-            .map(|cpus| ["--cpus".to_owned(), cpus.to_string()])
+            .filter(|milli| **milli > 0)
+            .map(|milli| ["--cpus".to_owned(), format_cpu_milli(*milli)])
     }
 
     /// The environment that makes the budget real inside the job.
@@ -259,6 +279,11 @@ impl SlotBudget {
             Observation::Observed(bytes) => format!("{}MiB", bytes / (1024 * 1024)),
             Observation::Unobservable(reason) => format!("unobservable ({reason})"),
         };
+        let docker_cpus = match &self.docker_cpu_milli {
+            Observation::Observed(milli) if *milli > 0 => format_cpu_milli(*milli),
+            Observation::Observed(_) => "0".to_owned(),
+            Observation::Unobservable(reason) => format!("unobservable ({reason})"),
+        };
         let host = match &self.host.cpu_milli {
             Observation::Observed(milli) => {
                 format!("{}.{} CPU(s)", milli / 1000, milli % 1000 / 100)
@@ -273,7 +298,7 @@ impl SlotBudget {
             .collect::<Vec<_>>()
             .join(", ");
         let mut notice = format!(
-            "velnor: host budget {host} from [{sources}]; {} slot(s); this job gets {cpus} and {memory}",
+            "velnor: host budget {host} from [{sources}]; {} slot(s); this job gets {cpus} compiler job(s), Docker cap {docker_cpus} CPU(s), and {memory}",
             self.slots
         );
         if !overridden.is_empty() {
@@ -284,6 +309,25 @@ impl SlotBudget {
         }
         notice
     }
+}
+
+fn cpu_milli_from_cpus(cpus: f64) -> Option<u64> {
+    if !cpus.is_finite() || cpus <= 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let milli = (cpus * 1000.0).floor() as u64;
+    Some(milli)
+}
+
+fn format_cpu_milli(milli: u64) -> String {
+    let whole = milli / 1000;
+    let fraction = milli % 1000;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let fraction = format!("{fraction:03}").trim_end_matches('0').to_owned();
+    format!("{whole}.{fraction}")
 }
 
 /// Number of runner slots this daemon provisioned, derived rather than assumed.
@@ -605,20 +649,19 @@ mod tests {
             "1520000 100000\n",
         );
         let budget = HostBudget::observe(root.path(), Some(16));
-        let host_cpus = *budget.cpu_milli.value().unwrap() / 1000;
+        let host_milli = *budget.cpu_milli.value().unwrap();
 
         let slots = NonZeroU32::new(4).unwrap();
         let slot = budget.per_slot(slots);
-        let share = slot.cpus.value().unwrap().get();
+        let share = *slot.docker_cpu_milli.value().unwrap();
 
-        assert_eq!(share, 3, "15.2 cores over four slots is three whole CPUs");
+        assert_eq!(share, 3800, "15.2 cores over four slots is 3.8 CPUs");
         assert!(
-            u64::from(share) * u64::from(slots.get()) <= host_cpus,
+            share * u64::from(slots.get()) <= host_milli,
             "four slots must fit inside the budget, not claim it four times"
         );
         assert_ne!(
-            u64::from(share),
-            host_cpus,
+            share, host_milli,
             "a slot must not be handed the whole machine"
         );
         assert_eq!(
@@ -631,7 +674,7 @@ mod tests {
         );
         assert_eq!(
             slot.docker_cpu_option(),
-            Some(["--cpus".to_owned(), "3".to_owned()])
+            Some(["--cpus".to_owned(), "3.8".to_owned()])
         );
     }
 
@@ -646,19 +689,34 @@ mod tests {
         let budget = HostBudget::observe(root.path(), Some(16));
         let slot = budget.per_slot(NonZeroU32::MIN);
         assert_eq!(slot.cpus.value().unwrap().get(), 15);
+        assert_eq!(slot.docker_cpu_milli, Observation::Observed(15_200));
+        assert_eq!(
+            slot.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "15.2".to_owned()])
+        );
     }
 
     #[test]
-    fn a_slot_share_never_falls_below_one_cpu() {
-        let root = SyntheticRoot::new("a_slot_share_never_falls_below_one_cpu");
+    fn a_sub_cpu_slot_keeps_one_compiler_job_but_fractional_docker_cap() {
+        let root = SyntheticRoot::new("a_sub_cpu_slot_keeps_one_compiler_job");
         write(
             root.path(),
             "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
             "200000 100000\n",
         );
         let budget = HostBudget::observe(root.path(), Some(2));
-        let slot = budget.per_slot(NonZeroU32::new(8).unwrap());
+        let slots = NonZeroU32::new(4).unwrap();
+        let slot = budget.per_slot(slots);
         assert_eq!(slot.cpus.value().unwrap().get(), 1);
+        assert_eq!(slot.docker_cpu_milli, Observation::Observed(500));
+        assert_eq!(
+            slot.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "0.5".to_owned()])
+        );
+        assert!(
+            500 * u64::from(slots.get()) <= 2000,
+            "fractional slot caps must fit in 2 CPUs"
+        );
     }
 
     #[test]
@@ -676,9 +734,23 @@ mod tests {
 
         let narrowed = slot.clone().capped_by_container_cpus(Some(2.0));
         assert_eq!(narrowed.cpus.value().unwrap().get(), 2);
+        assert_eq!(narrowed.docker_cpu_milli, Observation::Observed(2000));
+        assert_eq!(
+            narrowed.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "2".to_owned()])
+        );
+
+        let fractional = slot.clone().capped_by_container_cpus(Some(0.5));
+        assert_eq!(fractional.cpus.value().unwrap().get(), 1);
+        assert_eq!(fractional.docker_cpu_milli, Observation::Observed(500));
+        assert_eq!(
+            fractional.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "0.5".to_owned()])
+        );
 
         let widened = slot.capped_by_container_cpus(Some(64.0));
         assert_eq!(widened.cpus.value().unwrap().get(), 8);
+        assert_eq!(widened.docker_cpu_milli, Observation::Observed(8000));
     }
 
     #[test]
