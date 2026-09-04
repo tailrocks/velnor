@@ -2368,3 +2368,58 @@ default and confirming the failure. Full unification still needs `service.rs`.
 - The shared worktree's branch ref diverged from origin, carrying a duplicate of a commit already
   pushed. Verified the duplicate's trees are identical to the pushed version, so a rebase dropping
   it is correct; routed to the agent that holds the tree rather than reconciled underneath it.
+
+### V-3 — baseline refresh is one command, and a recommended split was correctly refused
+
+Fixture commits `e129032`, `136161a`, `2d1669c`.
+
+`just refresh-capability-baseline` now runs the real `velnor-runner capabilities export` through the
+**same** `load_runner_baseline` the readiness gate uses, writes that document verbatim, carries the
+manifest identity into `fixture-coverage.json`, and then re-runs readiness — so a refresh that does
+not certify fails. The checked-in file is never read or merged into. Two guards were added along the
+way: the runner build no longer inherits the fixture's `RUSTUP_TOOLCHAIN`, which had been silently
+overriding the runner's own `rust-toolchain.toml`, and deriving the SHA from a checkout requires
+`manifest.rs`, `action.rs`, `build.rs` and `Cargo.toml` to be committed. The two prose restatements
+of the baseline SHA in `README.md` and `GOAL.md` were deleted — those copies are what three earlier
+commits had been hand-retyping.
+
+Items 1 and 2 of that package were already done by the oracle work: the manifest is at v11, the
+`EXPECTED_*` constants were deliberately deleted rather than updated, and the Kache contract, its
+coverage rows and the `compat.yml:cache-kache` job are all gone — the only surviving mention is a
+mutation test that replays the exact identity swap. Diffing the runner export against the
+checked-in baseline showed the **only** disagreement was `source_sha`; actions, workflows, refs,
+subpaths and inputs matched exactly.
+
+The false `microvm: supported` claim for sccache is fixed, and a new test now holds every microVM
+disposition to the supported set. `_rust-suite.yml` already carried a comment documenting the
+opposite — that is how far the claim and the behaviour had drifted.
+
+**The recommended Mr Boxington coverage split was refused, and the refusal is correct.** At the
+admitted ref the action's own bundle contains
+`function AV(t){if(t==="github"||t==="server")return t;throw new Error('backend must be "github" or "server"…')}`
+— the string `local` appears nowhere in it. Velnor runs it as a pinned generic Node action, so
+`compat.yml`'s existing `backend: local` **must fail on both lanes**. The split is therefore not
+local-versus-remote but github-backend-versus-server-backend: `cache-key`, `restore-keys`,
+`cache-generation` and `save-on-workflow-dispatch` are GitHub-cache-backend inputs, and
+`github-token` resolves mbx release metadata rather than selecting a remote store. I had passed
+along the wrong split; the agent checked the action's source instead of applying it.
+
+That also yields a new Velnor-side defect: **`MR_BOXINGTON_INPUTS` admits `backend: local`, a value
+the pinned action always rejects.** Admission accepts something that cannot work.
+
+Three previously reported surface defects are confirmed at current line numbers:
+`velnor-tools/src/main.rs:2375` lists `submodules` as a supported checkout input while admission
+rejects it; `:2520` records `actions/setup-python` with no manifest capability at all, and
+`baptiste0928/cargo-install` and `dtolnay/rust-toolchain` share that problem; and `clean` and
+`fetch-tags` are admitted and honoured but missing from the supported list, so `target_audit` bails.
+
+**The readiness audit is red, and that is the correct state.** No check was removed, skipped or
+loosened — three were added. It is red because the shared runner checkout advanced twice during the
+work and its tree does not currently compile (`missing field 'cancellation' in initializer of
+JobExecutionState`, from the in-flight cancellation package), so the refresh cannot run against it.
+One command clears it once the runner builds.
+
+Flagged for whoever resumes: binding the baseline to an exact commit SHA turns the fixture gate red
+on **every** unrelated runner commit, which is what produced the hand-retyping commits in the first
+place. The single-command refresh mitigates that but does not remove it, and a content-derived
+identity — hashing the capability document rather than the commit — would.
