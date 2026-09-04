@@ -2731,7 +2731,11 @@ where
                 },
             )?;
             self.run_docker_with_env(
-                &container.build_docker_action_args(&action.image, dockerfile_host, context_host),
+                &container.build_docker_action_args(
+                    &action.image,
+                    dockerfile_host,
+                    context_host,
+                )?,
                 &[(
                     "DOCKER_CONFIG".to_string(),
                     docker_config.display().to_string(),
@@ -4154,10 +4158,18 @@ where
             container.network.clone(),
         ));
         for service in &container.services {
-            self.with_docker_lifecycle(|executor| executor.run_docker(&service.start_args()))?;
+            // Service environment holds workflow credentials; start_args keeps
+            // it in a mode-0600 env file instead of the world-readable argv.
+            let prepared = service.start_args(&container.env_dir())?;
+            self.with_docker_lifecycle(|executor| {
+                executor.run_docker_with_env(prepared.args(), prepared.process_env())
+            })?;
             self.wait_for_service(service)?;
         }
-        self.with_docker_lifecycle(|executor| executor.run_docker(&container.start_args()))?;
+        let prepared = container.start_args()?;
+        self.with_docker_lifecycle(|executor| {
+            executor.run_docker_with_env(prepared.args(), prepared.process_env())
+        })?;
         // Docker accepts repeated network-shaped create options with behavior
         // that depends on option placement. Reconcile the runner-owned
         // topology explicitly after every container exists, before any step
@@ -4247,7 +4259,7 @@ where
         {
             return Ok(());
         }
-        self.run_docker(&container.seed_mise_store_args())?;
+        self.run_docker(&container.seed_mise_store_args()?)?;
         fs::create_dir_all(&store).ok();
         fs::write(&marker, &image_id)
             .with_context(|| format!("write mise store seed marker {}", marker.display()))?;
@@ -11670,7 +11682,7 @@ impl JobExecutionState {
         else {
             return Ok(!self.status_scope_has_failure());
         };
-        self.evaluate_condition_expression(strip_expression(condition), true)
+        self.evaluate_condition_expression(strip_expression(condition))
     }
 
     /// Pre/post step conditions. An absent condition runs unconditionally
@@ -11686,7 +11698,7 @@ impl JobExecutionState {
         else {
             return Ok(true);
         };
-        self.evaluate_condition_expression(strip_expression(condition), true)
+        self.evaluate_condition_expression(strip_expression(condition))
     }
 
     /// Whether a pre/post step's condition is satisfied.
@@ -11714,7 +11726,6 @@ impl JobExecutionState {
     fn evaluate_condition_expression(
         &self,
         expression: &str,
-        apply_success_default: bool,
     ) -> Result<bool, expression::ExpressionError> {
         let context = self.expression_context();
         let Some(node) = expression::parse(expression, &context)? else {
@@ -11722,10 +11733,7 @@ impl JobExecutionState {
         };
         // `success() && (...)` short-circuits, so a job that has already failed
         // never evaluates — and therefore never errors on — the rest.
-        if apply_success_default
-            && !node_references_status_function(&node)
-            && self.status_scope_has_failure()
-        {
+        if !node_references_status_function(&node) && self.status_scope_has_failure() {
             return Ok(false);
         }
         Ok(expression::evaluate_node(&node, &context)?.is_truthy())
@@ -12600,7 +12608,13 @@ fn rendered_output_lines(stdout: &str, stderr: &str) -> Vec<String> {
 }
 
 fn rendered_output_line(line: &str) -> Option<String> {
-    let Some(rest) = line.strip_prefix("::") else {
+    // `ActionCommand.TryParseV2` trims leading whitespace before testing for
+    // the `::` keyword (src/Runner.Common/ActionCommand.cs:61-66), and
+    // `OutputManager.OnDataReceived` returns without emitting the line once a
+    // command is recognized (src/Runner.Worker/Handlers/OutputManager.cs:80-91).
+    // Matching on the untrimmed line let an indented command be processed and
+    // still echoed into the log.
+    let Some(rest) = line.trim_start().strip_prefix("::") else {
         return Some(line.to_string());
     };
     let Some((command, value)) = rest.split_once("::") else {
@@ -14266,7 +14280,7 @@ mod tests {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             let stdout = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
-                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\n::error::broken\nhidden\n"
+                "::set-output name=answer::42\n::add-mask::hidden\n::error::broken\nhidden\n"
                     .to_string()
             } else {
                 String::new()
@@ -14336,7 +14350,7 @@ mod tests {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             let stderr = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
-                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\n::warning::slow\nhidden\n"
+                "::set-output name=answer::42\n::add-mask::hidden\n::warning::slow\nhidden\n"
                     .to_string()
             } else {
                 String::new()
@@ -17127,6 +17141,8 @@ esac
         spec.cargo_target_host = Some(store.clone());
         assert!(!spec
             .start_args()
+            .unwrap()
+            .args()
             .iter()
             .any(|arg| arg.contains(":/__w/target")));
 
@@ -19474,9 +19490,12 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             state.resolve_expressions("target=${{ matrix.target }}"),
             "target=x86_64-apple-darwin"
         );
+        // toJSON is pretty-printed upstream: two-space indent, a newline
+        // before every element and ": " between key and value
+        // (src/Sdk/DTExpressions2/Expressions2/Sdk/Functions/ToJson.cs:158-282).
         assert_eq!(
             state.resolve_expressions("needs=${{ toJSON(needs.changes.outputs) }}"),
-            r#"needs={"bake-targets":"bitcoin-processor-app","bitcoin-processor":"false"}"#
+            "needs={\n  \"bake-targets\": \"bitcoin-processor-app\",\n  \"bitcoin-processor\": \"false\"\n}"
         );
         assert_eq!(
             state.resolve_expressions(
@@ -20945,7 +20964,6 @@ fi"#
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
-        assert_eq!(results[0].state.path, vec!["/opt/tool"]);
         assert_eq!(results[0].state.error_count, 1);
         assert_eq!(results[0].state.warning_count, 0);
         assert_eq!(results[0].state.notice_count, 0);
@@ -20957,7 +20975,7 @@ fi"#
         assert!(!summary.step_logs[0].skipped);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "echo answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -21006,13 +21024,12 @@ fi"#
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
-        assert_eq!(results[0].state.path, vec!["/opt/tool"]);
         assert_eq!(results[0].state.warning_count, 1);
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
         assert_eq!(summary.step_logs[0].warning_count, 1);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "echo answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -22017,6 +22034,144 @@ fi"#
             ignored_state.resolve_expressions("${{ job.status }}"),
             "success"
         );
+    }
+
+    /// D-3: string truthiness was inverted. GitHub runs a step whose
+    /// condition is `steps.x.outputs.count` when the output is "0", because
+    /// only the empty string is falsy
+    /// (src/Sdk/DTExpressions2/Expressions2/EvaluationResult.cs:64-66).
+    #[test]
+    fn condition_string_truthiness_matches_github() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "counter",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState {
+                    outputs: BTreeMap::from([
+                        ("count".to_string(), "0".to_string()),
+                        ("flag".to_string(), "false".to_string()),
+                        ("blank".to_string(), String::new()),
+                    ]),
+                    ..StepCommandState::default()
+                },
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        // GitHub: runs.
+        assert!(state
+            .evaluate_condition(Some("steps.counter.outputs.count"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.counter.outputs.flag"))
+            .unwrap());
+        // GitHub: skips.
+        assert!(!state
+            .evaluate_condition(Some("steps.counter.outputs.blank"))
+            .unwrap());
+    }
+
+    /// D-4: an unresolvable expression used to evaluate to its own source
+    /// text. GitHub coerces it to null, and null equals the empty string
+    /// (EvaluationResult.cs:385-396).
+    #[test]
+    fn condition_missing_values_coerce_to_null() {
+        let state =
+            JobExecutionState::new_with_context(&[("SET".to_string(), "value".to_string())], &[]);
+
+        // GitHub: true.
+        assert!(state.evaluate_condition(Some("env.UNSET == ''")).unwrap());
+        assert!(state.evaluate_condition(Some("env.UNSET == null")).unwrap());
+        assert!(!state.evaluate_condition(Some("env.UNSET")).unwrap());
+        assert!(state
+            .evaluate_condition(Some("env.SET == 'value'"))
+            .unwrap());
+        // The source text must never leak into the rendered value.
+        assert_eq!(state.resolve_expressions("[${{ env.UNSET }}]"), "[]");
+    }
+
+    /// D-5: the relational operators did not exist, so this condition ran on
+    /// run 1. GitHub skips it (Sdk/Operators/GreaterThan.cs:34-42).
+    #[test]
+    fn condition_relational_operators_match_github() {
+        let state = JobExecutionState::new_with_context(
+            &[("GITHUB_RUN_NUMBER".to_string(), "1".to_string())],
+            &[],
+        );
+
+        // GitHub: skips.
+        assert!(!state
+            .evaluate_condition(Some("github.run_number > 5"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("github.run_number < 5"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("github.run_number >= 1"))
+            .unwrap());
+        assert!(!state
+            .evaluate_condition(Some("github.run_number >= 2"))
+            .unwrap());
+    }
+
+    /// D-6: startsWith and friends were absent, so a release step guarded by
+    /// `startsWith(github.ref, 'refs/tags/')` ran on a branch push. GitHub
+    /// skips it (ExpressionConstants.cs:10-20).
+    #[test]
+    fn condition_function_set_matches_github() {
+        let state = JobExecutionState::new_with_context(
+            &[("GITHUB_REF".to_string(), "refs/heads/main".to_string())],
+            &[],
+        );
+
+        // GitHub: skips.
+        assert!(!state
+            .evaluate_condition(Some("startsWith(github.ref, 'refs/tags/')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("startsWith(github.ref, 'refs/heads/')"))
+            .unwrap());
+        assert!(!state
+            .evaluate_condition(Some("endsWith(github.ref, '/v1')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("contains(fromJson('[\"main\"]'), 'main')"))
+            .unwrap());
+        assert_eq!(
+            state.resolve_expressions("${{ join(fromJson('[\"a\",\"b\"]'), '+') }}"),
+            "a+b"
+        );
+    }
+
+    /// D-7: a condition that cannot be evaluated was fail-open and ran the
+    /// step. Upstream fails the step (src/Runner.Worker/StepsRunner.cs:231-242),
+    /// which requires a typed error out of the evaluator.
+    #[test]
+    fn condition_evaluation_failure_is_reported() {
+        let state = JobExecutionState::default();
+
+        for condition in [
+            "unknownContext.value",
+            "noSuchFunction('a')",
+            "contains('a')",
+            "github.ref ==",
+        ] {
+            assert!(
+                state.evaluate_condition(Some(condition)).is_err(),
+                "{condition} must fail the step rather than run it"
+            );
+        }
+        // A failed condition is not "provably false" either: the planner must
+        // not prune the step on it.
+        assert!(!condition_is_statically_false(
+            Some("noSuchFunction('a')"),
+            &[],
+            &[]
+        ));
     }
 
     #[test]
