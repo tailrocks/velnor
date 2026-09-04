@@ -3528,10 +3528,12 @@ accounting is absent.
 
 ## 51. Canonical branch/worktree convergence and ownership audit — 2026-09-05
 
-The canonical implementation checkout is now
+At the convergence checkpoint recorded in this section, the canonical
+implementation checkout was
 `/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on
 `perf/docker-rust-mbx`, with local and `origin/perf/docker-rust-mbx` both at
-`14d52ffc93a69c88f7eee9a5b0a89eddff41fc24`. The old checkout at
+`14d52ffc93a69c88f7eee9a5b0a89eddff41fc24`. Later canonical tips are recorded
+in §§52–54. The old checkout at
 `/Users/donbeave/Projects/donbeave/velnor` is retained as a backup and is clean;
 its live local tip `c26b74fc` and stale remote-tracking tip `e81db000` are
 ancestors of the canonical branch. The canonical `main`, detached performance
@@ -3591,7 +3593,7 @@ The canonical working directory remains
 `/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on
 `perf/docker-rust-mbx`; the old checkout
 `/Users/donbeave/Projects/donbeave/velnor` remains intact and clean. The old
-clone's live branch/worktree tip is an ancestor of canonical `1c1815c`, and it
+clone's live branch/worktree tip is an ancestor of canonical `1ba082f`, and it
 has no additional branch, worktree, or stash to merge. The canonical fix
 worktree and detached performance backup are also ancestors of the target.
 
