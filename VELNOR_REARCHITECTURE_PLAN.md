@@ -3866,3 +3866,14 @@ materialization fails on the missing column. The exact v6-after-open poison has
 the same defect. A narrow transactional repair and regression coverage remain
 required: repair only the known v4-shaped `jobs` table at version 5 or 6, and
 refuse unrelated or partial shapes without stamping them.
+
+## 71. Historical journal poison repaired — 2026-09-05
+
+Commit `f877acc` adds the migration gate. It recognizes only the exact v4
+`jobs` shape mis-stamped as version 5, or that shape plus all v6 columns
+mis-stamped as version 6, adds `provisional` in the existing immediate
+transaction, and lets the normal v6 migration finish. Partial or unrelated
+shapes return `journal.schema.mismatch` before commit and remain unchanged.
+
+Focused poison tests pass, and the complete `velnor-control` library suite
+passes (`233 passed`). The fix is pushed to `perf/docker-rust-mbx`.
