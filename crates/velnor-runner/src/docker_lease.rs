@@ -478,22 +478,10 @@ pub fn owned_container_ids_excluding_buildkit(formatted: &str) -> Vec<String> {
     ids
 }
 
-const DOCKER_RM_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Cap `docker rm` / `volume rm` / `network rm` so a stuck Engine delete cannot
-/// pin job teardown for the 6h step timeout.
-pub fn docker_cli_timeout(args: &[String], requested: Duration) -> Duration {
-    let is_rm = match args.first().map(String::as_str) {
-        Some("rm") => true,
-        Some("volume" | "network") if args.get(1).map(String::as_str) == Some("rm") => true,
-        _ => false,
-    };
-    if is_rm {
-        requested.min(DOCKER_RM_TIMEOUT)
-    } else {
-        requested
-    }
-}
+/// Host maintenance runs no job step, so a payload-classified command reaching
+/// [`run_host_docker`] has no step deadline to inherit. Thirty minutes is the
+/// registry-transfer bound: long enough for any maintenance pull, finite.
+const MAINTENANCE_PAYLOAD_DEADLINE: Duration = Duration::from_secs(1800);
 
 fn container_ids_from_rm_args(args: &[String]) -> Vec<String> {
     if args.first().map(String::as_str) != Some("rm") {
@@ -1529,32 +1517,26 @@ pub fn reclaim_unlabeled_job_image_siblings(
     docker(&force_remove_container_args(&ids)).map(|_| ())
 }
 
+/// Run one host `docker` command under the deadline its operation class earns.
+///
+/// Every path is bounded. Before the deadline policy existed only the `rm`
+/// family was, and every other maintenance call — `ps`, `inspect`, reclaim
+/// listings — waited on a wedged daemon forever.
 pub fn run_host_docker(args: &[String]) -> Result<String> {
-    if args.first().is_some_and(|arg| arg == "rm")
-        || (matches!(args.first().map(String::as_str), Some("volume" | "network"))
-            && args.get(1).map(String::as_str) == Some("rm"))
-    {
-        return run_host_docker_bounded(args, docker_cli_timeout(args, DOCKER_RM_TIMEOUT));
-    }
-    let mut command = host_docker_command(args)?;
-    let output = command
-        .args(args)
-        .output()
-        .with_context(|| format!("run docker {}", args.join(" ")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("already in progress") {
-            return Ok(String::new());
-        }
-        bail!("docker {} failed: {}", args.join(" "), stderr);
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let (_, deadline) = crate::docker::deadline_for(args, MAINTENANCE_PAYLOAD_DEADLINE);
+    run_host_docker_bounded(args, deadline)
 }
 
+/// Run one host `docker` command under an explicit deadline.
+///
+/// Expiry is a failure. The process is SIGKILLed and the caller gets a typed
+/// [`crate::docker::DockerTimeout`] naming the operation class and what to look
+/// at, never an empty success.
 pub(crate) fn run_host_docker_bounded(
     args: &[String],
     timeout: std::time::Duration,
 ) -> Result<String> {
+    let op = crate::docker::classify(args);
     let rm_claim = claim_docker_container_rm(args);
     if let Some(claim) = rm_claim.as_ref()
         && claim.ids.is_empty()
@@ -1574,8 +1556,14 @@ pub(crate) fn run_host_docker_bounded(
         .with_context(|| format!("run docker {}", args.join(" ")))?;
     let pid = child.id();
     let (cancel, cancelled) = std::sync::mpsc::channel();
+    let expired = Arc::new(AtomicBool::new(false));
+    let expired_thread = Arc::clone(&expired);
+    let started = std::time::Instant::now();
     let killer = std::thread::spawn(move || {
         if cancelled.recv_timeout(timeout).is_err() {
+            // Record expiry before the kill, so the SIGKILL that follows is
+            // never mistaken for the command's own exit status.
+            expired_thread.store(true, Ordering::SeqCst);
             let _ = std::process::Command::new("/bin/kill")
                 .args(["-KILL", &pid.to_string()])
                 .status();
@@ -1586,12 +1574,23 @@ pub(crate) fn run_host_docker_bounded(
         .with_context(|| format!("wait docker {}", args.join(" ")))?;
     let _ = cancel.send(());
     let _ = killer.join();
+    let expired = expired.load(Ordering::SeqCst);
+    crate::docker::observe(
+        op,
+        started.elapsed(),
+        output.status.code().unwrap_or(-1),
+        expired,
+    );
+    if expired {
+        // We killed it. Reporting that as success turned a resource leak into
+        // a silent one: teardown believed the object was gone.
+        return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
+            op, timeout,
+        )));
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if output.status.code() == Some(137)
-            || output.status.code() == Some(9)
-            || stderr.contains("already in progress")
-        {
+        if stderr.contains("already in progress") {
             return Ok(String::new());
         }
         bail!("docker {} failed: {}", args.join(" "), stderr);
@@ -3779,22 +3778,25 @@ ccc\tvelnor-docker-action-velnor-job-dead
     }
 
     #[test]
-    fn docker_cli_timeout_caps_rm_and_leaves_other_commands() {
-        let six_hours = Duration::from_secs(6 * 3600);
+    fn every_maintenance_command_is_bounded_below_the_step_default() {
+        let step_default = Duration::from_secs(6 * 3600);
+        for args in [
+            force_remove_container_args(&["id".into()]),
+            vec!["volume".into(), "rm".into(), "--force".into(), "v".into()],
+            vec!["ps".into(), "--all".into()],
+            list_daemon_owned_job_format_args(),
+        ] {
+            let (op, deadline) = crate::docker::deadline_for(&args, MAINTENANCE_PAYLOAD_DEADLINE);
+            assert!(op.is_control_plane(), "{args:?} classified as {op}");
+            assert!(deadline < step_default, "{args:?} ({op}) is unbounded");
+        }
         assert_eq!(
-            docker_cli_timeout(&force_remove_container_args(&["id".into()]), six_hours),
+            crate::docker::deadline_for(
+                &force_remove_container_args(&["id".into()]),
+                MAINTENANCE_PAYLOAD_DEADLINE
+            )
+            .1,
             Duration::from_secs(20)
-        );
-        assert_eq!(
-            docker_cli_timeout(
-                &["volume".into(), "rm".into(), "--force".into(), "v".into()],
-                six_hours
-            ),
-            Duration::from_secs(20)
-        );
-        assert_eq!(
-            docker_cli_timeout(&["ps".into(), "--all".into()], six_hours),
-            six_hours
         );
     }
 

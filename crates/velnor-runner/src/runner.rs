@@ -4035,16 +4035,19 @@ fn prune_empty_velnor_networks(daemon_id: &str) -> usize {
         // Bounded execution: the sweep runs beside the async broker poll loop,
         // so an unbounded Docker CLI wait there would also stall message
         // polling, credential refresh, and drain observation for the slot.
-        crate::docker_lease::run_host_docker_bounded(
-            &owned,
-            crate::docker_lease::docker_cli_timeout(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT),
-        )
-        .ok()
-        .map(|stdout| std::process::Output {
-            status: success_exit_status(),
-            stdout: stdout.into_bytes(),
-            stderr: Vec::new(),
-        })
+        // The operation class deadline, further capped by the sweep's own
+        // budget: this runs beside the poll loop and must not hold it for the
+        // full class deadline.
+        let deadline = crate::docker::deadline_for(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT)
+            .1
+            .min(EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT);
+        crate::docker_lease::run_host_docker_bounded(&owned, deadline)
+            .ok()
+            .map(|stdout| std::process::Output {
+                status: success_exit_status(),
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
     })
 }
 
@@ -7181,22 +7184,35 @@ fn kill_job_container(container_name: &str) {
         format!("velnor-docker-action-{container_name}"),
         container_name.to_string(),
     ] {
-        match Command::new("docker").args(["kill", &name]).output() {
-            Ok(output) if output.status.success() => {
+        // Bounded: an unbounded kill against a wedged daemon voids cancellation
+        // while the job is still reported as canceled. A kill that does not
+        // land is reported, never swallowed.
+        let args = vec!["kill".to_string(), name.clone()];
+        let (_, deadline) = crate::docker::deadline_for(&args, KILL_FALLBACK_DEADLINE);
+        match crate::docker_lease::run_host_docker_bounded(&args, deadline) {
+            Ok(_) => {
                 println!("Killed Docker container {name} after GitHub cancellation.");
             }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("No such container") {
-                    eprintln!("Failed to kill Docker container {name}: {stderr}");
-                }
-            }
             Err(error) => {
-                eprintln!("Failed to run docker kill for {name}: {error:#}");
+                let detail = format!("{error:#}");
+                if detail.contains("No such container") {
+                    continue;
+                }
+                eprintln!("Failed to kill Docker container {name}: {detail}");
+                tracing::warn!(
+                    target: "velnor.docker",
+                    docker_op = crate::docker::DockerOp::Kill.label(),
+                    container = name.as_str(),
+                    "cancellation kill did not land; the job container may still be running"
+                );
             }
         }
     }
 }
+
+/// `docker kill` classifies as a control-plane operation, so this never
+/// applies; it exists so the call names a finite deadline at every seam.
+const KILL_FALLBACK_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Counters for the mutable side-effect classes that plan 009 requires to occur
 /// strictly after a job's action closure has been admitted. They start at zero
