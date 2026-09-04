@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -527,36 +527,68 @@ fn reap_stale_credentials_in(dir: &Path) -> Result<usize> {
         }
     };
     let mut reaped = 0;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "read checkout credential journal entry in {}",
+                dir.display()
+            )
+        })?;
         let path = entry.path();
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
-            continue;
+        let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("open checkout credential journal {}", path.display())
+                })
+            }
         };
-        if flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
-            // A live job owns this credential.
-            continue;
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {}
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                // A live job owns this credential.
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("lock checkout credential journal {}", path.display())
+                })
+            }
         }
-        let config = fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-            .and_then(|record| {
-                record
-                    .get("config")
-                    .and_then(Value::as_str)
-                    .map(PathBuf::from)
-            });
-        if let Some(config) = config
-            && scrub_config_credentials(&config)?
-        {
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .with_context(|| format!("read checkout credential journal {}", path.display()))?;
+        let record = serde_json::from_str::<Value>(&content)
+            .with_context(|| format!("parse checkout credential journal {}", path.display()))?;
+        let config = record
+            .get("config")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "checkout credential journal {} has no config path",
+                    path.display()
+                )
+            })?;
+        if scrub_config_credentials(&config)? {
             eprintln!(
                 "Removed a checkout credential left behind by an aborted job: {}",
                 config.display()
             );
         }
-        fs::remove_file(&path).ok();
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("remove checkout credential journal {}", path.display())
+                })
+            }
+        }
         reaped += 1;
     }
     Ok(reaped)
@@ -566,8 +598,12 @@ fn reap_stale_credentials_in(dir: &Path) -> Result<usize> {
 /// anything was removed. Velnor is the only writer of `http.*.extraheader` in a
 /// checkout, and every value it writes is a bearer credential.
 fn scrub_config_credentials(config_path: &Path) -> Result<bool> {
-    let Ok(content) = fs::read_to_string(config_path) else {
-        return Ok(false);
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read git config {}", config_path.display()))
+        }
     };
     let (scrubbed, changed) = strip_extraheaders(&content);
     if !changed {
@@ -1953,6 +1989,27 @@ mod tests {
         assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 0);
         assert!(config_has_credential(&config));
         assert!(journal.join(".new-credential.pending").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_malformed_credential_journal_is_not_removed() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        std::fs::create_dir_all(&journal).unwrap();
+        let record = journal.join("malformed.json");
+        std::fs::write(&record, "not json").unwrap();
+
+        let error = reap_stale_credentials_in(&journal)
+            .expect_err("malformed journal records must fail closed");
+        assert!(
+            format!("{error:#}").contains("parse checkout credential journal"),
+            "unexpected error: {error:#}"
+        );
+        assert!(record.exists(), "malformed record was removed");
+        assert!(config_has_credential(&config));
         std::fs::remove_dir_all(root).ok();
     }
 
