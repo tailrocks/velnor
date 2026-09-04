@@ -848,7 +848,7 @@ impl CommandFileSet {
     fn collect_state(&self) -> Result<StepCommandState> {
         let mut state = StepCommandState {
             outputs: commands_to_map(parse_command_file(&self.output.host)?),
-            env: env_commands_to_map(parse_command_file(&self.env.host)?),
+            env: BTreeMap::new(),
             path: fs::read_to_string(&self.path.host)?
                 .lines()
                 .filter(|line| !line.is_empty())
@@ -863,8 +863,41 @@ impl CommandFileSet {
             warning_count: 0,
             notice_count: 0,
         };
+        self.collect_env(&mut state)?;
         self.collect_summary(&mut state)?;
         Ok(state)
+    }
+
+    /// Read `GITHUB_ENV`.
+    ///
+    /// Mirrors `SetEnvFileCommand.ProcessCommand` in actions/runner
+    /// `src/Runner.Worker/FileCommandManager.cs` (@397b032): every name is
+    /// applied except the ones on `_setEnvBlockList`, which holds `NODE_OPTIONS`
+    /// alone, and a blocked name is reported as a step error rather than
+    /// dropped. Velnor used to drop every `GITHUB_*` and `RUNNER_*` name too,
+    /// and silently: a step that exported `GITHUB_TOKEN` for later steps — which
+    /// GitHub allows — saw the value vanish with nothing in the log to say why.
+    fn collect_env(&self, state: &mut StepCommandState) -> Result<()> {
+        for command in parse_command_file(&self.env.host)? {
+            if let Some(blocked) = blocked_env_file_name(&command.name) {
+                state.error_count += 1;
+                state.annotations.push(StepAnnotation {
+                    level: StepAnnotationLevel::Failure,
+                    message: format!(
+                        "Can't store {blocked} output parameter using '$GITHUB_ENV' command."
+                    ),
+                    title: None,
+                    path: None,
+                    start_line: None,
+                    end_line: None,
+                    start_column: None,
+                    end_column: None,
+                });
+                continue;
+            }
+            state.env.insert(command.name, command.value);
+        }
+        Ok(())
     }
 
     /// Read `GITHUB_STEP_SUMMARY`, refusing anything over the upload limit.
@@ -1007,16 +1040,15 @@ fn commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn env_commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
-    commands
-        .into_iter()
-        .filter(|command| !is_blocked_env_mutation(&command.name))
-        .map(|command| (command.name, command.value))
-        .collect()
-}
+/// `SetEnvFileCommand._setEnvBlockList` (@397b032,
+/// src/Runner.Worker/FileCommandManager.cs).
+const SET_ENV_FILE_BLOCK_LIST: &[&str] = &["NODE_OPTIONS"];
 
-fn is_blocked_env_mutation(name: &str) -> bool {
-    name.starts_with("GITHUB_") || name.starts_with("RUNNER_") || name == "NODE_OPTIONS"
+fn blocked_env_file_name(name: &str) -> Option<&'static str> {
+    SET_ENV_FILE_BLOCK_LIST
+        .iter()
+        .find(|blocked| blocked.eq_ignore_ascii_case(name))
+        .copied()
 }
 
 fn fix_script(script: &str) -> String {
@@ -1134,9 +1166,16 @@ mod tests {
         assert_eq!(state.outputs["multi"], "one\ntwo");
         assert_eq!(state.env["NAME"], "value");
         assert_eq!(state.env["ACTIONS_RUNTIME_URL"], "https://runtime");
-        assert!(!state.env.contains_key("GITHUB_REF"));
-        assert!(!state.env.contains_key("RUNNER_TEMP"));
+        // Upstream blocks NODE_OPTIONS alone, loudly; every other name applies.
+        assert_eq!(state.env["GITHUB_REF"], "evil");
+        assert_eq!(state.env["RUNNER_TEMP"], "/bad");
         assert!(!state.env.contains_key("NODE_OPTIONS"));
+        assert_eq!(state.error_count, 1);
+        assert_eq!(
+            state.annotations[0].message,
+            "Can't store NODE_OPTIONS output parameter using '$GITHUB_ENV' command."
+        );
+        assert_eq!(state.annotations[0].level, StepAnnotationLevel::Failure);
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.summary, "summary text");
