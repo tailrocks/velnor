@@ -929,3 +929,35 @@ literals against the whole error chain. Of 20 retry sites, five are unbounded (w
 forever on a detached thread), 13 have no wall-clock deadline, and three retry
 non-idempotent operations. `executor.rs:8769`'s "55 s deadline" is fake: it is checked only
 after a nested three-attempt retry has already completed.
+
+## 14. Evidence provenance rule
+
+A second process failure, caught by an agent's own sanity check, produced a rule that now
+binds every agent in this program.
+
+The shared worktree moves and is dirty while agents work in it. An investigation that runs a
+build there — `cargo check`, `clippy`, `udeps`, a benchmark — is measuring whatever mixture of
+committed and uncommitted work happened to be present at that moment, not the commit it
+believes it is auditing. In one instance this produced an apparent broken lint gate
+(`error[E0425]: cannot find function docker_cli_timeout`) and a set of dead-code warnings that
+were entirely another agent's in-flight refactor. The finding was withheld pending
+verification and so never entered the record, which is the only reason a false P0-class claim
+did not ship.
+
+Therefore:
+
+1. **Static evidence** — reading source, manifests, lockfiles, and external registries — is
+   sound when taken with an explicit working directory at a known SHA, and should be
+   byte-verified against that SHA if it was collected earlier.
+2. **Build-derived evidence** must be produced against an immutable snapshot:
+   `git archive <sha> | tar -x -C <scratch>`, never a live worktree and never a
+   `git worktree add` on a shared branch.
+3. Every reported measurement must state which of the two classes it belongs to, and against
+   which SHA.
+4. A claim that something is dead, missing, or duplicated must be checked with
+   `git ls-tree <starting-sha>` before it is believed, because untracked work in progress is
+   visible to investigators.
+
+Rules 1-3 exist because build output in a shared tree is unattributable. Rule 4 exists
+because two separate findings in this program were artifacts of reading another agent's
+uncommitted work.
