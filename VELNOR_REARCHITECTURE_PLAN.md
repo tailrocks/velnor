@@ -3633,3 +3633,26 @@ After publication, `git fsck --no-reflogs --unreachable` reports no unreachable
 objects in the canonical repository. These refs are retention safety rails,
 not merge candidates: live branch/worktree ancestry remains unchanged and no
 unreviewed snapshot was promoted into `perf/docker-rust-mbx`.
+
+## 55. Archived WIP application audit — 2026-09-05
+
+Each of the five canonical stash archives was checked with a read-only
+three-way `git merge-tree --write-tree --name-only` against current
+`perf/docker-rust-mbx` (`6153329`). The oldest TLS/backend WIP produced a
+conflict-free merge tree, but its changes overlap the committed
+toolchain/runtime/protocol fixes and add no reviewed requirement. The large
+`pr534` snapshot conflicts across deleted-versus-current architecture and
+reserved runner/control-plane/CAS boundaries. The port snapshot conflicts in
+`velnor-tools` policy and `mise.toml`. The explicitly unrelated pre-existing
+snapshot conflicts across release/workflow and deleted-versus-current runner
+and control-plane files. The instruction-cleanup snapshot conflicts in
+`AGENTS.md` and the reserved runner executor.
+
+No archived WIP was blindly applied, cherry-picked, merged, or used to reset
+the branch. Applying the conflicted snapshots would reintroduce stale or
+reserved architecture; applying the conflict-free overlapping snapshot would
+duplicate work without a distinct reviewed behavior. The exact stash commits,
+index/untracked parents, old-clone reflog commits, and standalone objects
+remain published under the archive refs recorded above, so every input is
+recoverable for a separately reviewed merge if a unique requirement is later
+identified.
