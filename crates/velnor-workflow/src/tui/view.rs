@@ -824,7 +824,7 @@ mod tests {
         let review = render_text(&mut app, 80, 24);
         assert!(review.contains("0 create · 1 update · 1 delete"));
         assert!(review.contains("- DELETE .github/workflows/old.yml"));
-        assert!(review.contains("~ UPDATE .github/ci/.velnor-workflow-state"));
+        assert!(review.contains("~ UPDATE .github/ci/.github-actions-generator-state"));
         assert!(!review.contains("unchanged.toml"));
 
         app.phase = super::super::Phase::CheckDrift;

@@ -132,6 +132,8 @@ The important ordering is:
 | Cancellation delivery | Velnor | Active-session broker polling. The runner matches the cancellation to its job. |
 | Step status and logs | Velnor | Authenticated uploads to Results Service and timeline/feed services; progress publishing is best effort and bounded. |
 | Completion | Velnor | Authenticated Run Service request/response carrying terminal result, outputs, and metadata. |
+| Workflow generation | `velnor-workflow` | Static repository scan, owned workflow/config rendering, affected-unit planning, policy, and release checks. It does not schedule GitHub work. |
+| Workflow monitoring | `velnor-tools` | Read-only correlation of GitHub run state with Velnor control-plane evidence. GitHub owns the terminal result. |
 | Operator inspection | Operator | Local Unix-socket control API, local health files, metrics files, and bounded local logs, normally through `velnorctl`. |
 
 GitHub initiates scheduling and sends work requests. Velnor initiates every
