@@ -128,11 +128,9 @@ impl StoreCatalog {
     /// Catalog for a running job, resolved from its host temp directory
     /// (`…/work/slot-N/<job>/temp`).
     ///
-    /// The pending call site is `executor::artifact_store_dir`, which today
-    /// builds the artifact path itself and lands it one directory below where
-    /// GC looks. That file belongs to another agent in this program; this is
-    /// the constructor its change calls.
-    #[allow(dead_code, reason = "call site is executor::artifact_store_dir")]
+    /// Called by `executor::artifact_store_dir`, which previously built the
+    /// artifact path itself with a different root helper and landed it one
+    /// directory below where GC looks.
     pub(crate) fn for_job_temp(temp_host: &Path) -> Self {
         let layout = crate::storage::StorageLayout::resolve();
         Self {
@@ -193,7 +191,6 @@ impl StoreCatalog {
     }
 
     /// Artifact store bucket for one workflow run.
-    #[allow(dead_code, reason = "call site is executor::artifact_store_dir")]
     pub(crate) fn artifacts_run(&self, run_key: &str) -> PathBuf {
         self.artifacts()
             .join(crate::container::sanitize_store_key(run_key))
@@ -307,24 +304,14 @@ mod tests {
             }
         }
         offenders.sort();
-        // `executor::artifact_store_dir` is the one remaining second spelling —
-        // the live instance of this defect. That file is owned by another agent
-        // in this program, so the exemption is named here rather than silently
-        // tolerated: the test fails if a *new* spelling appears anywhere, and it
-        // fails again (forcing this exemption's deletion) the moment the
-        // executor is changed to call `StoreCatalog::artifacts_run`.
-        let pending: Vec<&String> = offenders
-            .iter()
-            .filter(|found| !found.contains("executor.rs"))
-            .collect();
+        // There is no exemption. `executor::artifact_store_dir` was the last
+        // second spelling and now calls `StoreCatalog::artifacts_run`, so a
+        // store directory name appearing outside this module is a regression:
+        // two spellings are what let the artifact store drift one directory
+        // below where GC looked.
         assert!(
-            pending.is_empty(),
-            "store directory names must be constructed only in store_catalog.rs; found: {pending:?}"
-        );
-        assert_eq!(
-            offenders.len(),
-            1,
-            "expected exactly the known executor::artifact_store_dir spelling; found: {offenders:?}"
+            offenders.is_empty(),
+            "store directory names must be constructed only in store_catalog.rs; found: {offenders:?}"
         );
     }
 
