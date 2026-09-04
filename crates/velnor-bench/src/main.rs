@@ -91,7 +91,7 @@ fn main() -> Result<()> {
         runner_config_dir: cli.runner_config_dir.clone(),
     };
     let mut runner = Runner::new();
-    let environment = EnvironmentIdentity::probe(&inputs, &mut runner);
+    let mut environment = EnvironmentIdentity::probe(&inputs, &mut runner);
     let capabilities =
         Capabilities::from_environment(&environment, cli.github_credentials, cli.network_egress);
 
@@ -156,6 +156,7 @@ fn main() -> Result<()> {
                 runner,
             };
             let observations = drivers::run(workload.as_mut(), &mut context)?;
+            environment.refresh_job_image_digest(&cli.job_image, &mut context.runner);
             let summaries = Summaries::new(&observations)?;
 
             let mut notes = workload.notes();

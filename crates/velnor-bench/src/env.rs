@@ -120,6 +120,15 @@ impl EnvironmentIdentity {
         }
     }
 
+    /// Refresh the image identity after a workload has prepared its inputs.
+    ///
+    /// Probing must not acquire mutable workload state. Container drivers may
+    /// pull the image during preparation, so a run records the digest only
+    /// after that phase has completed.
+    pub fn refresh_job_image_digest(&mut self, image: &str, runner: &mut Runner) {
+        self.job_image_digest = image_digest(image, runner).into();
+    }
+
     /// Fields the host could not answer, as `field: reason` pairs.
     #[must_use]
     pub fn gaps(&self) -> Vec<(&'static str, String)> {
@@ -258,15 +267,15 @@ fn git_commit(repo: &Path, runner: &mut Runner) -> Result<String, String> {
 }
 
 fn image_digest(image: &str, runner: &mut Runner) -> Result<String, String> {
-    // The identity of the image under measurement is not optional, and the
-    // image may legitimately not be on the host yet. Pull it here rather than
-    // recording a gap that a later scenario would silently fill.
-    let present = runner
+    // Identity probing is read-only. Workload preparation owns image
+    // acquisition; pulling here would contaminate cold-pull measurements.
+    let inspect = runner
         .run("docker", &["image", "inspect", image])
-        .map(|invocation| invocation.ok())
-        .unwrap_or(false);
-    if !present {
-        runner.capture("docker", &["pull", image])?;
+        .map_err(|error| format!("docker image inspect {image} could not run: {error}"))?;
+    if !inspect.ok() {
+        return Err(format!(
+            "job image {image} is not present locally; image acquisition belongs to workload preparation"
+        ));
     }
     // RepoDigests is the content identity; fall back to the local image ID,
     // which is still a digest, when the image was never pushed or pulled.
@@ -406,6 +415,17 @@ mod tests {
     #[test]
     fn docker_api_identity_uses_the_server_version() {
         assert_eq!(DOCKER_SERVER_API_VERSION_FORMAT, "{{.Server.APIVersion}}");
+    }
+
+    #[test]
+    fn image_identity_probe_never_pulls() {
+        let mut runner = Runner::new();
+        let _ = image_digest("invalid image ref", &mut runner);
+
+        assert!(runner.invocations().iter().all(|invocation| {
+            !(invocation.program == "docker"
+                && invocation.args.first().map(String::as_str) == Some("pull"))
+        }));
     }
 
     #[test]
