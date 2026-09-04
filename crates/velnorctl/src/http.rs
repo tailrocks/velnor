@@ -669,7 +669,7 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
-        mutations: false,
+        mutations: true,
     })
 }
 
@@ -1325,6 +1325,14 @@ mod tests {
         shutdown.send(true).expect("signal control shutdown");
         server.await.expect("join control server").expect("serve");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn admin_info_advertises_mutation_capability() {
+        let Json(info) = info_admin().await;
+        assert!(info.mutations);
+        assert_eq!(info.api_version, "v1");
+        assert_eq!(info.schema_version, SCHEMA_VERSION);
     }
 
     #[tokio::test]
