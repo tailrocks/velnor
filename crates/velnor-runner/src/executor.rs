@@ -338,7 +338,7 @@ pub enum CommandStream {
 }
 
 pub fn render_context_expressions(value: &str, context_data: &[(String, Value)]) -> String {
-    JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
+    JobExecutionState::new_with_context(&[], context_data).resolve_job_context_expressions(value)
 }
 
 pub(crate) fn render_context_expressions_bounded(
@@ -11586,6 +11586,24 @@ impl JobExecutionState {
     /// owned by the lifecycle work package. Step *conditions* are fail-closed
     /// below, which is the divergence this module owns.
     pub(crate) fn resolve_expressions(&self, value: &str) -> String {
+        self.render_template(value, false)
+    }
+
+    /// Render only the spans the job message alone can answer, leaving every
+    /// span that reads runtime state as its literal source text.
+    ///
+    /// Upstream evaluates a step's templates exactly once, at step
+    /// preparation, with `env`, `steps`, `job` and `runner` already populated
+    /// (`src/Runner.Worker/StepsRunner.cs:99-140`). Velnor renders twice —
+    /// once when the plan is built from the job message and again at step
+    /// time — so the first pass must not collapse a not-yet-known value to
+    /// null. Collapsing the second pass would be correct; collapsing the
+    /// first one silently drops runtime env and step outputs.
+    pub(crate) fn resolve_job_context_expressions(&self, value: &str) -> String {
+        self.render_template(value, true)
+    }
+
+    fn render_template(&self, value: &str, defer_runtime_contexts: bool) -> String {
         let mut rendered = String::with_capacity(value.len());
         let mut rest = value;
         while let Some(start) = rest.find("${{") {
@@ -11596,9 +11614,22 @@ impl JobExecutionState {
                 return rendered;
             };
             let expression = after_start[..end].trim();
-            match expression::evaluate(expression, &self.expression_context()) {
-                Ok(value) => rendered.push_str(&value.convert_to_string()),
-                Err(_) => rendered.push_str(&rest[start..start + 3 + end + 2]),
+            let source = &rest[start..start + 3 + end + 2];
+            let context = self.expression_context();
+            match expression::parse(expression, &context) {
+                Ok(Some(node))
+                    if !(defer_runtime_contexts && node_reads_runtime_context(&node)) =>
+                {
+                    match expression::evaluate_node(&node, &context) {
+                        Ok(value) => rendered.push_str(&value.convert_to_string()),
+                        Err(_) => rendered.push_str(source),
+                    }
+                }
+                Ok(None) => {}
+                // Deferred to the step-time pass, or unparseable: keep the
+                // literal span. See `resolve_expressions` on why interpolation
+                // is not fail-closed the way conditions are.
+                _ => rendered.push_str(source),
             }
             rest = &after_start[end + 2..];
         }
@@ -11754,6 +11785,31 @@ fn node_references_status_function(node: &expression::Node) -> bool {
     node.children()
         .iter()
         .any(|child| node_references_status_function(child))
+}
+
+/// Whether the tree reads state that only exists once the job is running:
+/// the `env`, `steps`, `job` and `runner` contexts, or any runner-provided
+/// function. Plan-time rendering defers those spans to the step-time pass.
+fn node_reads_runtime_context(node: &expression::Node) -> bool {
+    match node {
+        expression::Node::NamedValue(name) => matches!(
+            name.to_ascii_lowercase().as_str(),
+            "env" | "steps" | "job" | "jobs" | "runner"
+        ),
+        expression::Node::Function { name, .. } => {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "success" | "failure" | "always" | "cancelled" | "hashfiles"
+            ) || node
+                .children()
+                .iter()
+                .any(|child| node_reads_runtime_context(child))
+        }
+        node => node
+            .children()
+            .iter()
+            .any(|child| node_reads_runtime_context(child)),
+    }
 }
 
 /// The root contexts and extension functions an expression is evaluated
@@ -19243,10 +19299,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             state.resolve_expressions("value=${{ steps.producer.outputs['answer'] }}"),
             "value=42"
         );
-        assert_eq!(
-            state.resolve_expressions("keep=${{ github.ref }}"),
-            "keep=${{ github.ref }}"
-        );
+        // A context value that is not set is null, and null renders as the
+        // empty string (EvaluationResult.cs:140-141). The deleted evaluator
+        // rendered the source text instead, which is divergence D-4.
+        assert_eq!(state.resolve_expressions("keep=${{ github.ref }}"), "keep=");
     }
 
     #[test]

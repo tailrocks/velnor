@@ -2191,7 +2191,7 @@ runs:
 
         assert_eq!(
             plans[0].inputs["needs-json"],
-            r#"{"check":{"result":"success"}}"#
+            "{\n  \"check\": {\n    \"result\": \"success\"\n  }\n}"
         );
         assert_eq!(plans[0].inputs["workflow-label"], "CI");
     }
@@ -2225,7 +2225,7 @@ runs:
 
         assert_eq!(
             plans[0].inputs["needs-json"],
-            r#"{"build":{"result":"failure"},"check":{"result":"success"}}"#
+            "{\n  \"build\": {\n    \"result\": \"failure\"\n  },\n  \"check\": {\n    \"result\": \"success\"\n  }\n}"
         );
         assert_eq!(plans[0].inputs["workflow-label"], "CI");
     }
