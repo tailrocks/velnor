@@ -13305,24 +13305,46 @@ fn timed_docker_args(program: &str, args: &[String]) -> Result<Option<Vec<String
     {
         return Ok(None);
     }
-    let image_index =
-        docker_run_image_index(args).context("docker run has no image before timed execution")?;
+    let split =
+        docker_run_argv_split(args).context("docker run has no image before timed execution")?;
     let sequence = DOCKER_TIMEOUT_CONTAINER_SEQ.fetch_add(1, Ordering::Relaxed);
     let name = format!("velnor-timeout-{}-{sequence}", std::process::id());
     let mut owned = args.to_vec();
-    owned.splice(image_index..image_index, [String::from("--name"), name]);
+    // Splice at the end of the *flag* phase, not at the image. When the argv
+    // carries an explicit `--` separator the image sits after it, and inserting
+    // there would make `--name` the image operand and the real image an
+    // argument to it — which is exactly how `seed_mise_store_args` broke.
+    owned.splice(
+        split.flag_end..split.flag_end,
+        [String::from("--name"), name],
+    );
     Ok(Some(owned))
 }
 
-fn docker_run_image_index(args: &[String]) -> Option<usize> {
+/// Where the flag phase of a `docker run` argv ends and its image operand sits.
+struct DockerRunArgvSplit {
+    /// Index at which a synthesized flag must be inserted: the position of the
+    /// `--` separator when there is one, otherwise the image index.
+    flag_end: usize,
+    /// Index of the image operand.
+    image: usize,
+}
+
+fn docker_run_argv_split(args: &[String]) -> Option<DockerRunArgvSplit> {
     let mut index = 1;
     while index < args.len() {
         let option = args[index].as_str();
         if option == "--" {
-            return (index + 1 < args.len()).then_some(index + 1);
+            return (index + 1 < args.len()).then_some(DockerRunArgvSplit {
+                flag_end: index,
+                image: index + 1,
+            });
         }
         if !option.starts_with('-') {
-            return Some(index);
+            return Some(DockerRunArgvSplit {
+                flag_end: index,
+                image: index,
+            });
         }
         if docker_run_option_takes_value(option) && !option.contains('=') {
             index += 2;
@@ -13331,6 +13353,10 @@ fn docker_run_image_index(args: &[String]) -> Option<usize> {
         }
     }
     None
+}
+
+fn docker_run_image_index(args: &[String]) -> Option<usize> {
+    docker_run_argv_split(args).map(|split| split.image)
 }
 
 fn docker_run_option_takes_value(option: &str) -> bool {
@@ -13433,12 +13459,24 @@ fn docker_timeout_container_name(program: &str, args: &[String]) -> Option<Strin
     }
 }
 
+/// The container operand of a `docker exec` argv, which is what a step timeout
+/// must `docker kill`.
+///
+/// `DockerCommand` writes an end-of-flags `--` before every operand, so the
+/// separator — not an unrecognized flag — is what ends the flag phase here.
+/// Treating `--` as an unknown flag returns `None` for every real exec argv,
+/// which silently downgrades a step timeout to killing the local CLI process
+/// while the work keeps running inside the container.
 fn docker_exec_container_name(args: &[String]) -> Option<String> {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "-i" | "-t" | "--interactive" | "--tty" | "--privileged" => index += 1,
-            "-w" | "--workdir" | "-e" | "--env" | "--env-file" | "-u" | "--user" => index += 2,
+            "--" => return args.get(index + 1).cloned(),
+            "-i" | "-t" | "-d" | "--interactive" | "--tty" | "--detach" | "--privileged" => {
+                index += 1
+            }
+            "-w" | "--workdir" | "-e" | "--env" | "--env-file" | "-u" | "--user"
+            | "--detach-keys" => index += 2,
             value if value.starts_with('-') => return None,
             _ => return Some(args[index].clone()),
         }
@@ -13450,6 +13488,9 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            // Everything past the separator is an operand: an image argument
+            // that happens to read `--name` names nothing.
+            "--" => return None,
             "--name" => return args.get(index + 1).cloned(),
             "-v" | "--volume" | "--workdir" | "-w" | "-e" | "--env" | "--env-file"
             | "--network" | "--entrypoint" | "--user" | "-u" => index += 2,
@@ -14205,9 +14246,11 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
-    #[test]
-    fn docker_timeout_container_name_finds_exec_and_run_targets() {
-        let args = vec![
+    /// Every argv `DockerCommand`/`DockerArgv` produces carries an explicit
+    /// `--` before its operands, so a fixture without one cannot detect the
+    /// separator-handling bugs this test exists for.
+    fn exec_argv_with_separator() -> Vec<String> {
+        vec![
             "exec".to_string(),
             "-i".to_string(),
             "--workdir".to_string(),
@@ -14216,11 +14259,17 @@ mod tests {
             "/tmp/env".to_string(),
             "-e".to_string(),
             "NAME=value".to_string(),
+            "--".to_string(),
             "velnor-job-1".to_string(),
             "sh".to_string(),
             "-c".to_string(),
             "sleep 60".to_string(),
-        ];
+        ]
+    }
+
+    #[test]
+    fn docker_timeout_container_name_finds_exec_and_run_targets() {
+        let args = exec_argv_with_separator();
 
         assert_eq!(
             docker_timeout_container_name("docker", &args).as_deref(),
@@ -14231,6 +14280,7 @@ mod tests {
             "--rm".to_string(),
             "--name".to_string(),
             "velnor-node-action-velnor-job-1".to_string(),
+            "--".to_string(),
             "node:24-bookworm".to_string(),
         ];
         assert_eq!(
@@ -14241,24 +14291,90 @@ mod tests {
     }
 
     #[test]
+    fn docker_exec_container_name_survives_the_end_of_flags_separator() {
+        // Regression: treating `--` as an unknown flag returned None for every
+        // real exec argv, so a timed-out step killed only the local CLI and
+        // left the command running inside the container.
+        let args = exec_argv_with_separator();
+        assert_eq!(
+            docker_exec_container_name(&args[1..]).as_deref(),
+            Some("velnor-job-1")
+        );
+    }
+
+    #[test]
     fn timed_docker_run_gets_runner_owned_cleanup_name_before_image() {
         let args = vec![
             "run".to_string(),
             "--rm".to_string(),
             "--cgroup-parent".to_string(),
             "velnor-jobs.slice".to_string(),
+            "--".to_string(),
             "alpine:3.20".to_string(),
             "sleep".to_string(),
             "60".to_string(),
         ];
         let owned = timed_docker_args("docker", &args).unwrap().unwrap();
+        let separator = owned.iter().position(|arg| arg == "--").unwrap();
         let image = owned.iter().position(|arg| arg == "alpine:3.20").unwrap();
-        assert_eq!(owned[image - 2], "--name");
-        assert!(owned[image - 1].starts_with("velnor-timeout-"));
+        // The image must stay the first operand after the separator: splicing
+        // the name *after* `--` would make `--name` the image.
+        assert_eq!(image, separator + 1);
+        assert_eq!(owned[separator - 2], "--name");
+        assert!(owned[separator - 1].starts_with("velnor-timeout-"));
         assert_eq!(
             docker_timeout_container_name("docker", &owned),
-            owned.get(image - 1).cloned()
+            owned.get(separator - 1).cloned()
         );
+    }
+
+    /// A real `JobContainerSpec`, so `seed_mise_store_args` produces the argv
+    /// production actually hands to `timed_docker_args` — separator included.
+    fn seed_argv_container_spec(temp: &Path) -> JobContainerSpec {
+        JobContainerSpec {
+            name: "velnor-job-1".into(),
+            image: "ghcr.io/velnor/runner:1.2.3".into(),
+            network: "velnor-net-1".into(),
+            workspace_host: temp.join("work"),
+            temp_host: temp.join("temp"),
+            home_host: temp.join("home"),
+            actions_host: temp.join("actions"),
+            tools_host: temp.join("tools"),
+            mount_docker_socket: false,
+            env: Vec::new(),
+            resource_options: Vec::new(),
+            options: Vec::new(),
+            services: Vec::new(),
+            node_action_image: "node:24-bookworm".into(),
+            docker_cli_host_path: None,
+            docker_cli_plugin_host_dir: None,
+            docker_host_work_dir: None,
+            verify_bind_mounts: false,
+            daemon_id: "test-daemon".into(),
+            repository: Some("acme/repo".into()),
+            cargo_target_host: None,
+            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            mbx_store_host: None,
+            sccache_store_host: None,
+        }
+    }
+
+    #[test]
+    fn timed_docker_run_keeps_seed_mise_store_argv_intact() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("temp")).unwrap();
+        let spec = seed_argv_container_spec(&temp);
+        let args = spec.seed_mise_store_args().unwrap();
+        assert!(args.contains(&"--".to_string()), "fixture has no separator");
+
+        let owned = timed_docker_args("docker", &args).unwrap().unwrap();
+        let separator = owned.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(owned[separator + 1], "ghcr.io/velnor/runner:1.2.3");
+        assert_eq!(owned[separator - 2], "--name");
+        assert!(owned[separator - 1].starts_with("velnor-timeout-"));
+        // Everything after the image is still the seed shell invocation.
+        assert_eq!(owned[separator + 2], "-c");
+        fs::remove_dir_all(temp).ok();
     }
 
     #[test]
@@ -14267,9 +14383,74 @@ mod tests {
             "run".to_string(),
             "--name".to_string(),
             "velnor-job-1".to_string(),
+            "--".to_string(),
             "alpine:3.20".to_string(),
         ];
         assert!(timed_docker_args("docker", &args).unwrap().is_none());
+    }
+
+    #[test]
+    fn docker_run_container_name_ignores_operands_after_the_separator() {
+        let args = vec![
+            "--rm".to_string(),
+            "--".to_string(),
+            "alpine:3.20".to_string(),
+            "--name".to_string(),
+            "not-a-container".to_string(),
+        ];
+        assert_eq!(docker_run_container_name(&args), None);
+    }
+
+    #[test]
+    fn timed_out_docker_exec_kills_the_target_container() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let log = temp.join("docker-calls.log");
+        let fake_docker = temp.join("docker");
+        fs::write(
+            &fake_docker,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_docker, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let original_path = std::env::var_os("PATH");
+        let mut search = vec![temp.clone()];
+        if let Some(path) = original_path.as_ref() {
+            search.extend(std::env::split_paths(path));
+        }
+        // Safety: the runner test suite is run single-threaded, and PATH is
+        // restored before this test returns.
+        unsafe {
+            std::env::set_var("PATH", std::env::join_paths(search).unwrap());
+        }
+
+        let mut victim = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let args = exec_argv_with_separator();
+        let (timed_out, _cancel, watchdog) =
+            spawn_docker_timeout_watchdog("docker", &args, victim.id(), Duration::from_millis(50));
+        watchdog.unwrap().join().unwrap();
+        let _ = victim.wait();
+
+        unsafe {
+            match original_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        assert!(timed_out.load(std::sync::atomic::Ordering::SeqCst));
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.lines().any(|line| line == "kill velnor-job-1"),
+            "watchdog did not kill the container; docker calls were: {calls:?}"
+        );
+        fs::remove_dir_all(temp).ok();
     }
 
     #[derive(Default)]
