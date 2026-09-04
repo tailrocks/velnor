@@ -2432,3 +2432,108 @@ Testcontainers label plus an empty job label, reopening the unrelated-host delet
 closed; and `unlabeled_testcontainer_ids` silently drops malformed `docker ps` rows, allowing a
 partial listing to drive deletion. T-004 route authorization is unchanged. Restore the fail-closed
 ownership validator and reject malformed listings before this cleanup reaches the shared branch.
+
+## 16. Pause handover
+
+All five packages stopped cleanly on instruction. Six commits that were stranded on a diverged
+local ref have been cherry-picked onto the origin tip, verified with
+`cargo check --workspace --all-targets --features velnor-runner/test-support` on a clean
+`git archive` (exit 0, zero errors), and pushed: `2a85017`, `fe5baf9`, `5ba8cd3`, `e2f369e`,
+`ccbd396`, `95ab8ca`. A duplicate of an already-pushed commit was correctly dropped as
+already-applied.
+
+### T-018 cancellation — model built, deliberately inert
+
+`2a85017` lands `execution/cancel.rs`: the token, its registry and one termination ladder, with
+upstream's timings cited from source (`ProcessInvoker.cs:32-33` 7500/2500 ms, escalation at
+`:443-447`; `JobDispatcher.cs:1280-1285`; `StepsRunner.cs:146-187`; the fresh unlinked post source
+at `ExecutionContext.cs:436`, `:1384-1395`; `ContainerOperationProvider.cs:57-63`; and
+`JobCancelMessage.cs` carrying the `Timeout` that `runner.rs` currently discards).
+
+The executor half — process groups for every host child registered at the single spawn seam, a
+required `cancellation` field on `DockerJobEngine` and `JobExecutionState`, truthful `cancelled()`
+with `success()`/`failure()` false under cancellation, `continue_on_error` gated on not-cancelled,
+and post steps under a fresh unlinked token — **compiles and is gate-clean but is not
+test-verified**, and is preserved as a patch at
+`scratchpad/t018-uncommitted-executor.patch` (2232 lines, five files) rather than committed.
+
+The agent's own caveat is the important one: an earlier green test run was invalid because a second
+agent had overwritten its scratch directory, so those results never compiled its `executor.rs`.
+Nothing requests cancellation in production yet — the model is inert **by choice**, so nothing
+looks wired that is not. Requirements 3, 5, 6, 7 and 8 are unstarted.
+
+### T-019 completion durability — landed, with the schema discipline intact
+
+`fe5baf9`, `5ba8cd3`, `ccbd396`. `JOURNAL_SCHEMA_VERSION` 3 → 4 carries three events:
+`JobTerminalResult` written before payload serialisation (closing the crash window that converted a
+green job into a synthetic failure), `CompletionAttemptFailed` as a durable attempt counter so
+recovery terminates across restarts, and `CompletionUnresolvable` — whose reducer **refuses it
+unless the durable state already proves the budget is exhausted**, so the terminal state is proven
+rather than asserted by a caller.
+
+The ordering defect the red team predicted was found and fixed: the old code stamped `user_version`
+only when it was 0, so a v4 binary would leave a v3 stamp and a v3 binary would then reopen the
+journal and silently skip events it did not know. `open` now migrates and stamps before any event
+may be written, which is what makes the silent `continue` safe to turn into a hard error. A version
+behind or ahead of its physical shape is refused without mutating the file.
+
+The operator-facing decision is right: an unresolvable completion tells the operator plainly that
+GitHub was never told and will time the job out, releases the slot, and preserves the event — and
+deliberately does **not** send a synthetic conclusion, because fabricating a result that could not
+be delivered is worse than an honest timeout. `remote_acked` stays false and the send claim is
+never released, so abandonment can never become a second terminal send.
+
+Seven fault-injection boundaries pass, including budget-does-not-reset-across-restart and
+zero-sends-on-a-fenced-generation.
+
+### T-021 last string-rewriting evaluator — deleted
+
+`e2f369e`, `95ab8ca`. **Correction to my framing:** the survivor rendered the *script step's* `run`
+and `working-directory` inputs, not composite or local-action inputs — those already go through the
+migrated path. Six functions deleted, no shim.
+
+The setup-time versus runtime split was lifted into `expression::reads_runtime_context` rather than
+duplicated. One genuine difference from the established pattern, and the reason it needed thought:
+the whole expression is a `format()` call whose template holds the script's literal braces as
+`{{`/`}}` escapes, so deferring the span wholesale would re-emit those escapes *and* truncate at the
+first `}}`. Deferral is therefore per argument, with argument source recovered verbatim through the
+real lexer rather than by re-printing the tree or splitting on commas.
+
+Upstream is fail-closed here — `ActionRunner.cs:174-185` → `EvaluateStepInputs` →
+`context.Errors.Check()` → `StepsRunner.cs:335-344` — and Velnor now is too. Named divergence:
+upstream fails the *step*, Velnor fails the *job*, because Velnor renders at setup when no step row
+exists yet.
+
+### T-020 storage — committed locally, conflicts with the other lead's work
+
+`d76eab7` is **not** on origin: it conflicts in `cache.rs` with `dd93963`
+("isolate cache reclaim storage context"), which landed from the other lead's effort while T-020
+was running. That is the first genuine cross-lead conflict of this program, and I am not resolving
+it unilaterally — both sides changed reclaim behavior, and the merge needs the intent of each.
+
+Its content: a `StoreCatalog` as the sole path constructor (making the artifact-store path defect
+unrepresentable rather than fixed), a `HostCapacity` from `statvfs` with Docker accounted, lease
+classes for the emergency-managed stores, a reaper that consults claims and leases instead of
+`docker ps` alone, and disk pressure as a total transition function with a bounded
+`RefuseUntil`. Tests assert that a job mid-checkout, mid-artifact-upload and mid-target-publish is
+not reaped while a genuinely abandoned workspace is.
+
+One item needs an explicit decision when it lands: `prune_owned_builder` was dead code and now
+actually runs `buildx prune --max-used-space 0B` during emergency reclaim, with no lease covering
+the BuildKit store. The agent's reasoning — the cache is regenerable and BuildKit will not prune
+records in use — is sound, but it is the only change that becomes *more* destructive, and it should
+be a deliberate call rather than a side effect.
+
+### Open items carried forward
+
+- The `Acquired` unjournaled completion branch is prepared but not applied; it is fail-closed only
+  once the provisional acquire marker exists.
+- The provisional-marker design is specified and **gated on one upstream fact**: whether the 409
+  reply from `acquirejob` names the acquiring runner. If it does, the 409 is the ownership oracle;
+  if it does not, the oracle must become a probe, which is a materially different design. Verify
+  before building.
+- `CommandResult = TaskResult.Failed` needs three edits across two files nobody owned at once.
+- The runner test suite is unstable under parallelism from a shared-`/tmp` and process-env race in
+  `cache`, `container` and `executor` tests. Two packages independently hit it and neither could
+  attribute failures without a baseline diff. This undermines every gate in the program and should
+  be fixed before it costs another package a day.
