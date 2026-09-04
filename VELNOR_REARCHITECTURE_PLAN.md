@@ -3356,3 +3356,21 @@ function-return deadline: scheduler delay and evidence serialization, flush,
 or atomic rename may extend return time. Terminal classification records the
 GitHub response-acquisition instant so a response obtained after the budget is
 reported as timed out.
+
+## 41. Benchmark record integrity — T-021 `ab1cbe1`
+
+`BenchRecord::validate` now recomputes `Summaries` from the record's own
+observations and rejects mismatched aggregates. It also rejects records below
+the summary sample floor with a typed error. This closes a producer-side trust
+gap without changing the NDJSON wire shape or touching the reserved runner,
+executor, acquisition, or lifecycle boundaries.
+
+Focused source proof at `ab1cbe1269629389849c45db036ba85c0074ba49`:
+`velnor-bench` nextest passed (`78` tests), strict package Clippy passed, and
+format/diff checks passed. The fixture branch
+`codex/verifier-completion-fixes` was refreshed to source `ab1cbe1` at
+`e5a2792`; its full `mise run check` passed (`44` Python tests, `53` Rust
+tests, workflow/actionlint, capability readiness, format/check, and L2
+closure). This remains static/fixture proof: no live dual-lane run, deployed
+image identity, default-mbx end-to-end result, fault/soak result, or
+VelnorJob lifecycle benchmark is claimed.
