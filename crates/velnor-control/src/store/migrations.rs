@@ -809,8 +809,30 @@ pub(crate) fn apply_pending(
         // record v2 without that DDL and let appended v4 perform the safe
         // non-unique repair. No rows are rewritten or discarded.
         let slot_column_exists = migration.version == 5 && has_slot_column(&transaction)?;
-        let lifecycle_columns_exist =
+        let lifecycle_desired_state_exists =
             migration.version == 6 && has_column(&transaction, "instances", "desired_state")?;
+        let lifecycle_observed_state_exists =
+            migration.version == 6 && has_column(&transaction, "instances", "observed_state")?;
+        let lifecycle_resource_version_exists =
+            migration.version == 6 && has_column(&transaction, "instances", "resource_version")?;
+        let lifecycle_columns = [
+            lifecycle_desired_state_exists,
+            lifecycle_observed_state_exists,
+            lifecycle_resource_version_exists,
+        ];
+        if migration.version == 6
+            && lifecycle_columns.iter().any(|exists| *exists)
+            && !lifecycle_columns.iter().all(|exists| *exists)
+        {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v6 durable lifecycle instance columns are partial; desired_state, observed_state, and resource_version must all be present before the schema version can advance",
+            ));
+        }
+        let lifecycle_columns_exist = lifecycle_columns.iter().all(|exists| *exists);
         let scale_columns_exist = migration.version == 7
             && has_column(&transaction, "instances", "desired_slots")?
             && has_column(&transaction, "lifecycle_operations", "desired_slots")?;
@@ -1535,6 +1557,52 @@ mod tests {
         assert_eq!(current_version(&conn).unwrap(), 11);
         assert!(!has_column_connection(&conn, "events", "reconciliation_id").unwrap());
         release_lock(&conn, "partial-v12-test").unwrap();
+    }
+
+    #[test]
+    fn partial_v6_instance_lifecycle_fails_closed_before_version_bump() {
+        let temp = TempDb::new("partial-v6");
+        let mut conn = Connection::open(&temp.path).expect("open database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(5) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO instances
+                (instance_slug, host, daemon_version, slots_configured, slots_busy, updated_at)
+             VALUES ('legacy', 'sentry', 'v5', 2, 1, '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "ALTER TABLE instances ADD COLUMN desired_state TEXT NOT NULL DEFAULT 'ready'",
+            [],
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "partial-v6-test", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(&mut conn, "partial-v6-test", None).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+        assert_eq!(current_version(&conn).unwrap(), 5);
+        assert!(has_column_connection(&conn, "instances", "desired_state").unwrap());
+        assert!(!has_column_connection(&conn, "instances", "observed_state").unwrap());
+        assert!(!has_column_connection(&conn, "instances", "resource_version").unwrap());
+        let instance: (String, String, i64) = conn
+            .query_row(
+                "SELECT host, daemon_version, slots_busy
+                 FROM instances WHERE instance_slug = 'legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(instance, ("sentry".to_owned(), "v5".to_owned(), 1));
+        release_lock(&conn, "partial-v6-test").unwrap();
     }
 
     #[test]
