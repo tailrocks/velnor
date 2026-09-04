@@ -461,10 +461,7 @@ impl Workload for CargoWorkload {
 
     fn iterate(&mut self, context: &mut Context) -> Result<Observation> {
         self.iteration += 1;
-        context.runner.reset();
         let root = context.work_root.join(self.scenario.replace('/', "_"));
-        let disk_before = tree_bytes(&root);
-        let started = Instant::now();
 
         if self.plan.workspace == Workspace::FreshEachIteration {
             let name = format!("workspace-fresh-{}", self.iteration);
@@ -489,20 +486,26 @@ impl Workload for CargoWorkload {
                 .context("priming run")?;
         }
 
+        // Setup and priming are not the measured user command. Reset the
+        // process/resource census and establish the disk baseline immediately
+        // before the command; snapshot all observation inputs before restore.
+        context.runner.reset();
+        let disk_before = tree_bytes(&root);
+        let started = Instant::now();
         let trace_file = root.join(format!("git-trace-{}.jsonl", self.iteration));
         let command_ms = if self.plan.workspace == Workspace::PerConcurrentJob {
             self.run_concurrent(context, &args)?
         } else {
             self.run_cargo(context, &workspace, &target, &args, Some(&trace_file))?
         };
-        self.restore(context, &workspace);
-
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let usage = context.runner.rusage();
         let disk_after = tree_bytes(&root);
+        let process_count = context.runner.process_count() as u64;
+        let docker_invocations = context.runner.count_of("docker") as u64;
         let git = GitCounters::from_event_file(&trace_file).unwrap_or_default();
 
-        Ok(Observation {
+        let observation = Observation {
             total_ms,
             stages_ms: BTreeMap::from([(Stage::FirstUserCommand, command_ms)]),
             checkout_phases_ms: BTreeMap::new(),
@@ -514,13 +517,15 @@ impl Workload for CargoWorkload {
                 block_output_ops: usage.block_output_ops,
                 disk_bytes_delta: i64::try_from(disk_after).unwrap_or(i64::MAX)
                     - i64::try_from(disk_before).unwrap_or(0),
-                process_count: context.runner.process_count() as u64,
-                docker_invocations: context.runner.count_of("docker") as u64,
+                process_count,
+                docker_invocations,
                 bytes_downloaded: git.received_bytes,
                 ..Resources::default()
             },
             git,
-        })
+        };
+        self.restore(context, &workspace);
+        Ok(observation)
     }
 
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
