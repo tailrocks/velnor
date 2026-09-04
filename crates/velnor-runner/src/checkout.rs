@@ -3292,7 +3292,9 @@ mod tests {
         let header = git_basic_auth_value(token);
         let encoded = STANDARD.encode(format!("x-access-token:{token}"));
         for line in [
-            format!("fatal: could not read Username for 'https://x-access-token:{token}@github.com'"),
+            format!(
+                "fatal: could not read Username for 'https://x-access-token:{token}@github.com'"
+            ),
             format!("\textraheader = {header}"),
             format!("remote reported {encoded}"),
             // A URI-escaped form of the credential, which the eleven upstream
@@ -3305,4 +3307,3 @@ mod tests {
         }
     }
 }
-

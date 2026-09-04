@@ -3559,6 +3559,7 @@ name = "velnor-model"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "base64 0.23.1",
  "noyalib",
  "rustix",
  "serde",

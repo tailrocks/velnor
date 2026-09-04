@@ -528,7 +528,10 @@ mod tests {
             power_shell_pre_ampersand_escape(secret),
             power_shell_post_ampersand_escape(secret),
         ] {
-            assert!(!encoded.is_empty(), "test vector must exercise every encoder");
+            assert!(
+                !encoded.is_empty(),
+                "test vector must exercise every encoder"
+            );
             assert_eq!(
                 masker.mask(&format!("log line: {encoded} end")),
                 "log line: *** end",
