@@ -9,6 +9,8 @@
 //! 2. A record may not carry a stage its driver cannot observe, so a
 //!    container-only measurement can never be read as a claim about broker or
 //!    acquisition latency.
+//! 3. Summaries are recomputed from the observations during validation, so a
+//!    producer cannot attach unrelated aggregate numbers to a real sample.
 
 use std::collections::BTreeMap;
 
@@ -195,6 +197,11 @@ pub enum RecordError {
     },
     ScenarioFamilyMismatch,
     WrongSchema(String),
+    InsufficientObservations {
+        samples: usize,
+        required: usize,
+    },
+    SummaryMismatch,
 }
 
 impl std::fmt::Display for RecordError {
@@ -225,6 +232,16 @@ impl std::fmt::Display for RecordError {
                 )
             }
             Self::WrongSchema(schema) => write!(formatter, "unexpected schema {schema}"),
+            Self::InsufficientObservations { samples, required } => write!(
+                formatter,
+                "record contains {samples} observation(s); {required} required for summaries"
+            ),
+            Self::SummaryMismatch => {
+                write!(
+                    formatter,
+                    "record summaries are not derived from observations"
+                )
+            }
         }
     }
 }
@@ -235,8 +252,9 @@ impl BenchRecord {
     /// Check the invariants the schema alone cannot express.
     ///
     /// # Errors
-    /// Unknown scenario, family mismatch, wrong schema, or a stage the driver
-    /// is structurally unable to observe.
+    /// Unknown scenario, family mismatch, wrong schema, a stage the driver is
+    /// structurally unable to observe, or summaries not derived from the
+    /// observations.
     pub fn validate(&self) -> Result<(), RecordError> {
         if self.schema != RESULT_SCHEMA {
             return Err(RecordError::WrongSchema(self.schema.clone()));
@@ -262,6 +280,15 @@ impl BenchRecord {
                     });
                 }
             }
+        }
+        let expected = Summaries::new(&self.observations).map_err(|error| {
+            RecordError::InsufficientObservations {
+                samples: error.samples,
+                required: error.required,
+            }
+        })?;
+        if self.summaries != expected {
+            return Err(RecordError::SummaryMismatch);
         }
         Ok(())
     }
@@ -421,5 +448,25 @@ mod tests {
     fn summaries_refuse_a_single_observation() {
         let observations = vec![observation(10, Stage::ContainerStart)];
         assert!(Summaries::new(&observations).is_err());
+    }
+
+    #[test]
+    fn a_record_rejects_summaries_not_derived_from_observations() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.summaries.total_ms.max += 1;
+        assert_eq!(record.validate(), Err(RecordError::SummaryMismatch));
+    }
+
+    #[test]
+    fn a_record_with_too_few_observations_is_rejected() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.observations.truncate(2);
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::InsufficientObservations {
+                samples: 2,
+                required: crate::stats::MIN_SAMPLES,
+            })
+        );
     }
 }
