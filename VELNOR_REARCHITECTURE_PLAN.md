@@ -2926,13 +2926,13 @@ and mixed native/JavaScript post-action ordering remain in the other lead's rese
 
 This is the newest handoff record. It supersedes stale current-tip counts in §§20 and 22 while
 leaving those sections as history. The tested runner source snapshot is
-`e1ba5a50b437640153e841fd82862dfd4c9fc4a5`; it was materialized with
-`git archive e1ba5a50b437640153e841fd82862dfd4c9fc4a5 | tar -x -C <scratch>`.
+`6c0c1af6db984e53fa33608a82927cebee1553a4`; it was materialized with
+`git archive 6c0c1af6db984e53fa33608a82927cebee1553a4 | tar -x -C <scratch>`.
 The verifier's current provenance commit is
-`0b16f3110f225dccaf360d03e475cc4f368e8ad6`, with the generated baseline present in its
-parent `2f91e71be98d4225eee5d6928709d7896c4fba7c`. Manifest identity is v12, crate `0.1.250`,
+`33c351f38d9bd491674ec6226bc564a6ee6d2df8`, with the generated baseline present in its
+parent `21def7fe0dd1d72db26efbaae227cbd918905834`. Manifest identity is v12, crate `0.1.250`,
 capability ID `23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and source
-SHA `e1ba5a50b437640153e841fd82862dfd4c9fc4a5`. No live dual-lane verdict or deployed image
+SHA `6c0c1af6db984e53fa33608a82927cebee1553a4`. No live dual-lane verdict or deployed image
 digest is claimed.
 
 ### T-001 capability surface
@@ -2946,7 +2946,7 @@ accepts only `github` and `server`; the fixture uses `backend: github`. `7ca8b17
 ### T-002 storage and admission
 
 `StoreCatalog`, `HostCapacity`, leases/claims/reaper, bounded `DiskPressure`, and fail-closed
-claim iteration are present. BuildKit prune is deliberately disabled: no lease spans mutable
+claim iteration and portable Unix `statvfs` accounting are present. BuildKit prune is deliberately disabled: no lease spans mutable
 BuildKit content, so broad prune could delete live state. The artifact-store constructor follow-up
 is present on the shared tip but came from the concurrent lead. The remaining disk admission,
 reclaim, lease-publication, and acquire-order changes are still reserved by the file boundary;
@@ -2970,7 +2970,7 @@ and ephemeral-identity behavior. This is the `fb8ae38` documentation package.
 
 `capability_id` is SHA-256 over canonical capability content excluding only `source_sha` and
 `capability_id`; the full lowercase source SHA remains mandatory provenance. The fixture refresh
-and source-bound readiness audit pass against the e1ba5a5 archive. Baseline-only and single-lane
+and source-bound readiness audit pass against the 6c0c1af archive. Baseline-only and single-lane
 diagnostics remain fail-closed; no live parity result is substituted.
 
 ### Final gates
@@ -2982,7 +2982,7 @@ diagnostics remain fail-closed; no live parity result is substituted.
 | Runner workspace Clippy, warnings denied, locked | pass |
 | Runner dependency-boundary test, serial | 6 passed |
 | Runner tools test, serial | 190 passed |
-| Runner library test, serial | 1580 passed, 1 ignored |
+| Runner library test, serial | 1583 passed, 1 ignored |
 | Fixture refresh plus capability readiness audit | pass; v12 / crate 0.1.250 / ID above |
 | Fixture capability contract, workflow audit, Python syntax, Python tests | pass; 38 Python tests |
 | Fixture `mise run workflow-check` | pass; actionlint and audit suite included |
