@@ -238,6 +238,12 @@ impl Scenario {
                 driver: self.preferred,
             };
         }
+        // Rust benchmark rows are only authoritative when they reach the
+        // real Velnor job driver. A host Cargo fallback would produce a
+        // plausible number while measuring none of Velnor's lifecycle.
+        if self.family == Family::Rust && self.preferred == Driver::VelnorJob {
+            return Runnability::Unrunnable { missing };
+        }
         let Some(fallback) = self.fallback else {
             return Runnability::Unrunnable { missing };
         };
@@ -302,9 +308,8 @@ scenarios! {
     "lifecycle/concurrent-slots", Lifecycle, VelnorJob, None, VELNOR_JOB, &[],
         "Stage breakdown while every configured slot is busy";
 
-    // Rust cache behaviour. Preferred is a real job; the fallback runs the same
-    // build inside the real job image, which measures the build but observes no
-    // acquisition stages.
+    // Rust cache behaviour. These rows require a real Velnor job: host Cargo
+    // can measure compilation, but cannot establish Velnor acceleration.
     "rust/cold", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
         "Fully cold: no target dir, no shared cache, no mbx store";
     "rust/warm", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
@@ -497,6 +502,27 @@ mod tests {
             host.runnability(capabilities),
             Runnability::Unrunnable { .. }
         ));
+    }
+
+    #[test]
+    fn rust_rows_never_degrade_to_host_cargo() {
+        let capabilities = Capabilities {
+            rust_toolchain: true,
+            ..Capabilities::default()
+        };
+        for scenario in MATRIX
+            .iter()
+            .filter(|scenario| scenario.family == Family::Rust)
+        {
+            assert!(
+                matches!(
+                    scenario.runnability(capabilities),
+                    Runnability::Unrunnable { .. }
+                ),
+                "{} must not emit a host-Cargo measurement",
+                scenario.id
+            );
+        }
     }
 
     #[test]
