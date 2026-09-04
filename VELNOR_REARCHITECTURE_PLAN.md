@@ -108,6 +108,9 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-workflow/**` + workspace registration (workflow generator/client) | codex-lead | claimed — T-020 |
 | `crates/velnor-tools/src/workflow_monitor.rs` + approved `velnor-tools → velnor-client` read edge | codex-lead | claimed — T-020 |
 | `.github/workflows/velnor-workflow-policy.yml` (immutable reusable workflow-policy gate) | codex-lead | claimed — T-020 |
+| `.github/workflows/ci.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
+| `.github/workflows/docs.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
+| `.github/workflows/renovate.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
 
 ## 8. Discovered bug classes
 
