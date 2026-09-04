@@ -3768,3 +3768,20 @@ attempts after the earlier archive checkpoint: superseded commits `e42ec91`
 and `feb3224`, plus four exact trees. Each is now retained and published under
 `refs/archive/canonical/replaced-*`; the canonical branch was not rewritten.
 After publication, `git fsck --no-reflogs --unreachable` is empty again.
+
+## 64. Checkout hydration fails closed — 2026-09-05
+
+Commit `025ddc3` removes silent skips from shared-mirror hydration. Directory
+opens, directory-entry reads, entry-type reads, and object metadata reads now
+propagate contextual errors; the byte counter saturates instead of wrapping.
+The new regression test proves a missing object directory fails closed. The
+executor's command-recording fake now creates the object directory when it
+simulates `git init --bare`, preserving the test double's valid-mirror
+contract under strict hydration.
+
+The focused hydration test passed. A parallel runner-library attempt reported
+1545 passes plus three failures: the executor fake failure was the missing
+object-directory contract now repaired here; the two lease failures passed
+when run individually and are host lock contention. Re-running the repaired
+executor test was blocked twice by 60 seconds of silence from unrelated
+concurrent Rust workloads, so no full-suite pass is claimed yet.
