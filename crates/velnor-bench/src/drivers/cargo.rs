@@ -14,6 +14,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 
@@ -25,7 +26,7 @@ use crate::{
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
-    sys::{tree_bytes, Runner},
+    sys::{tree_bytes, Invocation, Runner},
 };
 
 /// How the workspace is prepared before each measured iteration.
@@ -125,6 +126,8 @@ const AMBIENT_CARGO_ENV_TO_REMOVE: &[&str] = &[
     "RUSTDOCFLAGS",
     "RUSTFLAGS",
 ];
+
+static NEXT_SCRATCH_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
 fn plan_for(id: &str) -> Option<Plan> {
     let plan = match id {
@@ -262,8 +265,7 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
     Ok(Box::new(CargoWorkload {
         plan,
         scenario: scenario.id,
-        worktrees: Vec::new(),
-        targets: Vec::new(),
+        scratch: ScratchOwner::new(),
         package: None,
         iteration: 0,
         notes: vec![
@@ -274,11 +276,66 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
     }))
 }
 
+#[derive(Debug, Default)]
+struct ScratchOwner {
+    id: u64,
+    root: Option<PathBuf>,
+    worktrees: Vec<OwnedWorktree>,
+    targets: Vec<PathBuf>,
+    traces: Vec<PathBuf>,
+}
+
+impl ScratchOwner {
+    fn new() -> Self {
+        Self {
+            id: NEXT_SCRATCH_OWNER_ID.fetch_add(1, Ordering::Relaxed),
+            ..Self::default()
+        }
+    }
+
+    fn scenario_root(&self, work_root: &Path, scenario: &str) -> PathBuf {
+        work_root.join(format!(
+            "{}-{}-{}",
+            scenario.replace('/', "_"),
+            std::process::id(),
+            self.id
+        ))
+    }
+
+    fn register_worktree(&mut self, path: PathBuf) -> usize {
+        let index = self.worktrees.len();
+        self.worktrees.push(OwnedWorktree {
+            path,
+            state: WorktreeState::Pending,
+        });
+        index
+    }
+
+    fn mark_worktree_registered(&mut self, index: usize) {
+        self.worktrees[index].state = WorktreeState::Registered;
+    }
+}
+
+#[derive(Debug)]
+struct OwnedWorktree {
+    path: PathBuf,
+    state: WorktreeState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeState {
+    /// `git worktree add` may have created Git metadata before failing.
+    Pending,
+    /// Git owns a registered worktree at `path`.
+    Registered,
+    /// Git cleanup succeeded; only the owned filesystem path may remain.
+    Removed,
+}
+
 struct CargoWorkload {
     plan: Plan,
     scenario: &'static str,
-    worktrees: Vec<PathBuf>,
-    targets: Vec<PathBuf>,
+    scratch: ScratchOwner,
     package: Option<String>,
     iteration: u64,
     notes: Vec<String>,
@@ -287,25 +344,24 @@ struct CargoWorkload {
 impl CargoWorkload {
     fn add_worktree(&mut self, context: &mut Context, root: &Path, name: &str) -> Result<PathBuf> {
         let path = root.join(name);
-        let invocation = context
-            .runner
-            .run(
-                "git",
-                &[
-                    "-C".to_owned(),
-                    context.velnor_repo.display().to_string(),
-                    "worktree".to_owned(),
-                    "add".to_owned(),
-                    "--detach".to_owned(),
-                    path.display().to_string(),
-                    "HEAD".to_owned(),
-                ],
-            )
-            .context("git worktree add")?;
+        let ownership = self.scratch.register_worktree(path.clone());
+        let invocation = context.runner.run(
+            "git",
+            &[
+                "-C".to_owned(),
+                context.velnor_repo.display().to_string(),
+                "worktree".to_owned(),
+                "add".to_owned(),
+                "--detach".to_owned(),
+                path.display().to_string(),
+                "HEAD".to_owned(),
+            ],
+        );
+        let invocation = invocation.context("git worktree add")?;
         if !invocation.ok() {
             bail!("git worktree add failed: {}", invocation.stderr.trim());
         }
-        self.worktrees.push(path.clone());
+        self.scratch.mark_worktree_registered(ownership);
         Ok(path)
     }
 
@@ -462,11 +518,21 @@ impl CargoWorkload {
 
 impl Workload for CargoWorkload {
     fn prepare(&mut self, context: &mut Context) -> Result<()> {
-        let root = context.work_root.join(self.scenario.replace('/', "_"));
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
+        if self.scratch.root.is_some()
+            || !self.scratch.worktrees.is_empty()
+            || !self.scratch.targets.is_empty()
+            || !self.scratch.traces.is_empty()
+        {
+            bail!("Cargo workload still owns scratch; teardown is required before prepare");
         }
-        std::fs::create_dir_all(&root)?;
+        let root = self
+            .scratch
+            .scenario_root(&context.work_root, self.scenario);
+        // Register before creating the directory so a partial prepare remains
+        // recoverable when directory creation fails.
+        self.scratch.root = Some(root.clone());
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("creating Cargo workload root {}", root.display()))?;
 
         let worktree_count = match self.plan.workspace {
             Workspace::PerConcurrentJob => context.concurrency.max(1),
@@ -481,12 +547,15 @@ impl Workload for CargoWorkload {
         };
         for index in 0..target_count {
             let target = root.join(format!("target-{index}"));
-            std::fs::create_dir_all(&target)?;
-            self.targets.push(target);
+            // Register before creating the directory so a partial prepare can
+            // retry or report ownership of this path.
+            self.scratch.targets.push(target.clone());
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("creating Cargo target {}", target.display()))?;
         }
 
         if let CargoCommand::ResolvedPackage { kind } = self.plan.command {
-            let workspace = self.worktrees[0].clone();
+            let workspace = self.scratch.worktrees[0].path.clone();
             let package = resolve_package(context, &workspace, kind)?;
             self.notes
                 .push(format!("resolved package for this scenario: {package}"));
@@ -500,9 +569,11 @@ impl Workload for CargoWorkload {
             TargetDir::Warm | TargetDir::PerConcurrentJob
         ) {
             let args = self.cargo_args(0);
-            for index in 0..self.targets.len() {
-                let workspace = self.worktrees[index.min(self.worktrees.len() - 1)].clone();
-                let target = self.targets[index].clone();
+            for index in 0..self.scratch.targets.len() {
+                let workspace = self.scratch.worktrees[index.min(self.scratch.worktrees.len() - 1)]
+                    .path
+                    .clone();
+                let target = self.scratch.targets[index].clone();
                 self.run_cargo(context, &workspace, &target, &args, None)
                     .context("warm-up run")?;
             }
@@ -512,18 +583,28 @@ impl Workload for CargoWorkload {
 
     fn iterate(&mut self, context: &mut Context) -> Result<Observation> {
         self.iteration += 1;
-        let root = context.work_root.join(self.scenario.replace('/', "_"));
+        let root = self
+            .scratch
+            .root
+            .clone()
+            .context("Cargo workload was not prepared")?;
 
         if self.plan.workspace == Workspace::FreshEachIteration {
             let name = format!("workspace-fresh-{}", self.iteration);
             self.add_worktree(context, &root, &name)?;
         }
         let workspace = self
+            .scratch
             .worktrees
             .last()
+            .map(|worktree| worktree.path.clone())
+            .context("Cargo workload has no owned worktree")?;
+        let target = self
+            .scratch
+            .targets
+            .first()
             .cloned()
-            .expect("prepare created at least one worktree");
-        let target = self.targets[0].clone();
+            .context("Cargo workload has no owned target")?;
 
         if self.plan.target == TargetDir::Cold && target.exists() {
             std::fs::remove_dir_all(&target)?;
@@ -541,7 +622,14 @@ impl Workload for CargoWorkload {
         // process/resource census and establish the disk baseline immediately
         // before the command; snapshot all observation inputs before restore.
         context.runner.reset();
-        let trace_file = trace_file_path(&context.work_root, self.scenario, self.iteration);
+        let trace_file = trace_file_path(
+            &context.work_root,
+            self.scenario,
+            self.scratch.id,
+            self.iteration,
+        );
+        // Register before clearing or allowing Git tracing to create the file.
+        self.scratch.traces.push(trace_file.clone());
         clear_trace_file(&trace_file)?;
         let disk_before = tree_bytes(&root);
         let started = Instant::now();
@@ -583,32 +671,20 @@ impl Workload for CargoWorkload {
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
         // Leave the shared repository exactly as it was found.
         let mut failures = Vec::new();
-        for path in std::mem::take(&mut self.worktrees) {
-            let result = context.runner.run(
-                "git",
-                &[
-                    "-C".to_owned(),
-                    context.velnor_repo.display().to_string(),
-                    "worktree".to_owned(),
-                    "remove".to_owned(),
-                    "--force".to_owned(),
-                    path.display().to_string(),
-                ],
-            );
-            match result {
-                Ok(invocation) if invocation.ok() => {}
-                Ok(invocation) => failures.push(format!(
-                    "remove worktree {} exited {}: {}",
-                    path.display(),
-                    invocation.code,
-                    invocation.stderr.trim()
-                )),
-                Err(error) => failures.push(format!(
-                    "remove worktree {} could not be executed: {error}",
-                    path.display()
-                )),
-            }
-        }
+        self.cleanup_worktrees(context, &mut failures);
+        cleanup_owned_paths(
+            &mut self.scratch.targets,
+            "target",
+            remove_owned_directory,
+            &mut failures,
+        );
+        cleanup_owned_paths(
+            &mut self.scratch.traces,
+            "trace file",
+            remove_owned_file,
+            &mut failures,
+        );
+        self.cleanup_root(&mut failures);
         if !failures.is_empty() {
             bail!("Cargo workload teardown failed: {}", failures.join("; "));
         }
@@ -621,14 +697,70 @@ impl Workload for CargoWorkload {
 }
 
 impl CargoWorkload {
+    fn cleanup_worktrees(&mut self, context: &mut Context, failures: &mut Vec<String>) {
+        let owned = std::mem::take(&mut self.scratch.worktrees);
+        let mut remaining = Vec::with_capacity(owned.len());
+        for mut worktree in owned {
+            let mut git_removed = worktree.state == WorktreeState::Removed;
+            if !git_removed {
+                match remove_git_worktree(context, &worktree.path) {
+                    Ok(()) => {
+                        worktree.state = WorktreeState::Removed;
+                        git_removed = true;
+                    }
+                    Err(error) => failures.push(format!(
+                        "remove worktree {} failed: {error:#}",
+                        worktree.path.display()
+                    )),
+                }
+            }
+
+            let filesystem_removed = match remove_owned_directory(&worktree.path) {
+                Ok(()) => true,
+                Err(error) => {
+                    failures.push(format!(
+                        "remove worktree path {} failed: {error:#}",
+                        worktree.path.display()
+                    ));
+                    false
+                }
+            };
+            if !(git_removed && filesystem_removed) {
+                remaining.push(worktree);
+            }
+        }
+        self.scratch.worktrees = remaining;
+    }
+
+    fn cleanup_root(&mut self, failures: &mut Vec<String>) {
+        let Some(root) = self.scratch.root.clone() else {
+            return;
+        };
+        if !self.scratch.worktrees.is_empty() || !self.scratch.targets.is_empty() {
+            failures.push(format!(
+                "retain Cargo workload root {} while owned child resources remain",
+                root.display()
+            ));
+            return;
+        }
+        match remove_owned_directory(&root) {
+            Ok(()) => self.scratch.root = None,
+            Err(error) => failures.push(format!(
+                "remove Cargo workload root {} failed: {error:#}",
+                root.display()
+            )),
+        }
+    }
+
     /// Concurrent jobs really do run concurrently: one thread per worktree,
     /// each with its own target directory.
     fn run_concurrent(&self, context: &mut Context, args: &[String]) -> Result<u64> {
         let pairs: Vec<(PathBuf, PathBuf)> = self
+            .scratch
             .worktrees
             .iter()
-            .cloned()
-            .zip(self.targets.iter().cloned())
+            .map(|worktree| worktree.path.clone())
+            .zip(self.scratch.targets.iter().cloned())
             .collect();
         let started = Instant::now();
         let worker_results: Vec<Result<Runner, String>> = std::thread::scope(|scope| {
@@ -686,9 +818,81 @@ impl CargoWorkload {
     }
 }
 
-fn trace_file_path(work_root: &Path, scenario: &str, iteration: u64) -> PathBuf {
+fn remove_git_worktree(context: &mut Context, path: &Path) -> Result<()> {
+    let invocation = context
+        .runner
+        .run(
+            "git",
+            &[
+                "-C".to_owned(),
+                context.velnor_repo.display().to_string(),
+                "worktree".to_owned(),
+                "remove".to_owned(),
+                "--force".to_owned(),
+                path.display().to_string(),
+            ],
+        )
+        .context("git worktree remove")?;
+    if invocation.ok() || git_worktree_not_found(invocation) {
+        return Ok(());
+    }
+    bail!(
+        "git worktree remove exited {}: {}",
+        invocation.code,
+        invocation.stderr.trim()
+    );
+}
+
+fn git_worktree_not_found(invocation: &Invocation) -> bool {
+    let output = format!("{}\n{}", invocation.stdout, invocation.stderr).to_ascii_lowercase();
+    ["not a working tree", "does not exist"]
+        .iter()
+        .any(|message| output.contains(message))
+}
+
+fn cleanup_owned_paths(
+    paths: &mut Vec<PathBuf>,
+    kind: &str,
+    remove: fn(&Path) -> Result<()>,
+    failures: &mut Vec<String>,
+) {
+    let owned = std::mem::take(paths);
+    let mut remaining = Vec::with_capacity(owned.len());
+    for path in owned {
+        match remove(&path) {
+            Ok(()) => {}
+            Err(error) => {
+                failures.push(format!(
+                    "remove Cargo {kind} {} failed: {error:#}",
+                    path.display()
+                ));
+                remaining.push(path);
+            }
+        }
+    }
+    *paths = remaining;
+}
+
+fn remove_owned_directory(path: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_owned_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn trace_file_path(work_root: &Path, scenario: &str, owner_id: u64, iteration: u64) -> PathBuf {
     work_root.join(format!(
-        "{}-git-trace-{iteration}.jsonl",
+        "{}-git-trace-{}-{owner_id}-{iteration}.jsonl",
+        std::process::id(),
         scenario.replace('/', "_")
     ))
 }
@@ -805,6 +1009,109 @@ fn select_package(metadata: &serde_json::Value, kind: PackageKind) -> Option<Str
 mod tests {
     use super::*;
 
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn test_path(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-bench-cargo-{label}-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create test path");
+        path
+    }
+
+    fn test_workload(plan: Plan, scenario: &'static str) -> CargoWorkload {
+        CargoWorkload {
+            plan,
+            scenario,
+            scratch: ScratchOwner::new(),
+            package: None,
+            iteration: 0,
+            notes: Vec::new(),
+        }
+    }
+
+    fn test_context(work_root: PathBuf, velnor_repo: PathBuf, iterations: usize) -> Context {
+        Context {
+            work_root,
+            velnor_repo,
+            job_image: String::new(),
+            iterations,
+            concurrency: 1,
+            runner: Runner::new(),
+        }
+    }
+
+    fn git_success(runner: &mut Runner, args: Vec<String>) {
+        let invocation = runner.run("git", &args).expect("run git test command");
+        assert!(
+            invocation.ok(),
+            "git {} failed: {}",
+            args.join(" "),
+            invocation.stderr.trim()
+        );
+    }
+
+    fn test_git_repo(parent: &Path) -> PathBuf {
+        let repo = parent.join("repo");
+        std::fs::create_dir_all(repo.join("src")).expect("create test repository");
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"scratch-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write test manifest");
+        std::fs::write(repo.join("src/lib.rs"), "pub fn fixture() {}\n")
+            .expect("write test source");
+
+        let mut runner = Runner::new();
+        let repo_arg = repo.display().to_string();
+        git_success(
+            &mut runner,
+            vec!["init".to_owned(), "-q".to_owned(), repo_arg.clone()],
+        );
+        git_success(
+            &mut runner,
+            vec![
+                "-C".to_owned(),
+                repo_arg.clone(),
+                "config".to_owned(),
+                "user.name".to_owned(),
+                "Velnor test".to_owned(),
+            ],
+        );
+        git_success(
+            &mut runner,
+            vec![
+                "-C".to_owned(),
+                repo_arg.clone(),
+                "config".to_owned(),
+                "user.email".to_owned(),
+                "velnor-test@example.invalid".to_owned(),
+            ],
+        );
+        git_success(
+            &mut runner,
+            vec![
+                "-C".to_owned(),
+                repo_arg.clone(),
+                "add".to_owned(),
+                ".".to_owned(),
+            ],
+        );
+        git_success(
+            &mut runner,
+            vec![
+                "-C".to_owned(),
+                repo_arg,
+                "commit".to_owned(),
+                "-qm".to_owned(),
+                "initial fixture".to_owned(),
+            ],
+        );
+        repo
+    }
+
     #[test]
     fn every_rust_scenario_with_a_cargo_fallback_has_a_plan() {
         for scenario in crate::scenario::MATRIX {
@@ -888,12 +1195,168 @@ mod tests {
     }
 
     #[test]
+    fn drivers_run_tears_down_owned_scratch_when_prepare_fails() {
+        let work_root = test_path("prepare-failure");
+        let repo = test_git_repo(&work_root);
+        let plan = Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Cold,
+            mutation: Mutation::None,
+            command: CargoCommand::ResolvedPackage {
+                kind: PackageKind::NativeSys,
+            },
+        };
+        let mut workload = test_workload(plan, "test/prepare-failure");
+        let expected_root = workload
+            .scratch
+            .scenario_root(&work_root, workload.scenario);
+        let mut context = test_context(work_root.clone(), repo, 1);
+
+        let error = crate::drivers::run(&mut workload, &mut context)
+            .expect_err("metadata without a native sys package must fail preparation");
+
+        assert!(!error.to_string().contains("workload teardown also failed"));
+        assert!(workload.scratch.worktrees.is_empty());
+        assert!(workload.scratch.targets.is_empty());
+        assert!(workload.scratch.traces.is_empty());
+        assert!(workload.scratch.root.is_none());
+        assert!(!expected_root.exists(), "prepare scratch must be removed");
+        assert!(
+            context.runner.invocations().iter().any(|invocation| {
+                invocation.program == "git" && invocation.args.contains(&"remove".to_owned())
+            }),
+            "drivers::run must invoke Cargo teardown after prepare failure"
+        );
+
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn drivers_run_preserves_prepare_failure_when_cleanup_also_fails() {
+        let work_root = test_path("prepare-and-cleanup-failure");
+        let mut workload = test_workload(plan_for("rust/cold").expect("cold plan"), "rust/cold");
+        let mut context = test_context(work_root.clone(), work_root.join("not-a-repository"), 1);
+
+        let error = crate::drivers::run(&mut workload, &mut context)
+            .expect_err("worktree creation from a non-repository must fail");
+        let text = format!("{error:#}");
+
+        assert!(text.contains("git worktree add failed"), "{text}");
+        assert!(text.contains("workload teardown also failed"));
+        assert!(text.contains("remove worktree"));
+        assert_eq!(workload.scratch.worktrees.len(), 1);
+        assert!(workload.scratch.root.is_some());
+
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn drivers_run_tears_down_owned_scratch_when_iteration_fails() {
+        let work_root = test_path("iteration-failure");
+        let repo = test_git_repo(&work_root);
+        let scenario = "test/iteration-failure";
+        let plan = Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Cold,
+            mutation: Mutation::None,
+            command: CargoCommand::Workspace {
+                subcommand: "velnor-no-such-cargo-subcommand",
+                extra: &[],
+            },
+        };
+        let mut workload = test_workload(plan, scenario);
+        let expected_root = workload.scratch.scenario_root(&work_root, scenario);
+        let expected_trace = trace_file_path(&work_root, scenario, workload.scratch.id, 1);
+        std::fs::write(&expected_trace, b"stale trace").expect("write stale trace");
+        let mut context = test_context(work_root.clone(), repo, 1);
+
+        let error = crate::drivers::run(&mut workload, &mut context)
+            .expect_err("unknown Cargo subcommand must fail iteration");
+
+        assert!(error
+            .to_string()
+            .contains("cargo velnor-no-such-cargo-subcommand"));
+        assert!(!error.to_string().contains("workload teardown also failed"));
+        assert!(workload.scratch.worktrees.is_empty());
+        assert!(workload.scratch.targets.is_empty());
+        assert!(workload.scratch.traces.is_empty());
+        assert!(workload.scratch.root.is_none());
+        assert!(!expected_root.exists(), "iteration scratch must be removed");
+        assert!(!expected_trace.exists(), "owned trace must be removed");
+
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn teardown_attempts_all_cleanup_and_retains_failed_ownership() {
+        let work_root = test_path("cleanup-failures");
+        let root = work_root.join("scratch");
+        std::fs::create_dir_all(&root).expect("create scratch root");
+        let target = root.join("target-file");
+        std::fs::write(&target, b"not a directory").expect("create target collision");
+        let trace = root.join("trace-directory");
+        std::fs::create_dir_all(&trace).expect("create trace collision");
+
+        let mut workload = test_workload(plan_for("rust/cold").expect("cold plan"), "rust/cold");
+        workload.scratch.root = Some(root.clone());
+        workload.scratch.targets.push(target.clone());
+        workload.scratch.traces.push(trace.clone());
+        let mut context = test_context(work_root.clone(), work_root.join("not-a-repository"), 1);
+
+        let error = workload
+            .teardown(&mut context)
+            .expect_err("invalid owned paths must be reported");
+        let text = format!("{error:#}");
+
+        assert!(text.contains("remove Cargo target"));
+        assert!(text.contains("remove Cargo trace file"));
+        assert!(text.contains("retain Cargo workload root"));
+        assert_eq!(workload.scratch.targets, vec![target]);
+        assert_eq!(workload.scratch.traces, vec![trace]);
+        assert_eq!(workload.scratch.root, Some(root.clone()));
+        assert!(root.exists());
+
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn teardown_treats_missing_owned_paths_as_idempotent() {
+        let work_root = test_path("missing-resources");
+        let repo = test_git_repo(&work_root);
+        let root = work_root.join("missing-root");
+        let mut workload = test_workload(plan_for("rust/cold").expect("cold plan"), "rust/cold");
+        workload.scratch.worktrees.push(OwnedWorktree {
+            path: root.join("missing-worktree"),
+            state: WorktreeState::Pending,
+        });
+        workload.scratch.root = Some(root.clone());
+        workload.scratch.targets.push(root.join("target"));
+        workload.scratch.traces.push(root.join("trace.jsonl"));
+        let mut context = test_context(work_root.clone(), repo, 1);
+
+        workload
+            .teardown(&mut context)
+            .expect("missing owned resources are already clean");
+
+        assert!(workload.scratch.worktrees.is_empty());
+        assert!(workload.scratch.targets.is_empty());
+        assert!(workload.scratch.traces.is_empty());
+        assert!(workload.scratch.root.is_none());
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
     fn teardown_surfaces_worktree_removal_failures() {
         let mut workload = CargoWorkload {
             plan: plan_for("rust/cold").expect("cold plan"),
             scenario: "rust/cold",
-            worktrees: vec![std::env::temp_dir().join("velnor-bench-unregistered-worktree")],
-            targets: Vec::new(),
+            scratch: ScratchOwner {
+                worktrees: vec![OwnedWorktree {
+                    path: std::env::temp_dir().join("velnor-bench-unregistered-worktree"),
+                    state: WorktreeState::Pending,
+                }],
+                ..ScratchOwner::new()
+            },
             package: None,
             iteration: 0,
             notes: Vec::new(),
@@ -912,6 +1375,8 @@ mod tests {
             .expect_err("an unregistered worktree must fail cleanup");
         assert!(error.to_string().contains("Cargo workload teardown failed"));
         assert!(error.to_string().contains("remove worktree"));
+        assert_eq!(workload.scratch.worktrees.len(), 1);
+        assert_eq!(workload.scratch.worktrees[0].state, WorktreeState::Pending);
     }
 
     #[test]
@@ -920,8 +1385,20 @@ mod tests {
         let harness = CargoWorkload {
             plan: plan_for("rust/concurrent-jobs").expect("concurrent plan"),
             scenario: "rust/concurrent-jobs",
-            worktrees: vec![worktree.clone(), worktree.clone()],
-            targets: vec![worktree.clone(), worktree],
+            scratch: ScratchOwner {
+                worktrees: vec![
+                    OwnedWorktree {
+                        path: worktree.clone(),
+                        state: WorktreeState::Registered,
+                    },
+                    OwnedWorktree {
+                        path: worktree.clone(),
+                        state: WorktreeState::Registered,
+                    },
+                ],
+                targets: vec![worktree.clone(), worktree],
+                ..ScratchOwner::new()
+            },
             package: None,
             iteration: 0,
             notes: Vec::new(),
@@ -953,8 +1430,7 @@ mod tests {
         let harness = CargoWorkload {
             plan,
             scenario: "rust/feature-set-change",
-            worktrees: Vec::new(),
-            targets: Vec::new(),
+            scratch: ScratchOwner::new(),
             package: None,
             iteration: 0,
             notes: Vec::new(),
@@ -1008,7 +1484,7 @@ mod tests {
         std::fs::create_dir_all(&measured_root).expect("create measured root");
 
         let disk_before = tree_bytes(&measured_root);
-        let trace_file = trace_file_path(&work_root, "rust/cold", 1);
+        let trace_file = trace_file_path(&work_root, "rust/cold", 1, 1);
         std::fs::write(
             &trace_file,
             br#"{"event":"version"}
@@ -1021,6 +1497,97 @@ mod tests {
         assert_eq!(git.received_bytes, 123);
 
         let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn scratch_owner_roots_are_unique_for_same_scenario() {
+        let work_root = std::env::temp_dir();
+        let first = ScratchOwner::new().scenario_root(&work_root, "rust/cold");
+        let second = ScratchOwner::new().scenario_root(&work_root, "rust/cold");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn teardown_removes_owned_targets_traces_and_root() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-bench-cargo-owned-root-{}",
+            std::process::id()
+        ));
+        let target = root.join("target");
+        let trace = root.join("trace.jsonl");
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(&trace, b"trace").expect("create trace");
+
+        let mut workload = CargoWorkload {
+            plan: plan_for("rust/cold").expect("cold plan"),
+            scenario: "rust/cold",
+            scratch: ScratchOwner {
+                root: Some(root.clone()),
+                targets: vec![target],
+                traces: vec![trace],
+                ..ScratchOwner::new()
+            },
+            package: None,
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        let mut context = Context {
+            work_root: std::env::temp_dir(),
+            velnor_repo: std::env::temp_dir(),
+            job_image: String::new(),
+            iterations: 1,
+            concurrency: 1,
+            runner: Runner::new(),
+        };
+
+        workload.teardown(&mut context).expect("teardown");
+        assert!(!root.exists());
+        assert!(workload.scratch.root.is_none());
+        assert!(workload.scratch.targets.is_empty());
+        assert!(workload.scratch.traces.is_empty());
+    }
+
+    #[test]
+    fn teardown_keeps_failed_owned_path_for_retry_and_cleans_siblings() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-bench-cargo-failed-root-{}",
+            std::process::id()
+        ));
+        let failed_target = root.join("failed-target");
+        let clean_target = root.join("clean-target");
+        std::fs::create_dir_all(&root).expect("create root");
+        std::fs::write(&failed_target, b"not a directory").expect("create file target");
+        std::fs::create_dir_all(&clean_target).expect("create clean target");
+
+        let mut workload = CargoWorkload {
+            plan: plan_for("rust/cold").expect("cold plan"),
+            scenario: "rust/cold",
+            scratch: ScratchOwner {
+                root: Some(root.clone()),
+                targets: vec![failed_target.clone(), clean_target.clone()],
+                ..ScratchOwner::new()
+            },
+            package: None,
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        let mut context = Context {
+            work_root: std::env::temp_dir(),
+            velnor_repo: std::env::temp_dir(),
+            job_image: String::new(),
+            iterations: 1,
+            concurrency: 1,
+            runner: Runner::new(),
+        };
+
+        let error = workload.teardown(&mut context).expect_err("failed cleanup");
+        assert!(error.to_string().contains("failed-target"));
+        assert!(failed_target.exists());
+        assert!(!clean_target.exists());
+        assert!(workload.scratch.root.is_some());
+        assert_eq!(workload.scratch.targets, vec![failed_target.clone()]);
+
+        std::fs::remove_dir_all(root).expect("remove test root");
     }
 
     #[test]
