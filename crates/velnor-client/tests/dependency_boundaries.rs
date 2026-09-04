@@ -446,13 +446,15 @@ fn crate_dependency_direction_matches_approved_graph() {
             "velnorctl -> {required}"
         );
     }
+    // `velnor-model` is deliberately absent from this list. It is the shared
+    // leaf — types and, since the redaction consolidation, the single
+    // `SecretMasker` and its sentinel. `velnor-tools` depends on it so the
+    // fleet-policy client masks with the *same* implementation as everything
+    // else; forbidding that edge is what previously left four callers on a
+    // second, weaker masker. The boundary exists to stop a legacy crate
+    // reaching into the new *architecture*, not into the shared vocabulary.
     for legacy in ["velnor-tools"] {
-        for new_crate in [
-            "velnor-model",
-            "velnor-control",
-            "velnor-client",
-            "velnor-render",
-        ] {
+        for new_crate in ["velnor-control", "velnor-client", "velnor-render"] {
             assert!(
                 !graph[legacy].iter().any(|d| d == new_crate),
                 "legacy crate {legacy} must not depend on new crate {new_crate}"
