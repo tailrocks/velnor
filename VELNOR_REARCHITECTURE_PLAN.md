@@ -2865,7 +2865,7 @@ source. The rule that caught all three is the same one: verify before implementi
 
 ## 22. Concurrent hardening — stale fencing and action-tree isolation
 
-The shared branch now contains four bounded follow-ups from the post-handoff audit:
+The shared branch now contains these bounded follow-ups from the post-handoff audit:
 
 - `111ed1d` hardens the durable journal boundary. `SlotStale` is rejected when any job on the
   slot is in `Assigned`, `Starting`, `Running`, or `Completing`; the reducer leaves state and
@@ -2887,12 +2887,29 @@ The shared branch now contains four bounded follow-ups from the post-handoff aud
 - `931ac8a` wires recovery of a durable provisional acquire through the `renewjob` ownership
   oracle. It is integrated, but its transport and controller call sites remain part of the other
   lead's runner boundary.
+- `3f14859` rejects zero-generation continuation tokens at the query boundary, so callers cannot
+  forge a token that bypasses generation validation.
+- `185ca1e` counts Unicode characters, rather than UTF-8 bytes, for telemetry identity limits;
+  the model now matches the JSON Schema `maxLength` contract.
+- `e34d05a` rejects benchmark records whose declared driver contradicts their runnability, so an
+  unrunnable scenario cannot report measurements.
+- `d671dc8` routes fixture cleanup through the surviving `velnorctl` operator CLI. `2c2b40e` then
+  removes raw PATs from cleanup and daemon subprocess argv; `ad4ab1b` makes `velnorctl` read the
+  token only from `GITHUB_TOKEN`.
+- `7e8e257` rejects an explicit `--instance` that conflicts with the selected context, while
+  `6194e14` rejects the currently unsupported global `--repo` selector instead of ignoring it.
+- `0c3bfda` allows cancellation only for known nonterminal GitHub run statuses; unknown statuses
+  fail closed without issuing a cancel request.
+- `d7d10cf`, `372bf6a`, and `f294929` remove the unreachable action-journal, action-model, and
+  CAS crates. The later journal/CAS durability findings therefore do not apply to this tree; no
+  remaining root publisher owns that abandoned API.
 
-The fixture baseline is synchronized to `ed2626e8be79a5bb3d1867ddabd4ccc2b38c3bb8`; its latest
-generated export is present at fixture commit `26102182ff34e1650e5be341a8a4daf6daded56a` on the
-shared fixture branch. The full fixture gate at the preceding integrated tip passed with 49 Rust
-tests, 38 Python tests, workflow/actionlint, formatting, workspace, capability, and L2 closure
-checks.
+The fixture baseline is synchronized to `2c2b40ec63f33d16a96bb052d9412efaf789e6b9`; its latest
+generated export is present at fixture commit `c2292450ab479741d71eaad8d35e6373d6680938` on the
+shared fixture branch. The refresh
+readiness audit passed; the full fixture gate remains to be rerun at this final source tip. The
+preceding integrated tip passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
+formatting, workspace, capability, and L2 closure checks.
 
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
 mixed native/JavaScript post-action ordering, and the microVM registration order remain in the

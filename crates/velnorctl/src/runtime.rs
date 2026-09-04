@@ -15,6 +15,10 @@ use velnor_runner::args as rt;
 
 pub use velnor_runner::scaffold::{dispatch, enforce_admission, init_telemetry, telemetry_dir};
 
+fn github_pat_from_environment() -> Option<String> {
+    std::env::var("GITHUB_TOKEN").ok()
+}
+
 /// Service daemon arguments. Runtime ownership moves to the lifecycle engine
 /// during Plan 079; this typed boundary keeps one parser and one conversion.
 #[derive(Debug, Clone, Args)]
@@ -26,7 +30,7 @@ pub struct DaemonArgs {
     pub config_dir: Option<PathBuf>,
     #[arg(long)]
     pub url: Option<String>,
-    #[arg(long, env = "GITHUB_TOKEN")]
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
     #[arg(long)]
     pub name: Option<String>,
@@ -495,8 +499,8 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub url: String,
 
-    /// GitHub personal access token used to create a JIT runner configuration.
-    #[arg(long, env = "GITHUB_TOKEN")]
+    /// GitHub personal access token read from `GITHUB_TOKEN`; never accepted as argv.
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
 
     /// Runner display name.
@@ -618,8 +622,8 @@ pub struct DoctorArgs {
     #[arg(long, default_value_t = 1)]
     pub slots: usize,
 
-    /// GitHub token used to list runners (same credential as the daemon).
-    #[arg(long, env = "GITHUB_TOKEN")]
+    /// GitHub token read from `GITHUB_TOKEN` (same credential as the daemon).
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
 }
 
@@ -685,11 +689,11 @@ impl From<PreflightArgs> for rt::PreflightArgs {
 
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// GitHub personal access token used to delete the exact stored JIT runner id.
-    #[arg(long, env = "GITHUB_TOKEN")]
+    /// GitHub token read from `GITHUB_TOKEN` to delete the exact stored JIT runner id.
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
 
-    /// Only remove local configuration, even if --pat is provided.
+    /// Only remove local configuration; never contact GitHub.
     #[arg(long)]
     pub local_only: bool,
 
@@ -825,5 +829,36 @@ mod tests {
     fn explicit_state_db_path_is_carried_without_environment_mutation() {
         let explicit = Path::new("/tmp/velnor-test/state.db");
         assert_eq!(resolve_state_db_path(Some(explicit)), explicit);
+    }
+
+    #[test]
+    fn github_pat_is_not_accepted_as_a_cli_argument() {
+        use clap::Parser;
+
+        for argv in [
+            vec!["velnorctl", "daemon", "--pat", "secret"],
+            vec![
+                "velnorctl",
+                "configure",
+                "--url",
+                "https://github.com/acme",
+                "--pat",
+                "secret",
+            ],
+            vec![
+                "velnorctl",
+                "doctor",
+                "--url",
+                "https://github.com/acme",
+                "--pat",
+                "secret",
+            ],
+            vec!["velnorctl", "remove", "--pat", "secret"],
+        ] {
+            assert!(
+                crate::Cli::try_parse_from(argv).is_err(),
+                "raw GitHub PAT unexpectedly accepted in argv"
+            );
+        }
     }
 }
