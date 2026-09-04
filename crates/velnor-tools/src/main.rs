@@ -702,6 +702,15 @@ async fn fixture_audit(args: FixtureAuditArgs) -> Result<()> {
         }
     }
 
+    // The default Velnor Rust path is the load-bearing workload. Check the
+    // scenario matrix per job so sccache stays one scenario among several.
+    match read_fixture_file(&args, RUST_SCENARIO_WORKFLOW).await {
+        Ok(content) => failures.extend(check_rust_scenarios(&content)),
+        Err(error) => failures.push(format!(
+            "{RUST_SCENARIO_WORKFLOW}: missing or unreadable: {error:#}"
+        )),
+    }
+
     if !failures.is_empty() {
         eprintln!("fixture audit failed:");
         for failure in failures {
@@ -717,6 +726,10 @@ async fn fixture_audit(args: FixtureAuditArgs) -> Result<()> {
         .unwrap_or_else(|| format!("{}@{}", args.repo, args.git_ref));
     println!("fixture audit passed for {source}");
     println!("checked {} files", fixture_required_snippets().len());
+    println!(
+        "checked {} Rust scenario(s) including the mandatory default Velnor Rust path",
+        fixture_rust_scenarios().len()
+    );
     Ok(())
 }
 
@@ -800,6 +813,154 @@ fn github_headers(user_agent: &'static str) -> Result<HeaderMap> {
     Ok(headers)
 }
 
+/// Fixture workflow that must carry the whole Rust scenario matrix.
+const RUST_SCENARIO_WORKFLOW: &str = ".github/workflows/_rust-suite.yml";
+
+/// One Rust scenario the fixture must cover, checked per job rather than per
+/// file so that a scenario's forbidden declarations cannot be satisfied by a
+/// sibling scenario in the same workflow.
+struct RustScenario {
+    /// Scenario letter and name, used in verifier output.
+    id: &'static str,
+    /// `jobs.<job>` key in [`RUST_SCENARIO_WORKFLOW`].
+    job: &'static str,
+    /// Substrings the serialized job must contain.
+    required: &'static [(&'static str, &'static str)],
+    /// Substrings the serialized job must NOT contain.
+    forbidden: &'static [(&'static str, &'static str)],
+}
+
+/// The Rust scenarios the fixture must cover.
+///
+/// Velnor's default Rust acceleration (Mr Boxington) is selected exactly when a
+/// job does **not** declare `mozilla-actions/sccache-action`; see
+/// `velnor_runner::github_adapter::job_container_spec`, which sets
+/// `mbx_store_host` only for `!declares_sccache(job)`, and
+/// `velnor_runner::container::JobContainerSpec::append_rust_acceleration`,
+/// which swaps in `MBX_DISABLE=1` for the sccache branch. A fixture that
+/// declared sccache in every Rust job therefore only ever exercised the
+/// compatibility branch, and requiring sccache here made that permanent.
+///
+/// The mandatory scenario is the default path. sccache is one scenario among
+/// several, never the fixture's baseline.
+fn fixture_rust_scenarios() -> &'static [RustScenario] {
+    &[
+        RustScenario {
+            id: "A default Velnor Rust path",
+            job: "rust-default",
+            required: &[
+                ("nextest invocation", "cargo nextest run"),
+                ("scenario evidence", "rust-default"),
+            ],
+            forbidden: &[
+                ("job-level compiler-cache wrapper", "RUSTC_WRAPPER"),
+                ("explicit sccache action", "mozilla-actions/sccache-action"),
+                ("explicit sccache environment", "SCCACHE_"),
+                ("explicit Mr Boxington action", "jdx/mr-boxington-action"),
+                ("acceleration opt-out", "MBX_DISABLE"),
+                ("cargo target cache", "path: target"),
+            ],
+        },
+        RustScenario {
+            id: "B explicit sccache compatibility",
+            job: "rust-sccache",
+            required: &[
+                ("explicit sccache action", "mozilla-actions/sccache-action@"),
+                ("explicit compiler-cache wrapper", "RUSTC_WRAPPER"),
+                ("local sccache environment", "SCCACHE_GHA_ENABLED"),
+                ("scenario evidence", "rust-sccache"),
+            ],
+            forbidden: &[],
+        },
+        RustScenario {
+            id: "C explicit acceleration opt-out",
+            job: "rust-accel-optout",
+            required: &[
+                ("acceleration opt-out", "MBX_DISABLE"),
+                ("scenario evidence", "rust-accel-optout"),
+            ],
+            forbidden: &[
+                ("explicit sccache action", "mozilla-actions/sccache-action"),
+                ("job-level compiler-cache wrapper", "RUSTC_WRAPPER"),
+            ],
+        },
+        RustScenario {
+            id: "D cache interaction",
+            job: "rust-cache-interaction",
+            required: &[
+                ("user actions/cache", "actions/cache@"),
+                ("cache restore-keys", "restore-keys:"),
+                ("scenario evidence", "rust-cache-interaction"),
+            ],
+            forbidden: &[],
+        },
+        RustScenario {
+            id: "E parallel Rust",
+            job: "rust-parallel",
+            required: &[
+                ("parallel shard matrix", "shard:"),
+                ("scenario evidence", "rust-parallel"),
+            ],
+            forbidden: &[],
+        },
+    ]
+}
+
+/// Check the fixture's Rust scenario matrix.
+///
+/// Requires the default Velnor Rust path to be covered, and every other
+/// declared scenario to keep the declarations that make it that scenario.
+fn check_rust_scenarios(content: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let workflow: serde_yaml::Value = match serde_yaml::from_str(content) {
+        Ok(value) => value,
+        Err(error) => {
+            failures.push(format!(
+                "{RUST_SCENARIO_WORKFLOW}: cannot parse YAML: {error}"
+            ));
+            return failures;
+        }
+    };
+
+    for scenario in fixture_rust_scenarios() {
+        let Some(job) = workflow.get("jobs").and_then(|jobs| jobs.get(scenario.job)) else {
+            failures.push(format!(
+                "{RUST_SCENARIO_WORKFLOW}: missing Rust scenario {} (job '{}')",
+                scenario.id, scenario.job
+            ));
+            continue;
+        };
+        let body = match serde_yaml::to_string(job) {
+            Ok(body) => body,
+            Err(error) => {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: job '{}' cannot be serialized: {error}",
+                    scenario.job
+                ));
+                continue;
+            }
+        };
+        for (label, snippet) in scenario.required {
+            if !body.contains(snippet) {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' missing {label}: {snippet}",
+                    scenario.id, scenario.job
+                ));
+            }
+        }
+        for (label, snippet) in scenario.forbidden {
+            if body.contains(snippet) {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not declare {label}: {snippet}",
+                    scenario.id, scenario.job
+                ));
+            }
+        }
+    }
+
+    failures
+}
+
 fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
     vec![
         (
@@ -818,12 +979,9 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("path filtering", "dorny/paths-filter@"),
                 ("mise tool installer", "jdx/mise-action@"),
                 ("mold linker", "rui314/setup-mold@"),
-                ("sccache action", "mozilla-actions/sccache-action@"),
-                ("sccache local env", "SCCACHE_GHA_ENABLED:"),
                 ("cargo cache", "actions/cache@"),
                 ("cargo cache restore-keys", "restore-keys:"),
                 ("cache off job", "cache-off:"),
-                ("cache sccache job", "cache-sccache:"),
                 ("Postgres services job", "services-postgres:"),
                 ("services declaration", "services:"),
                 ("Postgres health check", "pg_isready"),
@@ -4387,6 +4545,76 @@ mno\trefs/tags/not-a-runner-release
         let tag = latest_semver_tag_from_ls_remote(output).unwrap();
 
         assert_eq!(tag, "v3.0.0");
+    }
+
+    #[test]
+    fn rust_scenarios_require_the_default_path_and_never_mandate_sccache() {
+        let default_scenario = fixture_rust_scenarios()
+            .iter()
+            .find(|scenario| scenario.job == "rust-default")
+            .expect("the default Velnor Rust path is mandatory");
+        assert!(
+            default_scenario
+                .forbidden
+                .iter()
+                .any(|(_, snippet)| *snippet == "mozilla-actions/sccache-action"),
+            "the default path must not declare the sccache action"
+        );
+        assert!(
+            default_scenario
+                .forbidden
+                .iter()
+                .any(|(_, snippet)| *snippet == "RUSTC_WRAPPER"),
+            "the default path must not set a job-level compiler-cache wrapper"
+        );
+
+        // sccache is one scenario among several, never a fixture-wide
+        // requirement: no snippet outside scenario B may demand it.
+        for (path, snippets) in fixture_required_snippets() {
+            for (_, snippet) in snippets {
+                assert!(
+                    !snippet.contains("sccache"),
+                    "{path}: whole-file sccache requirement re-creates the lock-in: {snippet}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn check_rust_scenarios_rejects_an_accelerated_default_job() {
+        let workflow = r#"
+jobs:
+  rust-default:
+    steps:
+      - uses: mozilla-actions/sccache-action@0000000000000000000000000000000000000000
+      - run: cargo nextest run --locked -p app-a
+    env:
+      RUSTC_WRAPPER: sccache
+"#;
+
+        let failures = check_rust_scenarios(workflow);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("must not declare explicit sccache action")),
+            "{failures:?}"
+        );
+        assert!(
+            failures.iter().any(
+                |failure| failure.contains("must not declare job-level compiler-cache wrapper")
+            ),
+            "{failures:?}"
+        );
+        for scenario in fixture_rust_scenarios().iter().skip(1) {
+            assert!(
+                failures
+                    .iter()
+                    .any(|failure| failure.contains(scenario.job)),
+                "missing scenario {} was not reported: {failures:?}",
+                scenario.id
+            );
+        }
     }
 
     #[test]

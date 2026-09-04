@@ -23,7 +23,6 @@ mod checkout;
 mod command_files;
 mod config;
 mod container;
-pub mod docker;
 mod docker_lease;
 pub mod execution;
 mod executor;
