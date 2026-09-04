@@ -3315,7 +3315,7 @@ impl WorkflowIr {
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
             ActionPin::Checkout.reference()
         );
-        self.render_workflow_runtime_setup(output, lane);
+        Self::render_workflow_runtime_setup(output, lane);
         self.render_tool_provisioning(output, unit);
         if let Some(cache) = &unit.cache {
             let (paths, key) = rendered_cache_values(cache);
@@ -3368,7 +3368,7 @@ impl WorkflowIr {
         }
     }
 
-    fn render_workflow_runtime_setup(&self, output: &mut String, lane: RunnerMode) {
+    fn render_workflow_runtime_setup(output: &mut String, lane: RunnerMode) {
         output.push_str(&workflow_runtime_setup(lane));
     }
 
@@ -3492,7 +3492,7 @@ impl WorkflowIr {
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 ActionPin::Checkout.reference(),
             );
-            self.render_workflow_runtime_setup(output, lane);
+            Self::render_workflow_runtime_setup(output, lane);
             self.render_tool_provisioning(output, unit);
             if let Some(cache) = &unit.cache {
                 let (paths, key) = rendered_cache_values(cache);
@@ -4092,7 +4092,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 ActionPin::Checkout.reference()
             );
-            workflow.render_workflow_runtime_setup(&mut output, lane);
+            WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
             workflow.render_tool_provisioning(&mut output, unit);
             if let Some(cache) = &unit.cache {
                 let (paths, key) = rendered_cache_values(cache);
@@ -4381,8 +4381,7 @@ fn yaml_scalar(value: &str) -> String {
 fn workflow_runtime_setup(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} --package velnor-workflow --bin velnor-workflow\n",
-            VELNOR_WORKFLOW_REPOSITORY, VELNOR_WORKFLOW_SOURCE_REV
+            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} --package velnor-workflow --bin velnor-workflow\n"
         )
     } else {
         String::new()
