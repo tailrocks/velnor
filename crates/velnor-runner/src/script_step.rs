@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use crate::{
-    command_files::{parse_command_file, FileCommand},
+    command_files::{parse_command_file_contents, FileCommand},
     container::Shell,
+    fs_copy::NoFollowDestinationDir,
     job_message::{ActionReferenceType, ActionStep},
 };
 use anyhow::{bail, Context, Result};
@@ -10,6 +11,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -781,11 +783,11 @@ impl ScriptStepPlan {
         let script_name = format!("{}.sh", step.id);
         let script_host_path = temp_host.join(&script_name);
         let script = script_with_path_prelude(&step.script, path_prepend);
-        fs::write(&script_host_path, script)
-            .with_context(|| format!("write {}", script_host_path.display()))?;
+        let temp_dir = open_step_file_dir(temp_host)?;
+        write_step_file(&temp_dir, &script_name, &script)?;
 
         let command_files = CommandFileSet::new(&step.id, temp_host);
-        command_files.create_empty_files()?;
+        command_files.create_empty_files(&temp_dir)?;
 
         Ok(Self {
             script_host_path,
@@ -804,6 +806,7 @@ impl ScriptStepPlan {
 
 #[derive(Debug, Clone)]
 struct CommandFileSet {
+    temp_host: PathBuf,
     output: PathMapping,
     env: PathMapping,
     path: PathMapping,
@@ -814,6 +817,7 @@ struct CommandFileSet {
 impl CommandFileSet {
     fn new(step_id: &str, temp_host: &Path) -> Self {
         Self {
+            temp_host: temp_host.to_path_buf(),
             output: PathMapping::new(temp_host, step_id, "output"),
             env: PathMapping::new(temp_host, step_id, "env"),
             path: PathMapping::new(temp_host, step_id, "path"),
@@ -822,15 +826,15 @@ impl CommandFileSet {
         }
     }
 
-    fn create_empty_files(&self) -> Result<()> {
-        for path in [
-            &self.output.host,
-            &self.env.host,
-            &self.path.host,
-            &self.state.host,
-            &self.summary.host,
+    fn create_empty_files(&self, temp_dir: &NoFollowDestinationDir) -> Result<()> {
+        for mapping in [
+            &self.output,
+            &self.env,
+            &self.path,
+            &self.state,
+            &self.summary,
         ] {
-            fs::write(path, "").with_context(|| format!("create {}", path.display()))?;
+            write_step_file(temp_dir, &mapping.name, "")?;
         }
         Ok(())
     }
@@ -846,15 +850,22 @@ impl CommandFileSet {
     }
 
     fn collect_state(&self) -> Result<StepCommandState> {
+        let temp_dir = open_step_file_dir(&self.temp_host)?;
         let mut state = StepCommandState {
-            outputs: commands_to_map(parse_command_file(&self.output.host)?),
+            outputs: commands_to_map(parse_command_file_contents(&read_step_file(
+                &temp_dir,
+                &self.output.name,
+            )?)?),
             env: BTreeMap::new(),
-            path: fs::read_to_string(&self.path.host)?
+            path: read_step_file(&temp_dir, &self.path.name)?
                 .lines()
                 .filter(|line| !line.is_empty())
                 .map(ToOwned::to_owned)
                 .collect(),
-            state: commands_to_map(parse_command_file(&self.state.host)?),
+            state: commands_to_map(parse_command_file_contents(&read_step_file(
+                &temp_dir,
+                &self.state.name,
+            )?)?),
             summary: String::new(),
             masks: Vec::new(),
             annotations: Vec::new(),
@@ -863,8 +874,8 @@ impl CommandFileSet {
             warning_count: 0,
             notice_count: 0,
         };
-        self.collect_env(&mut state)?;
-        self.collect_summary(&mut state)?;
+        self.collect_env(&temp_dir, &mut state)?;
+        self.collect_summary(&temp_dir, &mut state)?;
         Ok(state)
     }
 
@@ -877,8 +888,12 @@ impl CommandFileSet {
     /// dropped. Velnor used to drop every `GITHUB_*` and `RUNNER_*` name too,
     /// and silently: a step that exported `GITHUB_TOKEN` for later steps — which
     /// GitHub allows — saw the value vanish with nothing in the log to say why.
-    fn collect_env(&self, state: &mut StepCommandState) -> Result<()> {
-        for command in parse_command_file(&self.env.host)? {
+    fn collect_env(
+        &self,
+        temp_dir: &NoFollowDestinationDir,
+        state: &mut StepCommandState,
+    ) -> Result<()> {
+        for command in parse_command_file_contents(&read_step_file(temp_dir, &self.env.name)?)? {
             if let Some(blocked) = blocked_env_file_name(&command.name) {
                 state.error_count += 1;
                 state.annotations.push(StepAnnotation {
@@ -907,14 +922,20 @@ impl CommandFileSet {
     /// attaches nothing, and a file larger than `AttachmentSizeLimit` is not
     /// uploaded at all — the step is failed with `UnsupportedSummarySize`
     /// instead, so an oversized summary can never reach the durable blob.
-    fn collect_summary(&self, state: &mut StepCommandState) -> Result<()> {
-        let size = match fs::metadata(&self.summary.host) {
-            Ok(metadata) => metadata.len(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(error).with_context(|| format!("stat {}", self.summary.host.display()))
-            }
+    fn collect_summary(
+        &self,
+        temp_dir: &NoFollowDestinationDir,
+        state: &mut StepCommandState,
+    ) -> Result<()> {
+        let Some(mut file) = open_step_file(temp_dir, &self.summary.name)? else {
+            return Ok(());
         };
+        // The size comes from the open descriptor, not from a second lookup by
+        // path, so the file that is measured is the file that is read.
+        let size = file
+            .metadata()
+            .with_context(|| format!("stat step file {}", self.summary.name))?
+            .len();
         if size == 0 {
             return Ok(());
         }
@@ -932,11 +953,82 @@ impl CommandFileSet {
             });
             return Ok(());
         }
-        state.summary = fs::read_to_string(&self.summary.host)
-            .with_context(|| format!("read {}", self.summary.host.display()))?;
+        let mut summary = String::new();
+        Read::read_to_string(&mut file, &mut summary)
+            .with_context(|| format!("read step file {}", self.summary.name))?;
+        state.summary = summary;
         Ok(())
     }
 }
+
+/// Bind `RUNNER_TEMP` to a directory descriptor, so every later step-file
+/// operation is relative to that descriptor rather than to a path a step can
+/// re-point.
+///
+/// `RUNNER_TEMP` itself is a runner-configured root and is treated as trusted:
+/// its own path is canonicalized once, which is what lets it sit under a
+/// symlinked prefix such as macOS `/var`. Everything *below* it is
+/// step-writable and is therefore only ever reached descriptor-relative and
+/// `O_NOFOLLOW`.
+fn open_step_file_dir(temp_host: &Path) -> Result<NoFollowDestinationDir> {
+    NoFollowDestinationDir::open_trusted_rooted_destination(temp_host, Path::new("")).with_context(
+        || {
+            format!(
+                "open step file directory {} without following symlinks",
+                temp_host.display()
+            )
+        },
+    )
+}
+
+/// Create or replace one step file inside `RUNNER_TEMP`.
+///
+/// `RUNNER_TEMP` is mode 1777 and every step-file name is derived from the
+/// step id, so the path a step will be handed is already predictable to the
+/// step running before it. Planting a symlink there and letting the runner's
+/// own `fs::write` follow it is an arbitrary host-file write, read and
+/// truncate as the runner user, with no race to win.
+///
+/// `write_file_from_reader` refuses a destination that is not a regular file,
+/// stages the content in an `O_CREAT | O_EXCL | O_NOFOLLOW` temporary it
+/// created itself, and renames that over the name. A planted symlink is
+/// therefore either reported or replaced, never written through.
+fn write_step_file(temp_dir: &NoFollowDestinationDir, name: &str, contents: &str) -> Result<()> {
+    temp_dir
+        .write_file_from_reader(
+            &mut contents.as_bytes(),
+            Path::new(name),
+            contents.len() as u64,
+            STEP_FILE_MODE,
+        )
+        .with_context(|| format!("write step file {name}"))?;
+    Ok(())
+}
+
+/// Open one step file for reading, or `None` when the step removed it.
+///
+/// The open is descriptor-relative and `O_NOFOLLOW`, and a name that is not a
+/// regular file is an error rather than a redirect: a step cannot make the
+/// runner read a host file by leaving a symlink behind.
+fn open_step_file(temp_dir: &NoFollowDestinationDir, name: &str) -> Result<Option<fs::File>> {
+    temp_dir
+        .open_relative_file_if_exists(Path::new(name))
+        .with_context(|| format!("open step file {name}"))
+}
+
+fn read_step_file(temp_dir: &NoFollowDestinationDir, name: &str) -> Result<String> {
+    let Some(mut file) = open_step_file(temp_dir, name)? else {
+        return Ok(String::new());
+    };
+    let mut contents = String::new();
+    Read::read_to_string(&mut file, &mut contents)
+        .with_context(|| format!("read step file {name}"))?;
+    Ok(contents)
+}
+
+/// Step files keep the owner-writable, world-readable mode the runner's umask
+/// already produced for them.
+const STEP_FILE_MODE: u16 = 0o644;
 
 /// `CreateStepSummaryCommand.AttachmentSizeLimit` in actions/runner
 /// `src/Runner.Worker/FileCommandManager.cs`: 1 MiB.
@@ -957,6 +1049,10 @@ fn unsupported_summary_size_message(size: u64) -> String {
 
 #[derive(Debug, Clone)]
 struct PathMapping {
+    /// File name inside `RUNNER_TEMP`. Every access goes through the directory
+    /// descriptor by this name; `host` is only for display and for callers
+    /// that need the mount-side path.
+    name: String,
     host: PathBuf,
     container: String,
 }
@@ -967,6 +1063,7 @@ impl PathMapping {
         Self {
             host: temp_host.join(&file_name),
             container: format!("/__t/{file_name}"),
+            name: file_name,
         }
     }
 }
@@ -1101,6 +1198,69 @@ mod tests {
     fn temp_step_dir() -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("velnor-step-test-{}-{}", std::process::id(), id))
+    }
+
+    fn sample_step() -> ScriptStep {
+        ScriptStep {
+            id: "step1".into(),
+            display_name: String::new(),
+            script: "echo test".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
+    }
+
+    /// `RUNNER_TEMP` is mode 1777 and step-file names are derived from the step
+    /// id, so one step can plant a symlink at the path the next step's files
+    /// will use. Neither the write nor the read may follow it.
+    #[cfg(unix)]
+    #[test]
+    fn step_files_never_follow_a_planted_symlink() {
+        let temp = temp_step_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let victim = temp.join("victim");
+        fs::write(&victim, "host secret").unwrap();
+
+        for name in ["step1.sh", "step1_output", "step1_summary"] {
+            let planted = temp.join(name);
+            let _ = fs::remove_file(&planted);
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+            let error = ScriptStepPlan::prepare(&sample_step(), &temp)
+                .expect_err("preparing a step over a planted symlink must not write through it");
+            assert!(
+                format!("{error:#}").contains("symlink"),
+                "unexpected error: {error:#}"
+            );
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "host secret");
+            assert!(fs::symlink_metadata(&planted)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            fs::remove_file(&planted).unwrap();
+        }
+
+        // A step that replaces its own command file with a symlink after the
+        // runner created it must not make the runner read the target back.
+        let plan = ScriptStepPlan::prepare(&sample_step(), &temp).unwrap();
+        let summary = temp.join("step1_summary");
+        fs::remove_file(&summary).unwrap();
+        std::os::unix::fs::symlink(&victim, &summary).unwrap();
+        let error = plan
+            .collect_state()
+            .expect_err("collecting state through a planted symlink must fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("not a regular file"),
+            "unexpected error: {rendered}"
+        );
+        assert!(!rendered.contains("host secret"));
+
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
