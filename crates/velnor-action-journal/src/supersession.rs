@@ -19,7 +19,7 @@ use velnor_model::{
     TelemetryLane, Timestamp,
 };
 
-use crate::{ActionRecord, JournalError, LeaseManager};
+use crate::{ActionJournal, ActionRecord, JournalError, LeaseManager};
 
 /// Lower bound for speculative retention.
 pub const MIN_RETENTION_MS: u64 = 30_000;
@@ -877,17 +877,20 @@ impl<C: Clock> SupersessionCoordinator<C> {
         terminator
             .terminate(action, reason)
             .map_err(SupersessionError::Terminator)?;
-        self.manager.journal.connection.execute(
-            "UPDATE action_termination_claims SET completed = 1 WHERE action_key_digest = ?1",
-            [digest.to_string()],
-        )?;
-        self.delete_retention(&digest)?;
         if let Some(mut record) = self.manager.latest_action(action)?
             && record.state != ActionState::Abandoned
         {
             record.state = ActionState::Abandoned;
             self.manager.append_action(&record)?;
         }
+        // Keep the claim incomplete until the lifecycle record is durable.
+        // If append or the process fails here, recovery requeues the claim
+        // instead of leaving a killed action replaying as Running forever.
+        self.manager.journal.connection.execute(
+            "UPDATE action_termination_claims SET completed = 1 WHERE action_key_digest = ?1",
+            [digest.to_string()],
+        )?;
+        self.delete_retention(&digest)?;
         Ok(())
     }
 
@@ -1253,6 +1256,69 @@ mod tests {
             .revoke_trust(&action, "retry termination", &mut spy)
             .unwrap();
         assert_eq!(spy.calls, 2);
+    }
+
+    #[test]
+    fn abandoned_append_failure_retries_after_reopen() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("append-failure.sqlite");
+        let clock = TestClock::default();
+        let action = action(8);
+        let config = SupersessionConfig::new(false, DEFAULT_RETENTION_MS).unwrap();
+        let mut coordinator =
+            SupersessionCoordinator::open(&path, clock.clone(), config.clone()).unwrap();
+        coordinator
+            .manager_mut()
+            .append_action(&record(action.clone(), ActionState::Running))
+            .unwrap();
+        coordinator
+            .manager_mut()
+            .attach_consumer(&action, "run-a")
+            .unwrap();
+        coordinator
+            .manager()
+            .journal
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_abandoned_append
+                 BEFORE INSERT ON action_events
+                 WHEN NEW.state = 'abandoned'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected abandoned append failure');
+                 END;",
+            )
+            .unwrap();
+
+        let mut first_spy = Spy::default();
+        let error = coordinator
+            .detach(&action, "run-a", &mut first_spy)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected abandoned append failure"));
+        assert_eq!(first_spy.calls.len(), 1);
+        drop(coordinator);
+
+        let journal = ActionJournal::open(&path).unwrap();
+        journal
+            .connection
+            .execute_batch("DROP TRIGGER fail_abandoned_append")
+            .unwrap();
+        drop(journal);
+
+        let mut recovered = SupersessionCoordinator::open(&path, clock, config).unwrap();
+        let mut retry_spy = Spy::default();
+        assert_eq!(recovered.reap_due(&mut retry_spy).unwrap().reaped, 1);
+        assert_eq!(retry_spy.calls.len(), 1);
+        assert_eq!(
+            recovered
+                .manager()
+                .latest_action(&action)
+                .unwrap()
+                .unwrap()
+                .state,
+            ActionState::Abandoned
+        );
     }
 
     #[cfg(feature = "virtual-time")]
