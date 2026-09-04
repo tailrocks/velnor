@@ -669,6 +669,10 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
+        // The durable ledger is not an actuator until a reconciler is wired
+        // into this daemon. Advertising write capability here would make the
+        // client claim that a lifecycle request can take effect when the
+        // handler correctly returns 501.
         mutations: false,
     })
 }

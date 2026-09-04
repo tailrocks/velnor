@@ -215,15 +215,32 @@ fn max_rss_bytes(raw: libc::c_long) -> u64 {
 /// Recursive size in bytes of a directory tree, following no symlinks.
 #[must_use]
 pub fn tree_bytes(root: &std::path::Path) -> u64 {
+    let Ok(root_metadata) = std::fs::symlink_metadata(root) else {
+        return 0;
+    };
+    if root_metadata.file_type().is_symlink() {
+        return 0;
+    }
+    if !root_metadata.is_dir() {
+        return root_metadata.len();
+    }
     let Ok(entries) = std::fs::read_dir(root) else {
-        return std::fs::symlink_metadata(root).map_or(0, |meta| meta.len());
+        return 0;
     };
     let mut total = 0_u64;
     for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
+        // `DirEntry::metadata()` follows links. Use lstat semantics at every
+        // level so a job-controlled link cannot make benchmark accounting walk
+        // outside the measured root or recurse through a link cycle.
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
         if meta.is_dir() {
             total = total.saturating_add(tree_bytes(&entry.path()));
-        } else if !meta.is_symlink() {
+        } else {
             total = total.saturating_add(meta.len());
         }
     }
@@ -313,5 +330,37 @@ mod tests {
         std::fs::write(dir.join("nested").join("b"), b"01234").expect("write");
         assert_eq!(tree_bytes(&dir), 15);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_bytes_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("velnor-bench-links-{suffix}"));
+        let outside = root.with_extension("outside");
+        let root_link = root.with_extension("link");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_file(&root_link);
+        std::fs::create_dir_all(root.join("nested")).expect("create root");
+        std::fs::create_dir_all(&outside).expect("create outside");
+        std::fs::write(root.join("inside"), b"12345").expect("write inside");
+        std::fs::write(outside.join("outside-file"), b"this must not count")
+            .expect("write outside");
+        symlink(&outside, root.join("linked-directory")).expect("link directory");
+        symlink(outside.join("outside-file"), root.join("linked-file")).expect("link file");
+        symlink(&root, &root_link).expect("link root");
+
+        assert_eq!(tree_bytes(&root), 5);
+        assert_eq!(tree_bytes(&root_link), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_file(root_link);
     }
 }
