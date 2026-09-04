@@ -87,6 +87,12 @@ impl Driver {
 pub enum Requirement {
     DockerDaemon,
     Buildx,
+    /// The benchmark contains an executable Velnor job driver.
+    ///
+    /// This remains absent until the runner-owned dispatch harness is wired;
+    /// host credentials alone must not make an unimplemented driver appear
+    /// runnable.
+    VelnorJobDriver,
     /// A Velnor runner registered against a GitHub repository.
     RegisteredRunner,
     /// Credentials able to dispatch a workflow and read its timeline.
@@ -109,6 +115,7 @@ impl Requirement {
         match self {
             Self::DockerDaemon => "docker-daemon",
             Self::Buildx => "buildx",
+            Self::VelnorJobDriver => "velnor-job-driver",
             Self::RegisteredRunner => "registered-runner",
             Self::GithubCredentials => "github-credentials",
             Self::ActionsFixture => "actions-fixture",
@@ -169,6 +176,9 @@ impl Runnability {
 pub struct Capabilities {
     pub docker_daemon: bool,
     pub buildx: bool,
+    /// Whether this build includes the real Velnor job benchmark driver.
+    /// This is deliberately false until that driver is implemented.
+    pub velnor_job_driver: bool,
     pub registered_runner: bool,
     pub github_credentials: bool,
     pub actions_fixture: bool,
@@ -192,6 +202,7 @@ impl Capabilities {
         Self {
             docker_daemon: environment.has_docker(),
             buildx: environment.buildkit_version.is_known(),
+            velnor_job_driver: false,
             registered_runner: environment.has_runner(),
             github_credentials,
             actions_fixture: environment.fixture_commit.is_known(),
@@ -207,6 +218,7 @@ impl Capabilities {
         match requirement {
             Requirement::DockerDaemon => self.docker_daemon,
             Requirement::Buildx => self.buildx,
+            Requirement::VelnorJobDriver => self.velnor_job_driver,
             Requirement::RegisteredRunner => self.registered_runner,
             Requirement::GithubCredentials => self.github_credentials,
             Requirement::ActionsFixture => self.actions_fixture,
@@ -269,6 +281,7 @@ impl Scenario {
 }
 
 const VELNOR_JOB: &[Requirement] = &[
+    Requirement::VelnorJobDriver,
     Requirement::RegisteredRunner,
     Requirement::GithubCredentials,
     Requirement::ActionsFixture,
@@ -526,10 +539,11 @@ mod tests {
     }
 
     #[test]
-    fn a_fully_capable_host_uses_the_real_job_driver() {
+    fn a_fully_capable_host_reports_unimplemented_job_driver() {
         let capabilities = Capabilities {
             docker_daemon: true,
             buildx: true,
+            velnor_job_driver: false,
             registered_runner: true,
             github_credentials: true,
             actions_fixture: true,
@@ -539,14 +553,34 @@ mod tests {
             linux_host: true,
         };
         for scenario in MATRIX {
-            assert_eq!(
-                scenario.runnability(capabilities),
-                Runnability::Preferred {
-                    driver: Driver::VelnorJob
-                },
-                "{}",
-                scenario.id
-            );
+            match scenario.runnability(capabilities) {
+                Runnability::Degraded {
+                    driver,
+                    missing_for_preferred,
+                } => {
+                    assert_eq!(driver, Driver::DockerDirect, "{}", scenario.id);
+                    assert_eq!(
+                        missing_for_preferred,
+                        vec![Requirement::VelnorJobDriver],
+                        "{}",
+                        scenario.id
+                    );
+                }
+                Runnability::Unrunnable { missing } => {
+                    assert_eq!(
+                        missing,
+                        vec![Requirement::VelnorJobDriver],
+                        "{}",
+                        scenario.id
+                    );
+                }
+                Runnability::Preferred { driver } => {
+                    panic!(
+                        "{} must not claim unimplemented driver {driver:?} is runnable",
+                        scenario.id
+                    );
+                }
+            }
         }
     }
 }
