@@ -7,9 +7,9 @@
 
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context as _, Result};
@@ -50,6 +50,7 @@ const USER_COMMAND: &str = "printf velnor-bench-first-user-command";
 const SERVICE_IMAGE: &str = "docker.io/library/redis:7-alpine";
 
 static NEXT_BUILD_TAG: AtomicU64 = AtomicU64::new(0);
+static NEXT_DOCKER_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
 fn is_build_kind(kind: Kind) -> bool {
     matches!(kind, Kind::BuildCached | Kind::BuildUncached | Kind::Buildx)
@@ -66,6 +67,14 @@ fn with_cleanup(primary: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
         Err(cleanup_error) => {
             primary.context(format!("workload cleanup also failed: {cleanup_error:#}"))
         }
+    }
+}
+
+fn remove_scratch_directory(path: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -170,15 +179,60 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
         kind,
         build_tag: is_build_kind(kind).then(unique_build_tag),
         build_tag_needs_cleanup: false,
+        scratch: ScratchOwner::new(),
+        owned_containers: Vec::new(),
+        owned_networks: Vec::new(),
         iteration: 0,
         notes: Vec::new(),
     }))
+}
+
+#[derive(Debug, Default)]
+struct ScratchOwner {
+    id: u64,
+    nonce: u128,
+    root: Option<PathBuf>,
+}
+
+impl ScratchOwner {
+    fn new() -> Self {
+        Self {
+            id: NEXT_DOCKER_OWNER_ID.fetch_add(1, Ordering::Relaxed),
+            nonce: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos()),
+            ..Self::default()
+        }
+    }
+
+    fn allocate(&mut self, work_root: &Path) -> Result<PathBuf> {
+        let root = work_root.join(format!(
+            "docker-{}-{}-{}",
+            std::process::id(),
+            self.nonce,
+            self.id
+        ));
+        self.root = Some(root.clone());
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("creating Docker workload scratch {}", root.display()))?;
+        Ok(root)
+    }
+
+    fn path(&self, name: &str) -> Result<PathBuf> {
+        self.root
+            .as_ref()
+            .map(|root| root.join(name))
+            .context("Docker workload was not prepared")
+    }
 }
 
 struct DockerWorkload {
     kind: Kind,
     build_tag: Option<String>,
     build_tag_needs_cleanup: bool,
+    scratch: ScratchOwner,
+    owned_containers: Vec<String>,
+    owned_networks: Vec<String>,
     iteration: u64,
     notes: Vec<String>,
 }
@@ -215,10 +269,23 @@ fn inspect_container_state(context: &mut Context, name: &str) -> Result<()> {
 }
 
 impl DockerWorkload {
+    fn own_container(&mut self, name: &str) {
+        if !self.owned_containers.iter().any(|owned| owned == name) {
+            self.owned_containers.push(name.to_owned());
+        }
+    }
+
+    fn own_network(&mut self, name: &str) {
+        if !self.owned_networks.iter().any(|owned| owned == name) {
+            self.owned_networks.push(name.to_owned());
+        }
+    }
+
     fn container_name(&self, prefix: &str) -> String {
         format!(
-            "velnor-bench-{prefix}-{}-{}",
+            "velnor-bench-{prefix}-{}-{}-{}",
             std::process::id(),
+            self.scratch.id,
             self.iteration
         )
     }
@@ -226,6 +293,10 @@ impl DockerWorkload {
 
 impl Workload for DockerWorkload {
     fn prepare(&mut self, context: &mut Context) -> Result<()> {
+        if self.scratch.root.is_some() {
+            bail!("Docker workload still owns scratch; teardown is required before prepare");
+        }
+        self.scratch.allocate(&context.work_root)?;
         match self.kind {
             Kind::ImagePull => {
                 // Nothing to warm: the pull is the measurement.
@@ -266,7 +337,7 @@ impl Workload for DockerWorkload {
             self.kind,
             Kind::BuildCached | Kind::BuildUncached | Kind::Buildx
         ) {
-            let dir = context.work_root.join("docker-build-context");
+            let dir = self.scratch.path("docker-build-context")?;
             std::fs::create_dir_all(&dir)?;
             write_build_context(&dir, &context.job_image)?;
             if self.kind == Kind::BuildCached {
@@ -288,8 +359,8 @@ impl Workload for DockerWorkload {
     fn iterate(&mut self, context: &mut Context) -> Result<Observation> {
         self.iteration += 1;
         context.runner.reset();
-        let work_root = context.work_root.clone();
-        let disk_before = tree_bytes(&work_root);
+        let scratch_root = self.scratch.path("")?;
+        let disk_before = tree_bytes(&scratch_root);
         let started = Instant::now();
 
         let mut stages = BTreeMap::new();
@@ -312,7 +383,7 @@ impl Workload for DockerWorkload {
 
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let usage = context.runner.rusage();
-        let disk_after = tree_bytes(&work_root);
+        let disk_after = tree_bytes(&scratch_root);
 
         resources.cpu_user_us = usage.user_us;
         resources.cpu_system_us = usage.system_us;
@@ -334,13 +405,51 @@ impl Workload for DockerWorkload {
     }
 
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
+        let mut failures = Vec::new();
+
+        if !self.owned_containers.is_empty() {
+            let containers: Vec<&str> = self.owned_containers.iter().map(String::as_str).collect();
+            match cleanup_resources(context, &containers, &[]) {
+                Ok(()) => self.owned_containers.clear(),
+                Err(error) => failures.push(format!("owned container cleanup failed: {error:#}")),
+            }
+        }
+
+        if !self.owned_networks.is_empty() {
+            let networks: Vec<&str> = self.owned_networks.iter().map(String::as_str).collect();
+            match cleanup_resources(context, &[], &networks) {
+                Ok(()) => self.owned_networks.clear(),
+                Err(error) => failures.push(format!("owned network cleanup failed: {error:#}")),
+            }
+        }
+
         if self.build_tag_needs_cleanup {
             let tag = self
                 .build_tag
                 .as_deref()
                 .expect("owned build image has a tag");
-            remove_image_if_missing(context, tag).context("tearing down benchmark image")?;
-            self.build_tag_needs_cleanup = false;
+            match remove_image_if_missing(context, tag).context("tearing down benchmark image") {
+                Ok(()) => self.build_tag_needs_cleanup = false,
+                Err(error) => failures.push(format!("owned image cleanup failed: {error:#}")),
+            }
+        }
+
+        if self.owned_containers.is_empty()
+            && self.owned_networks.is_empty()
+            && !self.build_tag_needs_cleanup
+            && let Some(root) = self.scratch.root.clone()
+        {
+            match remove_scratch_directory(&root) {
+                Ok(()) => self.scratch.root = None,
+                Err(error) => failures.push(format!(
+                    "remove Docker workload scratch {} failed: {error:#}",
+                    root.display()
+                )),
+            }
+        }
+
+        if !failures.is_empty() {
+            bail!("Docker workload teardown failed: {}", failures.join("; "));
         }
         Ok(())
     }
@@ -359,7 +468,7 @@ impl DockerWorkload {
         let name = self.container_name("job");
         let image = context.job_image.clone();
         let mount = if self.kind == Kind::JobContainer {
-            let workspace = context.work_root.join("workspace");
+            let workspace = self.scratch.path("workspace")?;
             std::fs::create_dir_all(&workspace)?;
             Some(format!("{}:/velnor/workspace", workspace.display()))
         } else {
@@ -397,6 +506,7 @@ impl DockerWorkload {
         // separately observable, exactly as the runner keeps a job container.
         create_args.push("sleep 30".to_owned());
 
+        self.own_container(&name);
         let (created, create_ms) = timed(|| context.runner.run("docker", &create_args).cloned());
         let created = created?;
         if !created.ok() {
@@ -483,6 +593,7 @@ impl DockerWorkload {
     ) -> Result<()> {
         let name = self.container_name("pull");
         let image = context.job_image.clone();
+        self.own_container(&name);
         let (created, create_ms) = timed(|| {
             context
                 .runner
@@ -561,6 +672,7 @@ impl DockerWorkload {
         let job = self.container_name("job");
         let image = context.job_image.clone();
 
+        self.own_network(&network);
         let (network_created, network_ms) = timed(|| {
             context
                 .runner
@@ -574,6 +686,7 @@ impl DockerWorkload {
                 network_created.stderr.trim()
             );
         }
+        self.own_container(&service);
         let (service_started, service_ms) = timed(|| {
             context
                 .runner
@@ -616,6 +729,7 @@ impl DockerWorkload {
             ));
         }
 
+        self.own_container(&job);
         let (created, create_ms) = timed(|| {
             context
                 .runner
@@ -687,7 +801,7 @@ impl DockerWorkload {
         stages: &mut BTreeMap<Stage, u64>,
         resources: &mut Resources,
     ) -> Result<()> {
-        let dir = context.work_root.join("docker-build-context");
+        let dir = self.scratch.path("docker-build-context")?;
         let (prepared, setup_ms) = timed(|| -> Result<()> {
             if self.kind == Kind::BuildUncached {
                 // Defeat the cache at the first instruction, which is what an
@@ -934,5 +1048,55 @@ mod tests {
         let rendered = format!("{error:#}");
         assert!(rendered.contains("primary workload failure"));
         assert!(rendered.contains("container removal failed"));
+    }
+
+    #[test]
+    fn scratch_owners_allocate_distinct_roots() {
+        let work_root = std::env::temp_dir().join(format!(
+            "velnor-bench-docker-scratch-{}",
+            std::process::id()
+        ));
+        let mut first = ScratchOwner::new();
+        let mut second = ScratchOwner::new();
+        let first_root = first.allocate(&work_root).expect("allocate first root");
+        let second_root = second.allocate(&work_root).expect("allocate second root");
+
+        assert_ne!(first_root, second_root);
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn teardown_removes_owned_scratch_root() {
+        let work_root = std::env::temp_dir().join(format!(
+            "velnor-bench-docker-teardown-{}",
+            std::process::id()
+        ));
+        let mut scratch = ScratchOwner::new();
+        let root = scratch.allocate(&work_root).expect("allocate scratch root");
+        std::fs::create_dir_all(root.join("workspace")).expect("create workspace");
+        std::fs::create_dir_all(root.join("docker-build-context")).expect("create build context");
+
+        let mut workload = DockerWorkload {
+            kind: Kind::JobContainer,
+            build_tag: None,
+            build_tag_needs_cleanup: false,
+            scratch,
+            owned_containers: Vec::new(),
+            owned_networks: Vec::new(),
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        let mut context = Context {
+            work_root,
+            velnor_repo: std::env::temp_dir(),
+            job_image: String::new(),
+            iterations: 1,
+            concurrency: 1,
+            runner: crate::sys::Runner::new(),
+        };
+
+        workload.teardown(&mut context).expect("teardown");
+        assert!(workload.scratch.root.is_none());
+        assert!(!root.exists());
     }
 }
