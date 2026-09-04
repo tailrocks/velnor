@@ -2133,3 +2133,78 @@ commit rule is now an explicit pathspec.
 
 One commit (`f87b977`) appeared unpushed from the agent's stale local branch; it landed as its
 rebased twin `26002ce`, and the deleted symbol is absent from the tree — verified, nothing missing.
+
+### BC-29 closed at its worst instance — argv injection and secrets on argv are now unconstructible
+
+`37c3725`, `be9aa1c`. Both defects were confirmed exactly as reported, and both fixes remove the
+unsafe construction rather than patching the sites, which is what RC-4 requires.
+
+**Argument injection.** A new `crates/velnor-runner/src/docker_argv.rs` makes the defect a type
+error. `DockerCommand`/`DockerArgv` are the flag phase; the *only* transitions into the operand
+phase are `image(&ImageReference)` and `operands()`, and both emit `--` first. The operand-phase
+types expose no method that appends a flag, so there is no way to write a call site that places an
+operand where Docker will read a flag. The `vec!["run".into(), …]` idiom is gone from
+`container.rs` and `guest_runtime.rs`. `ImageReference` parses the actual OCI distribution
+reference grammar — domain and port, path component rules, the tag charset, `algo:hex` digests,
+the 255-byte name cap — and an image can only reach a command line through it, so
+`runs.image: docker://--privileged` is refused at the single place the scheme is stripped, with
+the repository named and the value not echoed.
+
+**Secrets on argv.** The builder has **no `-e NAME=VALUE` emitter at all**. Callers use `env()`,
+and rendering materialises a mode-0600 `--env-file` created `O_CREAT|O_EXCL|O_NOFOLLOW` and
+unlinked on drop, placed exactly where the entries were declared so Docker's last-wins override
+order is preserved. Values an env file cannot carry — newlines, whitespace in the name — become a
+bare `-e NAME` forwarded from the client's own environment. This covers the job container,
+workflow services, node and Docker action sidecars, `docker exec`, and the MicroVM guest path.
+The guest step script no longer rides on argv either: it goes to `sh -s` on stdin, which also
+stops the script and its environment leaking into the `HostDockerInvoked` and `GuestDocker`
+events, both of which log the entire argv. Prepared commands additionally run a fail-closed audit
+that refuses the command if any masked secret reached the finished argv.
+
+### Correction to my own correction — redaction
+
+I retracted the "five copies that disagree" finding on the grounds that there is exactly one
+*secret masker*. That remains true, and the retraction was right about the masker. But it
+over-corrected: there were **six redaction implementations across the workspace** with three
+sentinels, and one disagreement was real and load-bearing — `records.rs`'s
+`is_exact_redaction`/`json_value_is_exact_redaction` accepted only `[REDACTED]`, so a
+runner-masked `***` string failed the store validator, exactly as the security audit said.
+
+The right reading is that the two reports were about different scopes: one masker for *secrets*
+in the runner, and several unrelated redactors elsewhere in the workspace. Both were right; my
+retraction collapsed the distinction.
+
+Now consolidated (`435a34c`) into `crates/velnor-model/src/redaction.rs`, the only crate both
+`velnor-runner` and `velnor-control` depend on, sitting beside the existing
+redaction-by-construction module. One sentinel, `***`, matching upstream's `SecretMasker`.
+Upstream's rules are implemented: the literal value, **every line of a multi-line secret** so that
+line-oriented output cannot evade a whole-value match, and the encoder forms — JSON string escape,
+URI data escape, XML escape, backslash escape, surrounding-quote trim, base64 — longest match
+first, with values under three characters never registered in any encoding. `velnor-control`'s log
+and diagnostics redactors and `velnor-tools`' fleet-policy client are migrated, and `records.rs`
+now accepts the single sentinel while correctly treating `[REDACTED]` and `[redacted]` as *not*
+redacted.
+
+Remaining for the `runner.rs` owner: delete `MaskPatterns`/`Masker`/`mask_all` and call the shared
+masker. They already use `***`, so only the weaker matching rules differ. `script_step.rs` and a
+test-local sixth copy in `crates/velnor-runner/tests/idle_scaling.rs` move with it.
+
+### The `RUNNER_TEMP` class was already closed
+
+Re-verified independently: `RUNNER_TEMP` is still mode 1777 — deliberate, matching GitHub-hosted
+`/tmp` — and step-file names are still predictable, but the exploit is closed. All step-file I/O
+is descriptor-relative through a `NoFollow` directory handle, writes stage into an
+`O_CREAT|O_EXCL|O_NOFOLLOW` temporary and rename over the name, reads error on a non-regular file,
+and no `fs::write`/`fs::read_to_string` by path remains in non-test code. The regression test
+covers the script, output and summary paths. The optional remaining hardening is a per-step
+private directory, which would remove the predictable-name property itself.
+
+### Boundary crossings, disclosed
+
+Two fixes could not be delivered without narrow edits to `executor.rs`, and the agent made them
+rather than stopping: three argument builders had to become fallible, a four-line call-site change;
+and the twenty-one `CommandRunner` test doubles observe argv, which no longer carries environment,
+so each gained one line expanding the env file under `cfg(test)`. Eleven assertions of the form
+`!call.contains("GITHUB_TOKEN=…")` became delivery assertions with a comment recording why:
+confidentiality is no longer a property of those call sites, it is enforced by construction and
+tested where the construction happens. That is the correct place for the assertion to live.
