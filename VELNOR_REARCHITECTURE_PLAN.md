@@ -3510,3 +3510,18 @@ Focused proof: `velnor-bench` tests passed (`103` across three suites), along wi
 locked check, and strict Clippy. Remaining: a disposable Docker
 daemon/data-root/socket is required before image-pull; live Docker
 failure/identity proof and build-image ownership remain.
+
+## 50. Build-image ownership by immutable ID — pushed commit `4c182b3` (2026-09-05)
+
+Build/buildx outputs now carry owner+role labels. A successful output is followed
+by inspection of the exact owner label and retrieval of its immutable image ID.
+Cleanup and adoption remove image IDs only; mutable tags are never removed. The
+image-ID inspection time is recorded as `CompletionOverhead`.
+
+Focused proof at pushed commit `4c182b3`: `velnor-bench` package tests passed
+(`104` across three suites), along with the locked check, strict Clippy, fmt, and
+diff check.
+
+Remaining honestly: no live Docker daemon or failure proof; `image-pull` remains
+unrunnable pending a disposable daemon/data-root/socket; full Docker Engine/cgroup
+accounting is absent.
