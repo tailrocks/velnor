@@ -3116,3 +3116,32 @@ read-only and credentials stay in the existing environment/runner transport.
 
 Focused proof: `velnor-tools` tests `192` passed, strict package Clippy passed,
 and dependency-boundary tests `6` passed. Full workspace gates remain required.
+
+## 29. Continuation anchor — shared tip `118437e`
+
+This continuation synchronized the parallel branch without rewriting either history.
+`f7238fe` releases the per-mirror reader lease immediately after workspace hydration;
+`e9e4113` proves moving branch refs are refetched and repinned; `3550690` validates every
+mirror ref tip before accepting the object store; and `6d6b809` excludes Cargo setup,
+optional priming, and restoration from measured timing, process/resource, disk, and Git
+observations. The workspace package allowlist and strict Clippy contracts were updated in
+`5a9481a`, `c37c64f`, and `010af2c`. Merge commits `d2d4a2b` and `118437e` preserve the
+other lead's workflow generator, packaging, monitor, and typed-client work.
+
+Final local proof at this anchor:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2460 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against this source | pass; 41 Python tests, 49 Rust tests, workflow/capability/L2 audits |
+
+The hydration error-propagation patch was deliberately not landed: it exposed a fake
+mirror path in a reserved executor test. Propagating those errors safely requires a
+coordinated update at that reserved boundary; the uncommitted patch was reverted and the
+tree is clean. No live dual-lane run, deployed image digest, default-mbx end-to-end proof,
+VelnorJob benchmark, Docker daemon-resource accounting, fault/soak result, provisional
+acquisition recovery fix, or mixed native/JavaScript post-order fix is claimed. Those
+remain open under the ownership and evidence constraints recorded in §§15, 18, 25, and 28.
