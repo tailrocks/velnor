@@ -2921,3 +2921,79 @@ full gate both passed after the final provenance update.
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation
 and mixed native/JavaScript post-action ordering remain in the other lead's reserved `runner.rs`,
 `executor.rs`, and `execution/**` worktrees.
+
+## 23. Final immutable revalidation — five-task handoff
+
+This is the newest handoff record. It supersedes stale current-tip counts in §§20 and 22 while
+leaving those sections as history. The tested runner source snapshot is
+`c5bf24df93e7e6a4fc2a94489570e9218677d9af`; it was materialized with
+`git archive c5bf24df93e7e6a4fc2a94489570e9218677d9af | tar -x -C <scratch>`.
+The verifier's current provenance commit is
+`33983a2b12f73df90d9ed9db15df9224563a095a`, with the generated baseline introduced by its
+parent `926eb072660b5d87d11bc864cea45918ec471d90`. Manifest identity is v12, crate `0.1.250`,
+capability ID `23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and source
+SHA `c5bf24df93e7e6a4fc2a94489570e9218677d9af`. No live dual-lane verdict or deployed image
+digest is claimed.
+
+### T-001 capability surface
+
+The immutable manifest-derived checkout set is exactly `clean`, `fetch-tags`, `fetch-depth`,
+`lfs`, `path`, `persist-credentials`, `ref`, `repository`, and `token`. `submodules` is absent
+and rejected. Target expected actions no longer include unsupported manifest entries. Mr Boxington
+accepts only `github` and `server`; the fixture uses `backend: github`. `7ca8b17`, `0e3b6ea`,
+`637ae99`, and `0bcc304` provide the implementation and regression proof.
+
+### T-002 storage and admission
+
+`StoreCatalog`, `HostCapacity`, leases/claims/reaper, bounded `DiskPressure`, and fail-closed
+claim iteration are present. BuildKit prune is deliberately disabled: no lease spans mutable
+BuildKit content, so broad prune could delete live state. The artifact-store constructor follow-up
+is present on the shared tip but came from the concurrent lead. The remaining disk admission,
+reclaim, lease-publication, and acquire-order changes are still reserved by the file boundary;
+exact patch instructions remain in §18. This handoff does not claim those forbidden call sites
+are boundary-clean.
+
+### T-003 test isolation
+
+Allowed cache/container tests use UUID-qualified roots and do not mutate process environment.
+The executor fallback `/tmp/velnor` and `/tmp/vlc-*` fixture paths remain reserved; §18 gives the
+injection patch. Full parallel runner execution is not claimed: the known controller/wiremock
+harness stalled at both comparison snapshots. Serial execution is the accepted repository gate.
+
+### T-004 documentation
+
+Trust defaults to `VELNOR_TRUST_SCOPE=untrusted`; Mr Boxington is documented at 1.7.0; trust is
+daemon-pool scoped, not per-job; unavailable `head_repository_id` is documented with fail-closed
+and ephemeral-identity behavior. This is the `fb8ae38` documentation package.
+
+### T-005 verifier provenance
+
+`capability_id` is SHA-256 over canonical capability content excluding only `source_sha` and
+`capability_id`; the full lowercase source SHA remains mandatory provenance. The fixture refresh
+and source-bound readiness audit pass against the c5bf24d archive. Baseline-only and single-lane
+diagnostics remain fail-closed; no live parity result is substituted.
+
+### Final gates
+
+| Gate | Result |
+| --- | --- |
+| Runner `cargo fmt --all -- --check` | pass |
+| Runner workspace check, all targets, `velnor-runner/test-support`, locked | pass |
+| Runner workspace Clippy, warnings denied, locked | pass |
+| Runner dependency-boundary test, serial | 6 passed |
+| Runner tools test, serial | 190 passed |
+| Runner library test, serial | 1580 passed, 1 ignored |
+| Fixture refresh plus capability readiness audit | pass; v12 / crate 0.1.250 / ID above |
+| Fixture capability contract, workflow audit, Python syntax, Python tests | pass; 38 Python tests |
+| Fixture `mise run workflow-check` | pass; actionlint and audit suite included |
+| Fixture L2 closure | pass; `closure-valid=3` |
+| Fixture Rust fmt/check/Clippy | pass |
+| Fixture Rust nextest, one test thread | 49 passed; 11 binaries |
+
+### Reserved-file boundary
+
+This turn did not author edits to `crates/velnor-runner/src/executor.rs`,
+`crates/velnor-runner/src/execution/**`, or the reserved cancellation/storage/admission/lease
+integration call sites. Concurrent shared-branch commits touch some of those paths and remain in
+the tested snapshot; they are identified in §§18, 20, and 22. The allowed configless acquisition
+regression fix is `e7bcac5`. No forbidden patch was silently presented as completed.
