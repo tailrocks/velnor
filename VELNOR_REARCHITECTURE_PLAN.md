@@ -2645,11 +2645,10 @@ These are implementation instructions, not applied changes:
 ### Evidence at handoff
 
 Runner `839c950` passes the serialized library suite (`1524 passed, 1 ignored`) and tools suite;
-workspace all-target check with `velnor-runner/test-support` also passes. The full format check
-still reports only pre-existing formatting in forbidden `execution/cancel.rs`, `execution/mod.rs`,
-and the already-landed tools surface file. BuildKit emergency reclaim remains deliberately
-disabled because no BuildKit lease spans its mutable content; `prune_owned_builder` is reserved
-for a future caller that proves that lease.
+workspace all-target check with `velnor-runner/test-support` also passes. The final immutable
+archive check passes `cargo fmt --check`, workspace clippy, and the workspace check (337 crates).
+BuildKit emergency reclaim remains deliberately disabled because no BuildKit lease spans its mutable
+content; `prune_owned_builder` is reserved for a future caller that proves that lease.
 
 ## 19. Post-handoff concurrent follow-up
 
