@@ -574,3 +574,72 @@ Nothing above weakens signature verification; all three options verify the same 
 | --- | --- | --- |
 | T-003a | Licence gate: `deny.toml` had no `[licenses]` section, so `cargo deny check licenses` failed with 367 rejections; the `deny` mise task ran only `advisories`, which hid it. Allow-list enumerated from the real graph (MIT, Apache-2.0, BSD-3-Clause, ISC, Unicode-3.0, Zlib — no blanket, no exception needed) and the task now runs every section. Gate now reports `advisories ok, bans ok, licenses ok, sources ok`. | `5644bfd` |
 | T-003b | `tokio` `fs` feature declared (four `tokio::fs` uses in `gha_cache.rs` compiled only through transitive feature unification); unused `process` feature removed after confirming zero `tokio::process` uses in the workspace. | `d72dd73` |
+
+### BC-23 — Velnor is an allowlist emulator, not a general Actions runner
+
+`crates/velnor-runner/src/manifest.rs:917-975` allowlists 28 repositories with every ref
+pinned to a 40-hex SHA; `action.rs:173-203` reimplements 25 of them as native Rust
+adapters; and `runner.rs:9475-9479` hard-`bail!`s any JavaScript action that is not one of
+them. The generic JavaScript, Docker and composite execution paths exist but are exercised
+by roughly two allowlisted entries, so defects there are currently latent.
+
+This is a legitimate architecture *if it is what Velnor claims*. It is not what the
+capability model claims today, which is the actual defect: the surface must state that
+third-party JavaScript actions outside the allowlist are unsupported and must fail early
+and explicitly, rather than being presented as supported.
+
+Latent defects in those paths, to be fixed on merit rather than blast radius: post steps are
+kept as two separately-reversed lists (native, then JavaScript) where upstream maintains a
+single LIFO stack (`Runner.Worker/StepsRunner.cs:169-172`), so a mixed job runs them in the
+wrong order; `runs.using` node version selection is dead code because
+`node_action_image` (`executor.rs:382-394`) always returns the `node:24-bookworm` fallback;
+three composite depth limits disagree (upstream 9, admission 10, local 16) and remote
+composite recursion in `runner.rs:9443-9560` is unbounded with no cycle detection; composite
+step-output references are rewritten with a naive `str::replace` (`action.rs:1682-1691`),
+which clobbers prefix ids and literal text; and Docker actions mount `/__a` — every
+downloaded action's source — plus `/__w`, `/tmp` and `/__tool`, where upstream mounts six
+specific paths.
+
+### BC-24 — Durable sinks bypass the secret masker
+
+`GITHUB_STEP_SUMMARY` content is uploaded without masking
+(`crates/velnor-runner/src/script_step.rs:858` → `protocol.rs:4313-4415`), where upstream
+scrubs every line first (`Runner.Worker/FileCommandManager.cs:256-267`). A secret echoed
+into a step summary is therefore written to a durable blob in cleartext. The redaction logic
+is triplicated in the tree, which is the enabling condition: three copies cannot stay in
+agreement, and only one of them is on this path.
+
+Related upstream limits are also absent, and they matter because these payloads ride the
+durable `CompleteJob` call: no 4096-character annotation truncation, no 10-per-type
+annotation cap, no 1 MiB step-summary cap, and `step_number` is always `None`.
+
+Missing invariant: *every sink that leaves the process passes through one masker, and there
+is exactly one masker.*
+
+### BC-25 — The wire-name class recurs in the cache and step-result contracts
+
+Three further instances of BC-1 were found. `RunServiceStepResult` is serialised snake_case
+inside an otherwise camelCase `CompleteJob` payload (`protocol.rs:3276-3298`). The GitHub
+Actions cache v1 response returns `cacheDownloadUrl`/`cacheId` where the client expects
+`archiveLocation`/`cacheKey`, and the v2 `GetCacheEntryDownloadURL` response omits
+`matchedKey`, so a restore-key hit is reported as non-exact and the entry is re-saved every
+run.
+
+Note for future work: the artifact-v4 and cache v1/v2 protocols are **not** defined in
+`actions/runner` — they live in `actions/toolkit`, which must be pinned as a second
+upstream reference. Several of these contracts therefore had no authoritative oracle in the
+repository the project treats as its only source of truth, which is itself part of why the
+class persisted.
+
+Independently, every cache v1 lookup misses unconditionally: `query_param`
+(`gha_cache.rs:662-669`) uses `find_map` and then filters, so only the first query parameter
+can match. `lookup_v1` asks for `version`, receives `""`, and `version` participates in the
+entry hash — so BuildKit's `type=gha` cache never restores.
+
+### Worth preserving
+
+Three things this codebase does better than upstream, which the rearchitecture must not
+discard: path-traversal guards on action paths (upstream has none); SHA-pinned action refs,
+which make the missing download-integrity check moot; and the completion outbox — intent and
+payload checksum journaled before send, crash-replayable — where upstream simply retries
+five times.
