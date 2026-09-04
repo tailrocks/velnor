@@ -436,7 +436,7 @@ mod tests {
         }
     }
 
-    fn fixture_repo(remote: Option<&str>, with_commit: bool) -> PathBuf {
+    fn fixture_repo(remote: Option<&str>) -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
@@ -447,12 +447,10 @@ mod tests {
         if let Some(remote) = remote {
             run_git(&path, &["remote", "add", "origin", remote]);
         }
-        if with_commit {
-            run_git(
-                &path,
-                &["commit", "--quiet", "--allow-empty", "--message", "fixture"],
-            );
-        }
+        run_git(
+            &path,
+            &["commit", "--quiet", "--allow-empty", "--message", "fixture"],
+        );
         path
     }
 
@@ -512,7 +510,7 @@ mod tests {
 
     #[test]
     fn probe_requires_a_canonical_fixture_origin() {
-        let repo = fixture_repo(Some("https://github.com/tailrocks/velnor.git"), true);
+        let repo = fixture_repo(Some("https://github.com/tailrocks/velnor.git"));
         let mut probe_inputs = inputs();
         probe_inputs.fixture_repo = Some(repo.clone());
         let mut runner = Runner::new();
@@ -535,13 +533,21 @@ mod tests {
                     "origin".to_owned(),
                 ])
         }));
+        let repo_path = repo.display().to_string();
+        assert!(!runner.invocations().iter().any(|invocation| {
+            invocation.program == "git"
+                && invocation.args.get(1) == Some(&repo_path)
+                && invocation
+                    .args
+                    .ends_with(&["rev-parse".to_owned(), "HEAD".to_owned()])
+        }));
 
         remove_fixture_repo(&repo);
     }
 
     #[test]
     fn probe_records_a_clear_gap_when_fixture_origin_is_missing() {
-        let repo = fixture_repo(None, true);
+        let repo = fixture_repo(None);
         let mut probe_inputs = inputs();
         probe_inputs.fixture_repo = Some(repo.clone());
         let mut runner = Runner::new();
@@ -562,10 +568,7 @@ mod tests {
 
     #[test]
     fn probe_accepts_a_canonical_fixture_origin_before_recording_commit() {
-        let repo = fixture_repo(
-            Some("git@github.com:tailrocks/velnor-actions-fixture.git"),
-            true,
-        );
+        let repo = fixture_repo(Some("git@github.com:tailrocks/velnor-actions-fixture.git"));
         let mut probe_inputs = inputs();
         probe_inputs.fixture_repo = Some(repo.clone());
         let mut runner = Runner::new();
