@@ -3498,12 +3498,13 @@ mutation. `image-pull` remains unrun until then.
 
 ## 49. Docker ownership identity and fail-closed validation — `00e4835`, `c26b635`, `d843d9d`, `26a1e6c` (2026-09-05)
 
-Docker container/network ownership now uses owner+role labels. Immutable IDs are
-captured only after successful create/run/network-create; later lifecycle and
-destructive calls use those IDs. Unresolved identity refuses name cleanup and
-retains ownership. `docker/image-pull` has no fallback and is unrunnable.
-Record validation now requires a declared preferred/degraded driver, with a
-forged image-pull regression test.
+- `00e4835`: Docker container/network ownership uses owner+role labels. Immutable
+  IDs are captured from successful create/run/network-create; later lifecycle
+  and destructive calls use those IDs. Unresolved identity refuses name
+  cleanup and retains ownership.
+- `c26b635`: `docker/image-pull` has no fallback and is unrunnable.
+- `d843d9d`: Record validation requires a declared preferred/degraded driver and
+  adds a forged image-pull regression test.
 
 Focused proof: `velnor-bench` tests passed (`103` across three suites), along with fmt,
 locked check, and strict Clippy. Remaining: a disposable Docker
