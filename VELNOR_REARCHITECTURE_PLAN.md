@@ -3145,3 +3145,30 @@ tree is clean. No live dual-lane run, deployed image digest, default-mbx end-to-
 VelnorJob benchmark, Docker daemon-resource accounting, fault/soak result, provisional
 acquisition recovery fix, or mixed native/JavaScript post-order fix is claimed. Those
 remain open under the ownership and evidence constraints recorded in §§15, 18, 25, and 28.
+
+## 30. Continuation anchor — workflow monitor sync `68d4cff`
+
+After §29, the shared branch received the other lead's reqwest-backed workflow monitor
+implementation and packaging follow-ups. The synchronization commits preserved those
+changes while adding `5a22ba9` (reject a successful no-op `cargo update`), `010af2c` and
+`69819df` (strict workflow-runtime Clippy cleanup), and the required merge ancestry. The
+workspace package boundary now names `velnor-workflow`; no duplicate package entry remains.
+
+Final proof at `68d4cff`:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2461 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against source | pass; 41 Python tests, 49 Rust tests, workflow/capability/L2 audits |
+
+The branch remains open. Fixture audits still find static-only or vacuous default-mbx,
+sccache, opt-out, image-digest, and provenance assertions; compatibility gate predicates
+have event/skip cases needing explicit tests; and no live dual-lane run has been triggered.
+Source audits still identify Docker CLI-only resource accounting and the unreachable
+VelnorJob/Rust/MBX authoritative benchmark path. Reserved provisional-acquisition recovery
+and mixed native/JavaScript post-order work remain with the other lead. Checkout traversal
+error propagation remains deferred because it requires a coordinated change to a reserved
+executor test boundary.
