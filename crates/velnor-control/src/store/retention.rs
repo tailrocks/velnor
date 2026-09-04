@@ -1766,6 +1766,11 @@ fn filesystem_free_bytes(path: &Path) -> Option<u64> {
         path.parent().filter(|parent| parent.exists())?
     };
     let stat = rustix::fs::statvfs(probe).ok()?;
+    free_bytes_from_stat(&stat)
+}
+
+#[cfg(unix)]
+fn free_bytes_from_stat(stat: &rustix::fs::StatVfs) -> Option<u64> {
     stat.f_frsize.max(1).checked_mul(stat.f_bavail)
 }
 
@@ -2419,7 +2424,8 @@ mod tests {
         let path = std::env::temp_dir();
         let stat = rustix::fs::statvfs(&path).unwrap();
         let expected = stat.f_frsize.max(1).checked_mul(stat.f_bavail);
-        assert_eq!(filesystem_free_bytes(&path), expected);
+        assert_eq!(free_bytes_from_stat(&stat), expected);
+        assert!(filesystem_free_bytes(&path).is_some());
     }
 
     #[test]
