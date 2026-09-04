@@ -490,11 +490,6 @@ mod tests {
             serde_json::from_value::<GitEvidence>(value).expect("deserialize evidence"),
             evidence
         );
-        assert_eq!(
-            serde_json::to_value(GitEvidence::NoGitTraceObserved).expect("serialize no-Git state")
-                ["status"],
-            "no_git_trace_observed"
-        );
         let mixed = GitEvidence::Mixed {
             counters: crate::gittrace::GitCounters {
                 processes: 1,
@@ -508,6 +503,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(mixed).expect("serialize mixed state")["status"],
             "mixed"
+        );
+    }
+
+    #[test]
+    fn no_git_trace_evidence_serializes_with_the_current_v2_discriminator() {
+        assert_eq!(
+            serde_json::to_value(GitEvidence::NoGitTraceObserved).expect("serialize no-Git state"),
+            serde_json::json!({"status": "no_git_trace_observed"})
+        );
+    }
+
+    #[test]
+    fn legacy_v2_no_git_process_evidence_deserializes_to_current_state() {
+        let legacy = serde_json::json!({"status": "no_git_process"});
+
+        assert_eq!(
+            serde_json::from_value::<GitEvidence>(legacy).expect("deserialize legacy no-Git state"),
+            GitEvidence::NoGitTraceObserved
         );
     }
 

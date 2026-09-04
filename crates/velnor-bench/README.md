@@ -78,6 +78,10 @@ malformed, incomplete, or missing evidence fails the current Cargo-direct run.
 The state means “no Git Trace2 process observed”; it is not a claim that a
 child could not have exited before Trace2 initialization.
 
+The result schema remains v2. Deserializers accept the historical v2
+discriminator `{"status":"no_git_process"}` as an input alias; new output
+always uses `no_git_trace_observed`.
+
 Each summary carries `samples, min, max, mean, variance, p50, p95, p99`.
 
 `environment` records CPU model (the brand string, not the architecture — the
