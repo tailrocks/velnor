@@ -20,6 +20,7 @@ use crate::{fact::Fact, sys::Runner};
 
 /// Stable discriminator for the environment block.
 pub const ENVIRONMENT_SCHEMA: &str = "velnor.bench.environment.v1";
+const DOCKER_SERVER_API_VERSION_FORMAT: &str = "{{.Server.APIVersion}}";
 
 /// Runner configuration under which the measurement was taken.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +95,10 @@ impl EnvironmentIdentity {
                 .capture("docker", &["version", "--format", "{{.Server.Version}}"])
                 .into(),
             docker_api_version: runner
-                .capture("docker", &["version", "--format", "{{.Client.APIVersion}}"])
+                .capture(
+                    "docker",
+                    &["version", "--format", DOCKER_SERVER_API_VERSION_FORMAT],
+                )
                 .into(),
             docker_storage_driver: runner
                 .capture("docker", &["info", "--format", "{{.Driver}}"])
@@ -397,6 +401,11 @@ mod tests {
             identity.cpu_model.known().map(String::as_str),
             Some(std::env::consts::ARCH)
         );
+    }
+
+    #[test]
+    fn docker_api_identity_uses_the_server_version() {
+        assert_eq!(DOCKER_SERVER_API_VERSION_FORMAT, "{{.Server.APIVersion}}");
     }
 
     #[test]
