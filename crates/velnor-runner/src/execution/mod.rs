@@ -6,6 +6,7 @@
 
 mod artifacts;
 mod backend;
+pub mod cancel;
 mod cache_transport;
 mod docker;
 mod firecracker;
@@ -29,6 +30,11 @@ pub use backend::{
     ValidatedService, ValidatedStep,
 };
 pub use cache_transport::{publish_on_success, CacheBlob, CacheTransportError};
+pub use cancel::{
+    forced_kill_delay, terminate, CancelLevel, CancelReason, ContainerRole, JobCancellation,
+    TargetRegistration, TerminationLadder, TerminationOutcome, TerminationSignal,
+    TerminationTarget,
+};
 pub(crate) use docker::verify_docker_job_cgroup_boundary;
 pub use docker::DockerBackend;
 pub use firecracker::{
