@@ -370,7 +370,10 @@ mod tests {
             scenario: "docker/existing-image".to_owned(),
             family: Family::Docker,
             driver,
-            runnability: Runnability::Preferred { driver },
+            runnability: Runnability::Degraded {
+                driver,
+                missing_for_preferred: vec![crate::scenario::Requirement::VelnorJobDriver],
+            },
             environment: environment(),
             observations: observations.clone(),
             summaries: Summaries::new(&observations).expect("summaries"),
