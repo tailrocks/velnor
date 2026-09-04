@@ -569,6 +569,14 @@ fn control_api_unavailable(command: &str) -> CommandError {
 fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, CommandError> {
     use velnor_control::config::ContextStore;
 
+    if globals.repo.is_some() {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "repo.selector_unsupported",
+            "global --repo is not supported by the v1 query API",
+        ));
+    }
+
     let contexts = context_store()?.list()?;
     let (endpoint, context_selected) = if let Some(context_name) = &globals.context {
         let context = contexts
@@ -1399,6 +1407,21 @@ fn flag_metadata<'a>(args: impl Iterator<Item = &'a clap::Arg>, global: bool) ->
 mod tests {
     use super::*;
 
+    fn globals_with_repo(repo: Option<&str>) -> GlobalArgs {
+        GlobalArgs {
+            context: None,
+            output: OutputArg::Table,
+            instance: None,
+            repo: repo.map(str::to_owned),
+            selector: None,
+            field_selector: None,
+            since: None,
+            timeout: None,
+            no_color: false,
+            verbose: 0,
+        }
+    }
+
     #[test]
     fn explicit_instance_rejects_a_different_context_endpoint() {
         let endpoint = velnor_client::UnixEndpoint::parse("unix:///run/velnor/primary")
@@ -1409,5 +1432,14 @@ mod tests {
 
         assert_eq!(error.class, ExitClass::Conflict);
         assert_eq!(error.reason, "instance.context_mismatch");
+    }
+
+    #[test]
+    fn global_repo_selector_fails_before_context_or_query_access() {
+        let error = client_for(&globals_with_repo(Some("owner/repo")))
+            .expect_err("unsupported repository scope must fail closed");
+
+        assert_eq!(error.class, ExitClass::Usage);
+        assert_eq!(error.reason, "repo.selector_unsupported");
     }
 }
