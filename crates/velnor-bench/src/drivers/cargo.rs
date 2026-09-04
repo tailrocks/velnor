@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context as _, Result};
@@ -279,6 +279,7 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
 #[derive(Debug, Default)]
 struct ScratchOwner {
     id: u64,
+    nonce: u128,
     root: Option<PathBuf>,
     worktrees: Vec<OwnedWorktree>,
     targets: Vec<PathBuf>,
@@ -289,15 +290,19 @@ impl ScratchOwner {
     fn new() -> Self {
         Self {
             id: NEXT_SCRATCH_OWNER_ID.fetch_add(1, Ordering::Relaxed),
+            nonce: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos()),
             ..Self::default()
         }
     }
 
     fn scenario_root(&self, work_root: &Path, scenario: &str) -> PathBuf {
         work_root.join(format!(
-            "{}-{}-{}",
+            "{}-{}-{}-{}",
             scenario.replace('/', "_"),
             std::process::id(),
+            self.nonce,
             self.id
         ))
     }
@@ -736,7 +741,10 @@ impl CargoWorkload {
         let Some(root) = self.scratch.root.clone() else {
             return;
         };
-        if !self.scratch.worktrees.is_empty() || !self.scratch.targets.is_empty() {
+        if !self.scratch.worktrees.is_empty()
+            || !self.scratch.targets.is_empty()
+            || !self.scratch.traces.is_empty()
+        {
             failures.push(format!(
                 "retain Cargo workload root {} while owned child resources remain",
                 root.display()
@@ -1315,6 +1323,28 @@ mod tests {
         assert_eq!(workload.scratch.traces, vec![trace]);
         assert_eq!(workload.scratch.root, Some(root.clone()));
         assert!(root.exists());
+
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn teardown_retains_root_when_trace_cleanup_fails() {
+        let work_root = test_path("trace-cleanup-failure");
+        let root = work_root.join("scratch");
+        let trace = root.join("trace-directory");
+        std::fs::create_dir_all(&trace).expect("create trace collision");
+
+        let mut workload = test_workload(plan_for("rust/cold").expect("cold plan"), "rust/cold");
+        workload.scratch.root = Some(root.clone());
+        workload.scratch.traces.push(trace.clone());
+        let mut context = test_context(work_root.clone(), work_root.join("not-a-repository"), 1);
+
+        let error = workload
+            .teardown(&mut context)
+            .expect_err("invalid trace path must be reported");
+        assert!(error.to_string().contains("remove Cargo trace file"));
+        assert!(trace.exists());
+        assert_eq!(workload.scratch.root, Some(root));
 
         let _ = std::fs::remove_dir_all(work_root);
     }
