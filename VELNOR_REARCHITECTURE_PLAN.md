@@ -3337,3 +3337,12 @@ the pinned reusable workflow; the installed runtime compares the entrypoint's
 full SHA with that input. The base-owned entrypoint remains the authority, and
 the static scanner requires the exact-shape entrypoint plus self-consistent
 full-SHA input.
+
+## 39. Monitor deadline contract
+
+The workflow monitor timeout is a cooperative polling and local-observation
+budget, bounded additionally by the 2,048-observation cap. It is not a hard
+function-return deadline: scheduler delay and evidence serialization, flush,
+or atomic rename may extend return time. Terminal classification records the
+GitHub response-acquisition instant so a response obtained after the budget is
+reported as timed out.

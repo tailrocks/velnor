@@ -2716,10 +2716,6 @@ fn release_spec(profile: &EstateProfile) -> Option<ReleaseSpec> {
     release_contract_complete(&spec).then_some(spec)
 }
 
-fn catalog_config(profile: &'static EstateProfile, runners: RunnerMode) -> ProjectConfig {
-    catalog_config_with_default_branch(profile, runners, "main")
-}
-
 fn catalog_config_with_default_branch(
     profile: &'static EstateProfile,
     runners: RunnerMode,
@@ -3450,7 +3446,7 @@ impl WorkflowIr {
         let _ = (runners, trusted);
         let _ = writeln!(
             output,
-            "  policy:\n    name: Advisory policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
+            "  policy:\n    name: Advisory policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    with:\n      policy-revision: {VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
         );
     }
 
@@ -3905,7 +3901,7 @@ fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
 
 fn render_policy_entrypoint() -> String {
     format!(
-        "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\npermissions:\n  contents: read\n\njobs:\n  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read\n"
+            "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\npermissions:\n  contents: read\n\njobs:\n  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    with:\n      policy-revision: {VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read\n"
     )
 }
 
@@ -7627,12 +7623,12 @@ path-only = { path = "../path-only" }
         must(
             fs::write(
                 workflows.join("ci-policy.yml"),
-                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
+                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    with:\n      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
             ),
             "write policy entrypoint",
         );
         must(
-            runtime::enforce_policy(&root),
+            runtime::enforce_policy_with_revision(&root, VELNOR_POLICY_WORKFLOW_REV),
             "run policy on valid workflow",
         );
 
@@ -7643,7 +7639,7 @@ path-only = { path = "../path-only" }
             ),
             "write invalid workflow",
         );
-        let invalid = runtime::enforce_policy(&root);
+        let invalid = runtime::enforce_policy_with_revision(&root, VELNOR_POLICY_WORKFLOW_REV);
         assert!(invalid.is_err());
         assert!(invalid
             .err()
@@ -7669,7 +7665,7 @@ path-only = { path = "../path-only" }
             fs::write(ci.join("project.toml"), "runners = \"velnor\"\n"),
             "write Velnor mode",
         );
-        let rejected = runtime::enforce_policy(&root);
+        let rejected = runtime::enforce_policy_with_revision(&root, VELNOR_POLICY_WORKFLOW_REV);
         assert!(rejected
             .err()
             .is_some_and(|error| error.to_string().contains("workflow policy rejected")));
@@ -7753,7 +7749,9 @@ path-only = { path = "../path-only" }
                 continue;
             }
             for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
-                let workflow = WorkflowIr::from_config(&catalog_config(profile, runners));
+                let workflow = WorkflowIr::from_config(&catalog_config_with_default_branch(
+                    profile, runners, "main",
+                ));
                 for kind in [
                     WorkflowKind::PullRequest,
                     WorkflowKind::Main,
@@ -7791,7 +7789,7 @@ path-only = { path = "../path-only" }
                 continue;
             }
             for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
-                let config = catalog_config(profile, runners);
+                let config = catalog_config_with_default_branch(profile, runners, "main");
                 let files = generated_files(&config);
                 let project = must_some(
                     files.get(&PathBuf::from(".github/ci/project.toml")),
@@ -8625,7 +8623,7 @@ path-only = { path = "../path-only" }
         assert_eq!(repositories.len(), ESTATE_PROFILES.len());
 
         for profile in ESTATE_PROFILES {
-            let config = catalog_config(profile, RunnerMode::Both);
+            let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
             let files = generated_files(&config);
             let actual_workflows = files
                 .keys()

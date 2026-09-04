@@ -37,7 +37,8 @@ pub struct WorkflowMonitorConfig {
     pub repo: String,
     /// GitHub Actions run database id.
     pub run_id: u64,
-    /// Maximum wall-clock monitoring time.
+    /// Cooperative polling/local-observation budget. Scheduler delay and
+    /// evidence serialization or filesystem operations may extend return time.
     pub timeout: Duration,
     /// Delay between observations.
     pub poll_interval: Duration,
@@ -235,6 +236,9 @@ impl<'a> WorkflowMonitorResult<'a> {
 }
 
 /// Poll GitHub until terminal state or deadline, optionally capturing Velnor state.
+///
+/// The timeout is cooperative and observation-capped, not a hard function
+/// return deadline; evidence persistence may take additional time.
 pub fn monitor_workflow_run<'a>(
     config: &'a WorkflowMonitorConfig,
 ) -> Result<WorkflowMonitorResult<'a>> {
@@ -259,6 +263,7 @@ pub fn monitor_workflow_run<'a>(
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let run = fetch_run(&config.repo, config.run_id, remaining)?;
+        let response_acquired_at = Instant::now();
         first_poll = false;
         if run.id != config.run_id {
             bail!(
@@ -290,6 +295,7 @@ pub fn monitor_workflow_run<'a>(
             &mut observations,
         )?;
         if current.is_terminal() {
+            timed_out = response_acquired_at >= deadline;
             break current;
         }
         if observation_count >= MAX_MONITOR_OBSERVATIONS || Instant::now() >= deadline {
