@@ -82,10 +82,10 @@ fn remove_scratch_directory(path: &Path) -> Result<()> {
     }
 }
 
-fn remove_image_if_missing(context: &mut Context, image: &str) -> Result<()> {
+fn remove_image_id_if_missing(context: &mut Context, id: &str) -> Result<()> {
     let invocation = context
         .runner
-        .run("docker", &["image", "rm", "-f", image])
+        .run("docker", &["image", "rm", "-f", id])
         .context("docker image removal")?;
     if invocation.ok()
         || invocation
@@ -96,7 +96,7 @@ fn remove_image_if_missing(context: &mut Context, image: &str) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "docker image removal failed with exit code {}: {}",
+        "docker image ID removal failed with exit code {}: {}",
         invocation.code,
         invocation.stderr.trim()
     )
@@ -112,6 +112,22 @@ fn parse_docker_id(stdout: &str) -> Result<String> {
         bail!("Docker returned an invalid container ID: {id:?}");
     }
     Ok(id.to_owned())
+}
+
+fn parse_owned_image_inspect(output: &str, expected_owner: &str) -> Result<String> {
+    let mut fields = output.split_whitespace();
+    let raw_id = fields
+        .next()
+        .context("Docker image inspect returned no image ID")?;
+    let owner = fields
+        .next()
+        .context("Docker image inspect returned no owner label")?;
+    if owner != expected_owner {
+        bail!("Docker image owner label mismatch: expected {expected_owner:?}, got {owner:?}");
+    }
+    let id = raw_id.strip_prefix("sha256:").unwrap_or(raw_id);
+    let id = parse_docker_id(id)?;
+    Ok(format!("sha256:{id}"))
 }
 
 fn force_remove_id(context: &mut Context, id: &str) -> Result<()> {
@@ -178,7 +194,8 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
     Ok(Box::new(DockerWorkload {
         kind,
         build_tag: is_build_kind(kind).then(unique_build_tag),
-        build_tag_needs_cleanup: false,
+        build_attempted: false,
+        owned_images: Vec::new(),
         scratch: ScratchOwner::new(),
         owned_containers: Vec::new(),
         owned_networks: Vec::new(),
@@ -238,10 +255,16 @@ struct OwnedNetwork {
     id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct OwnedImage {
+    id: String,
+}
+
 struct DockerWorkload {
     kind: Kind,
     build_tag: Option<String>,
-    build_tag_needs_cleanup: bool,
+    build_attempted: bool,
+    owned_images: Vec<OwnedImage>,
     scratch: ScratchOwner,
     owned_containers: Vec<OwnedContainer>,
     owned_networks: Vec<OwnedNetwork>,
@@ -323,11 +346,12 @@ impl DockerWorkload {
         Ok(id)
     }
 
+    fn owner_token(&self) -> String {
+        format!("{:032x}-{}", self.scratch.nonce, self.scratch.id)
+    }
+
     fn owner_label(&self) -> String {
-        format!(
-            "com.velnor.bench.owner={:032x}-{}",
-            self.scratch.nonce, self.scratch.id
-        )
+        format!("com.velnor.bench.owner={}", self.owner_token())
     }
 
     fn role_label(role: &str) -> String {
@@ -341,6 +365,81 @@ impl DockerWorkload {
             "--label".to_owned(),
             Self::role_label(role),
         ]
+    }
+
+    fn own_image(&mut self, id: String) {
+        if !self.owned_images.iter().any(|owned| owned.id == id) {
+            self.owned_images.push(OwnedImage { id });
+        }
+    }
+
+    fn capture_owned_image(&mut self, context: &mut Context, tag: &str) -> Result<()> {
+        let output = context
+            .runner
+            .capture(
+                "docker",
+                &[
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}} {{index .Config.Labels \"com.velnor.bench.owner\"}}",
+                    tag,
+                ],
+            )
+            .map_err(anyhow::Error::msg)?;
+        let id = parse_owned_image_inspect(&output, &self.owner_token())?;
+        self.own_image(id);
+        Ok(())
+    }
+
+    fn adopt_owned_images(&mut self, context: &mut Context) -> Result<()> {
+        if self.build_tag.is_none() {
+            return Ok(());
+        }
+        let args = vec![
+            "image".to_owned(),
+            "ls".to_owned(),
+            "--no-trunc".to_owned(),
+            "--filter".to_owned(),
+            format!("label=com.velnor.bench.owner={}", self.owner_token()),
+            "--filter".to_owned(),
+            "label=com.velnor.bench.role=image".to_owned(),
+            "--format".to_owned(),
+            "{{.ID}}".to_owned(),
+        ];
+        let output = context
+            .runner
+            .capture("docker", &args)
+            .map_err(anyhow::Error::msg)?;
+        for line in output.lines() {
+            let raw_id = line.trim();
+            if raw_id.is_empty() {
+                continue;
+            }
+            let id = raw_id.strip_prefix("sha256:").unwrap_or(raw_id);
+            let id = parse_docker_id(id).with_context(|| {
+                format!("Docker image listing returned invalid ID from {line:?}")
+            })?;
+            self.own_image(format!("sha256:{id}"));
+        }
+        Ok(())
+    }
+
+    fn cleanup_owned_images(&mut self, context: &mut Context) -> Result<()> {
+        let mut failures = Vec::new();
+        let mut remaining = Vec::new();
+        for image in std::mem::take(&mut self.owned_images) {
+            if let Err(error) = remove_image_id_if_missing(context, &image.id) {
+                failures.push(format!("image {}: {error:#}", image.id));
+                remaining.push(image);
+            }
+        }
+        self.owned_images = remaining;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!("Docker image cleanup failed: {}", failures.join("; "))
+        }
     }
 
     fn cleanup_owned_resources(&mut self, context: &mut Context) -> Result<()> {
@@ -439,12 +538,15 @@ impl Workload for DockerWorkload {
                 let tag = self
                     .build_tag
                     .as_deref()
-                    .expect("build workloads have an owned image tag");
-                self.build_tag_needs_cleanup = true;
-                let warmed = context
-                    .runner
-                    .run("docker", &["build", "-t", tag, &dir.display().to_string()])?;
+                    .expect("build workloads have an owned image tag")
+                    .to_owned();
+                self.build_attempted = true;
+                let mut args = vec!["build".to_owned()];
+                args.extend(self.resource_labels("image"));
+                args.extend(["-t".to_owned(), tag.clone(), dir.display().to_string()]);
+                let warmed = context.runner.run("docker", &args)?;
                 require_success(warmed, "docker cached-build warmup")?;
+                self.capture_owned_image(context, &tag)?;
             }
         }
         Ok(())
@@ -502,20 +604,19 @@ impl Workload for DockerWorkload {
             failures.push(format!("owned resource cleanup failed: {error:#}"));
         }
 
-        if self.build_tag_needs_cleanup {
-            let tag = self
-                .build_tag
-                .as_deref()
-                .expect("owned build image has a tag");
-            match remove_image_if_missing(context, tag).context("tearing down benchmark image") {
-                Ok(()) => self.build_tag_needs_cleanup = false,
-                Err(error) => failures.push(format!("owned image cleanup failed: {error:#}")),
+        if self.build_attempted {
+            if let Err(error) = self.adopt_owned_images(context) {
+                failures.push(format!("owned image discovery failed: {error:#}"));
+            }
+            if let Err(error) = self.cleanup_owned_images(context) {
+                failures.push(format!("owned image cleanup failed: {error:#}"));
             }
         }
 
         if self.owned_containers.is_empty()
             && self.owned_networks.is_empty()
-            && !self.build_tag_needs_cleanup
+            && self.owned_images.is_empty()
+            && failures.is_empty()
             && let Some(root) = self.scratch.root.clone()
         {
             match remove_scratch_directory(&root) {
@@ -786,32 +887,28 @@ impl DockerWorkload {
             .build_tag
             .clone()
             .expect("build workloads have an owned image tag");
-        let args: Vec<String> = if self.kind == Kind::Buildx {
-            vec![
-                "buildx".to_owned(),
-                "build".to_owned(),
-                "--load".to_owned(),
-                "-t".to_owned(),
-                tag.clone(),
-                path,
-            ]
+        let mut args = if self.kind == Kind::Buildx {
+            vec!["buildx".to_owned(), "build".to_owned(), "--load".to_owned()]
         } else {
-            vec!["build".to_owned(), "-t".to_owned(), tag.clone(), path]
+            vec!["build".to_owned()]
         };
-        // A failed build may have created or retagged an image before it
-        // reported the error. The tag is unique to this workload, so it is
-        // safe for teardown to remove it even on that partial path.
-        self.build_tag_needs_cleanup = true;
-        let (built, build_ms) = timed(|| context.runner.run("docker", &args));
+        args.extend(self.resource_labels("image"));
+        args.extend(["-t".to_owned(), tag.clone(), path]);
+        // A failed build may have created an image before it reported the
+        // error. Teardown recovers only the exact owner-labeled IDs.
+        self.build_attempted = true;
+        let (built, build_ms) = timed(|| context.runner.run("docker", &args).cloned());
         let built = built?;
         if !built.ok() {
             bail!("docker build failed: {}", built.stderr.trim());
         }
+        let (captured, inspect_ms) = timed(|| self.capture_owned_image(context, &tag));
+        captured?;
         let (hits, misses) = count_layer_cache(&format!("{}\n{}", built.stdout, built.stderr));
         resources.cache_hits = hits;
         resources.cache_misses = misses;
         stages.insert(Stage::FirstUserCommand, build_ms);
-        stages.insert(Stage::CompletionOverhead, 0);
+        stages.insert(Stage::CompletionOverhead, inspect_ms);
         stages.insert(Stage::Teardown, 0);
         Ok(())
     }
@@ -1030,11 +1127,26 @@ mod tests {
     }
 
     #[test]
+    fn owned_image_inspect_requires_matching_owner_and_id() {
+        let id = "d".repeat(64);
+        assert_eq!(
+            parse_owned_image_inspect(&format!("sha256:{id} owner-token"), "owner-token")
+                .expect("valid owned image"),
+            format!("sha256:{id}")
+        );
+        assert!(
+            parse_owned_image_inspect(&format!("sha256:{id} other-owner"), "owner-token").is_err()
+        );
+        assert!(parse_owned_image_inspect("sha256:not-an-id owner-token", "owner-token").is_err());
+    }
+
+    #[test]
     fn resource_labels_bind_owner_and_role() {
         let workload = DockerWorkload {
             kind: Kind::JobContainer,
             build_tag: None,
-            build_tag_needs_cleanup: false,
+            build_attempted: false,
+            owned_images: Vec::new(),
             scratch: ScratchOwner::new(),
             owned_containers: Vec::new(),
             owned_networks: Vec::new(),
@@ -1062,7 +1174,8 @@ mod tests {
         let mut workload = DockerWorkload {
             kind: Kind::JobContainer,
             build_tag: None,
-            build_tag_needs_cleanup: false,
+            build_attempted: false,
+            owned_images: Vec::new(),
             scratch: ScratchOwner::new(),
             owned_containers: Vec::new(),
             owned_networks: Vec::new(),
@@ -1104,7 +1217,8 @@ mod tests {
         let mut workload = DockerWorkload {
             kind: Kind::JobContainer,
             build_tag: None,
-            build_tag_needs_cleanup: false,
+            build_attempted: false,
+            owned_images: Vec::new(),
             scratch: ScratchOwner::new(),
             owned_containers: vec![OwnedContainer {
                 name: "possible-foreign-name".to_owned(),
@@ -1170,7 +1284,8 @@ mod tests {
         let mut workload = DockerWorkload {
             kind: Kind::JobContainer,
             build_tag: None,
-            build_tag_needs_cleanup: false,
+            build_attempted: false,
+            owned_images: Vec::new(),
             scratch,
             owned_containers: Vec::new(),
             owned_networks: Vec::new(),
