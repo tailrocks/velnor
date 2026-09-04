@@ -30,7 +30,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 31e8e026f655d816a04e7010302004a2bbfd225a \
+            --rev 76d34ca5eaca700ed0d0a4aca3952542dcdc591e \
             --root "$VELNOR_WORKFLOW_ROOT" \
             --bin velnor-workflow
           echo "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"
