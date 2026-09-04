@@ -15029,6 +15029,160 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
+    /// A busy neighbour must never fail an acquired job. `Store` already
+    /// serialises writers, so concurrent admissions queue and all succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_admissions_from_every_slot_all_succeed() {
+        let base = unique_temp_dir("blocking-admission-concurrent");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        let admissions = (0..8).map(|slot| {
+            let sink = Arc::clone(&sink);
+            async move {
+                persist_admission_on_blocking_pool(
+                    sink,
+                    blocking_admission_test_input(&format!("job-blocking-slot-{slot}")),
+                )
+                .await
+            }
+        });
+        let outcomes = futures_util::future::join_all(admissions).await;
+
+        assert_eq!(outcomes.len(), 8);
+        for outcome in outcomes {
+            assert_eq!(outcome, AdmissionPersistenceOutcome::Accepted);
+        }
+        assert!(!sink.degraded());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Read-only closure admission serialises nothing it does not have to: up
+    /// to `ACTION_ADMISSION_CONCURRENCY` jobs admit at once, and the job that
+    /// arrives next waits for a slot instead of being rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn action_admission_slots_are_concurrent_and_waiting() {
+        let mut held = Vec::new();
+        for _ in 0..ACTION_ADMISSION_CONCURRENCY {
+            let (permit, waited) = acquire_action_admission_slot(Duration::from_secs(5))
+                .await
+                .expect("an unheld admission slot is granted immediately");
+            assert!(waited < Duration::from_secs(1));
+            held.push(permit);
+        }
+
+        // With every slot held, the next caller waits and then proceeds — the
+        // release, not a rejection, is what ends the wait.
+        let waiter = tokio::spawn(acquire_action_admission_slot(Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "the caller must wait, not fail");
+        held.pop();
+        let (_permit, waited) = waiter
+            .await
+            .expect("waiter task")
+            .expect("a released slot must be granted, never rejected");
+        assert!(waited >= Duration::from_millis(50));
+    }
+
+    /// A genuinely exhausted budget is a bounded, explained wait — never an
+    /// instant "another slot is busy" failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exhausted_action_admission_budget_reports_a_bounded_wait() {
+        let mut held = Vec::new();
+        for _ in 0..ACTION_ADMISSION_CONCURRENCY {
+            let (permit, _) = acquire_action_admission_slot(Duration::from_secs(5))
+                .await
+                .expect("an unheld admission slot is granted immediately");
+            held.push(permit);
+        }
+
+        let budget = Duration::from_millis(120);
+        let started = Instant::now();
+        let waited = acquire_action_admission_slot(budget)
+            .await
+            .map(|_| ())
+            .expect_err("a fully held limiter must exhaust the budget, not return early");
+        assert!(waited >= budget, "the caller waited the whole budget");
+        assert!(
+            started.elapsed() < budget + Duration::from_secs(2),
+            "the wait stays bounded by the budget"
+        );
+        assert_eq!(
+            WaitReason::LocalAdmissionLimiter.as_str(),
+            "local_admission_limiter"
+        );
+    }
+
+    /// An operational store that cannot answer inside its bounded deadline is
+    /// a real infrastructure failure, and is reported as one — distinctly from
+    /// a rejected row and from a worker panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operational_admission_deadline_is_bounded_and_distinct() {
+        let base = unique_temp_dir("blocking-admission-deadline");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        let deadline = Duration::from_millis(150);
+        let started = Instant::now();
+        let outcome = persist_admission_on_blocking_pool_with(
+            sink,
+            blocking_admission_test_input("job-blocking-deadline"),
+            deadline,
+            |_sink, _admission| -> bool {
+                // Long enough that only the deadline can end the wait, short
+                // enough that the runtime's blocking task does not hold test
+                // shutdown open.
+                std::thread::sleep(Duration::from_secs(2));
+                true
+            },
+        )
+        .await;
+
+        assert_eq!(outcome, AdmissionPersistenceOutcome::DeadlineExceeded);
+        assert_ne!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
+        assert!(
+            started.elapsed() >= deadline && started.elapsed() < deadline + Duration::from_secs(5),
+            "the caller waits the deadline and no longer"
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stage_wait_telemetry_is_machine_readable() {
+        let fields = stage_wait_telemetry_fields(
+            JobStage::HostCapacityWait,
+            WaitReason::HostDiskCapacity,
+            u64::MAX,
+            1_700_000_000_000,
+        );
+        assert_eq!(
+            fields.get("stage"),
+            Some(&Value::from("host_capacity")),
+            "the stage names where the job is"
+        );
+        assert_eq!(
+            fields.get("wait_reason"),
+            Some(&Value::from("host_disk_capacity")),
+            "the wait reason names why it is not executing"
+        );
+        assert_eq!(
+            fields.get("stage_started_unix_ms"),
+            Some(&Value::from(1_700_000_000_000_u64))
+        );
+        assert_eq!(
+            fields.get("ms"),
+            Some(&Value::from(MAX_TELEMETRY_DURATION_MS)),
+            "durations stay bounded"
+        );
+        assert_eq!(fields.get("cause"), Some(&Value::from("host_capacity")));
+    }
+
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
