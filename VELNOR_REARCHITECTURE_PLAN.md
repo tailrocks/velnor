@@ -961,3 +961,59 @@ Therefore:
 Rules 1-3 exist because build output in a shared tree is unattributable. Rule 4 exists
 because two separate findings in this program were artifacts of reading another agent's
 uncommitted work.
+
+### BC-31 — Automation that matches nothing looks exactly like automation that works
+
+The reason a known-defective `.0` toolchain pin survived is not that nobody configured
+Renovate. Renovate *appeared* to cover the toolchain: a custom manager described as "rust
+toolchain pin in the job image Dockerfile" matched `\brust@([0-9.]+)` against
+`docker/job-ubuntu.Dockerfile`. That string does not occur in that file — its only `@`
+occurrences are the pinned `ubuntu:26.04@sha256:…` digest and a `printf`. The manager matched
+nothing, produced zero updates, and presented as coverage. `1.97.1`, also a miscompilation
+backport, was uncovered for the same reason.
+
+**Nine of the remaining ten custom managers have the identical defect.** They match
+`docker/job-ubuntu.Dockerfile` for strings such as `'cargo:cargo-nextest@…'`, `\bjust@`,
+`\bprotoc@` and `\bgh@`, none of which exist in that file — those pins now live in
+`mise.toml` and `docker/job-mise.toml`. Only the `sccache`, `hadolint`, `cosign` and
+`MISE_VERSION` matchers correspond to real strings.
+
+Missing invariant: *a matcher that matches nothing is a failure, not a pass.* A regex manager
+with zero matches must be an error in CI, exactly as an empty test suite should be.
+
+A related discovery from the same work: the mise lockfiles are **hard pin sites**, not
+derived artifacts. mise resolves Rust from `rust-toolchain.toml` via
+`idiomatic_version_file_enable_tools = ["rust"]` and then exports `RUSTUP_TOOLCHAIN` from the
+resolved lock entry, so a stale `mise.lock` silently keeps the old compiler after the channel
+moves. This was observed live: after the channel was edited, `rustc --version` still reported
+1.98.0. Five content sites had to move together — `rust-toolchain.toml`, `mise.lock`,
+`docker/build-mise.lock`, `docker/job-mise.lock`, and the prose in
+`content/docs/guides/development.mdx`.
+
+### Confirmed: `recursion_depth_exceeding_limit` is real at the starting SHA
+
+Verified against an immutable `git archive` snapshot of `2858e92`, per the evidence rule
+above: `cargo +nightly-2026-09-01 check -p velnor-runner --locked --features test-support`
+emits exactly one warning — `overflow evaluating the requirement … Send` for the
+`tokio::spawn(async move { … })` at `crates/velnor-runner/src/runner.rs:2592`. Proving `Send`
+walks the nested async chain (`configure` → `remove_existing_jit_config_for_replace` →
+`prewarm_daemon_slot_successor` → `prewarm_successor_after_job` → onward) until the trait
+solver overflows.
+
+It does **not** fire on stable 1.98.0 or 1.98.1, so `-D warnings` cannot currently see it:
+the gate is green by luck. rust#159228 makes it a hard compiler error regardless of lint
+level, so it must be budgeted into any upgrade beyond the 1.98.x series. `#![recursion_limit]`
+is de-risking, not the fix; the enabling condition is the depth of that async chain, and
+boxing a link in it is the structural remedy.
+
+The "77 warnings" and the dead code in `expression/value.rs` observed alongside it were
+entirely another agent's work in progress — at the audited SHA the crate generates exactly
+one warning.
+
+## 13. Completed work packages (continued)
+
+| ID | Change | Commits |
+| --- | --- | --- |
+| T-001 | P0 toolchain: Rust 1.98.0 → 1.98.1 (vtable miscompilation, rust#161441) across all five pin sites, and a Renovate manager that actually matches them, grouped into one PR with no stabilization delay so a correctness backport is not held back. Gates on 1.98.1: fmt pass, workspace build pass, clippy pass on the nine crates untouched by concurrent work. | `e1bc67b` |
+| T-007a | Job execution given its own thread, control-plane pool bounded — the prerequisite for removing the fail-closed admission permits. | `239c695` |
+| T-006a | Workflow commands: leading whitespace trimmed before matching, closing the `add-mask` bypass that let a whitespace-prefixed mask directive be ignored and the secret printed. | `766b214` |
