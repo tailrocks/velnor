@@ -513,7 +513,7 @@ fn store_roots_with_layout(
     if let Some(layout) = layout {
         stores.push(StoreRoot {
             kind: CacheStore::GhaCache,
-            path: crate::store_catalog::gha_cache_root(&layout).join("tenants"),
+            path: crate::store_catalog::gha_cache_root(layout).join("tenants"),
             scope_prefix: Vec::new(),
             scope_depth: 1,
             candidate_depth: 1,
@@ -670,7 +670,7 @@ fn reclaim_for_disk_pressure_with_context(
             break;
         }
         match reclaim_work_root_with_layout(
-            &work_root,
+            work_root,
             &run_root,
             &log_root,
             remaining,
