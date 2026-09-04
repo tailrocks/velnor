@@ -2926,13 +2926,13 @@ and mixed native/JavaScript post-action ordering remain in the other lead's rese
 
 This is the newest handoff record. It supersedes stale current-tip counts in §§20 and 22 while
 leaving those sections as history. The tested runner source snapshot is
-`c5bf24df93e7e6a4fc2a94489570e9218677d9af`; it was materialized with
-`git archive c5bf24df93e7e6a4fc2a94489570e9218677d9af | tar -x -C <scratch>`.
+`41624d4e13f46c9b35c0e5586c4623713c1e5d5e`; it was materialized with
+`git archive 41624d4e13f46c9b35c0e5586c4623713c1e5d5e | tar -x -C <scratch>`.
 The verifier's current provenance commit is
-`33983a2b12f73df90d9ed9db15df9224563a095a`, with the generated baseline introduced by its
-parent `926eb072660b5d87d11bc864cea45918ec471d90`. Manifest identity is v12, crate `0.1.250`,
+`14b2a27d2028f939bdc6e05ada7de5c1649e7f9b`, with the generated baseline introduced by its
+parent `3ddfdddf13b25dad2845c2d9792e926266f2c91c`. Manifest identity is v12, crate `0.1.250`,
 capability ID `23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and source
-SHA `c5bf24df93e7e6a4fc2a94489570e9218677d9af`. No live dual-lane verdict or deployed image
+SHA `41624d4e13f46c9b35c0e5586c4623713c1e5d5e`. No live dual-lane verdict or deployed image
 digest is claimed.
 
 ### T-001 capability surface
@@ -2970,7 +2970,7 @@ and ephemeral-identity behavior. This is the `fb8ae38` documentation package.
 
 `capability_id` is SHA-256 over canonical capability content excluding only `source_sha` and
 `capability_id`; the full lowercase source SHA remains mandatory provenance. The fixture refresh
-and source-bound readiness audit pass against the c5bf24d archive. Baseline-only and single-lane
+and source-bound readiness audit pass against the 41624d4 archive. Baseline-only and single-lane
 diagnostics remain fail-closed; no live parity result is substituted.
 
 ### Final gates
