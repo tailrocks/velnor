@@ -1986,7 +1986,7 @@ fn slot_has_admission_block(
                     | ActorPhase::Completing
             )
     }) || state.outbox.iter().any(|row| {
-        row.intended && !row.remote_acked && row.slot_id == *slot_id && row.generation == generation
+        row.is_pending() && row.slot_id == *slot_id && row.generation == generation
     })
 }
 
@@ -2782,6 +2782,10 @@ mod tests {
             send_started: false,
             remote_acked: false,
             created_unix: 0,
+            attempts: 0,
+            deadline_unix: 0,
+            permanent: false,
+            abandoned: false,
         });
 
         assert!(slot_has_admission_block(
