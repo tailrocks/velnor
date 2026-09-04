@@ -1390,3 +1390,57 @@ proven non-vacuous by injecting a bogus key.
 | --- | --- | --- |
 | T-014 | Eight dead custom managers deleted; the native mise manager pointed at the image configs that were never covered; `MISE_VERSION` coverage widened to the root `Dockerfile`, which was unmanaged entirely; pin-integrity gate added and proven to fail. | `6bb40d0`, `8c84237` |
 | T-012a | The two environment divergences reconciled: `cargo-nextest` 0.9.140 → 0.9.143 in the root `mise.toml`, `MISE_VERSION` v2026.8.14 → v2026.9.1 in `Dockerfile`. | `f1e272f` |
+
+### Correction — the Docker instrumentation the benchmark needs already exists
+
+The benchmark package reported that no `CommandRunner` counting decorator exists and
+specified one for a future package. That was true when it looked and is stale now: the Docker
+deadline work landed the instrumentation at exactly that seam.
+
+At `origin/perf/docker-rust-mbx`: `crates/velnor-runner/src/docker/metrics.rs` exists, and
+`executor.rs` calls `docker_deadline` and `record_docker_result` from every `CommandRunner`
+method (`:593`/`:645`, `:676`/`:737`, `:798`/`:838`, and the stdin variant). Per-call fields
+are `docker_op`, `docker_latency_ms`, `docker_exit_code`, `docker_timed_out`,
+`docker_invocation`; per-job totals are emitted from a drop guard so they report even on an
+early return. Field names are a closed vocabulary — an unclassified subcommand logs
+`"unclassified"` rather than the raw token — so no argv content reaches the sink.
+
+Consequence: `crates/velnor-bench/README.md` still asks for a decorator that now exists, and
+`sys::Runner` still counts only the harness's own processes. Wiring the benchmark to consume
+the runner's per-job Docker counters is a small follow-up, and it is what makes the 12+N and
+52-72 per-job process figures in BC-7 measurable rather than estimated.
+
+Still genuinely missing, as that package reported: the per-phase checkout spans (mirror lock
+wait, mirror fetch, workspace fetch, workspace checkout, mtime normalization). Those belong
+with the checkout package.
+
+### BC-32 and BC-33 — the runner's own timing analytics cannot report a breach
+
+Recorded by the benchmark package while building the harness, and they matter because they
+are the numbers the runner reports about itself.
+
+**BC-32.** Every `JobTimingRecord` is constructed with `teardown_ms: 0` (`runner.rs:6215`).
+The teardown thread overwrites it at `:8507` only on the path that has a `TeardownHandle`; the
+path without one emits the zero at `:6226`, and that feeds `timing_percentiles` (`:11584`)
+into the `DEFAULT_SLO_TEARDOWN_MS = 2_000` check at `:11674`. A zero can never breach a two
+second budget, so the teardown SLO cannot fire. The fix is the class fix rather than the
+assignment: make it `Option<u64>`, `None` at construction, filtered out of the percentile
+exactly as `queue_ms` already is, so the SLO reports "no samples" instead of "satisfied".
+`finalize_ms` and `container_boot_ms` are built at the same site and owe the same audit.
+
+In the same function, `percentile` (`:11575`) has **no minimum-n guard**, so a single
+completed job reports itself as the p95 — the identical defect to the benchmark script that
+was just deleted for printing a p95 at n=5. The runner's 100-record window is large enough to
+satisfy a p95 rule once a guard exists.
+
+**BC-33.** `load_recent_job_timings` (`:11630`) recovers records by splitting `lifecycle.log`
+lines on the literal `"job-timing "` (`:11564`). Change that prefix and the SLOs do not
+breach — they *disappear*, reporting "no completed job-timing records yet", which reads as
+health. The sort at `:11647` compares the timestamp prefix as a string, which is
+chronologically correct only because `unix_now_iso8601` is pinned to fixed-width UTC with
+seven fractional digits — and that format is maintained for an unrelated reason, GitHub's log
+UI strip rule (`:9917-9932`). Analytics sort correctness is load-bearing on a web-UI
+rendering constraint, and nothing tests the coupling.
+
+Both are RC-3 in miniature: a contract recovered by re-parsing a rendering rather than read
+through the serialiser that wrote it.
