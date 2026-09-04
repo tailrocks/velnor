@@ -25,7 +25,7 @@ use crate::{
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
-    sys::{tree_bytes, Runner, Rusage},
+    sys::{tree_bytes, Runner},
 };
 
 /// How the workspace is prepared before each measured iteration.

@@ -639,14 +639,14 @@ fn write_toml_array(output: &mut String, name: &str, values: &[String]) {
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the scan pass keeps generic detectors in one auditable pipeline"
-)]
 pub fn scan_repository(root: &Path, runners: RunnerMode) -> Result<ProjectConfig, GeneratorError> {
     scan_repository_with_default_branch(root, runners, "main")
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the scan pass keeps generic detectors in one auditable pipeline"
+)]
 fn scan_repository_with_default_branch(
     root: &Path,
     runners: RunnerMode,
@@ -3095,6 +3095,10 @@ impl WorkflowIr {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the legacy renderer remains a single auditable workflow pass"
+    )]
     fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) = match kind {
@@ -6065,12 +6069,12 @@ fn resolve_default_branch(repository: &Path) -> Result<String, GeneratorError> {
         .arg(repository)
         .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         .output();
-    if let Ok(output) = symbolic_ref {
-        if output.status.success() {
-            let reference = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if let Some(branch) = reference.strip_prefix("origin/") {
-                return validate_default_branch(branch).map(str::to_owned);
-            }
+    if let Ok(output) = symbolic_ref
+        && output.status.success()
+    {
+        let reference = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if let Some(branch) = reference.strip_prefix("origin/") {
+            return validate_default_branch(branch).map(str::to_owned);
         }
     }
 
@@ -6113,7 +6117,9 @@ fn validate_default_branch(branch: &str) -> Result<&str, GeneratorError> {
         && !branch.contains("..")
         && !branch.contains("@{")
         && !branch.contains("//")
-        && !branch.ends_with(".lock")
+        && !Path::new(branch)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"))
         && !branch.chars().any(|character| {
             character.is_control()
                 || character.is_whitespace()
