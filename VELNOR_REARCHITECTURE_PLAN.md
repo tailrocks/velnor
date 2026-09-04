@@ -3296,3 +3296,13 @@ the protected branch, operators must add its exact `Velnor workflow policy /
 Policy` check to the ruleset and verify one test PR before declaring the merge
 gate complete. Existing handwritten Velnor workflows remain outside generator
 ownership until separately migrated.
+
+## 35. Workflow install command correction — multi-binary workspace
+
+The hosted bootstrap and immutable policy workflow must pass the positional
+`velnor-workflow` package to `cargo install`; `--bin` alone is rejected when
+the Velnor git workspace contains multiple binary packages. This correction
+preserves the existing pinned-source and pinned-policy trust boundaries and
+is covered by a direct `cargo install --locked --git ... --rev ...
+velnor-workflow --bin velnor-workflow` proof. The corrected immutable policy
+workflow is now pinned at `0b68533ea24e8259ebd8aee54e36905debe8fcc3`.

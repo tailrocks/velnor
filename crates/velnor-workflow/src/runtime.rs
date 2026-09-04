@@ -22,7 +22,7 @@ use serde_yaml::{Mapping, Value};
 
 const IMMUTABLE_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
-const IMMUTABLE_POLICY_WORKFLOW_REV: &str = "fe805b984d3e261d3686d7ec670792f8121306bc";
+const IMMUTABLE_POLICY_WORKFLOW_REV: &str = "0b68533ea24e8259ebd8aee54e36905debe8fcc3";
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
@@ -1370,7 +1370,7 @@ mod tests {
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
         std::fs::write(
             root.join(".github/workflows/ci-policy.yml"),
-            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@fe805b984d3e261d3686d7ec670792f8121306bc\n    permissions:\n      contents: read\n",
+            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@0b68533ea24e8259ebd8aee54e36905debe8fcc3\n    permissions:\n      contents: read\n",
         )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
@@ -1431,7 +1431,7 @@ name: Policy caller
 on: pull_request
 jobs:
   policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@fe805b984d3e261d3686d7ec670792f8121306bc
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@0b68533ea24e8259ebd8aee54e36905debe8fcc3
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1482,7 +1482,7 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@fe805b984d3e261d3686d7ec670792f8121306bc
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@0b68533ea24e8259ebd8aee54e36905debe8fcc3
     permissions:
       contents: read
 ";
