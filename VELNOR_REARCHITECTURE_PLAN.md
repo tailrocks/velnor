@@ -3485,3 +3485,13 @@ Focused source proof at `19c66ba43c30822b6ea93956bfd2dce774fc8fb5`:
 format/diff checks passed. This slice does not claim borrowed-image-safe cold
 pull semantics, full Docker Engine resource labels, live daemon fault proof,
 or end-to-end runner/fixture evidence; those remain separate work.
+
+## 48. Docker image-pull fail-closed boundary — `d61c7e5` (2026-09-05)
+
+`docker/image-pull` now fails closed before workload construction. The
+destructive shared-daemon image removal/pull lifecycle was deleted.
+
+Focused proof at `d61c7e5`: `velnor-bench` tests passed (`97`), the format check
+passed, and strict Clippy passed. Remaining follow-up: implement a disposable
+Docker daemon/data-root/socket per measured iteration, with no shared-daemon
+mutation. `image-pull` remains unrun until then.
