@@ -669,7 +669,11 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
-        mutations: true,
+        // The durable ledger is not an actuator until a reconciler is wired
+        // into this daemon. Advertising write capability here would make the
+        // client claim that a lifecycle request can take effect when the
+        // handler correctly returns 501.
+        mutations: false,
     })
 }
 
@@ -1325,14 +1329,6 @@ mod tests {
         shutdown.send(true).expect("signal control shutdown");
         server.await.expect("join control server").expect("serve");
         let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn admin_info_advertises_mutation_capability() {
-        let Json(info) = info_admin().await;
-        assert!(info.mutations);
-        assert_eq!(info.api_version, "v1");
-        assert_eq!(info.schema_version, SCHEMA_VERSION);
     }
 
     #[tokio::test]

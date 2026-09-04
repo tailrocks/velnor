@@ -566,7 +566,9 @@ fn validate_info(info: &Info, mutations: bool) -> Result<(), ClientError> {
         });
     }
     if mutations && !info.mutations {
-        return Err(ClientError::Authorization);
+        return Err(ClientError::Unsupported {
+            operation: "lifecycle mutations".to_owned(),
+        });
     }
     Ok(())
 }
@@ -675,6 +677,8 @@ pub enum ClientError {
         api_version: String,
         schema_version: u32,
     },
+    /// The daemon knows the API but does not implement the requested operation.
+    Unsupported { operation: String },
     /// Peer authorization rejected the operation.
     Authorization,
     /// Request deadline elapsed.
@@ -700,6 +704,9 @@ impl fmt::Display for ClientError {
                 formatter,
                 "unsupported control API {api_version} schema {schema_version}"
             ),
+            Self::Unsupported { operation } => {
+                write!(formatter, "unsupported control API operation: {operation}")
+            }
             Self::Authorization => formatter.write_str("control API authorization denied"),
             Self::Timeout => formatter.write_str("control API request timed out"),
             Self::Io { message, .. } => formatter.write_str(message),
@@ -726,6 +733,7 @@ impl ClientError {
                 ExitClass::from_code(envelope.code).unwrap_or(ExitClass::Transport)
             }
             Self::UnsupportedApi { .. } | Self::Io { .. } => ExitClass::Transport,
+            Self::Unsupported { .. } => ExitClass::Operation,
             Self::Authorization => ExitClass::Authorization,
             Self::Timeout => ExitClass::Timeout,
         }
@@ -761,6 +769,21 @@ mod tests {
             endpoint.socket_path(SocketKind::Control),
             endpoint.socket_path(SocketKind::Admin)
         );
+    }
+
+    #[test]
+    fn disabled_mutation_capability_is_not_reported_as_authorization() {
+        let error = validate_info(
+            &Info {
+                api_version: API_VERSION.to_owned(),
+                schema_version: SCHEMA_VERSION,
+                mutations: false,
+            },
+            true,
+        )
+        .expect_err("disabled mutation capability must fail closed");
+        assert!(matches!(error, ClientError::Unsupported { .. }));
+        assert_eq!(error.exit_class(), ExitClass::Operation);
     }
 
     #[tokio::test]
