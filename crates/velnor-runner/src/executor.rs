@@ -9403,8 +9403,7 @@ fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact actions require a temp directory"))?;
     let run_key = artifact_run_key(state);
-    let run_root = shared_work_root(temp);
-    Ok(run_root.join("_velnor_artifacts").join(run_key))
+    Ok(crate::store_catalog::StoreCatalog::for_job_temp(temp).artifacts_run(&run_key))
 }
 
 /// Resolve the store directory for a cache entry. Trust and repository remain
