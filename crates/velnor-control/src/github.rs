@@ -8,6 +8,8 @@ use velnor_model::{GithubArtifact, GithubJob, GithubRun, RepositoryRef};
 use crate::ports::PortError;
 
 const MAX_PAGE: u32 = 100;
+const CANCELLABLE_STATUSES: [&str; 5] =
+    ["queued", "in_progress", "requested", "waiting", "pending"];
 
 /// Typed GitHub transport failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,8 +117,10 @@ impl<C: GithubApi> GithubService<C> {
             .client
             .get_run(repository, run_id)
             .map_err(PortError::from)?;
-        if run.status == "completed" {
-            return Ok(false);
+        match run.status.as_str() {
+            "completed" => return Ok(false),
+            status if CANCELLABLE_STATUSES.contains(&status) => {}
+            _ => return Err(GithubError::InvalidResponse.into()),
         }
         self.client
             .cancel_run(repository, run_id)
@@ -219,5 +223,45 @@ mod tests {
         assert!(!service
             .cancel_run(&RepositoryRef::new("tailrocks", "velnor"), 7)
             .expect("cancel check"));
+    }
+
+    #[test]
+    fn unknown_run_status_fails_closed_without_cancelling() {
+        let fake = Fake {
+            run: run("mysterious"),
+            canceled: std::sync::Mutex::new(0),
+        };
+        let service = GithubService::new(fake);
+        let result = service.cancel_run(&RepositoryRef::new("tailrocks", "velnor"), 7);
+
+        assert_eq!(result, Err(PortError::from(GithubError::InvalidResponse)));
+        assert_eq!(*service.client.canceled.lock().expect("counter"), 0);
+    }
+
+    #[test]
+    fn malformed_run_status_fails_closed_without_cancelling() {
+        let fake = Fake {
+            run: run(" in_progress "),
+            canceled: std::sync::Mutex::new(0),
+        };
+        let service = GithubService::new(fake);
+        let result = service.cancel_run(&RepositoryRef::new("tailrocks", "velnor"), 7);
+
+        assert_eq!(result, Err(PortError::from(GithubError::InvalidResponse)));
+        assert_eq!(*service.client.canceled.lock().expect("counter"), 0);
+    }
+
+    #[test]
+    fn known_cancellable_status_is_cancelled() {
+        let fake = Fake {
+            run: run("in_progress"),
+            canceled: std::sync::Mutex::new(0),
+        };
+        let service = GithubService::new(fake);
+
+        assert!(service
+            .cancel_run(&RepositoryRef::new("tailrocks", "velnor"), 7)
+            .expect("cancel check"));
+        assert_eq!(*service.client.canceled.lock().expect("counter"), 1);
     }
 }
