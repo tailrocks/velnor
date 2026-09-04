@@ -2884,6 +2884,9 @@ The shared branch now contains these bounded follow-ups from the post-handoff au
   registered before that hook while cancellation fan-out preserves registration order. The
   graceful guest stop is therefore not proven at this tip; the ordering fix remains in the other
   lead's reserved `execution/firecracker.rs` and `execution/cancel.rs`.
+- `0a23bbc` closes the opposite cancellation failure direction: an unknown Docker inspect error
+  keeps the container in the escalation ladder instead of falsely treating an unproven daemon as
+  gone.
 - `931ac8a` wires recovery of a durable provisional acquire through the `renewjob` ownership
   oracle. It is integrated, but its transport and controller call sites remain part of the other
   lead's runner boundary.
@@ -2904,12 +2907,11 @@ The shared branch now contains these bounded follow-ups from the post-handoff au
   CAS crates. The later journal/CAS durability findings therefore do not apply to this tree; no
   remaining root publisher owns that abandoned API.
 
-The fixture baseline is synchronized to `2c2b40ec63f33d16a96bb052d9412efaf789e6b9`; its latest
-generated export is present at fixture commit `c2292450ab479741d71eaad8d35e6373d6680938` on the
-shared fixture branch. The refresh
-readiness audit passed; the full fixture gate remains to be rerun at this final source tip. The
-preceding integrated tip passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
-formatting, workspace, capability, and L2 closure checks.
+The fixture baseline is synchronized to `02284d9ad98cf429263d18a3d595df66e6bdec13`; its latest
+generated export is present at fixture commit `1ac2e10b9eb082af5615b91043924e5c4b82aeeb` on the
+shared fixture branch. The refresh readiness audit and the full fixture gate passed at this tip:
+49 Rust tests, 38 Python tests, workflow/actionlint, formatting, workspace, capability, and L2
+closure checks.
 
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
 mixed native/JavaScript post-action ordering, and the microVM registration order remain in the
