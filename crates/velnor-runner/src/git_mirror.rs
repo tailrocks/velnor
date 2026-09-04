@@ -354,7 +354,6 @@ fn mirror_is_healthy<R: CommandRunner>(runner: &mut R, mirror: &Path) -> bool {
             "-C".to_string(),
             path_arg(mirror),
             "for-each-ref".to_string(),
-            "--count=1".to_string(),
             "--format=%(objectname)".to_string(),
         ],
     ) else {
@@ -363,11 +362,10 @@ fn mirror_is_healthy<R: CommandRunner>(runner: &mut R, mirror: &Path) -> bool {
     if refs.code != 0 {
         return false;
     }
-    let Some(object) = refs.stdout.split_whitespace().next() else {
-        // A freshly initialized mirror has no refs yet and no objects to lose.
-        return true;
-    };
-    object_exists(runner, mirror, object)
+    // A freshly initialized mirror has no refs yet and no objects to lose.
+    refs.stdout
+        .split_whitespace()
+        .all(|object| object_exists(runner, mirror, object))
 }
 
 fn object_exists<R: CommandRunner>(runner: &mut R, mirror: &Path, object: &str) -> bool {
@@ -938,6 +936,34 @@ mod tests {
         assert!(repaired.repaired);
         assert_eq!(repaired.sha, sha);
         assert!(mirror_is_healthy(&mut runner, &repaired.path));
+    }
+
+    #[test]
+    fn mirror_health_checks_every_ref_tip() {
+        let fixture = Fixture::new();
+        let sha = fixture.commit("one");
+        let mut runner = ProcessCommandRunner;
+        let mirror = ensure_mirror(
+            &mut runner,
+            &fixture.store,
+            &fixture.clone_url(),
+            None,
+            &want(&sha),
+        )
+        .unwrap();
+        let mirror_path = mirror.path.clone();
+        drop(mirror);
+
+        let heads = mirror_path.join("refs/heads");
+        fs::create_dir_all(&heads).unwrap();
+        fs::write(heads.join("aaa"), format!("{sha}\n")).unwrap();
+        fs::write(
+            heads.join("zzz"),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+        )
+        .unwrap();
+
+        assert!(!mirror_is_healthy(&mut runner, &mirror_path));
     }
 
     #[test]
