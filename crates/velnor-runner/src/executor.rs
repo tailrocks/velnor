@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
-    fs::{self, OpenOptions},
+    fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -82,6 +82,162 @@ const PERSISTENT_TARGET_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PERSISTENT_TARGET_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 static DOCKER_TIMEOUT_CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Bind a container-writable root to a directory descriptor.
+///
+/// Every tree Velnor bind-mounts into a job is writable by that job: the job
+/// temp dir alone appears at `/__t`, at `/tmp` and at its own host path, and
+/// the mise executable store appears at `/opt/mise/installs`. Every name the
+/// runner later touches inside one of those trees is therefore chosen by the
+/// job, and a path-based `fs::write`, `fs::read_to_string` or `create_dir_all`
+/// follows whatever symlink the job left at that name — an arbitrary host-file
+/// write, truncate or read as the daemon user, with no race to win.
+///
+/// The mount *root* itself is not attacker-replaceable (inside the container it
+/// is the mount point, and its host parent is never exposed), so it is treated
+/// as trusted and canonicalized once — the same split `script_step` already
+/// makes for `RUNNER_TEMP`. Everything below it is reached descriptor-relative
+/// and `O_NOFOLLOW`. Stat-then-open would only narrow the race, not close it.
+fn open_job_writable_root(root: &Path) -> Result<crate::fs_copy::NoFollowDestinationDir> {
+    crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(root, Path::new(""))
+        .with_context(|| {
+            format!(
+                "securely open {} without following symlinks",
+                root.display()
+            )
+        })
+}
+
+/// Create or replace one file below a container-writable root.
+///
+/// `write_file_from_reader` refuses a destination that is not a regular file,
+/// walks the parent components with `O_NOFOLLOW` (creating real directories for
+/// missing ones), stages the content in an `O_CREAT | O_EXCL | O_NOFOLLOW`
+/// temporary it created itself and renames that over the name. A planted
+/// symlink is therefore reported or replaced, never written through.
+fn write_job_writable_file(root: &Path, relative: &Path, contents: &[u8], mode: u16) -> Result<()> {
+    // The root is the trusted mount point, not a step-writable name, so
+    // creating it by path is safe — and it is what the path-based writes this
+    // replaces used to do implicitly.
+    fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
+    open_job_writable_root(root)?
+        .write_file_from_reader(&mut &contents[..], relative, contents.len() as u64, mode)
+        .with_context(|| format!("write {}", root.join(relative).display()))?;
+    Ok(())
+}
+
+/// Read one file below a container-writable root, or `None` when it is absent.
+///
+/// The open is descriptor-relative and `O_NOFOLLOW`, and a name that is not a
+/// regular file is an error rather than a redirect: a job cannot make the
+/// runner read — and then echo back — an arbitrary host file by leaving a
+/// symlink at a name the runner is about to open.
+fn read_job_writable_file(root: &Path, relative: &Path) -> Result<Option<String>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+    let Some(mut file) = open_job_writable_root(root)?
+        .open_relative_file_if_exists(relative)
+        .with_context(|| format!("open {}", root.join(relative).display()))?
+    else {
+        return Ok(None);
+    };
+    let mut contents = String::new();
+    Read::read_to_string(&mut file, &mut contents)
+        .with_context(|| format!("read {}", root.join(relative).display()))?;
+    Ok(Some(contents))
+}
+
+/// Remove one file below a container-writable root.
+///
+/// `unlinkat` never follows the final component, but the *parent* components
+/// still would: `remove_file(temp/_velnor/x)` with `_velnor` replaced by a
+/// symlink deletes an attacker-chosen host file. Walking the parents no-follow
+/// removes that.
+fn remove_job_writable_file(root: &Path, relative: &Path) -> Result<()> {
+    let Some(parent) = relative.parent() else {
+        bail!("path has no file name: {}", relative.display());
+    };
+    let Some(name) = relative.file_name() else {
+        bail!("path has no file name: {}", relative.display());
+    };
+    open_job_writable_root(root)?
+        .open_relative_directory(parent)?
+        .remove_tree_entry(name)
+}
+
+/// Create a directory that may live inside a container-writable tree.
+///
+/// Paths below `trusted_root` are created component by component with
+/// `O_NOFOLLOW`; a planted symlink is reported instead of being followed.
+/// Paths outside it (the daemon-owned shared store roots) keep plain
+/// `create_dir_all`, because no job can reach their components.
+fn create_job_writable_directory(trusted_root: &Path, path: &Path) -> Result<()> {
+    match path.strip_prefix(trusted_root) {
+        Ok(relative) => {
+            fs::create_dir_all(trusted_root)
+                .with_context(|| format!("create {}", trusted_root.display()))?;
+            open_job_writable_root(trusted_root)?.open_relative_directory(relative)?;
+            Ok(())
+        }
+        Err(_) => fs::create_dir_all(path).with_context(|| format!("create {}", path.display())),
+    }
+}
+
+const MISE_ENV_EXPORT_PATH: &str = "_velnor/mise-env.json";
+const MISE_ENV_REDACTED_EXPORT_PATH: &str = "_velnor/mise-env-redacted.json";
+
+/// Read (and then remove) the two files the mise setup script exports into the
+/// job temp dir.
+///
+/// Both names are fixed and both live in the container's own `/__t`, so any
+/// step can replace either with a symlink before the runner reads it. The
+/// contents are merged straight into the job environment and can be echoed by a
+/// later step, which turns a path-based `fs::read_to_string` into arbitrary
+/// host-file exfiltration as the daemon user. The reads are therefore
+/// descriptor-relative and `O_NOFOLLOW`, and a name that is not a regular file
+/// is an error rather than a redirect.
+fn take_mise_environment_exports(temp_host: &Path) -> Result<(String, String)> {
+    let env_path = Path::new(MISE_ENV_EXPORT_PATH);
+    let redacted_path = Path::new(MISE_ENV_REDACTED_EXPORT_PATH);
+    let exported_env = read_job_writable_file(temp_host, env_path)?.with_context(|| {
+        format!(
+            "read mise environment from {}",
+            temp_host.join(env_path).display()
+        )
+    })?;
+    let redacted_env = read_job_writable_file(temp_host, redacted_path)?.with_context(|| {
+        format!(
+            "read mise redacted environment from {}",
+            temp_host.join(redacted_path).display()
+        )
+    })?;
+    let _ = remove_job_writable_file(temp_host, env_path);
+    let _ = remove_job_writable_file(temp_host, redacted_path);
+    Ok((exported_env, redacted_env))
+}
+
+/// Stage a `buildkitd-config-inline` input as a file the job container reads
+/// back at `/__t/<name>`, and return that container path.
+///
+/// The file name is derived from a step input, so an earlier step of the same
+/// job knows the exact host path — and can write it, because the job temp dir
+/// *is* the container's `/__t` and `/tmp`. A path-based `fs::write` here
+/// follows a symlink planted at that name and becomes an arbitrary host-file
+/// write and truncate as the daemon user, with no race to win. The write is
+/// therefore descriptor-relative and no-follow, and refuses a destination that
+/// is not a regular file.
+fn write_buildkitd_config(temp_host: &Path, name: &str, contents: &str) -> Result<String> {
+    let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(name));
+    write_job_writable_file(
+        temp_host,
+        Path::new(&config_name),
+        contents.as_bytes(),
+        0o644,
+    )
+    .context("write BuildKit config")?;
+    Ok(format!("/__t/{config_name}"))
+}
 
 /// Return a stable test-runner label only when a shell segment starts with a
 /// recognized test command. Matching the command position avoids treating
@@ -411,6 +567,40 @@ fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
+/// Put a host child in its own process group.
+///
+/// Every host process Velnor starts becomes a group leader, so cancellation can
+/// signal `-pgid` and reach the whole tree — the shell, the compiler it forked,
+/// and the sibling daemon that compiler started. Without this a cancelled job's
+/// host children were never killed at all: the runner only ever knew the direct
+/// child's pid, and a `sh -c` wrapper exiting left everything under it running.
+fn own_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+/// Register a spawned child's process group with the running job's
+/// cancellation, for as long as the returned guard lives.
+///
+/// `ProcessCommandRunner` is the single seam every host spawn passes through,
+/// which is why registration lives here: no call site can forget it, and a
+/// process that outlives its `Command` is still a cancellation target.
+#[must_use]
+fn register_process_group(
+    pid: u32,
+    program: &str,
+) -> Option<crate::execution::cancel::TargetRegistration> {
+    let token = crate::execution::cancel::active()?;
+    Some(
+        token.register(crate::execution::cancel::TerminationTarget::ProcessGroup {
+            pgid: pid,
+            // Deliberately the program name only. An argument vector can carry
+            // a registry URL or a secret into an unredacted log sink.
+            label: program.to_string(),
+        }),
+    )
+}
+
 const PACKAGE_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 
 /// Deadline and operation class for one host process invocation.
@@ -530,6 +720,7 @@ impl CommandRunner for ProcessCommandRunner {
     fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
         let mut command = Command::new(program);
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let child = command
             .args(args)
             .stdin(Stdio::null())
@@ -619,9 +810,11 @@ impl CommandRunner for ProcessCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
         let (timed_out, watchdog_cancel, watchdog) =
             spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
         let output = child
@@ -684,9 +877,11 @@ impl CommandRunner for ProcessCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
         let stdout = child
             .stdout
             .take()
@@ -751,14 +946,24 @@ impl CommandRunner for ProcessCommandRunner {
             return self.run_timeout_with_env(program, args, env, DEFAULT_STEP_TIMEOUT);
         }
         let mut command = Command::new(program);
-        command.args(args);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for (name, value) in env {
             command.env(name, value);
         }
         configure_host_docker_command(&mut command, program, args)?;
-        let output = command
-            .output()
+        own_process_group(&mut command);
+        // Spawn rather than `output()` so the process group is registered with
+        // the job's cancellation before this thread blocks waiting for it.
+        let child = command
+            .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
 
         let result = CommandResult {
             code: exit_code(output.status)?,
@@ -807,9 +1012,11 @@ impl CommandRunner for ProcessCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
         let (timed_out, watchdog_cancel, watchdog) =
             spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
         if let Some(mut child_stdin) = child.stdin.take() {
@@ -1414,6 +1621,12 @@ pub(crate) struct DockerJobEngine<R> {
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
+    /// The running job's cancellation. Required, not optional: a job that could
+    /// not be cancelled is the defect this field exists to remove, so there is
+    /// no constructor that leaves it unset. Cleanup and teardown engines, which
+    /// are definitionally not the job, take an inert token through
+    /// [`DockerJobEngine::inert`].
+    cancellation: crate::execution::cancel::JobCancellation,
 }
 
 #[derive(Debug, Clone)]
@@ -1428,7 +1641,8 @@ impl<R> DockerJobEngine<R>
 where
     R: CommandRunner,
 {
-    pub fn new(runner: R) -> Self {
+    /// Engine for one cancellable job.
+    pub fn new(runner: R, cancellation: crate::execution::cancel::JobCancellation) -> Self {
         Self {
             runner,
             step_start_sender: None,
@@ -1444,7 +1658,15 @@ where
             docker_lease: None,
             job_network_guard: None,
             lifecycle_telemetry: None,
+            cancellation,
         }
+    }
+
+    /// Engine for work that is not a cancellable job: post-completion Docker
+    /// teardown, workspace cleanup, and tests. Its token can never be
+    /// cancelled, which is the truth about that work rather than a default.
+    pub fn inert(runner: R) -> Self {
+        Self::new(runner, crate::execution::cancel::JobCancellation::inert())
     }
 
     pub fn with_job_timeout_minutes(mut self, timeout_minutes: Option<u64>) -> Self {
@@ -1779,6 +2001,14 @@ where
             .iter()
             .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
             .collect();
+        // The job's status for `success()`, `failure()` and `cancelled()` is
+        // this token. Installing it here is what makes those functions truthful
+        // instead of constant.
+        state.set_cancellation(self.cancellation.clone());
+        // `ProcessCommandRunner` registers every host process group it spawns
+        // with the active token, so the current step's whole process tree is a
+        // cancellation target without any call site naming it.
+        let active_cancellation = crate::execution::cancel::set_active(self.cancellation.clone());
         let mut step_error = None;
         let mut post_actions = Vec::new();
         let mut native_post_actions = Vec::new();
@@ -2010,7 +2240,7 @@ where
                     effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
                 )?;
                 let failed = result.exit_code != 0;
-                if failed && *continue_on_error {
+                if failed && *continue_on_error && !state.is_cancelled() {
                     result.failure_ignored = true;
                 }
                 if let Some(frame) = composite_frame.as_mut() {
@@ -2279,7 +2509,13 @@ where
             match result {
                 Ok(mut result) => {
                     let failed = result.exit_code != 0;
-                    if failed && step.continue_on_error() {
+                    // `continue-on-error` is gated on not-cancelled. Without
+                    // this gate a cancelled job promoted its killed step's
+                    // conclusion to success, `success()` stayed true, and every
+                    // remaining step was dispatched — the "a cancelled job keeps
+                    // running ordinary steps" defect, removed at its root rather
+                    // than by a flag check in the step loop.
+                    if failed && step.continue_on_error() && !state.is_cancelled() {
                         result.failure_ignored = true;
                     }
                     if let Some(frame) = composite_frame.as_mut() {
@@ -2319,7 +2555,7 @@ where
                     // a step that fails by throwing still honors
                     // continue-on-error — outcome stays failure, the reported
                     // conclusion is success, and the job runs remaining steps.
-                    if step.continue_on_error() {
+                    if step.continue_on_error() && !state.is_cancelled() {
                         eprintln!(
                             "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
                         );
@@ -2394,6 +2630,18 @@ where
             .rev()
             .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
             .collect::<Vec<_>>();
+        // Every post step's condition above was evaluated against the job's
+        // real status, so `always()` and `cancelled()` posts are selected on a
+        // cancelled job. Their *execution* then runs under a fresh unlinked
+        // token, so nothing can cancel the cleanup — exactly as upstream gives
+        // every post child a new `CancellationTokenSource`
+        // (`src/Runner.Worker/ExecutionContext.cs:436`, reached with `null`
+        // from `CreatePostChild`, `:1384-1395`). The job's status itself stays
+        // `cancelled`, which is why `state` keeps the job token.
+        let post_cancellation = self.cancellation.unlinked();
+        self.cancellation = post_cancellation.clone();
+        drop(active_cancellation);
+        let _post_cancellation = crate::execution::cancel::set_active(post_cancellation);
         reserve_github_post_step_orders(
             &mut timeline_order,
             native_post_actions.len() + post_actions.len() + self.trailing_post_action_count,
@@ -2716,20 +2964,24 @@ where
             (&action.build_context_host, &action.dockerfile_host)
         {
             let docker_config = temp_host.join("_velnor/docker-client");
-            fs::create_dir_all(&docker_config).with_context(|| {
+            // `_velnor` is inside the container's own /__t, so a step can turn
+            // it into a symlink; a path-based create_dir_all would then place
+            // (and chmod 0700) a daemon-written credential directory wherever
+            // the job points. Walk the components no-follow instead.
+            let docker_config_dir = open_job_writable_root(temp_host)?
+                .open_relative_directory(Path::new("_velnor/docker-client"))
+                .with_context(|| {
+                    format!(
+                        "create isolated Docker client config {}",
+                        docker_config.display()
+                    )
+                })?;
+            docker_config_dir.set_mode(0o700).with_context(|| {
                 format!(
-                    "create isolated Docker client config {}",
+                    "secure isolated Docker client config {}",
                     docker_config.display()
                 )
             })?;
-            fs::set_permissions(&docker_config, fs::Permissions::from_mode(0o700)).with_context(
-                || {
-                    format!(
-                        "secure isolated Docker client config {}",
-                        docker_config.display()
-                    )
-                },
-            )?;
             self.run_docker_with_env(
                 &container.build_docker_action_args(
                     &action.image,
@@ -3049,19 +3301,8 @@ where
             .temp_host
             .as_deref()
             .context("mise adapter requires the mounted job temp directory")?;
-        let env_path = temp_host.join("_velnor/mise-env.json");
-        let redacted_path = temp_host.join("_velnor/mise-env-redacted.json");
-        let exported_env = fs::read_to_string(&env_path)
-            .with_context(|| format!("read mise environment from {}", env_path.display()))?;
-        let redacted_env = fs::read_to_string(&redacted_path).with_context(|| {
-            format!(
-                "read mise redacted environment from {}",
-                redacted_path.display()
-            )
-        })?;
+        let (exported_env, redacted_env) = take_mise_environment_exports(temp_host)?;
         let (mut env, masks) = parse_mise_environment(&exported_env, &redacted_env)?;
-        let _ = fs::remove_file(&env_path);
-        let _ = fs::remove_file(&redacted_path);
         let path = mise_step_path(&result.stdout);
         if result.stdout.contains("__VELNOR_MISE_BIN__")
             || result.stdout.contains("__VELNOR_MISE_SELF__")
@@ -3479,15 +3720,15 @@ where
         let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
             None
         } else {
-            let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&name));
-            let config_host = state
+            let temp_host = state
                 .temp_host
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?
-                .join(&config_name);
-            fs::write(&config_host, &buildkitd_config_inline)
-                .with_context(|| format!("write BuildKit config {}", config_host.display()))?;
-            Some(format!("/__t/{config_name}"))
+                .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?;
+            Some(write_buildkitd_config(
+                temp_host,
+                &name,
+                &buildkitd_config_inline,
+            )?)
         };
         let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
         let inspect_result =
@@ -3668,13 +3909,17 @@ where
         );
         args.push(container_context_path(&context));
         let result = self.container_docker(container, &action_state, &args, None, timeout)?;
-        let metadata_path = action_state
+        let metadata_root = action_state
             .temp_host
             .clone()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(&metadata_name);
+            .unwrap_or_else(std::env::temp_dir);
         let mut command_state = StepCommandState::default();
-        if let Ok(raw) = fs::read_to_string(&metadata_path) {
+        // The container was handed `--metadata-file /tmp/<metadata_name>`, so
+        // it knows the exact host name the runner is about to read and can
+        // leave a symlink there instead. The contents become step outputs, so
+        // following it would exfiltrate a host file; read no-follow and only
+        // accept a regular file.
+        if let Ok(Some(raw)) = read_job_writable_file(&metadata_root, Path::new(&metadata_name)) {
             if let Ok(metadata) = serde_json::from_str::<Value>(&raw) {
                 if let Some(digest) = metadata
                     .get("containerimage.digest")
@@ -3696,7 +3941,7 @@ where
                     .outputs
                     .insert("metadata".to_string(), raw.trim().to_string());
             }
-            let _ = fs::remove_file(&metadata_path);
+            let _ = remove_job_writable_file(&metadata_root, Path::new(&metadata_name));
         }
         Ok(native_command_result(result, command_state))
     }
@@ -4093,14 +4338,23 @@ where
     }
 
     fn start_job_environment_once(&mut self, container: &JobContainerSpec) -> Result<()> {
-        fs::create_dir_all(container.temp_host.join("_github_workflow")).with_context(|| {
+        // A slot's temp dir survives between the jobs that land on it, so every
+        // one of these names can already be a symlink planted by the previous
+        // job. `create_dir_all` would follow it and then hand the target to
+        // `docker -v`, giving the next job a read-write mount of an arbitrary
+        // host directory.
+        create_job_writable_directory(
+            &container.temp_host,
+            &container.temp_host.join("_github_workflow"),
+        )
+        .with_context(|| {
             format!(
                 "create GitHub workflow directory under {}",
                 container.temp_host.display()
             )
         })?;
         if let Some(cache_host) = &container.mbx_store_host {
-            fs::create_dir_all(cache_host).with_context(|| {
+            create_job_writable_directory(&container.temp_host, cache_host).with_context(|| {
                 format!(
                     "create Mr Boxington store for {}",
                     container.temp_host.display()
@@ -4108,7 +4362,7 @@ where
             })?;
         }
         if let Some(cache_host) = &container.sccache_store_host {
-            fs::create_dir_all(cache_host).with_context(|| {
+            create_job_writable_directory(&container.temp_host, cache_host).with_context(|| {
                 format!("create sccache store for {}", container.temp_host.display())
             })?;
         }
@@ -4250,26 +4504,34 @@ where
         // download-cache root lets the first repository suppress seeding for
         // every later repository, leaving baked shims (notably `gh`) dangling.
         // Keep the image marker beside the exact executable store it governs.
-        let marker = container
-            .mise_executable_store_host()
-            .join(".velnor-seeded-image");
-        if fs::read_to_string(&marker)
-            .map(|seeded| seeded.trim() == image_id)
-            .unwrap_or(false)
+        // The executable store is bind-mounted read-write at /opt/mise/installs,
+        // so the marker's name is one a job can replace with a symlink. Reading
+        // it by path leaks a host file into a comparison; writing it by path is
+        // an arbitrary host-file overwrite as the daemon. Both go through the
+        // descriptor-bound store root instead.
+        let marker_root = container.mise_executable_store_host();
+        let marker_name = Path::new(".velnor-seeded-image");
+        if read_job_writable_file(&marker_root, marker_name)
+            .unwrap_or_default()
+            .is_some_and(|seeded| seeded.trim() == image_id)
         {
             return Ok(());
         }
         self.run_docker(&container.seed_mise_store_args()?)?;
         fs::create_dir_all(&store).ok();
-        fs::write(&marker, &image_id)
-            .with_context(|| format!("write mise store seed marker {}", marker.display()))?;
+        create_job_writable_directory(&container.temp_host, &marker_root)
+            .with_context(|| format!("create mise store {}", marker_root.display()))?;
+        write_job_writable_file(&marker_root, marker_name, image_id.as_bytes(), 0o644)
+            .context("write mise store seed marker")?;
         Ok(())
     }
 
     fn verify_bind_mounts(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let marker = container.temp_host.join(DOCKER_MOUNT_CHECK_FILE);
-        fs::write(&marker, "velnor\n")
-            .with_context(|| format!("write Docker bind-mount marker {}", marker.display()))?;
+        // A previous job on this slot can have left a symlink at the marker
+        // name; the write must land on the marker, not on its target.
+        let marker = Path::new(DOCKER_MOUNT_CHECK_FILE);
+        write_job_writable_file(&container.temp_host, marker, b"velnor\n", 0o644)
+            .context("write Docker bind-mount marker")?;
 
         let args = container.prepare_exec_process_args(
             "/",
@@ -4282,7 +4544,7 @@ where
             ],
         )?;
         let result = self.runner.run("docker", args.args())?;
-        fs::remove_file(&marker).ok();
+        remove_job_writable_file(&container.temp_host, marker).ok();
         if result.code != 0 {
             bail!(
                 "Docker daemon cannot see Velnor bind-mounted work directories. \
@@ -9426,7 +9688,15 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
         eprintln!(
             "forensics.lifecycle: persistent actions cache refused: missing github.repository"
         );
-        return Ok(temp.join("_velnor/ephemeral/caches").join(version));
+        // Deliberately *outside* the job temp dir. The temp dir is bind-mounted
+        // read-write at the container's /__t and /tmp, so an ephemeral store
+        // placed under it would let a step plant symlinks at the entry, staging
+        // and metadata names the cache save/restore paths then create, write and
+        // read. The shared work root is never mounted into a job, which removes
+        // the enabling condition instead of hardening each call site.
+        return Ok(shared_work_root(temp)
+            .join("_velnor_caches_ephemeral")
+            .join(version));
     };
     let root = crate::storage::cache_class_path(
         &crate::container::daemon_shared_root(shared_work_root(temp)),
@@ -10988,7 +11258,8 @@ fn push_arg(args: &mut Vec<String>, name: &str, value: &str) {
 
 #[derive(Debug)]
 struct BuildSecretFile {
-    host_path: PathBuf,
+    temp_host: PathBuf,
+    relative: PathBuf,
     container_path: String,
 }
 
@@ -10997,21 +11268,18 @@ impl BuildSecretFile {
         let relative = PathBuf::from("_velnor")
             .join("build-secrets")
             .join(uuid::Uuid::new_v4().to_string());
-        let host_path = temp_host.join(&relative);
-        fs::create_dir_all(host_path.parent().expect("secret file has parent"))
-            .context("create BuildKit secret directory")?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options
-            .open(&host_path)
+        let container_path = format!("/__t/{}", relative.to_string_lossy());
+        // The file name is random, but `_velnor/build-secrets` is not: a step
+        // can replace either component with a symlink and a path-based
+        // create_dir_all would then deposit the secret in a directory of the
+        // job's choosing. Walk the parents no-follow and publish the secret
+        // through an O_EXCL | O_NOFOLLOW staging file.
+        write_job_writable_file(temp_host, &relative, value.as_bytes(), 0o600)
             .context("create BuildKit secret file")?;
-        file.write_all(value.as_bytes())
-            .context("write BuildKit secret file")?;
         Ok(Self {
-            host_path,
-            container_path: format!("/__t/{}", relative.to_string_lossy()),
+            temp_host: temp_host.to_path_buf(),
+            relative,
+            container_path,
         })
     }
 
@@ -11022,7 +11290,7 @@ impl BuildSecretFile {
 
 impl Drop for BuildSecretFile {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.host_path);
+        let _ = remove_job_writable_file(&self.temp_host, &self.relative);
     }
 }
 
@@ -11271,6 +11539,11 @@ pub(crate) struct JobExecutionState {
     masks: Vec<String>,
     composite_stack: Vec<String>,
     composite_conclusion_stack: Vec<CompositeConclusionFrame>,
+    /// The running job's cancellation, so `success()`, `failure()` and
+    /// `cancelled()` answer from the job's real status instead of from a
+    /// constant. The engine installs its own required token here before the
+    /// first step runs.
+    cancellation: crate::execution::cancel::JobCancellation,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -11347,6 +11620,7 @@ impl JobExecutionState {
             masks: Vec::new(),
             composite_stack: Vec::new(),
             composite_conclusion_stack: Vec::new(),
+            cancellation: crate::execution::cancel::JobCancellation::inert(),
         };
         state.env = state
             .env
@@ -11396,6 +11670,10 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
+            // A derived state is the same job, so it carries the same
+            // cancellation. Dropping it here would make every step's condition
+            // — which is evaluated on a derived state — read as not cancelled.
+            cancellation: self.cancellation.clone(),
         };
         state
             .env
@@ -11422,6 +11700,10 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
+            // A derived state is the same job, so it carries the same
+            // cancellation. Dropping it here would make every step's condition
+            // — which is evaluated on a derived state — read as not cancelled.
+            cancellation: self.cancellation.clone(),
         };
         for (name, value) in env {
             state.env.insert(name, value);
@@ -11637,9 +11919,47 @@ impl JobExecutionState {
         rendered
     }
 
-    /// `job.status` — `success` unless a step has already concluded failed.
+    /// Whether this job has been cancelled.
+    ///
+    /// Upstream sets `JobContext.Status` to `cancelled` on the cancellation
+    /// callback and re-evaluates every remaining step's condition against it
+    /// (`src/Runner.Worker/StepsRunner.cs:146-187`). Velnor evaluates each
+    /// step's condition immediately before dispatching it, so reading the live
+    /// token here gives the same result without a separate re-evaluation pass.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// Install the running job's cancellation.
+    pub(crate) fn set_cancellation(
+        &mut self,
+        cancellation: crate::execution::cancel::JobCancellation,
+    ) {
+        self.cancellation = cancellation;
+    }
+
+    /// `success()` — `src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`
+    /// reads the status of the enclosing scope, which cancellation sets to
+    /// `cancelled`. A cancelled job is therefore not successful, which is what
+    /// stops its remaining ordinary steps: their implicit condition is
+    /// `success()`.
+    fn success_status(&self) -> bool {
+        !self.is_cancelled() && !self.status_scope_has_failure()
+    }
+
+    /// `failure()` — `src/Runner.Worker/Expressions/FailureFunction.cs:28-39`.
+    /// Also false under cancellation: the status is `cancelled`, not `failure`,
+    /// so `if: failure()` cleanup does not run on a cancelled job.
+    fn failure_status(&self) -> bool {
+        !self.is_cancelled() && self.status_scope_has_failure()
+    }
+
+    /// `job.status` — `cancelled` once the job is cancelled, otherwise
+    /// `success` unless a step has already concluded failed.
     fn job_status(&self) -> &'static str {
-        if self
+        if self.is_cancelled() {
+            "cancelled"
+        } else if self
             .conclusions
             .values()
             .any(|outcome| *outcome == StepOutcome::Failure)
@@ -11654,7 +11974,9 @@ impl JobExecutionState {
     /// `job.status`, matching how `SuccessFunction` picks its source
     /// (`src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`).
     fn action_status(&self) -> &'static str {
-        if self.status_scope_has_failure() {
+        if self.is_cancelled() {
+            "cancelled"
+        } else if self.status_scope_has_failure() {
             "failure"
         } else {
             "success"
@@ -11711,7 +12033,7 @@ impl JobExecutionState {
             .map(str::trim)
             .filter(|condition| !condition.is_empty())
         else {
-            return Ok(!self.status_scope_has_failure());
+            return Ok(self.success_status());
         };
         self.evaluate_condition_expression(strip_expression(condition))
     }
@@ -11760,11 +12082,12 @@ impl JobExecutionState {
     ) -> Result<bool, expression::ExpressionError> {
         let context = self.expression_context();
         let Some(node) = expression::parse(expression, &context)? else {
-            return Ok(!self.status_scope_has_failure());
+            return Ok(self.success_status());
         };
         // `success() && (...)` short-circuits, so a job that has already failed
-        // never evaluates — and therefore never errors on — the rest.
-        if !node_references_status_function(&node) && self.status_scope_has_failure() {
+        // — or been cancelled — never evaluates, and therefore never errors on,
+        // the rest.
+        if !node_references_status_function(&node) && !self.success_status() {
             return Ok(false);
         }
         Ok(expression::evaluate_node(&node, &context)?.is_truthy())
@@ -12095,22 +12418,16 @@ impl expression::EvaluationContext for JobExpressionContext<'_> {
     ) -> Result<expression::Value, expression::ExpressionError> {
         match name.to_ascii_lowercase().as_str() {
             // `src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`
-            "success" => Ok(expression::Value::Boolean(
-                !self.state.status_scope_has_failure(),
-            )),
+            "success" => Ok(expression::Value::Boolean(self.state.success_status())),
             // `src/Runner.Worker/Expressions/FailureFunction.cs:28-39`
-            "failure" => Ok(expression::Value::Boolean(
-                self.state.status_scope_has_failure(),
-            )),
+            "failure" => Ok(expression::Value::Boolean(self.state.failure_status())),
             // `src/Runner.Worker/Expressions/AlwaysFunction.cs:19-23`
             "always" => Ok(expression::Value::Boolean(true)),
-            // SEAM: cancellation. Upstream's `CancelledFunction`
-            // (`src/Runner.Worker/Expressions/CancelledFunction.cs:20-29`)
-            // returns `job.status == cancelled`. Velnor has no truthful job
-            // cancellation status yet; the cancellation work package replaces
-            // this constant with that status and must change nothing else in
-            // this module.
-            "cancelled" => Ok(expression::Value::Boolean(false)),
+            // `src/Runner.Worker/Expressions/CancelledFunction.cs:20-29` returns
+            // `job.status == cancelled`. The job's cancellation token is that
+            // status: it is a required field of the state, so this can never
+            // fall back to a constant again.
+            "cancelled" => Ok(expression::Value::Boolean(self.state.is_cancelled())),
             "hashfiles" => self.hash_files_function(args),
             other => Err(expression::ExpressionError::evaluation(format!(
                 "Unrecognized function: '{other}'"
@@ -12706,10 +13023,16 @@ fn prepare_github_event_path(
     let Some(payload) = github_event_payload(context_data) else {
         return Ok(None);
     };
-    let event_dir = temp_host.join("_github_workflow");
-    fs::create_dir_all(&event_dir).with_context(|| format!("create {}", event_dir.display()))?;
-    let event_path = event_dir.join("event.json");
-    fs::write(&event_path, payload).with_context(|| format!("write {}", event_path.display()))?;
+    // `_github_workflow` is inside the container's own /__t, and both it and
+    // `event.json` have fixed names. Following a symlink here would write the
+    // event payload — attacker-influenced bytes — to any host path the daemon
+    // can reach, so walk the directory no-follow and stage the file.
+    write_job_writable_file(
+        temp_host,
+        Path::new("_github_workflow/event.json"),
+        payload.as_bytes(),
+        0o644,
+    )?;
     Ok(Some("/github/workflow/event.json".to_string()))
 }
 
@@ -13505,7 +13828,7 @@ mod tests {
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default())
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default())
             .with_job_environment_started(true)
             .with_tool_prep_telemetry(Arc::clone(&sink), admission);
 
@@ -13574,7 +13897,7 @@ mod tests {
         };
         let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
         let job_container = container(&temp);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default())
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission);
 
         let root_result = executor
@@ -13760,6 +14083,126 @@ mod tests {
         let (op, deadline) = docker_deadline("git", &["status".to_string()], DEFAULT_STEP_TIMEOUT);
         assert!(op.is_none());
         assert_eq!(deadline, DEFAULT_STEP_TIMEOUT);
+    }
+
+    /// Plant `link` as a symlink to `victim`, the way a job step can inside its
+    /// own /__t before the runner touches that name.
+    fn plant_symlink(victim: &Path, link: &Path) {
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(victim, link).unwrap();
+    }
+
+    #[test]
+    fn buildkitd_config_write_does_not_follow_a_planted_symlink() {
+        let root = temp_dir();
+        let temp_host = root.join("job/temp");
+        fs::create_dir_all(&temp_host).unwrap();
+        let victim = root.join("victim.conf");
+        fs::write(&victim, "original\n").unwrap();
+
+        // The builder name is a step input, so the whole file name is known to
+        // an earlier step of the same job.
+        let name = "velnor-builder";
+        let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(name));
+        plant_symlink(&victim, &temp_host.join(&config_name));
+
+        let error = write_buildkitd_config(&temp_host, name, "[worker]\nmax-parallelism = 1\n")
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("symlink"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "original\n");
+        assert!(fs::symlink_metadata(temp_host.join(&config_name))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn mise_environment_read_does_not_follow_a_planted_symlink() {
+        let root = temp_dir();
+        let temp_host = root.join("job/temp");
+        fs::create_dir_all(temp_host.join("_velnor")).unwrap();
+        let victim = root.join("secret.json");
+        fs::write(&victim, "{\"HOST_SECRET\":\"leaked\"}").unwrap();
+
+        plant_symlink(&victim, &temp_host.join(MISE_ENV_EXPORT_PATH));
+        fs::write(temp_host.join(MISE_ENV_REDACTED_EXPORT_PATH), "{}").unwrap();
+
+        let error = take_mise_environment_exports(&temp_host).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("not a regular file") || rendered.contains("symlink"),
+            "unexpected error: {rendered}"
+        );
+        assert!(
+            !rendered.contains("leaked"),
+            "host file content reached the runner: {rendered}"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "{\"HOST_SECRET\":\"leaked\"}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn mise_environment_read_does_not_follow_a_symlinked_parent_directory() {
+        let root = temp_dir();
+        let temp_host = root.join("job/temp");
+        fs::create_dir_all(&temp_host).unwrap();
+        let victim_dir = root.join("host-secrets");
+        fs::create_dir_all(&victim_dir).unwrap();
+        // Both names present, so a path-based read would succeed and merge the
+        // host directory's contents straight into the job environment.
+        fs::write(
+            victim_dir.join("mise-env.json"),
+            "{\"HOST_SECRET\":\"leaked\"}",
+        )
+        .unwrap();
+        fs::write(
+            victim_dir.join("mise-env-redacted.json"),
+            "{\"HOST_SECRET\":\"leaked\"}",
+        )
+        .unwrap();
+
+        // `_velnor` itself is a step-writable name inside /__t.
+        std::os::unix::fs::symlink(&victim_dir, temp_host.join("_velnor")).unwrap();
+
+        // The refusal wording is platform-dependent (ELOOP on Linux, ENOTDIR on
+        // macOS); what matters is that the walk stopped at `_velnor` instead of
+        // resolving through it, and that nothing was read or removed.
+        let error = take_mise_environment_exports(&temp_host).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains(&temp_host.join("_velnor").display().to_string()),
+            "unexpected error: {rendered}"
+        );
+        assert!(victim_dir.join("mise-env.json").exists());
+        assert!(victim_dir.join("mise-env-redacted.json").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn job_writable_write_replaces_a_planted_symlink_only_when_asked() {
+        // The generic primitive behind every fixed site: a symlink at the
+        // destination is reported, never written through.
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let victim = root.join("victim");
+        fs::write(&victim, "original").unwrap();
+        plant_symlink(&victim, &root.join("nested/marker"));
+
+        let error = write_job_writable_file(&root, Path::new("nested/marker"), b"attacker", 0o644)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("symlink"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "original");
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -14044,7 +14487,7 @@ mod tests {
             ports: vec!["5432".into()],
             options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
         });
-        let mut executor = DockerJobEngine::new(ServiceContextRunner);
+        let mut executor = DockerJobEngine::inert(ServiceContextRunner);
         let context = executor.service_context(&job).unwrap().unwrap();
 
         assert_eq!(context["postgres"]["id"], "container-id");
@@ -14964,7 +15407,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let mut spec = container(&temp);
         spec.verify_bind_mounts = true;
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor.start_job_environment_once(&spec).unwrap();
 
@@ -14983,7 +15426,7 @@ esac
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
@@ -15037,7 +15480,7 @@ esac
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(ReclaimRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::inert(ReclaimRunner { calls: Vec::new() });
         executor.cleanup(&spec).unwrap();
         let calls = &executor.runner().calls;
         assert!(calls
@@ -15068,7 +15511,7 @@ esac
         let temp = root.join("job-scope").join("temp");
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(BuildkitCleanupRunner::default());
+        let mut executor = DockerJobEngine::inert(BuildkitCleanupRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
         // Created + removing of this job's builder must both be force-removed,
@@ -15188,7 +15631,7 @@ esac
             "lease socket must exist before cleanup"
         );
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(LeaseOrderRunner {
+        let mut executor = DockerJobEngine::inert(LeaseOrderRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
             buildkit_saw_dead_lease: false,
@@ -15268,7 +15711,7 @@ esac
         )
         .unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(SkipBuildkitRunner {
+        let mut executor = DockerJobEngine::inert(SkipBuildkitRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
             calls: Vec::new(),
@@ -15316,7 +15759,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_job_environment_started(true);
+            DockerJobEngine::inert(RecordingRunner::default()).with_job_environment_started(true);
 
         executor
             .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
@@ -15340,7 +15783,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let mut spec = container(&temp);
         spec.verify_bind_mounts = true;
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -15381,7 +15824,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let result = executor
             .execute_step(&container(&temp), &step, &temp)
@@ -15439,7 +15882,7 @@ esac
             timeout_minutes: None,
         };
 
-        let result = DockerJobEngine::new(RecordingRunner::default())
+        let result = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission)
             .execute_step(&container(&temp), &step, &temp)
             .unwrap();
@@ -15522,7 +15965,7 @@ esac
             timeout_minutes: None,
         };
 
-        let result = DockerJobEngine::new(RecordingRunner::default())
+        let result = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission)
             .execute_step(&container(&temp), &step, &temp)
             .unwrap();
@@ -15585,7 +16028,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -15630,7 +16073,7 @@ esac
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_steps(&container(&temp), &steps, &temp)
@@ -15667,7 +16110,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -15790,7 +16233,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(GitDiffRunner {
+        let mut executor = DockerJobEngine::inert(GitDiffRunner {
             calls: Vec::new(),
             stdout: "docker/construct/Dockerfile\ncontent/docs/index.mdx\nCargo.toml\n".into(),
             missing_refs: true,
@@ -15912,7 +16355,7 @@ esac
         expected_hash.update(Sha256::digest(b"pub fn answer() -> u8 { 42 }\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -16007,7 +16450,7 @@ esac
         let state = JobExecutionState::new_internal(&[], &[], None, Some(temp.clone()));
         assert_eq!(
             cache_store_dir(&state, "cv1-abc123").unwrap(),
-            temp.join("_velnor/ephemeral/caches/cv1-abc123")
+            root.join("_velnor_caches_ephemeral/cv1-abc123")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -16060,7 +16503,7 @@ esac
         fs::create_dir_all(root.join("partial-job/home")).unwrap();
         fs::create_dir_all(root.join("miss-job/home")).unwrap();
 
-        let exact_results = DockerJobEngine::new(RecordingRunner::default())
+        let exact_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&exact_temp),
                 &cache_step("linux-rust-exact", ""),
@@ -16068,7 +16511,7 @@ esac
                 &exact_temp,
             )
             .unwrap();
-        let partial_results = DockerJobEngine::new(RecordingRunner::default())
+        let partial_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&partial_temp),
                 &cache_step("linux-rust-prefix-miss", "linux-rust-prefix-\n"),
@@ -16076,7 +16519,7 @@ esac
                 &partial_temp,
             )
             .unwrap();
-        let miss_results = DockerJobEngine::new(RecordingRunner::default())
+        let miss_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&miss_temp),
                 &cache_step("linux-rust-total-miss", "linux-rust-missing-\n"),
@@ -16119,7 +16562,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -16219,7 +16662,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&save_temp),
                 &save,
@@ -16270,7 +16713,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&restore_temp),
                 &restore,
@@ -16429,7 +16872,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "empty-glob")],
         )];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -16447,7 +16890,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "empty-glob")],
         )];
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(results[0].state.outputs["cache-hit"], "true");
@@ -16530,7 +16973,7 @@ esac
             Some("invalid"),
             &[("path", "/etc/**"), ("key", "invalid-glob")],
         );
-        let error = DockerJobEngine::new(RecordingRunner::default())
+        let error = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &[step],
@@ -16558,7 +17001,7 @@ esac
             &[("path", paths), ("key", "malformed-actions-cache")],
         );
 
-        let error = DockerJobEngine::new(RecordingRunner::default())
+        let error = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &[step],
@@ -16660,7 +17103,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -16701,7 +17144,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -16740,7 +17183,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
         assert!(save_results[0]
@@ -16780,7 +17223,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
@@ -16826,7 +17269,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "target-glob-dedup")],
         )];
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&save_container, &save, &env, &save_temp)
             .unwrap();
         assert!(save_results[0]
@@ -16855,7 +17298,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "target-glob-dedup")],
         )];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&restore_container, &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
@@ -16920,7 +17363,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "glob-traversal")],
         )];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
         let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("glob-traversal");
@@ -16934,7 +17377,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "glob-traversal")],
         )];
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
@@ -16964,7 +17407,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -17005,7 +17448,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -17046,7 +17489,7 @@ esac
 
         let mut spec = container(&temp);
         spec.cargo_target_host = Some(temp.join("target-store"));
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -17081,7 +17524,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -17126,7 +17569,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -17150,7 +17593,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17194,7 +17637,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -17233,7 +17676,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17697,7 +18140,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -17730,7 +18173,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17783,7 +18226,7 @@ esac
             timeout_minutes: None,
         }];
 
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -17807,7 +18250,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let lookup_results = DockerJobEngine::new(RecordingRunner::default())
+        let lookup_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&lookup_temp), &lookup, &env, &lookup_temp)
             .unwrap();
 
@@ -17862,7 +18305,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17922,7 +18365,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-miss")],
         )];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -17952,7 +18395,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-save-only")],
         )];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -17996,7 +18439,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-existing")],
         )];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -18025,7 +18468,7 @@ esac
                 source_path,
                 &[("path", "~/.cache/rust-script"), ("key", "some-key")],
             )];
-            let results = DockerJobEngine::new(RecordingRunner::default())
+            let results = DockerJobEngine::inert(RecordingRunner::default())
                 .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
                 .unwrap();
             let keys: std::collections::BTreeSet<String> =
@@ -18102,7 +18545,7 @@ esac
             Some("save"),
             &[("path", "~/.cache/rust-script"), ("key", "shared-key")],
         )];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &save_env, &save_temp)
             .unwrap();
 
@@ -18116,7 +18559,7 @@ esac
         let win_temp = root.join("win/temp");
         fs::create_dir_all(root.join("win/home")).unwrap();
         let win_env = vec![repo.clone(), ("RUNNER_OS".into(), "Windows".into())];
-        let win_results = DockerJobEngine::new(RecordingRunner::default())
+        let win_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&win_temp), &restore, &win_env, &win_temp)
             .unwrap();
         assert_eq!(win_results[0].state.outputs["cache-hit"], "false");
@@ -18126,7 +18569,7 @@ esac
         let lin_temp = root.join("lin/temp");
         fs::create_dir_all(root.join("lin/home")).unwrap();
         let lin_env = vec![repo, ("RUNNER_OS".into(), "Linux".into())];
-        let lin_results = DockerJobEngine::new(RecordingRunner::default())
+        let lin_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&lin_temp), &restore, &lin_env, &lin_temp)
             .unwrap();
         assert_eq!(lin_results[0].state.outputs["cache-hit"], "true");
@@ -18369,7 +18812,7 @@ type=sha,format=long,prefix=,enable=true"
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -18499,7 +18942,7 @@ type=sha,format=long,prefix=,enable=true"
     fn docker_login_refused_outside_trusted_scope() {
         let temp = temp_dir();
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("public-forks");
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("public-forks");
         let error = executor
             .native_docker_login(
                 &container(&temp),
@@ -18721,7 +19164,7 @@ type=sha,format=long,prefix=,enable=true"
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -18740,7 +19183,7 @@ type=sha,format=long,prefix=,enable=true"
         fs::create_dir_all(&temp).unwrap();
 
         let secret = BuildSecretFile::create(&temp, "runtime-token").unwrap();
-        let host_path = secret.host_path.clone();
+        let host_path = secret.temp_host.join(&secret.relative);
         assert_eq!(fs::read_to_string(&host_path).unwrap(), "runtime-token");
         #[cfg(unix)]
         assert_eq!(
@@ -18782,7 +19225,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -19006,7 +19449,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -19114,7 +19557,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor.execute_step(&container, &step, &temp).unwrap();
 
@@ -19140,7 +19583,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ports: Vec::new(),
             options: Vec::new(),
         });
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor.cleanup_services(&spec).unwrap();
 
@@ -19179,7 +19622,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             options: Vec::new(),
         });
 
-        DockerJobEngine::new(ContainerRemovalRaceRunner)
+        DockerJobEngine::inert(ContainerRemovalRaceRunner)
             .cleanup_services(&spec)
             .unwrap();
     }
@@ -19229,7 +19672,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ports: Vec::new(),
             options: Vec::new(),
         });
-        let mut executor = DockerJobEngine::new(StaleServiceCleanupRunner::default());
+        let mut executor = DockerJobEngine::inert(StaleServiceCleanupRunner::default());
 
         executor.cleanup_stale(&spec);
 
@@ -19276,7 +19719,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -19319,7 +19762,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     fn start_job_double_failure_cleans_up_retry_resources() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -19492,7 +19935,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(CheckoutOutputRunner::default());
+        let mut executor = DockerJobEngine::inert(CheckoutOutputRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -19992,7 +20435,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -20064,7 +20507,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -20133,7 +20576,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 }
             }),
         )];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
@@ -20176,7 +20619,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20288,7 +20731,7 @@ fi"#
                 }),
             ),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20349,7 +20792,7 @@ fi"#
             "fallback": "${{ steps.missing.outputs.value || 'default' }}",
             "empty": "${{ steps.missing.outputs.value }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20391,7 +20834,7 @@ fi"#
             "type": "String",
             "value": "${{ steps.deployment.outputs.page_url }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20446,7 +20889,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20520,7 +20963,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20593,7 +21036,7 @@ fi"#
                 }
             ]
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20636,7 +21079,7 @@ fi"#
             "bitcoin-processor": "${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.bitcoin-processor }}",
             "bake-targets": "${{ steps.targets.outputs.list }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20676,7 +21119,7 @@ fi"#
         let job_outputs = serde_json::json!({
             "docs": "${{ steps.dispatch.outputs.docs || steps.filter.outputs.docs }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20720,7 +21163,7 @@ fi"#
             "x86_linux": "${{ steps.shas.outputs.x86_linux }}",
             "x86_macos": "${{ steps.shas.outputs.x86_macos }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20785,7 +21228,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20863,7 +21306,7 @@ fi"#
                 step_id: "composite".into(),
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -20939,7 +21382,7 @@ fi"#
             }),
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
@@ -20993,7 +21436,7 @@ fi"#
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut executor =
-            DockerJobEngine::new(StdoutCommandRunner::default()).with_step_log_sender(sender);
+            DockerJobEngine::inert(StdoutCommandRunner::default()).with_step_log_sender(sender);
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -21028,7 +21471,7 @@ fi"#
         })];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut executor =
-            DockerJobEngine::new(StreamingMaskRunner::default()).with_step_log_sender(sender);
+            DockerJobEngine::inert(StreamingMaskRunner::default()).with_step_log_sender(sender);
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -21076,7 +21519,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(SilentCommandRunner::default());
+        let mut executor = DockerJobEngine::inert(SilentCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -21140,7 +21583,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(StdoutCommandRunner::default());
+        let mut executor = DockerJobEngine::inert(StdoutCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -21200,7 +21643,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(StderrCommandRunner::default());
+        let mut executor = DockerJobEngine::inert(StderrCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -21309,7 +21752,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -21442,7 +21885,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -21516,7 +21959,7 @@ fi"#
                 "test-bitcoin-processor": { "result": "cancelled" }
             }),
         )];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -21594,7 +22037,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -21668,7 +22111,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+        let mut executor = DockerJobEngine::inert(ErroringExecRunner {
             calls: Vec::new(),
             fail_execs: 1,
         });
@@ -21723,7 +22166,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+        let mut executor = DockerJobEngine::inert(ErroringExecRunner {
             calls: Vec::new(),
             fail_execs: 1,
         });
@@ -21775,7 +22218,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(StreamingErrorExecRunner {
+        let mut executor = DockerJobEngine::inert(StreamingErrorExecRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -21827,7 +22270,7 @@ fi"#
             continue_on_error: true,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
+        let mut executor = DockerJobEngine::inert(MainActionErrorRunner {
             calls: Vec::new(),
             failure_marker: "/__a/_actions/acme_action/v1/main.js".into(),
         });
@@ -21888,7 +22331,7 @@ fi"#
             continue_on_error: true,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
+        let mut executor = DockerJobEngine::inert(MainActionErrorRunner {
             calls: Vec::new(),
             failure_marker: "sccache --start-server".into(),
         });
@@ -21949,7 +22392,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(FailingCheckoutRunner::default());
+        let mut executor = DockerJobEngine::inert(FailingCheckoutRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_completion(
@@ -22014,7 +22457,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_completion(
@@ -22082,7 +22525,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -22226,6 +22669,91 @@ fi"#
             ignored_state.resolve_expressions("${{ job.status }}"),
             "success"
         );
+    }
+
+    /// A cancelled job's status is `cancelled`, so `success()` and `failure()`
+    /// are both false while `always()` and `cancelled()` are true
+    /// (`src/Runner.Worker/StepsRunner.cs:146-187`,
+    /// `src/Runner.Worker/Expressions/CancelledFunction.cs:20-29`).
+    #[test]
+    fn cancellation_makes_the_status_functions_truthful() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token.clone());
+
+        assert!(state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
+
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+
+        assert!(!state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!state.evaluate_condition(Some("failure()")).unwrap());
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+        assert_eq!(state.resolve_expressions("${{ job.status }}"), "cancelled");
+        assert_eq!(
+            state.resolve_expressions("${{ github.action_status }}"),
+            "cancelled"
+        );
+        assert!(state
+            .evaluate_condition(Some("job.status == 'cancelled'"))
+            .unwrap());
+    }
+
+    /// A cancelled job does not run its ordinary remaining steps — their
+    /// implicit condition is `success()` — but does run `always()` and
+    /// `cancelled()` steps.
+    #[test]
+    fn a_cancelled_job_skips_ordinary_steps_and_runs_cancelled_ones() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token.clone());
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+
+        // No `if:` at all: the default condition is `success()`.
+        assert!(!state.evaluate_condition(None).unwrap());
+        // An `if:` that names no status function is implicitly
+        // `success() && (...)`, so it is skipped too, however true it is.
+        assert!(!state.evaluate_condition(Some("true")).unwrap());
+        assert!(!state
+            .evaluate_condition(Some("runner.os == 'Linux'"))
+            .unwrap());
+        // Cleanup that asked to run on cancellation still runs.
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+        // `failure()` cleanup does not: the status is cancelled, not failure.
+        assert!(!state.evaluate_condition(Some("failure()")).unwrap());
+    }
+
+    /// Job `timeout-minutes` is an ordinary cancellation, so it reaches the
+    /// same status functions through the same token.
+    #[test]
+    fn a_timed_out_job_reads_as_cancelled() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token.clone());
+        token.request(crate::execution::cancel::CancelReason::JobTimeout);
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(!state.evaluate_condition(None).unwrap());
+    }
+
+    /// Post steps run under a fresh unlinked token, so a cancelled job still
+    /// runs its cleanup (`src/Runner.Worker/ExecutionContext.cs:436`,
+    /// `:1384-1395`), while the job's own status stays `cancelled`.
+    #[test]
+    fn post_step_token_is_unlinked_from_the_cancelled_job() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let post = token.unlinked();
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        assert!(token.is_cancelled());
+        assert!(!post.is_cancelled());
+
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token);
+        // The condition is evaluated against the job's real status, which is
+        // what selects an `always()` post step on a cancelled job.
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
     }
 
     /// D-3: string truthiness was inverted. GitHub runs a step whose
@@ -22464,7 +22992,7 @@ fi"#
                 ),
             ],
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let result = executor
             .execute_javascript_action(&container(&temp), "action1", &action, &temp)
@@ -22524,7 +23052,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -22604,7 +23132,7 @@ fi"#
                 serde_json::json!({ "DOCKER_TOKEN": "secret-token" }),
             ),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -22653,7 +23181,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -22736,7 +23264,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -22899,7 +23427,7 @@ fi"#
         expected_hash.update(Sha256::digest(b"build:\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -23014,7 +23542,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -23022,7 +23550,7 @@ fi"#
                 &upload_temp,
             )
             .unwrap();
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -23080,7 +23608,7 @@ fi"#
                 continue_on_error: false,
                 timeout_minutes: None,
             }];
-            DockerJobEngine::new(RecordingRunner::default())
+            DockerJobEngine::inert(RecordingRunner::default())
                 .execute_ordered_steps(
                     &container(&upload_temp),
                     &upload,
@@ -23105,7 +23633,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -23221,7 +23749,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -23249,7 +23777,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -23306,7 +23834,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -23334,7 +23862,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -23669,7 +24197,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission)
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
@@ -23798,7 +24326,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -23850,10 +24378,10 @@ fi"#
             }]
         };
 
-        let default_results = DockerJobEngine::new(RecordingRunner::default())
+        let default_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload(None, "default"), &[], &temp)
             .unwrap();
-        let explicit_results = DockerJobEngine::new(RecordingRunner::default())
+        let explicit_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &upload(Some("true"), "explicit"),
@@ -24072,7 +24600,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -24286,10 +24814,10 @@ fi"#
             }]
         };
 
-        let first_results = DockerJobEngine::new(RecordingRunner::default())
+        let first_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("first.txt", None), &[], &temp)
             .unwrap();
-        let duplicate_results = DockerJobEngine::new(RecordingRunner::default())
+        let duplicate_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("second.txt", None), &[], &temp)
             .unwrap();
 
@@ -24301,7 +24829,7 @@ fi"#
                 .unwrap(),
             "second\n"
         );
-        let overwrite_results = DockerJobEngine::new(RecordingRunner::default())
+        let overwrite_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &upload("second.txt", Some("true")),
@@ -24354,7 +24882,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -24402,7 +24930,7 @@ fi"#
             ),
         ];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
             .unwrap();
 
@@ -24502,7 +25030,7 @@ fi"#
             ("GITHUB_TOKEN".into(), "ghs_token".into()),
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -24657,7 +25185,7 @@ fi"#
                 "id-token-request-token".into(),
             ),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -24806,7 +25334,7 @@ fi"#
         spec.mount_docker_socket = true;
         spec.docker_cli_host_path = Some("/usr/bin/docker".into());
         spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -24885,7 +25413,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -24951,7 +25479,7 @@ fi"#
                 continue_on_error: false,
                 timeout_minutes: None,
             }];
-            let mut executor = DockerJobEngine::new(RecordingRunner::default());
+            let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
             executor
                 .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -25168,7 +25696,7 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
                 }),
             ),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -25288,7 +25816,7 @@ bitcoin-processor-app.push=true")
             "secrets".into(),
             serde_json::json!({ "RENOVATE_TOKEN": "renovate-token" }),
         )];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -25379,7 +25907,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25475,7 +26003,7 @@ bitcoin-processor-app.push=true")
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25613,7 +26141,7 @@ bitcoin-processor-app.push=true")
             ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
             ("RUNNER_OS".into(), "Linux".into()),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25699,7 +26227,7 @@ bitcoin-processor-app.push=true")
             },
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
@@ -25779,7 +26307,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25833,7 +26361,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(PhaseStateRunner {
+        let mut executor = DockerJobEngine::inert(PhaseStateRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25879,7 +26407,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -25949,7 +26477,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -25997,7 +26525,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: true,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(FailingPostRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::inert(FailingPostRunner { calls: Vec::new() });
 
         let results = executor
             .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &[], &temp)
@@ -26057,7 +26585,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(FailingPostRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::inert(FailingPostRunner { calls: Vec::new() });
 
         let results = executor
             .execute_ordered_steps(
@@ -26153,7 +26681,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(EnvAndFailureRunner {
+        let mut executor = DockerJobEngine::inert(EnvAndFailureRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -26249,7 +26777,7 @@ bitcoin-processor-app.push=true")
             ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
             ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
         ];
-        let mut executor = DockerJobEngine::new(EnvAndFailureRunner {
+        let mut executor = DockerJobEngine::inert(EnvAndFailureRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -26917,7 +27445,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -26962,7 +27490,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -27020,7 +27548,7 @@ bitcoin-processor-app.push=true")
     #[test]
     fn setup_qemu_uses_pinned_image() {
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("trusted");
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("trusted");
         let mut inputs = BTreeMap::new();
         inputs.insert(
             "image".to_string(),
@@ -27056,7 +27584,7 @@ bitcoin-processor-app.push=true")
     #[test]
     fn setup_qemu_rejects_untrusted_scope_before_host_docker() {
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("public-forks");
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("public-forks");
         let error = executor
             .native_setup_qemu(
                 &NativeActionInvocation {
