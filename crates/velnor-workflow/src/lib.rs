@@ -4096,9 +4096,10 @@ fn render_preview(config: &ProjectConfig) -> String {
             workflow_runtime_setup(RunnerMode::Github)
         ),
     )
-    .replace(
+    .replacen(
         "runs-on: ubuntu-24.04",
         &format!("runs-on: {}", selected_runner(config)),
+        1,
     )
     .replace(
         "name: ${{ matrix.target }}",
@@ -4286,10 +4287,7 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "# Release tags are cut from the protected {} branch.",
         config.default_branch
     );
-    output.replace(
-        "runs-on: ubuntu-24.04",
-        &format!("runs-on: {}", selected_runner(config)),
-    )
+    output
 }
 
 fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
@@ -4389,10 +4387,6 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     }
     output
         .replace(
-            "runs-on: ubuntu-24.04",
-            &format!("runs-on: {}", selected_runner(config)),
-        )
-        .replace(
             "name: ${{ matrix.target }}",
             "name: ${{ matrix.lane }}-${{ matrix.target }}",
         )
@@ -4472,10 +4466,7 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
             workflow_runtime_setup(RunnerMode::Github)
         ),
     );
-    output.replace(
-        "runs-on: ubuntu-24.04",
-        &format!("runs-on: {}", selected_runner(config)),
-    )
+    output
 }
 
 fn yaml_scalar(value: &str) -> String {
@@ -4577,8 +4568,11 @@ jobs:
 
 fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW.replace(
-        "runs-on: ubuntu-24.04",
-        &format!("runs-on: {}", selected_runner(config)),
+        "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
+        &format!(
+            "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
+            config.default_branch
+        ),
     )
 }
 
@@ -6129,6 +6123,9 @@ fn validate_default_branch(branch: &str) -> Result<&str, GeneratorError> {
         && !branch.contains("..")
         && !branch.contains("@{")
         && !branch.contains("//")
+        && branch.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '/')
+        })
         && !Path::new(branch)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"))
@@ -6539,6 +6536,9 @@ mod tests {
             None
         );
         assert_eq!(parse_remote_head("0123\tHEAD\n"), None);
+        assert!(validate_default_branch("release/candidate_1").is_ok());
+        assert!(validate_default_branch("release' && evil").is_err());
+        assert!(validate_default_branch("release&&evil").is_err());
     }
 
     #[test]
@@ -7822,6 +7822,10 @@ path-only = { path = "../path-only" }
                         continue;
                     }
                     if content.contains("uses: ./.github/workflows/") {
+                        continue;
+                    }
+                    if workflow_name == "maintenance.yml" {
+                        assert!(runner_lines.iter().all(|line| !line.contains("self-hosted")));
                         continue;
                     }
                     match runners {
