@@ -2687,3 +2687,74 @@ The pinned upstream runner contract (`actions/runner` `397b032`) sends only `job
 does not identify the runner that won it. Velnor's provisional-marker design therefore cannot
 use a remote winner identity: `409` means unavailable/owned elsewhere, while local durable
 claims, leases, and generation fencing remain the ownership proof.
+
+## 17. Resolved: the provisional acquire marker's gating question
+
+The completion-durability package specified a provisional marker to close the lost-completion
+window between `acquirejob` returning 200 (`runner.rs:5145`) and the durable marker
+(`runner.rs:5328`), and correctly refused to build it until one upstream fact was verified:
+**does the 409 reply name the acquiring runner?** It does not.
+
+Read from `actions/runner` v2.337.0, `src/Sdk/RSWebApi/RunServiceHttpClient.cs:88-120`. The
+409 path is:
+
+```csharp
+if (TryParseErrorBody(result.ErrorBody, out RunServiceError error))
+{
+    switch ((HttpStatusCode)error.Code)
+    {
+        case HttpStatusCode.Conflict:
+            throw new TaskOrchestrationJobAlreadyAcquiredException(
+                $"Job message already acquired '{messageId}'. {error.Message}");
+```
+
+`RunServiceError` carries only `source`, `statusCode` and `errorMessage` — the same envelope
+whose wire names BC-1 was about. `error.Message` is free-text with no structured runner
+identity. So a 409 tells us the message was acquired by *someone*, and cannot distinguish "we
+acquired it and then crashed" from "another runner acquired it". As an ownership oracle it is
+useless, and the design that depended on it must not be built.
+
+**The oracle is `renewjob`.** `RunServiceHttpClient.cs:184-218` posts `{planId, jobId}` and
+either succeeds — which only the lease holder can do — or raises
+`TaskOrchestrationJobNotFoundException` on a 404. That is exactly the discrimination the 409
+could not provide, keyed on the identifiers a provisional marker already records.
+
+Corrected design:
+
+1. Before `acquirejob`, journal `JobAcquisitionIntended{slot_id, generation, plan_id, job_id,
+   message_id}`, creating the job row in a **provisional** state that occupies the slot for
+   admission but is not an ownership proof — `outbox_owner_is_proven` must keep rejecting it,
+   so no completion can ever be sent against a provisional row.
+2. Issue `acquirejob`. A 200 promotes the row to owned. A 404 or 422 drops it and frees the
+   slot.
+3. On a 409, **or** on recovery after a crash with a provisional row present, call `renewjob`
+   for the recorded `(plan_id, job_id)`. Success promotes the row — we own the job and crashed
+   after a previous attempt's 200. A 404 drops it.
+4. Bound the whole thing with the durable attempt counter and deadline the completion package
+   added, so a provisional row also reaches a terminal state instead of pinning a slot.
+
+With a provisional row always present before the call, there is no state in which a terminal
+completion has no journal row, so deleting the unjournaled `Acquired` branch becomes a pure
+deletion rather than a behaviour change — which was the other half of that package's blocked
+work.
+
+One caveat to carry into the implementation: `renewjob` extends the lease as a side effect, so
+the recovery probe is not free of consequence. On the "not ours" path the 404 arrives before
+any extension, and on the "ours" path extending the lease is what we want anyway — but a probe
+loop must still be bounded, or a job we own but cannot execute would have its lease renewed
+indefinitely.
+
+### Also settled: job `timeout-minutes` is not a Velnor wall clock
+
+Recorded as a P0 by the cancellation audit ("a 10-minute job with 20 steps can run 200
+minutes"). Checked before implementing: there is **no job-level timeout field in the job
+message**, because upstream does not enforce it in the runner either. GitHub enforces
+`timeout-minutes` server-side and sends an ordinary `JobCancellation` when it elapses.
+
+What upstream's runner *does* implement is the listener-side escalation backstop,
+`max(cancel_timeout, 60s) − 15s` (`JobDispatcher.cs:1280-1285`) — and Velnor already has it,
+in `forced_kill_delay`, with a test citing those lines. Building a local wall clock would have
+introduced a divergence rather than closing one.
+
+Three items on the open list turned out to be inherited from audit claims rather than from
+source. The rule that caught all three is the same one: verify before implementing.
