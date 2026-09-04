@@ -10,7 +10,7 @@ This is the repository’s current development contract. Citations use `path:lin
 
 ## Current: build, test, lint, format
 
-The workspace has 12 members and uses Cargo resolver 3, Rust edition 2024, and a
+The workspace has 9 members and uses Cargo resolver 3, Rust edition 2024, and a
 shared dependency table. The pinned toolchain is Rust 1.98.1 with `rustfmt` and
 `clippy`; the workspace keeps rustfmt’s style edition at 2021. [`Cargo.toml:1-21`](../../Cargo.toml)
 [`rust-toolchain.toml:1-10`](../../rust-toolchain.toml) [`rustfmt.toml:1-2`](../../rustfmt.toml)
@@ -73,17 +73,10 @@ manifest and release workflow define this cross-build/package sequence.
 Ownership is layered:
 
 - `velnor-model` owns shared versioned control-plane types and is the workspace
-  root; `velnor-action-model` owns the canonical I/O-free physical-action model.
+  root.
   [`crates/velnor-model/Cargo.toml:1-20`](../../crates/velnor-model/Cargo.toml)
-  [`crates/velnor-action-model/Cargo.toml:1-16`](../../crates/velnor-action-model/Cargo.toml)
-- `velnor-cas` owns digest-verified content-addressed storage; the crash-safe
-  action journal is limited to the action and shared models. Docker Rust build
-  outputs are owned by the image-pinned Mr Boxington store rather than another
-  Velnor compiler-cache crate.
-  [`crates/velnor-cas/Cargo.toml:1-20`](../../crates/velnor-cas/Cargo.toml)
-  [`crates/velnor-action-journal/Cargo.toml:1-24`](../../crates/velnor-action-journal/Cargo.toml)
 - `velnor-control` owns daemon-side application services and directly consumes
-  only the journal and shared model. `velnor-client` owns the transport contract
+  the shared model. `velnor-client` owns the transport contract
   and consumes only the shared model. `velnor-render` owns output renderers and
   consumes only the shared model.
   [`crates/velnor-control/Cargo.toml:1-24`](../../crates/velnor-control/Cargo.toml)
@@ -91,8 +84,8 @@ Ownership is layered:
   [`crates/velnor-render/Cargo.toml:1-17`](../../crates/velnor-render/Cargo.toml)
 - `velnorctl` owns operator composition and the Axum adapter; it currently uses
   the runner library as an explicitly interim execution facade. `velnor-runner`
-  owns the daemon/runtime binaries and consumes control, action, and model
-  crates. `velnor-tools` owns maintainer policy/verification tooling; the
+  owns the daemon/runtime binaries and consumes the control and model crates.
+  `velnor-tools` owns maintainer policy/verification tooling; the
   `unit-collector` tool owns structured Cargo evidence collection
   (`tools/unit-collector/src/main.rs:1-41`).
   [`crates/velnorctl/Cargo.toml:9-42`](../../crates/velnorctl/Cargo.toml)
