@@ -456,11 +456,6 @@ pub fn evaluate_github_format(expr: &str, context_data: &[(String, Value)]) -> O
     Some(result)
 }
 
-/// Public alias so executor.rs can call the format-arg parser directly.
-pub fn split_format_args_pub(s: &str) -> Vec<String> {
-    split_format_args(s)
-}
-
 fn split_format_args(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
