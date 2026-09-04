@@ -1766,3 +1766,67 @@ The shared index remains the sharpest hazard: `git add <path> && git commit` swe
 anyone else has staged. The rule is now `git commit -s -- <paths>`, and `git pull --rebase
 --autostash` is also discouraged, having flattened another agent's staged files to unstaged
 (content survived; only the staged distinction was lost).
+
+### Correction — upstream *does* parse stderr for workflow commands
+
+I told an agent that upstream never parsed stderr for workflow commands. That is wrong.
+`Runner.Worker/Handlers/ScriptHandler.cs:334-336` wires both streams into the output manager:
+`StepHost.OutputDataReceived += stdoutManager.OnDataReceived` and
+`StepHost.ErrorDataReceived += stderrManager.OnDataReceived`. Velnor parsing stderr matches
+upstream, and nothing was changed there. The agent verified it against the pinned source rather
+than accepting my instruction, which is the behavior this program needs.
+
+### BC-29 instance closed — workflow commands were a permissive re-implementation
+
+All five workflow-command findings were confirmed against upstream at `397b032` and fixed
+(`766b214`, `a3fcd59`, `6c7092f`, `8dc57ff`):
+
+- Leading whitespace is now trimmed before matching, as `ActionCommand.TryParseV2` does. Because
+  Velnor masks log lines from the registered mask set, the missing registration was exactly what
+  leaked the secret — `"  ::add-mask::$SECRET"` registered nothing and the value reached the log.
+- `add-mask` now masks each line of a multi-line value as well as the whole, matching
+  `AddMaskCommandExtension.ProcessCommand`, and warns on an all-whitespace value instead of
+  dropping it silently. A PEM key previously leaked line by line.
+- `stop-commands` tokens are validated the way `ActionCommandManager.ValidateStopToken` does —
+  rejecting an empty token, `pause-logging`, or any registered command name, and continuing to
+  process rather than stopping — with tokens longer than six characters registered as masks, the
+  `ACTIONS_ALLOW_UNSECURE_STOPCOMMAND_TOKENS` opt-in honoured, and resume matched by command
+  name rather than by an exact `::token::` string compare that indented or parameterised resume
+  lines defeated.
+- `::set-env::` and `::add-path::` are refused with upstream's exact error strings unless
+  `ACTIONS_ALLOW_UNSECURE_COMMANDS` is set. Because the refusal lives in the parser it covers
+  stdout and stderr at once.
+- `GITHUB_ENV` now blocks only `NODE_OPTIONS`, loudly, as `SetEnvFileCommand` does, instead of
+  silently dropping every `GITHUB_*` and `RUNNER_*` name.
+
+The enabling condition, stated by the agent and worth keeping: `workflow_command.rs` was written
+as a permissive re-implementation of the command grammar rather than a transcription of
+`ActionCommandManager` plus `ActionCommand`, so every *refusal* upstream performs — the
+registered-name gate, stop-token validation, the disabled commands, the block-list — was simply
+absent while every *effect* was implemented. That is RC-3 with a specific and dangerous shape:
+transcribing what a system does while omitting what it refuses to do.
+
+The remaining instance of the class is a **second, independent command grammar** in
+`executor.rs::rendered_output_line`, which has the same missing trim.
+
+### New security gap — the masker has no encoded variants
+
+Upstream registers eight encoders on the secret masker itself (`HostContext.cs:103-112`):
+`Base64StringEscape` with shift-1 and shift-2 variants, `CommandLineArgumentEscape`,
+`ExpressionStringEscape`, `JsonStringEscape`, `UriDataEscape`, `XmlDataEscape`,
+`TrimDoubleQuotes`, and `PowerShellPreAmpersandEscape`. Registering them on the masker means
+every value it holds, including anything added by `::add-mask::`, is masked in all those
+encodings.
+
+Velnor's `Masker` matches the literal value only, so a secret reaching a log base64-encoded,
+JSON-escaped or URI-escaped passes through unmasked. Same shape as the two unmasked sinks: the
+masker is correct and its coverage is not. Routed to the `runner.rs` owner.
+
+### Deferred, named
+
+- Upstream sets `CommandResult = TaskResult.Failed` when a command throws. Velnor's
+  `StepCommandState` has no such field, so a step emitting `::set-env::` now logs two errors and
+  still passes if the process exits 0. Needs a field plus a change in `executor.rs::absorb`.
+- Upstream reads the `ACTIONS_ALLOW_UNSECURE_*` opt-ins from the job `env:` context as well as
+  the process environment; `parse_workflow_commands` has no env context, so only the process half
+  is modelled and a workflow setting the flag in `env:` is refused.
