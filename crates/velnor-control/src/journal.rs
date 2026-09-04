@@ -1690,7 +1690,8 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     // another opener may have completed setup after the first read-only
     // preflight, and its current state is the only state we may migrate.
     let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let (_, outbox_shape) = preflight_schema_snapshot(&transaction)?;
+    let (stored, outbox_shape) = preflight_schema_snapshot(&transaction)?;
+    repair_historic_jobs_shape(&transaction, stored)?;
     transaction.execute_batch(SCHEMA)?;
     if matches!(outbox_shape, OutboxSchema::V2) {
         migrate_v2_to_v3(&transaction)?;
@@ -2513,6 +2514,82 @@ fn migrate_v5_to_v6(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     Ok(())
 }
 
+/// Repair the one historical migration poison that can pass the version gate.
+///
+/// The v5 bump once stamped a v4 `jobs` table as version 5. A later opener
+/// therefore skipped the v4-to-v5 migration and, when v6 was introduced,
+/// advanced the same table to version 6 without ever adding `provisional`.
+/// `Journal::open` used to accept both states and only fail later when
+/// materialization selected that missing column.
+///
+/// This is deliberately narrower than making migrations infer arbitrary
+/// partial schemas. Only the exact v4 shape at stamp 5, or that same shape
+/// plus all v6 columns at stamp 6, is repairable. Anything else remains
+/// forensic evidence and fails in the transaction before its version stamp can
+/// change.
+fn repair_historic_jobs_shape(tx: &rusqlite::Transaction<'_>, stored: u32) -> StoreResult<()> {
+    if !matches!(stored, 5 | 6) || table_has_column(tx, "jobs", "provisional")? {
+        return Ok(());
+    }
+
+    let mut expected = vec![
+        ("job_id", "TEXT", 0, None, 1),
+        ("slot_id", "TEXT", 1, None, 0),
+        ("generation", "INTEGER", 1, None, 0),
+        ("attempt", "INTEGER", 1, None, 0),
+        ("worker", "TEXT", 1, None, 0),
+        ("phase", "TEXT", 1, None, 0),
+        ("accepted_unix", "INTEGER", 1, Some("0"), 0),
+        ("terminal_conclusion", "TEXT", 0, None, 0),
+    ];
+    if stored == 6 {
+        expected.extend([
+            ("plan_id", "TEXT", 1, Some("''"), 0),
+            ("run_service_url", "TEXT", 1, Some("''"), 0),
+            ("probe_attempts", "INTEGER", 1, Some("0"), 0),
+            ("probe_deadline_unix", "INTEGER", 1, Some("0"), 0),
+        ]);
+    }
+
+    let columns = job_schema_columns(tx)?;
+    let matches = columns.len() == expected.len()
+        && columns.iter().zip(expected).all(
+            |(
+                (name, ty, not_null, default, pk),
+                (expected_name, expected_ty, expected_not_null, expected_default, expected_pk),
+            )| {
+                name.eq_ignore_ascii_case(expected_name)
+                    && ty.eq_ignore_ascii_case(expected_ty)
+                    && *not_null == expected_not_null
+                    && default.as_deref() == expected_default
+                    && *pk == expected_pk
+            },
+        );
+    if !matches {
+        return Err(jobs_schema_mismatch(stored));
+    }
+
+    tx.execute_batch("ALTER TABLE jobs ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0;")?;
+    Ok(())
+}
+
+fn job_schema_columns(
+    conn: &Connection,
+) -> StoreResult<Vec<(String, String, i64, Option<String>, i64)>> {
+    let mut statement = conn.prepare("PRAGMA table_info(jobs)")?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
     let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -2520,6 +2597,13 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> StoreResult
         name.map(|name| name.eq_ignore_ascii_case(column))
             .unwrap_or(false)
     }))
+}
+
+fn jobs_schema_mismatch(version: u32) -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch")
+        .with_remediation(format!(
+            "preserve the journal unchanged: PRAGMA user_version={version} carries an unrecognized jobs shape"
+        ))
 }
 
 fn outbox_owner_inconsistent(job_id: &str, generation: i64) -> StoreError {
@@ -5431,6 +5515,101 @@ mod tests {
             );
         }
         drop(conn);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn stamp_historic_jobs_shape(path: &Path, version: u32, drop_columns: &[&str]) {
+        let conn = Connection::open(path).unwrap();
+        for column in drop_columns {
+            conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
+                .unwrap();
+        }
+        conn.pragma_update(None, "user_version", version).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_historically_poisoned_v5_jobs_shape_is_repaired_before_materialization() {
+        let (dir, journal) = open_tmp("repair-poisoned-v5");
+        let path = dir.join("journal.db");
+        drop(journal);
+        stamp_historic_jobs_shape(
+            &path,
+            5,
+            &[
+                "provisional",
+                "plan_id",
+                "run_service_url",
+                "probe_attempts",
+                "probe_deadline_unix",
+            ],
+        );
+
+        let journal = Journal::open(&path).expect("known v5 poison is repairable");
+        journal
+            .load_state()
+            .expect("repaired v5 journal must replay");
+        journal
+            .materialized_state()
+            .expect("repaired v5 journal must materialize");
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "jobs", "provisional").unwrap());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_v6_jobs_shape_missing_provisional_is_repaired_without_reversion() {
+        let (dir, journal) = open_tmp("repair-poisoned-v6");
+        let path = dir.join("journal.db");
+        drop(journal);
+        stamp_historic_jobs_shape(&path, 6, &["provisional"]);
+
+        let journal = Journal::open(&path).expect("known v6 poison is repairable");
+        journal
+            .materialized_state()
+            .expect("repaired v6 journal must materialize");
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
+        assert!(table_has_column(&conn, "jobs", "provisional").unwrap());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_unrecognized_poisoned_jobs_shape_is_preserved_and_rejected() {
+        let (dir, journal) = open_tmp("reject-poisoned-jobs");
+        let path = dir.join("journal.db");
+        drop(journal);
+        stamp_historic_jobs_shape(
+            &path,
+            5,
+            &[
+                "provisional",
+                "plan_id",
+                "run_service_url",
+                "probe_attempts",
+                "probe_deadline_unix",
+                "worker",
+            ],
+        );
+
+        let error = Journal::open(&path).expect_err("partial job shape must fail closed");
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+        assert!(!table_has_column(&conn, "jobs", "provisional").unwrap());
         std::fs::remove_dir_all(dir).ok();
     }
 
