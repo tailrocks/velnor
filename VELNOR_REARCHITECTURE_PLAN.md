@@ -417,3 +417,64 @@ only CPU reading is `getconf _NPROCESSORS_ONLN` (`execution/docker.rs:155`), whi
 cgroup quota and cpuset. `--slots 4` on a 16-core host therefore runs roughly 64 compiler
 processes against 15.2 cores of quota: everything is runnable, nothing progresses, and
 nothing explains why. Mysterious idleness in its most literal form.
+
+### BC-18 — The verifier cannot fail, so it certifies nothing
+
+Every field the fixture compares across lanes is a literal copied out of workflow YAML
+(fixture `crates/.../evidence.rs:51`, `:60-65`; `write-result.py:14-24`), so the
+GitHub-hosted lane and the Velnor lane emit byte-identical JSON *by construction*. The
+comparators can fail only when a lane is missing entirely; `backend-parity.yml:166-167`
+even removes its single environment-derived field before comparing. Normalization then
+drops `runner` and `lane` as recursive subtrees at any depth
+(`compare-results.py:16`, `:70-79`; `workflow_evidence.py:15-17`, `:20-30`), so an entire
+namespace can conceal a mismatch, and a single-lane compare returns success without
+comparing anything (`:118-123`).
+
+Readiness has no freshness gate either: `audit()`
+(`audit_capability_coverage.py:1139-1171`) reads three JSON files and some workflow text,
+and evidence validation is `is_file()` (`:274-286`) — no run id, no timestamp, no API call.
+Evidence from any earlier run, or from a different Velnor build, certifies the current one.
+
+Missing invariant: *evidence is a collected fact carrying provenance the workflow author
+cannot fabricate, comparison is over observed behavior rather than echoed literals, and the
+oracle has tests proving it rejects bad input.*
+
+This is a program-level P0: until it is fixed, no other result in this effort can be
+called verified.
+
+### BC-19 — The capability baseline is pinned, and the pin cannot detect drift
+
+The fixture pins manifest v10 / `2fad3ffb…` (`audit_capability_coverage.py:25-26`,
+`coverage/velnor-capabilities.json:2-3`) while the runner under test is v11
+(`crates/velnor-runner/src/manifest.rs:18`). `crate_version` reads `0.1.250` on both sides,
+so the version pin gives a false all-clear, and `validate_manifest` (`:167-232`) compares
+checked-in JSON against Python constants without ever reading Velnor.
+
+Kache was removed from Velnor at v11, yet `compat.yml:239-260` still executes
+`kunobi-ninja/kache-action` and `audit_capability_coverage.py:666-693` still enforces it as
+a contract. The admitted-action count stayed exactly 30 across that breaking change — a
+one-for-one swap with mbx — so `EXPECTED_ACTION_COUNT = 30` (`:27`) passed. Cardinality
+cannot detect identity drift. Seven further rows record coverage citing `_rust-suite.yml`,
+which never mentions the action being cited.
+
+Missing invariant: *the baseline is derived from the Velnor commit under test, and identity
+is compared, not cardinality.*
+
+### BC-20 — The two repositories have locked each other into testing the fallback path
+
+All 11 Rust jobs in the fixture set `RUSTC_WRAPPER: sccache` and invoke
+`mozilla-actions/sccache-action` (`_rust-suite.yml:32-41` and ten others), which forces
+Velnor's `MBX_DISABLE=1` branch (`github_adapter.rs:78-83`, `container.rs:71-95`);
+`mbx_store_host` is `None` in every fixture job. The default Velnor Rust path — the single
+most important workload in this program — has **zero** coverage.
+
+It is not a fixture-side accident. Velnor's own verifier *requires* the arrangement:
+`crates/velnor-tools/src/main.rs:803-830` asserts that the fixture contains
+`sccache-action@` and `cache-sccache:`. Each repository now enforces the other's use of the
+fallback. Job-level `RUSTC_WRAPPER` additionally makes every Rust job microVM-ineligible
+(`manifest.rs:1372-1385`), while coverage still claims `microvm: supported` for sccache.
+`jdx/mr-boxington-action` has 16 admitted inputs (`manifest.rs:274-291`, `:423-432`) and no
+coverage row, no surface row, and no workflow reference.
+
+Missing invariant: *the default path is the primary scenario; compatibility modes are
+separate scenarios; and neither repository asserts the other's use of a compatibility mode.*
