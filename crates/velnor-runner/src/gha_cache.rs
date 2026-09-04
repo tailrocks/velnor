@@ -70,7 +70,6 @@ fn hex(bytes: &[u8]) -> String {
 #[derive(Debug, Clone)]
 struct CacheHit {
     hash: String,
-    size: u64,
     key: String,
 }
 
@@ -125,10 +124,9 @@ impl CacheService {
     fn lookup(&self, keys: &[&str], version: &str, namespace: Option<&str>) -> Option<CacheHit> {
         for (index, key) in keys.iter().enumerate() {
             let hash = entry_hash(key, version);
-            if let Some(entry) = self.read_entry(&hash, namespace) {
+            if self.read_entry(&hash, namespace).is_some() {
                 return Some(CacheHit {
                     hash,
-                    size: entry["size"].as_u64().unwrap_or(0),
                     key: (*key).to_owned(),
                 });
             }
@@ -176,7 +174,6 @@ impl CacheService {
                 rank,
                 CacheHit {
                     hash,
-                    size: entry["size"].as_u64().unwrap_or(0),
                     key: entry_key.to_owned(),
                 },
             );
@@ -972,13 +969,12 @@ mod tests {
         let hit = svc
             .lookup(&["linux-rust-2026", "linux"], "v1", None)
             .unwrap();
-        assert_eq!(hit.size, 3);
         assert_eq!(hit.hash, entry_hash("linux-rust-2026", "v1"));
         assert_eq!(hit.key, "linux-rust-2026");
 
         // Prefix falls back to newest, and reports the stored key it matched.
         let hit = svc.lookup(&["linux-other", "linux"], "v1", None).unwrap();
-        assert_eq!(hit.size, 5);
+        assert_eq!(hit.hash, entry_hash("linux-rust", "v1"));
         assert_eq!(hit.key, "linux-rust");
 
         // Version mismatch misses.

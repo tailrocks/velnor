@@ -740,3 +740,138 @@ fn regression_d7_evaluation_errors_are_typed() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property sweeps over the value model
+// ---------------------------------------------------------------------------
+
+/// A corpus spanning every kind and every interesting coercion boundary.
+fn value_corpus() -> Vec<Value> {
+    let shared_array = array(&[Value::Number(1.0)]);
+    let shared_object = object(&[("a", Value::Number(1.0))]);
+    vec![
+        Value::Null,
+        Value::Boolean(true),
+        Value::Boolean(false),
+        Value::Number(0.0),
+        Value::Number(-0.0),
+        Value::Number(1.0),
+        Value::Number(-1.0),
+        Value::Number(0.5),
+        Value::Number(f64::NAN),
+        Value::Number(f64::INFINITY),
+        Value::Number(f64::NEG_INFINITY),
+        Value::string(""),
+        Value::string(" "),
+        Value::string("0"),
+        Value::string("1"),
+        Value::string("false"),
+        Value::string("TRUE"),
+        Value::string("true"),
+        Value::string("abc"),
+        Value::string("Infinity"),
+        Value::string("0x10"),
+        shared_array.clone(),
+        shared_array,
+        shared_object.clone(),
+        shared_object,
+    ]
+}
+
+#[test]
+fn property_truthiness_is_total_and_exclusive() {
+    for value in value_corpus() {
+        assert_eq!(value.is_truthy(), !value.is_falsy(), "{value:?}");
+    }
+}
+
+/// `AbstractEqual` coerces symmetrically (`EvaluationResult.cs:358-397`), so
+/// equality must not depend on operand order.
+#[test]
+fn property_equality_is_symmetric_and_negates_cleanly() {
+    for left in value_corpus() {
+        for right in value_corpus() {
+            assert_eq!(
+                left.abstract_equal(&right),
+                right.abstract_equal(&left),
+                "{left:?} == {right:?}"
+            );
+            assert_eq!(
+                left.abstract_not_equal(&right),
+                !left.abstract_equal(&right),
+                "{left:?} != {right:?}"
+            );
+        }
+    }
+}
+
+/// `>=` and `<=` are defined as equal-or-greater / equal-or-less
+/// (`EvaluationResult.cs:99-120`), and `<` / `>` are mirror images.
+#[test]
+fn property_ordering_relations_are_consistent() {
+    for left in value_corpus() {
+        for right in value_corpus() {
+            assert_eq!(
+                left.abstract_greater_than_or_equal(&right),
+                left.abstract_equal(&right) || left.abstract_greater_than(&right),
+                "{left:?} >= {right:?}"
+            );
+            assert_eq!(
+                left.abstract_less_than_or_equal(&right),
+                left.abstract_equal(&right) || left.abstract_less_than(&right),
+                "{left:?} <= {right:?}"
+            );
+            assert_eq!(
+                left.abstract_greater_than(&right),
+                right.abstract_less_than(&left),
+                "{left:?} > {right:?}"
+            );
+            assert!(
+                !(left.abstract_greater_than(&right) && left.abstract_less_than(&right)),
+                "{left:?} cannot be both greater and less than {right:?}"
+            );
+            assert!(
+                !(left.abstract_equal(&right) && left.abstract_greater_than(&right)),
+                "{left:?} cannot be both equal to and greater than {right:?}"
+            );
+        }
+    }
+}
+
+/// Rendering a number and parsing it back is lossless for every value the
+/// G15 format can represent exactly.
+#[test]
+fn property_number_round_trips_through_g15() {
+    for value in [
+        0.0_f64,
+        1.0,
+        -1.0,
+        0.5,
+        -0.25,
+        1e14,
+        1e15,
+        1e-4,
+        1e-5,
+        123456789.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        let rendered = format_number(value);
+        let parsed = parse_number(&rendered);
+        assert_eq!(parsed, value, "round trip of {value} via {rendered:?}");
+    }
+    assert!(parse_number(&format_number(f64::NAN)).is_nan());
+}
+
+/// Every value converts to a string, and every primitive converts to a
+/// number, without panicking — the union has no partial operations.
+#[test]
+fn property_conversions_are_total() {
+    for value in value_corpus() {
+        let _ = value.convert_to_string();
+        let number = value.convert_to_number();
+        if !value.is_primitive() {
+            assert!(number.is_nan(), "{value:?} must convert to NaN");
+        }
+    }
+}

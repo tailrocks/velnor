@@ -258,7 +258,7 @@ fn evaluate_function(
 
 /// `Sdk/Functions/Case.cs:10-42`.
 fn evaluate_case(args: &[Node], context: &dyn EvaluationContext) -> Result<Value, ExpressionError> {
-    if args.len() % 2 == 0 {
+    if args.len().is_multiple_of(2) {
         return Err(ExpressionError::evaluation(
             "case requires an odd number of arguments",
         ));
@@ -300,7 +300,7 @@ fn evaluate_contains(
     }
 
     if let Value::Array(array) = &left
-        && array.len() > 0
+        && !array.is_empty()
     {
         let right = evaluate_node(&args[1], context)?;
         for item in array.items() {
@@ -473,7 +473,7 @@ fn evaluate_join(args: &[Node], context: &dyn EvaluationContext) -> Result<Value
     let items = evaluate_node(&args[0], context)?;
 
     if let Value::Array(array) = &items
-        && array.len() > 0
+        && !array.is_empty()
     {
         let separator = if args.len() > 1 {
             let separator = evaluate_node(&args[1], context)?;
@@ -530,7 +530,7 @@ fn write_json(value: &Value, out: &mut String, level: usize, prefix: JsonPrefix)
     };
 
     match value {
-        Value::Object(object) if object.len() > 0 => {
+        Value::Object(object) if !object.is_empty() => {
             out.push_str(&prefix);
             out.push('{');
             for (position, (key, entry)) in object.entries().iter().enumerate() {
@@ -546,7 +546,7 @@ fn write_json(value: &Value, out: &mut String, level: usize, prefix: JsonPrefix)
             out.push_str(&"  ".repeat(level));
             out.push('}');
         }
-        Value::Array(array) if array.len() > 0 => {
+        Value::Array(array) if !array.is_empty() => {
             out.push_str(&prefix);
             out.push('[');
             for (position, item) in array.items().iter().enumerate() {
