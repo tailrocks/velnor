@@ -2207,11 +2207,21 @@ fn select_runner_storage_layout_from(
     }
 }
 
+fn resolve_run_trust_scope(args: &mut RunArgs) {
+    args.trust_scope = crate::trust_scope::resolve(&args.trust_scope).into_string();
+}
+
 async fn run_with_jit_prewarmer(
-    args: RunArgs,
+    mut args: RunArgs,
     prewarm_trigger: Option<oneshot::Sender<()>>,
     storage_mode: RunnerStorageMode,
 ) -> Result<()> {
+    // Node/job workers bypass the service CLI conversion, so establish the
+    // process-local trust boundary before any store or capability path runs.
+    // Keep the write-once winner in the owned args too: a later invocation in
+    // this process must not widen capabilities by carrying a different value.
+    resolve_run_trust_scope(&mut args);
+
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
@@ -13754,6 +13764,22 @@ mod tests {
             skip_preflight: false,
             require_docker_socket: false,
         }
+    }
+
+    #[test]
+    fn runner_boundary_preserves_write_once_trust_scope() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        let mut args = run_args(false, true, false);
+        args.trust_scope = "public-forks".into();
+
+        resolve_run_trust_scope(&mut args);
+        assert_eq!(args.trust_scope, "public-forks");
+        assert_eq!(crate::trust_scope::current(), "public-forks");
+
+        args.trust_scope = "trusted".into();
+        resolve_run_trust_scope(&mut args);
+        assert_eq!(args.trust_scope, "public-forks");
+        assert_eq!(crate::trust_scope::current(), "public-forks");
     }
 
     fn minimal_job_with_variables(
