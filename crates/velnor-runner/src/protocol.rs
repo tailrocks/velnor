@@ -337,7 +337,7 @@ fn is_loopback_host(host: &str) -> bool {
         || host == "::1"
 }
 
-fn unix_epoch_now() -> u64 {
+pub(crate) fn unix_epoch_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1856,11 +1856,52 @@ impl RunServiceError {
 /// `RunServiceHttpClient.TryParseErrorBody` only accepts this source value.
 const RUN_SERVICE_ERROR_SOURCE: &str = "actions-run-service";
 
+/// The `statusCode` of a run-service error body, when the body really is one.
+///
+/// This is the only sanctioned way to read a run-service verdict. The outer
+/// HTTP status is not it: upstream classifies from the body, and an unrelated
+/// proxy or gateway can produce the same outer status with no run-service
+/// meaning at all.
+fn run_service_error_code(body: &str) -> Option<u16> {
+    RunServiceError::parse(body).and_then(|error| error.code)
+}
+
 /// Match the exact error shape used by actions/runner's RunService client for
 /// a missing completion job. A bare 404 or an unrelated API 404 is not proof
 /// that this job was already terminal.
 fn is_run_service_job_not_found(body: &str) -> bool {
-    RunServiceError::parse(body).is_some_and(|error| error.code == Some(404))
+    run_service_error_code(body) == Some(404)
+}
+
+/// Whether a non-retriable `acquirejob` reply proves this runner will never own
+/// the job behind the broker message.
+///
+/// Only `404` (the message is gone) and `422` (the run service refuses to hand
+/// it over) are definite, and only when the *typed body* says so. `409` is
+/// deliberately excluded: upstream's `RunServiceError` carries `source`,
+/// `statusCode` and `errorMessage` and no runner identity
+/// (`src/Sdk/RSWebApi/Contracts/RunServiceError.cs`), so a conflict cannot
+/// distinguish "this runner acquired the job and then crashed" from "another
+/// runner holds it". Treating a conflict as gone would drop a job this runner
+/// may own; leaving the provisional row lets `renewjob` decide later.
+#[must_use]
+pub fn acquire_reply_is_definitely_gone(body: &str) -> bool {
+    matches!(run_service_error_code(body), Some(404 | 422))
+}
+
+/// Whether a `renewjob` failure proves the run service has no such job for this
+/// runner.
+///
+/// Only a typed `404` counts. Every other failure — transport, 5xx, auth, or a
+/// body that is not a run-service error at all — leaves ownership unproven, and
+/// the caller must treat it as indeterminate rather than dropping a row it may
+/// still own.
+#[must_use]
+pub fn renew_failure_is_job_gone(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+        .is_some_and(|api| is_run_service_job_not_found(&api.body))
 }
 
 /// Decode a GET /actions/runners/{id} response: `Ok(None)` only on a definite
@@ -7819,6 +7860,64 @@ mod tests {
         )));
         // Not knowing the remote's answer is exactly when retrying is right.
         assert!(!completion_failure_is_permanent(&anyhow::anyhow!(
+            "connection reset"
+        )));
+    }
+
+    #[test]
+    fn acquire_reply_is_gone_only_for_typed_404_and_422() {
+        for code in [404u16, 422] {
+            assert!(acquire_reply_is_definitely_gone(
+                &upstream_run_service_error_body("actions-run-service", code, "gone").to_string(),
+            ));
+        }
+        // A conflict says the job is held. Upstream's error envelope carries no
+        // runner identity, so it cannot say *by whom* — abandoning here would
+        // drop a job this runner may have acquired before it crashed.
+        assert!(!acquire_reply_is_definitely_gone(
+            &upstream_run_service_error_body("actions-run-service", 409, "already acquired")
+                .to_string(),
+        ));
+        // Raw HTTP status is never the oracle: an untyped or foreign-sourced
+        // body proves nothing, whatever the outer status was.
+        assert!(!acquire_reply_is_definitely_gone(
+            r#"{"message":"Not Found"}"#
+        ));
+        assert!(!acquire_reply_is_definitely_gone(
+            &upstream_run_service_error_body("actions-broker", 404, "gone").to_string(),
+        ));
+        assert!(!acquire_reply_is_definitely_gone(""));
+    }
+
+    #[test]
+    fn renew_failure_is_job_gone_only_for_typed_404() {
+        let gone = github_api_error(
+            "renew run-service job",
+            404,
+            upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                .to_string(),
+        );
+        assert!(renew_failure_is_job_gone(&gone));
+        // The typed body decides, not the envelope status.
+        let gone_behind_5xx = github_api_error(
+            "renew run-service job",
+            500,
+            upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                .to_string(),
+        );
+        assert!(renew_failure_is_job_gone(&gone_behind_5xx));
+        let server_error = github_api_error(
+            "renew run-service job",
+            500,
+            upstream_run_service_error_body("actions-run-service", 500, "server error").to_string(),
+        );
+        assert!(!renew_failure_is_job_gone(&server_error));
+        let untyped = github_api_error("renew run-service job", 404, r#"{"message":"Not Found"}"#);
+        assert!(!renew_failure_is_job_gone(&untyped));
+        let unauthorized = github_api_error("renew run-service job", 401, "");
+        assert!(!renew_failure_is_job_gone(&unauthorized));
+        // A transport failure never proves anything about ownership.
+        assert!(!renew_failure_is_job_gone(&anyhow::anyhow!(
             "connection reset"
         )));
     }
