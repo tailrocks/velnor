@@ -86,6 +86,9 @@ pub struct Fixture {
     pub pull_refs: usize,
     /// Bytes of tracked content on the wanted commit.
     pub content_bytes: u64,
+    /// Bytes reachable only from `refs/pull/*` — the objects a job that asked
+    /// for one commit has no use for, and the whole cost the ref wall imposes.
+    pub pull_ref_bytes: u64,
 }
 
 /// One replayed checkout: the cold mirror plus `legs - 1` further workspaces on
@@ -118,6 +121,7 @@ pub fn build_fixture(
     pull_refs: usize,
     blob_bytes: usize,
     blobs: usize,
+    pull_blob_bytes: usize,
 ) -> Result<Fixture> {
     let work = root.join("origin-work");
     let origin = root.join("origin.git");
@@ -174,15 +178,23 @@ pub fn build_fixture(
 
     let sha = capture(runner, &["-C", str_of(&work)?, "rev-parse", "HEAD"])?;
 
-    // The pull refs: each is a distinct commit, so the ref wall carries objects
-    // as well as names, exactly as `refs/pull/*` does on a busy repository. A
-    // ref whose object the origin does not hold would be a broken advertisement
-    // rather than a cost, so the commits are pushed, never `update-ref`d in.
+    // The pull refs: each is a distinct commit carrying its own blob, because
+    // the whole cost `+refs/*:refs/*` pays is the objects reachable only from
+    // refs the job did not ask for. A ref wall of empty commits would make the
+    // two strategies look identical for a reason that has nothing to do with
+    // either of them. A ref whose object the origin does not hold would be a
+    // broken advertisement rather than a cost, so the commits are pushed, never
+    // `update-ref`d in.
     let mut refspecs = Vec::with_capacity(pull_refs);
+    let mut pull_ref_bytes = 0_u64;
     for index in 0..pull_refs {
+        let body = filler(blobs + index + 1, pull_blob_bytes);
+        pull_ref_bytes += body.len() as u64;
+        std::fs::write(work.join("pr.bin"), &body)
+            .with_context(|| "write pull payload".to_owned())?;
         std::fs::write(work.join("pr.txt"), format!("pull {index}\n"))
             .with_context(|| "write pull marker".to_owned())?;
-        git(runner, &["-C", str_of(&work)?, "add", "pr.txt"])?;
+        git(runner, &["-C", str_of(&work)?, "add", "pr.bin", "pr.txt"])?;
         git(
             runner,
             &[
@@ -220,6 +232,7 @@ pub fn build_fixture(
         sha,
         pull_refs,
         content_bytes,
+        pull_ref_bytes,
     })
 }
 
@@ -641,6 +654,7 @@ fn capture(runner: &mut Runner, args: &[&str]) -> Result<String> {
 pub struct FixtureIdentity {
     pub pull_refs: usize,
     pub content_bytes: u64,
+    pub pull_ref_bytes: u64,
     pub commit: String,
 }
 
@@ -780,6 +794,7 @@ mod tests {
             sha: "0".repeat(40),
             pull_refs: 0,
             content_bytes: 0,
+            pull_ref_bytes: 0,
         };
         assert!(replay(Strategy::WantedRefLinked, &fixture, &dir, &mut runner, 0).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -821,8 +836,12 @@ mod tests {
             return;
         }
         let fixture =
-            build_fixture(&dir, &mut runner, 8, 4096, 4).expect("build the synthetic origin");
+            build_fixture(&dir, &mut runner, 8, 4096, 4, 4096).expect("build the synthetic origin");
         assert_eq!(fixture.sha.len(), 40);
+        assert!(
+            fixture.pull_ref_bytes > 0,
+            "the ref wall must carry objects, not just names"
+        );
 
         let mut trees = Vec::new();
         for strategy in Strategy::ALL {

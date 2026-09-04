@@ -102,9 +102,13 @@ enum Command {
         /// Tracked blobs on the wanted commit.
         #[arg(long, default_value_t = 96)]
         blobs: usize,
-        /// Bytes per blob.
+        /// Bytes per blob on the wanted commit.
         #[arg(long, default_value_t = 65_536)]
         blob_bytes: usize,
+        /// Bytes each `refs/pull/*` commit adds. These are the objects a job
+        /// asking for one commit never needs.
+        #[arg(long, default_value_t = 24_576)]
+        pull_blob_bytes: usize,
         /// Append the records here instead of stdout.
         #[arg(long)]
         output: Option<PathBuf>,
@@ -271,16 +275,23 @@ fn main() -> Result<()> {
             pull_refs,
             blobs,
             blob_bytes,
+            pull_blob_bytes,
             output,
         } => {
             let root = work_root.join("checkout-replay");
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-            let fixture =
-                checkout_replay::build_fixture(&root, &mut runner, pull_refs, blob_bytes, blobs)?;
+            let fixture = checkout_replay::build_fixture(
+                &root,
+                &mut runner,
+                pull_refs,
+                blob_bytes,
+                blobs,
+                pull_blob_bytes,
+            )?;
             eprintln!(
-                "fixture: {} pull refs, {} bytes of content, commit {}",
-                fixture.pull_refs, fixture.content_bytes, fixture.sha
+                "fixture: {} pull refs carrying {} bytes, {} bytes on the wanted commit {}",
+                fixture.pull_refs, fixture.pull_ref_bytes, fixture.content_bytes, fixture.sha
             );
 
             let mut lines = Vec::new();
@@ -306,6 +317,7 @@ fn main() -> Result<()> {
                     fixture: checkout_replay::FixtureIdentity {
                         pull_refs: fixture.pull_refs,
                         content_bytes: fixture.content_bytes,
+                        pull_ref_bytes: fixture.pull_ref_bytes,
                         commit: fixture.sha.clone(),
                     },
                     legs,
