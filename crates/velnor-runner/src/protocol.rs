@@ -337,7 +337,7 @@ fn is_loopback_host(host: &str) -> bool {
         || host == "::1"
 }
 
-fn unix_epoch_now() -> u64 {
+pub(crate) fn unix_epoch_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
