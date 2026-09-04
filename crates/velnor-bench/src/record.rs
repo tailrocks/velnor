@@ -653,20 +653,14 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_image_pull_cannot_claim_a_docker_fallback() {
+    fn image_pull_accepts_the_declared_isolated_docker_fallback() {
         let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
         record.scenario = "docker/image-pull".to_owned();
         record.runnability = Runnability::Degraded {
             driver: Driver::DockerDirect,
             missing_for_preferred: vec![crate::scenario::Requirement::VelnorJobDriver],
         };
-        assert_eq!(
-            record.validate(),
-            Err(RecordError::DeclaredDriverMismatch {
-                runnability_driver: Some(Driver::DockerDirect),
-                declared_driver: None,
-            })
-        );
+        record.validate().expect("declared fallback is valid");
     }
 
     #[test]

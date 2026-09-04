@@ -7,6 +7,7 @@
 
 pub mod cargo;
 pub mod docker;
+mod isolated_docker;
 
 use std::path::PathBuf;
 
