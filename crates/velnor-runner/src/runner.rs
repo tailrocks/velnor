@@ -9469,12 +9469,52 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
     let Some(task) = task else {
         return Ok(());
     };
-    tokio::task::spawn_blocking(move || task.join())
-        .await
-        .context("join prior slot teardown task")?
-        .map_err(|panic| anyhow::anyhow!("prior slot teardown task panicked: {panic:?}"))??;
+    // Bounded. The teardown thread retries on its own schedule, so an await
+    // with no deadline let a teardown that never succeeds pin the slot of a job
+    // GitHub had already been told was finished — the one place a *completed*
+    // job could hold a slot indefinitely.
+    //
+    // On expiry the thread is left running: it owns the containers and will
+    // keep trying, and abandoning its handle is strictly better than refusing
+    // to start the next job. What the operator must not get is silence, so the
+    // wait says which slot and how long it waited.
+    let joined = tokio::time::timeout(
+        PRIOR_TEARDOWN_JOIN_DEADLINE,
+        tokio::task::spawn_blocking(move || task.join()),
+    )
+    .await;
+    match joined {
+        Ok(joined) => {
+            joined
+                .context("join prior slot teardown task")?
+                .map_err(|panic| {
+                    anyhow::anyhow!("prior slot teardown task panicked: {panic:?}")
+                })??;
+        }
+        Err(_) => {
+            let message = format!(
+                "prior slot teardown for {} did not finish within {}s; continuing without it, \
+                 its containers may still be present",
+                config_dir.display(),
+                PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs()
+            );
+            eprintln!("{message}");
+            tracing::warn!(
+                target: "velnor.teardown",
+                slot_dir = %config_dir.display(),
+                waited_s = PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs(),
+                "prior slot teardown exceeded its join deadline"
+            );
+        }
+    }
     Ok(())
 }
+
+/// How long a slot waits for the previous job's teardown before starting work.
+///
+/// Generous, because a legitimate teardown of a large workspace takes time, and
+/// bounded, because a completed job must never hold a slot forever.
+const PRIOR_TEARDOWN_JOIN_DEADLINE: Duration = Duration::from_secs(300);
 
 struct PrecreatedJobEnvironment {
     container: crate::container::JobContainerSpec,
