@@ -4,6 +4,7 @@
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMessage};
@@ -30,6 +31,38 @@ pub struct UnixVsockChannel {
     path: PathBuf,
     stream: Option<UnixStream>,
     timeout: Duration,
+    /// Held only while a frame is being written, never while `recv` blocks.
+    ///
+    /// A cancellation hook writes `Cancel` on a cloned handle to this same
+    /// connection, and two writers interleaving mid-frame would hand the guest
+    /// a corrupt message. Sharing the *write* alone is what avoids that without
+    /// making the hook wait out a blocking `recv`, which can idle for an hour.
+    write_lock: Arc<Mutex<()>>,
+}
+
+/// Sends `Cancel` to a running guest on the session's own connection.
+///
+/// The graceful half of microVM cancellation: the guest's session loop reads
+/// `Cancel` and returns, so the job ends the way upstream's worker cancellation
+/// does, instead of only having its jailer killed underneath it.
+pub struct GuestCancelHandle {
+    stream: UnixStream,
+    write_lock: Arc<Mutex<()>>,
+}
+
+impl GuestCancelHandle {
+    /// # Errors
+    /// Transport failure writing the frame.
+    pub fn cancel(&self) -> Result<(), String> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut stream = &self.stream;
+        VsockMessage::Cancel
+            .write_to(&mut stream)
+            .map_err(|error| format!("vsock cancel write: {error}"))
+    }
 }
 
 impl UnixVsockChannel {
@@ -40,7 +73,24 @@ impl UnixVsockChannel {
             path: host_vsock_connect_path(&uds_path, guest_cid, port),
             stream: None,
             timeout: Duration::from_secs(3600),
+            write_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// A handle that can cancel the running guest from another thread.
+    ///
+    /// Connects if the session has not yet, so the handle can be taken before
+    /// the first frame is exchanged.
+    ///
+    /// # Errors
+    /// Transport failure connecting or cloning the connection.
+    pub fn cancel_handle(&mut self) -> Result<GuestCancelHandle, String> {
+        let write_lock = Arc::clone(&self.write_lock);
+        let stream = self.connected()?;
+        let stream = stream
+            .try_clone()
+            .map_err(|error| format!("vsock clone for cancel: {error}"))?;
+        Ok(GuestCancelHandle { stream, write_lock })
     }
 
     fn connected(&mut self) -> Result<&mut UnixStream, String> {
@@ -66,6 +116,18 @@ impl VsockChannel for UnixVsockChannel {
         self.stream = None;
     }
 
+    fn cancel_handle(&mut self) -> Option<GuestCancelHandle> {
+        match UnixVsockChannel::cancel_handle(self) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                // A guest we cannot reach is still cancellable by terminating
+                // its jailer, so this is a downgrade, not a failure.
+                eprintln!("microVM graceful cancel unavailable, jailer kill only: {error}");
+                None
+            }
+        }
+    }
+
     fn set_idle_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
         if let Some(stream) = self.stream.as_mut() {
@@ -75,7 +137,11 @@ impl VsockChannel for UnixVsockChannel {
     }
 
     fn send(&mut self, message: VsockMessage) -> Result<(), String> {
+        let write_lock = Arc::clone(&self.write_lock);
         let stream = self.connected()?;
+        let _guard = write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         message
             .write_to(stream)
             .map_err(|error| format!("vsock write: {error}"))

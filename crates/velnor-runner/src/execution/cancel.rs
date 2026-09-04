@@ -1255,6 +1255,45 @@ mod tests {
         );
     }
 
+    /// The graceful half runs before the bounded one. A hook and the jailer are
+    /// both step-scoped, so a single cancellation request fires the guest's own
+    /// `Cancel` and, if that does not stop it, terminates the jailer — rather
+    /// than only ever killing the VM out from under the guest.
+    #[test]
+    fn a_microvm_cancels_the_guest_before_it_kills_the_jailer() {
+        let token = JobCancellation::recording(None);
+        let guest_cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&guest_cancelled);
+        let _guest = token.register(TerminationTarget::Hook {
+            label: "microvm-guest-cancel".into(),
+            run: Arc::new(move |_| {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            }),
+        });
+        let _jailer = token.register(TerminationTarget::ProcessGroup {
+            pgid: 4242,
+            label: "microvm-jailer".into(),
+        });
+
+        token.request(CancelReason::ServerRequested);
+        token.fan_out_once();
+
+        assert!(
+            guest_cancelled.load(Ordering::SeqCst),
+            "the guest is told to stop"
+        );
+        assert_eq!(
+            token
+                .outcomes()
+                .into_iter()
+                .map(|outcome| outcome.target)
+                .collect::<Vec<_>>(),
+            vec!["hook:microvm-guest-cancel", "pgid:4242"],
+            "registration order is the termination order: guest first, jailer after"
+        );
+    }
+
     /// A microVM job used to be entirely uncancellable: the only cancellation
     /// path killed a host container that does not exist on that backend, so the
     /// guest kept running while GitHub was told the job was cancelled. The
