@@ -13,6 +13,20 @@
       "at any time"
     ]
   },
+  "packageRules": [
+    {
+      "description": "Rust toolchain patch releases are frequently compiler-correctness backports (1.97.1, 1.98.1). Keep every pin site in one PR and never delay it.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "rust-lang/rust"
+      ],
+      "groupName": "rust toolchain",
+      "minimumReleaseAge": null,
+      "internalChecksFilter": "none"
+    }
+  ],
   "customManagers": [
     {
       "customType": "regex",
@@ -104,15 +118,23 @@
     },
     {
       "customType": "regex",
-      "description": "rust toolchain pin in the job image Dockerfile (kept in sync with rust-toolchain.toml by Renovate)",
+      "description": "Rust stable toolchain channel: rust-toolchain.toml is the single source of truth, and every mise lockfile mirrors the resolved version. All four sites must move together or the built artifact diverges from the declared toolchain.",
       "managerFilePatterns": [
-        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+        "/^rust-toolchain\\.toml$/",
+        "/^mise\\.lock$/",
+        "/^docker\\/build-mise\\.lock$/",
+        "/^docker\\/job-mise\\.lock$/",
+        "/^content\\/docs\\/guides\\/development\\.mdx$/"
       ],
       "matchStrings": [
-        "\\brust@(?<currentValue>[0-9.]+)"
+        "channel = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "toolchain is Rust (?<currentValue>\\d+\\.\\d+\\.\\d+)",
+        "\\[\\[tools\\.rust\\]\\]\\s+version = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "\\[\\[tools\\.rust\\]\\]\\s+version = \"\\d+\\.\\d+\\.\\d+\"\\s+backend = \"core:rust\"\\s+specifiers = \\[\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"\\]"
       ],
       "datasourceTemplate": "github-releases",
-      "depNameTemplate": "rust-lang/rust"
+      "depNameTemplate": "rust-lang/rust",
+      "versioningTemplate": "semver"
     },
     {
       "customType": "regex",
