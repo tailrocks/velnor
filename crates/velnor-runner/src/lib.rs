@@ -52,6 +52,7 @@ pub mod service;
 mod slot_log;
 mod storage;
 mod telemetry;
+pub mod trust_scope;
 mod workflow_command;
 
 #[cfg(any(test, feature = "test-support"))]

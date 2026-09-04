@@ -1679,8 +1679,8 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let work = root.join("lib/velnor-test/work");
-        let cache = root.join("cache/velnor/v1/trusted/caches/idle/key");
-        let compiler_cache = work.join("_velnor_sccache/trusted/idle/key");
+        let cache = root.join("cache/velnor/v1/untrusted/caches/idle/key");
+        let compiler_cache = work.join("_velnor_sccache/untrusted/idle/key");
         fs::create_dir_all(&work).unwrap();
         fs::create_dir_all(&cache).unwrap();
         fs::create_dir_all(&compiler_cache).unwrap();
@@ -1688,15 +1688,13 @@ mod tests {
         fs::write(compiler_cache.join("payload"), vec![0; 16]).unwrap();
 
         let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
-        let previous_trust = std::env::var_os("VELNOR_TRUST_SCOPE");
-        // SAFETY: this synchronous test owns the process environment values
-        // while exercising the discovery path and restores them below. The
-        // canonical actions-cache path is trust-scoped, so pin the exact
-        // `trusted` scope the fixture directories use instead of relying on
-        // the process-global default.
+        // SAFETY: this synchronous test owns the process environment value
+        // while exercising the discovery path and restores it below. The
+        // canonical actions-cache path is trust-scoped; nothing reads
+        // VELNOR_TRUST_SCOPE any more, so the fixture uses the fail-closed
+        // scope an unresolved process reports.
         unsafe {
             std::env::set_var("VELNOR_STORAGE_ROOT", &root);
-            std::env::set_var("VELNOR_TRUST_SCOPE", "trusted");
         }
         let report = reclaim_for_disk_pressure(32);
         // SAFETY: restore the values owned by this synchronous test.
@@ -1704,10 +1702,6 @@ mod tests {
             match previous {
                 Some(value) => std::env::set_var("VELNOR_STORAGE_ROOT", value),
                 None => std::env::remove_var("VELNOR_STORAGE_ROOT"),
-            }
-            match previous_trust {
-                Some(value) => std::env::set_var("VELNOR_TRUST_SCOPE", value),
-                None => std::env::remove_var("VELNOR_TRUST_SCOPE"),
             }
         }
 

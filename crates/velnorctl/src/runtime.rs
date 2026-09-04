@@ -68,8 +68,11 @@ pub struct DaemonArgs {
     pub job_cpus: String,
     #[arg(long, default_value = "4g")]
     pub job_memory: String,
-    #[arg(long, default_value = "public")]
-    pub trust_scope: String,
+    /// Pool trust boundary. Flattened from the single declaration in
+    /// `velnor_runner::trust_scope`, so this binary and `velnor-runner` cannot
+    /// disagree about a security gate.
+    #[command(flatten)]
+    pub trust: velnor_runner::trust_scope::TrustScopeArg,
     #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024_u64)]
     pub emergency_reserve_bytes: u64,
     #[arg(long, default_value_t = 4 * 1024 * 1024 * 1024_u64)]
@@ -321,7 +324,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             docker_image: args.docker_image,
             job_cpus: args.job_cpus,
             job_memory: args.job_memory,
-            trust_scope: args.trust_scope,
+            trust_scope: args.trust.resolve().into_string(),
             emergency_reserve_bytes: args.emergency_reserve_bytes,
             job_peak_bytes: args.job_peak_bytes,
             node_action_image: args.node_action_image,
