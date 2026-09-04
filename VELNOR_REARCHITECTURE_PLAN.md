@@ -478,3 +478,63 @@ coverage row, no surface row, and no workflow reference.
 
 Missing invariant: *the default path is the primary scenario; compatibility modes are
 separate scenarios; and neither repository asserts the other's use of a compatibility mode.*
+
+### BC-21 — Fork pull requests can write state the next trusted job executes
+
+`cargo_target_trust_scope()` reads the daemon environment variable `VELNOR_TRUST_SCOPE`
+(`github_adapter.rs:211-213`) and the shipped unit sets it to `trusted`
+(`debian/velnor.env:42`). `validate_job_trust_policy` then returns `Ok(())` immediately for
+a trusted scope *before it looks at the job at all* (`runner.rs:6155-6157`). There is no
+`event_name`, `head_repository` or fork check, and no repository allowlist, anywhere in the
+tree. A fork pull request therefore shares the `trusted/` namespace with default-branch
+builds.
+
+Ten fork-to-trusted write paths were enumerated. Three of them are **code execution on the
+next job**, because the directories are mounted read-write onto its `PATH`:
+`$CARGO_HOME/bin` (`container.rs:176-180`), `/opt/mise/installs` and
+`/opt/velnor/mise-binaries` (`:186-194`).
+
+Separately, Cargo's `registry/{cache,index}` and `git/db` and mise's `cache` are shared
+daemon-wide across every repository and owner, read-write (`container.rs:157-171`,
+`:195-199`). Rewriting a `.crate` together with its index entry defeats Cargo's checksum
+verification, which makes this a cross-repository supply-chain path.
+
+The native `actions/cache` implementation also has no ref scoping at all
+(`executor.rs:9296-9322`): GitHub's branch-scoping rule is simply absent.
+
+Missing invariant: *trust class is derived from the job's own event and repository
+relationship, is not `Default`-constructible, fails closed to fork-PR, and no cache
+namespace crosses a trust boundary read-write.*
+
+### BC-22 — Disk pressure has no terminal state, and GC deletes live state
+
+Below 2 GiB free, the slot loops `sleep(60); continue` forever on both branches
+(`runner.rs:2570-2581`): no deadline, no escalation, no terminal state. Queued jobs are only
+resolved by a separate `velnor-doctor.timer` unit that does not exist outside Debian
+packaging. This is precisely the indefinite "waiting for disk" state the program forbids.
+
+Two garbage collectors delete state that is in use. The leftover reaper determines liveness
+from `docker ps` alone (`leftover_disk.rs:103-144`), so a job is invisible to it during
+checkout, artifact upload, target publish and deferred BuildKit teardown — it takes no lock
+and reads no lease, unlike `cache gc` (`cache.rs:153-169`). Emergency reclaim deletes
+unleased stores under live jobs, because leases cover eight scopes
+(`runner.rs:5498-5507`) while `mbx`, `sccache` and `artifacts` are `emergency_managed` with
+no lease class (`cache.rs:438-446`, `:473-482`).
+
+There is no host disk budget, and Docker is entirely unaccounted: `CacheStore` has no
+Docker class (`cache.rs:921-929`) and `system`/`builder` prunes are hard-refused
+(`leftover_disk.rs:355-364`), so images consume the headroom the reservation ledger
+believes it holds. On the shipped four-slot configuration the artifact store is invisible
+to every GC: `artifact_store_dir` (`executor.rs:9287`) omits the `daemon_shared_root` wrap
+that `cache_store_dir` applies twenty lines later (`:9313`), so artifacts are written to
+`<work>/slot-N/_velnor_artifacts` while GC registers `<work>/_velnor_artifacts` — unbounded
+growth. Routine `cache gc` is manual-only with no timer unit, so all 310 GiB of class
+budgets are dead letters, and the GitHub Actions cache service is namespaced by the
+*per-job* `ACTIONS_RUNTIME_TOKEN` (`gha_cache.rs:222-227`), so it can never produce a
+cross-run hit while each tenant still accumulates 10 GiB outside `store_roots`.
+
+Missing invariants: *one catalog is the sole constructor of store paths, so a path built
+two ways is unrepresentable; one capacity model derived from `statvfs` rather than summed
+constants; one lease-honouring bounded reclaimer that never touches a foreign class; and
+disk pressure is a state machine with a deadline and a terminal state, with admission
+evaluated before acquisition.*
