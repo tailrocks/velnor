@@ -883,6 +883,10 @@ fn daemon_owned_buildkit_volume_names(
 }
 
 /// IDs of testcontainers that were created before the lease proxy (no job label).
+///
+/// This remains a best-effort inspection helper for compatibility. Automatic
+/// cleanup must use [`validate_legacy_testcontainer_listing`], which refuses
+/// both malformed rows and every unlabeled container before any delete call.
 pub fn unlabeled_testcontainer_ids(formatted: &str) -> Vec<String> {
     let mut ids = formatted
         .lines()
@@ -898,6 +902,50 @@ pub fn unlabeled_testcontainer_ids(formatted: &str) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// A legacy Testcontainers listing is not an ownership proof. Keep its
+/// failure modes typed so callers cannot accidentally turn an inspection
+/// result into a destructive cleanup decision.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum LegacyTestcontainerReclaimError {
+    #[error("refusing legacy Testcontainers reclaim: malformed docker ps row {line}: {row:?}")]
+    MalformedRow { line: usize, row: String },
+    #[error(
+        "refusing legacy Testcontainers reclaim: unlabeled containers have no Velnor ownership proof: {ids:?}"
+    )]
+    Unlabeled { ids: Vec<String> },
+}
+
+/// Validate the legacy Testcontainers listing without producing deleteable
+/// IDs. Rows carrying a Velnor job label are intentionally ignored here;
+/// their cleanup belongs to [`reclaim_job_owned`] or
+/// [`reclaim_stale_job_owned`]. An unlabeled row is a hard refusal because the
+/// `org.testcontainers.managed-by` label proves only Testcontainers origin,
+/// not Velnor ownership.
+pub fn validate_legacy_testcontainer_listing(
+    formatted: &str,
+) -> std::result::Result<(), LegacyTestcontainerReclaimError> {
+    let mut unlabeled = Vec::new();
+    for (line_number, row) in formatted.lines().enumerate() {
+        let fields = row.split('\t').collect::<Vec<_>>();
+        if fields.len() != 2 || fields[0].trim().is_empty() {
+            return Err(LegacyTestcontainerReclaimError::MalformedRow {
+                line: line_number + 1,
+                row: row.to_string(),
+            });
+        }
+        if fields[1].trim().is_empty() {
+            unlabeled.push(fields[0].trim().to_string());
+        }
+    }
+
+    if unlabeled.is_empty() {
+        return Ok(());
+    }
+    unlabeled.sort();
+    unlabeled.dedup();
+    Err(LegacyTestcontainerReclaimError::Unlabeled { ids: unlabeled })
 }
 
 #[allow(dead_code)]
@@ -1495,11 +1543,7 @@ pub fn reclaim_unlabeled_testcontainers(
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
     let formatted = docker(&list_testcontainers_format_args())?;
-    let ids = unlabeled_testcontainer_ids(&formatted);
-    if ids.is_empty() {
-        return Ok(());
-    }
-    docker(&force_remove_container_args(&ids)).map(|_| ())
+    validate_legacy_testcontainer_listing(&formatted).map_err(Into::into)
 }
 
 pub fn reclaim_unlabeled_job_image_siblings(
@@ -4009,22 +4053,47 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
     }
 
     #[test]
-    fn reclaim_unlabeled_testcontainers_force_removes_orphans_only() {
+    fn reclaim_unlabeled_testcontainers_refuses_unlabeled_rows_without_removal() {
         let mut calls = Vec::new();
-        let mut outputs = vec![
-            "dead1\t\nlive1\tvelnor-job-now\ndead2\t\n".to_string(),
-            String::new(),
-        ];
+        let result = reclaim_unlabeled_testcontainers(|args| {
+            calls.push(args.to_vec());
+            Ok("dead1\t\nlive1\tvelnor-job-now\ndead2\t\n".to_string())
+        });
+        let error = result.expect_err("unlabeled rows must refuse legacy reclaim");
+        assert!(matches!(
+            error.downcast_ref::<LegacyTestcontainerReclaimError>(),
+            Some(LegacyTestcontainerReclaimError::Unlabeled { ids })
+                if ids == &vec!["dead1".to_string(), "dead2".to_string()]
+        ));
+        assert_eq!(calls[0], list_testcontainers_format_args());
+        assert_eq!(calls.len(), 1, "refusal must make zero delete calls");
+    }
+
+    #[test]
+    fn reclaim_unlabeled_testcontainers_refuses_malformed_rows_without_removal() {
+        let mut calls = Vec::new();
+        let result = reclaim_unlabeled_testcontainers(|args| {
+            calls.push(args.to_vec());
+            Ok("malformed-row-without-tab\n".to_string())
+        });
+        let error = result.expect_err("malformed rows must refuse legacy reclaim");
+        assert!(matches!(
+            error.downcast_ref::<LegacyTestcontainerReclaimError>(),
+            Some(LegacyTestcontainerReclaimError::MalformedRow { line: 1, row })
+                if row == "malformed-row-without-tab"
+        ));
+        assert_eq!(calls, vec![list_testcontainers_format_args()]);
+    }
+
+    #[test]
+    fn reclaim_unlabeled_testcontainers_ignores_labeled_rows_without_removal() {
+        let mut calls = Vec::new();
         reclaim_unlabeled_testcontainers(|args| {
             calls.push(args.to_vec());
-            Ok(outputs.remove(0))
+            Ok("live1\tvelnor-job-now\n".to_string())
         })
         .unwrap();
-        assert_eq!(calls[0], list_testcontainers_format_args());
-        assert_eq!(
-            calls[1],
-            force_remove_container_args(&["dead1".into(), "dead2".into()])
-        );
+        assert_eq!(calls, vec![list_testcontainers_format_args()]);
     }
 
     #[test]
