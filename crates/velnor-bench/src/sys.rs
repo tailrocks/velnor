@@ -8,9 +8,14 @@
 
 use std::{
     io,
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io::Read;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::process::ExitStatusExt;
 
 /// Outcome of one host process invocation.
 #[derive(Debug, Clone)]
@@ -56,11 +61,19 @@ impl Invocation {
     }
 }
 
+struct CommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    usage: Rusage,
+}
+
 /// Counting process runner. Records every spawn so a scenario's process count
 /// and Docker invocation count are measured, never estimated.
 #[derive(Debug, Default)]
 pub struct Runner {
     invocations: Vec<Invocation>,
+    usage: Rusage,
 }
 
 impl Runner {
@@ -98,8 +111,9 @@ impl Runner {
             command.env(key, value);
         }
         let started = Instant::now();
-        let output = command.output()?;
+        let output = command_output(&mut command)?;
         let wall = started.elapsed();
+        self.usage = self.usage.accumulate(output.usage);
         self.invocations.push(Invocation {
             program: program.to_owned(),
             args: owned,
@@ -141,18 +155,117 @@ impl Runner {
         &self.invocations
     }
 
+    /// Resource usage for commands recorded since the last reset.
+    #[must_use]
+    pub(crate) fn rusage(&self) -> Rusage {
+        self.usage
+    }
+
     /// Merge invocations collected by a completed worker.
     pub(crate) fn merge(&mut self, worker: Self) {
+        self.usage = self.usage.accumulate(worker.usage);
         self.invocations.extend(worker.invocations);
     }
 
     /// Forget the recorded invocations, keeping the runner for the next sample.
     pub fn reset(&mut self) {
         self.invocations.clear();
+        self.usage = Rusage::default();
     }
 }
 
-/// Kernel resource accounting for child processes, read from `getrusage`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn command_output(command: &mut Command) -> io::Result<CommandOutput> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::other("child stdout pipe was not captured"));
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::other("child stderr pipe was not captured"));
+    };
+
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|_| output)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).map(|_| output)
+    });
+
+    let (status, usage) = match wait4_child(&mut child) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error);
+        }
+    };
+    let stdout = join_output(stdout_reader)?;
+    let stderr = join_output(stderr_reader)?;
+
+    Ok(CommandOutput {
+        status,
+        stdout,
+        stderr,
+        usage,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn wait4_child(child: &mut std::process::Child) -> io::Result<(ExitStatus, Rusage)> {
+    let pid = libc::pid_t::try_from(child.id())
+        .map_err(|_| io::Error::other("child process id does not fit the platform pid type"))?;
+    let mut status = 0;
+    // SAFETY: `libc::rusage` contains only integer/time fields, so an
+    // all-zero bit pattern is valid C struct storage.
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    loop {
+        // SAFETY: `pid` is the live child returned by `Command::spawn`; the
+        // status and usage pointers are valid writable storage for wait4.
+        let waited = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+        if waited == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if waited != pid {
+            return Err(io::Error::other("wait4 returned an unexpected child"));
+        }
+        return Ok((ExitStatus::from_raw(status), Rusage::from_raw(usage)));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn join_output(reader: std::thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("child output reader panicked"))?
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn command_output(command: &mut Command) -> io::Result<CommandOutput> {
+    let output = command.output()?;
+    Ok(CommandOutput {
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        usage: Rusage::default(),
+    })
+}
+
+/// Kernel resource accounting for one interval of child processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rusage {
     pub user_us: u64,
@@ -163,40 +276,26 @@ pub struct Rusage {
 }
 
 impl Rusage {
-    /// Cumulative usage of all reaped children of this process.
-    #[must_use]
-    pub fn children() -> Self {
-        // SAFETY: `getrusage` writes a fully-initialised `rusage` into the
-        // out-parameter and reads nothing from it.
-        let usage = unsafe {
-            let mut usage: libc::rusage = std::mem::zeroed();
-            if libc::getrusage(libc::RUSAGE_CHILDREN, &raw mut usage) != 0 {
-                return Self::default();
-            }
-            usage
-        };
+    fn accumulate(self, sample: Self) -> Self {
+        Self {
+            user_us: self.user_us.saturating_add(sample.user_us),
+            system_us: self.system_us.saturating_add(sample.system_us),
+            max_rss_bytes: self.max_rss_bytes.max(sample.max_rss_bytes),
+            block_input_ops: self.block_input_ops.saturating_add(sample.block_input_ops),
+            block_output_ops: self
+                .block_output_ops
+                .saturating_add(sample.block_output_ops),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn from_raw(usage: libc::rusage) -> Self {
         Self {
             user_us: timeval_us(usage.ru_utime),
             system_us: timeval_us(usage.ru_stime),
             max_rss_bytes: max_rss_bytes(usage.ru_maxrss),
             block_input_ops: u64::try_from(usage.ru_inblock).unwrap_or(0),
             block_output_ops: u64::try_from(usage.ru_oublock).unwrap_or(0),
-        }
-    }
-
-    /// Usage accumulated between two observations.
-    #[must_use]
-    pub fn since(&self, earlier: Self) -> Self {
-        Self {
-            user_us: self.user_us.saturating_sub(earlier.user_us),
-            system_us: self.system_us.saturating_sub(earlier.system_us),
-            // Peak RSS is a high-water mark, not a counter: the larger of the
-            // two is the only meaningful value for the interval.
-            max_rss_bytes: self.max_rss_bytes.max(earlier.max_rss_bytes),
-            block_input_ops: self.block_input_ops.saturating_sub(earlier.block_input_ops),
-            block_output_ops: self
-                .block_output_ops
-                .saturating_sub(earlier.block_output_ops),
         }
     }
 }
@@ -324,19 +423,54 @@ mod tests {
     }
 
     #[test]
-    fn rusage_accumulates_across_children() {
-        let before = Rusage::children();
+    fn rusage_aggregates_and_resets_rss_high_water() {
+        let high = Rusage {
+            user_us: 11,
+            system_us: 13,
+            max_rss_bytes: 64 * 1024 * 1024,
+            block_input_ops: 17,
+            block_output_ops: 19,
+        };
+        let low = Rusage {
+            user_us: 2,
+            system_us: 3,
+            max_rss_bytes: 1024,
+            block_input_ops: 5,
+            block_output_ops: 7,
+        };
+
+        let mut runner = Runner::new();
+        runner.usage = runner.usage.accumulate(high);
+        runner.usage = runner.usage.accumulate(low);
+        assert_eq!(
+            runner.rusage(),
+            Rusage {
+                user_us: 13,
+                system_us: 16,
+                max_rss_bytes: 64 * 1024 * 1024,
+                block_input_ops: 22,
+                block_output_ops: 26,
+            }
+        );
+
+        runner.reset();
+        runner.usage = runner.usage.accumulate(low);
+        assert_eq!(runner.rusage().max_rss_bytes, low.max_rss_bytes);
+    }
+
+    #[test]
+    fn wait_time_rusage_is_recorded_without_cumulative_rss() {
         let mut runner = Runner::new();
         let _ = runner.capture(
             "/bin/sh",
             &["-c", "i=0; while [ $i -lt 40000 ]; do i=$((i+1)); done"],
         );
-        let delta = Rusage::children().since(before);
+        let usage = runner.rusage();
         assert!(
-            delta.user_us + delta.system_us > 0,
+            usage.user_us + usage.system_us > 0,
             "expected measurable child cpu time"
         );
-        assert!(delta.max_rss_bytes > 0);
+        assert!(usage.max_rss_bytes > 0);
     }
 
     #[test]

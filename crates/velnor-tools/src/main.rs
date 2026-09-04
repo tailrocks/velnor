@@ -2,6 +2,7 @@ mod audit_ci;
 mod fleet_policy;
 mod fleet_policy_client;
 mod lane_compare;
+mod workflow_monitor;
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
@@ -57,6 +58,8 @@ enum CommandKind {
     Commit(CommitArgs),
     /// Dispatch a GitHub Actions workflow and print the new run id.
     WorkflowDispatch(WorkflowDispatchArgs),
+    /// Monitor one GitHub Actions run and write bounded evidence.
+    WorkflowMonitor(WorkflowMonitorArgs),
     /// Write Velnor live evidence for a GitHub Actions run.
     WriteLiveEvidence(WriteLiveEvidenceArgs),
     /// Run the full fixture smoke sequence against a Velnor JIT daemon.
@@ -394,6 +397,28 @@ struct WorkflowDispatchArgs {
 }
 
 #[derive(Debug, Args)]
+struct WorkflowMonitorArgs {
+    /// GitHub repository slug.
+    #[arg(long, env = "VELNOR_WORKFLOW_REPO")]
+    repo: String,
+    /// GitHub Actions run database id.
+    #[arg(long, env = "VELNOR_WORKFLOW_RUN_ID")]
+    run_id: u64,
+    /// Maximum monitoring duration, such as `30m` or `2h`.
+    #[arg(long, default_value = "15m", value_parser = parse_monitor_duration)]
+    timeout: Duration,
+    /// Delay between GitHub observations, such as `2s`.
+    #[arg(long, default_value = "2s", value_parser = parse_monitor_duration)]
+    poll: Duration,
+    /// Local Velnor instance to observe through the read-only control CLI.
+    #[arg(long, env = "VELNOR_INSTANCE")]
+    instance: Option<String>,
+    /// Directory for atomically-written evidence JSON.
+    #[arg(long, env = "VELNOR_WORKFLOW_EVIDENCE_DIR")]
+    evidence_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct WriteLiveEvidenceArgs {
     /// Evidence phase label (e.g. after-velnor, completed, failed-before-completion).
     phase: String,
@@ -507,6 +532,7 @@ async fn main() -> Result<()> {
         CommandKind::TargetVerify(args) => target_verify(&root, args).await,
         CommandKind::Commit(args) => commit(&root, args),
         CommandKind::WorkflowDispatch(args) => workflow_dispatch(args),
+        CommandKind::WorkflowMonitor(args) => run_workflow_monitor(args),
         CommandKind::WriteLiveEvidence(args) => write_live_evidence_cmd(&root, args),
         CommandKind::FixtureSmoke(args) => fixture_smoke(&root, args),
         CommandKind::TargetSmoke(args) => target_smoke(&root, args),
@@ -3321,6 +3347,68 @@ where
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.trim().is_empty() {
         print!("{stdout}");
+    }
+    Ok(())
+}
+
+fn parse_monitor_duration(raw: &str) -> Result<Duration, String> {
+    let (number, unit) = raw.split_at(
+        raw.find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(raw.len()),
+    );
+    let value = number
+        .parse::<u64>()
+        .map_err(|_| "duration must start with an unsigned integer".to_owned())?;
+    let multiplier = match unit {
+        "ms" => 1,
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => return Err("duration unit must be ms, s, m, or h".to_owned()),
+    };
+    let milliseconds = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration is too large".to_owned())?;
+    if milliseconds == 0 {
+        return Err("duration must be greater than zero".to_owned());
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+fn run_workflow_monitor(args: WorkflowMonitorArgs) -> Result<()> {
+    let mut config = workflow_monitor::WorkflowMonitorConfig::new(args.repo, args.run_id)
+        .with_timeout(args.timeout)
+        .with_poll_interval(args.poll);
+    if let Some(instance) = args.instance {
+        config = config.with_instance(instance);
+    }
+    if let Some(evidence_dir) = args.evidence_dir {
+        config = config.with_evidence_dir(evidence_dir);
+    }
+    let result = workflow_monitor::monitor_workflow_run(&config)?;
+    println!(
+        "run={} status={} conclusion={} observations={} timed_out={}",
+        result.final_run.id,
+        result.final_run.status,
+        result.final_run.conclusion.as_deref().unwrap_or("pending"),
+        result.observations.len(),
+        result.timed_out
+    );
+    if let Some(path) = &result.evidence_path {
+        println!("evidence={}", path.display());
+    }
+    if result.timed_out {
+        bail!(
+            "workflow run {} did not reach a terminal GitHub state",
+            result.final_run.id
+        );
+    }
+    if !result.succeeded() {
+        bail!(
+            "workflow run {} completed with conclusion {}",
+            result.final_run.id,
+            result.final_run.conclusion.as_deref().unwrap_or("unknown")
+        );
     }
     Ok(())
 }

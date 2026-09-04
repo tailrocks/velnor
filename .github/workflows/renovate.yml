@@ -25,6 +25,7 @@ concurrency:
 jobs:
   renovate:
     name: Renovate (${{ matrix.config.lane }})
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     timeout-minutes: 30
     strategy:
       fail-fast: false

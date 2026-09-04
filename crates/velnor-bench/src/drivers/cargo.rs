@@ -379,6 +379,10 @@ impl CargoWorkload {
                 touch(&script)
             }
             Mutation::UpdateLockfile => {
+                let lockfile = workspace.join("Cargo.lock");
+                let before = std::fs::read(&lockfile).with_context(|| {
+                    format!("reading {} before cargo update", lockfile.display())
+                })?;
                 let invocation = context
                     .runner
                     .exec(
@@ -390,6 +394,15 @@ impl CargoWorkload {
                     .context("cargo update")?;
                 if !invocation.ok() {
                     bail!("cargo update failed: {}", invocation.stderr.trim());
+                }
+                let after = std::fs::read(&lockfile).with_context(|| {
+                    format!("reading {} after cargo update", lockfile.display())
+                })?;
+                if !lockfile_bytes_changed(&before, &after) {
+                    bail!(
+                        "cargo update succeeded but {} was unchanged; refusing to measure a no-op as dependency invalidation",
+                        lockfile.display()
+                    );
                 }
                 Ok(())
             }
@@ -461,11 +474,7 @@ impl Workload for CargoWorkload {
 
     fn iterate(&mut self, context: &mut Context) -> Result<Observation> {
         self.iteration += 1;
-        context.runner.reset();
-        let before_usage = Rusage::children();
         let root = context.work_root.join(self.scenario.replace('/', "_"));
-        let disk_before = tree_bytes(&root);
-        let started = Instant::now();
 
         if self.plan.workspace == Workspace::FreshEachIteration {
             let name = format!("workspace-fresh-{}", self.iteration);
@@ -490,20 +499,27 @@ impl Workload for CargoWorkload {
                 .context("priming run")?;
         }
 
-        let trace_file = root.join(format!("git-trace-{}.jsonl", self.iteration));
+        // Setup and priming are not the measured user command. Reset the
+        // process/resource census and establish the disk baseline immediately
+        // before the command; snapshot all observation inputs before restore.
+        context.runner.reset();
+        let trace_file = trace_file_path(&context.work_root, self.scenario, self.iteration);
+        clear_trace_file(&trace_file)?;
+        let disk_before = tree_bytes(&root);
+        let started = Instant::now();
         let command_ms = if self.plan.workspace == Workspace::PerConcurrentJob {
             self.run_concurrent(context, &args)?
         } else {
             self.run_cargo(context, &workspace, &target, &args, Some(&trace_file))?
         };
-        self.restore(context, &workspace);
-
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let usage = Rusage::children().since(before_usage);
+        let usage = context.runner.rusage();
         let disk_after = tree_bytes(&root);
+        let process_count = context.runner.process_count() as u64;
+        let docker_invocations = context.runner.count_of("docker") as u64;
         let git = GitCounters::from_event_file(&trace_file).unwrap_or_default();
 
-        Ok(Observation {
+        let observation = Observation {
             total_ms,
             stages_ms: BTreeMap::from([(Stage::FirstUserCommand, command_ms)]),
             checkout_phases_ms: BTreeMap::new(),
@@ -515,13 +531,15 @@ impl Workload for CargoWorkload {
                 block_output_ops: usage.block_output_ops,
                 disk_bytes_delta: i64::try_from(disk_after).unwrap_or(i64::MAX)
                     - i64::try_from(disk_before).unwrap_or(0),
-                process_count: context.runner.process_count() as u64,
-                docker_invocations: context.runner.count_of("docker") as u64,
+                process_count,
+                docker_invocations,
                 bytes_downloaded: git.received_bytes,
                 ..Resources::default()
             },
             git,
-        })
+        };
+        self.restore(context, &workspace);
+        Ok(observation)
     }
 
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
@@ -612,10 +630,31 @@ impl CargoWorkload {
     }
 }
 
+fn trace_file_path(work_root: &Path, scenario: &str, iteration: u64) -> PathBuf {
+    work_root.join(format!(
+        "{}-git-trace-{iteration}.jsonl",
+        scenario.replace('/', "_")
+    ))
+}
+
+fn clear_trace_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("removing stale git trace {}", path.display()))
+        }
+    }
+}
+
 fn touch(path: &Path) -> Result<()> {
     let text = std::fs::read(path)?;
     std::fs::write(path, text)?;
     Ok(())
+}
+
+fn lockfile_bytes_changed(before: &[u8], after: &[u8]) -> bool {
+    before != after
 }
 
 fn first_tracked_source(context: &mut Context, workspace: &Path) -> Result<String> {
@@ -853,5 +892,36 @@ mod tests {
         touch(&path).expect("touch");
         assert_eq!(std::fs::read(&path).expect("read"), b"contents");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn git_trace_is_outside_disk_measurement_but_counters_are_preserved() {
+        let work_root = std::env::temp_dir().join(format!(
+            "velnor-bench-cargo-trace-root-{}",
+            std::process::id()
+        ));
+        let measured_root = work_root.join("rust_cold");
+        std::fs::create_dir_all(&measured_root).expect("create measured root");
+
+        let disk_before = tree_bytes(&measured_root);
+        let trace_file = trace_file_path(&work_root, "rust/cold", 1);
+        std::fs::write(
+            &trace_file,
+            br#"{"event":"version"}
+{"event":"data","key":"bytes-received","value":123}"#,
+        )
+        .expect("write trace");
+
+        assert_eq!(tree_bytes(&measured_root), disk_before);
+        let git = GitCounters::from_event_file(&trace_file).expect("read trace");
+        assert_eq!(git.received_bytes, 123);
+
+        let _ = std::fs::remove_dir_all(work_root);
+    }
+
+    #[test]
+    fn lockfile_change_requires_different_bytes() {
+        assert!(!lockfile_bytes_changed(b"lockfile", b"lockfile"));
+        assert!(lockfile_bytes_changed(b"lockfile", b"changed"));
     }
 }

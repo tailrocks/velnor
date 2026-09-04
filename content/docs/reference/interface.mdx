@@ -17,6 +17,7 @@ velnorctl get runs
 velnorctl events
 velnorctl logs SUBJECT
 velnorctl telemetry
+velnor-tools workflow-monitor --repo OWNER/REPO --run-id RUN_ID
 ```
 
 Use `velnorctl --help` for the installed binary's complete parser metadata.
@@ -62,6 +63,39 @@ Global options:
 | `version`, `man`, `completion SHELL` | Version and CLI metadata helpers. |
 
 `cache du` and `cache gc` operate on the local cache when their required local paths are available. Storage commands such as `storage du`, `storage gc`, `storage history`, `storage reservations`, `storage leases`, and `storage explain-pressure` currently return unavailable.
+
+### Workflow generation and monitoring
+
+`velnor-workflow` is the Velnor-owned static generator and runtime used by
+generated GitHub Actions jobs. It writes only its owned files and keeps the
+declarative execution contract in `.github/ci/project.toml`:
+
+```sh
+velnor-workflow REPOSITORY --runners both
+velnor-workflow plan --config .github/ci/project.toml
+velnor-workflow run --scope affected
+velnor-workflow policy --workflow-root .
+velnor-workflow release verify-tag
+```
+
+`velnor-tools workflow-monitor` joins authoritative GitHub run state with
+read-only local Velnor observations. GitHub remains authoritative for the
+terminal result; local readiness, runner, slot, job, event, log, and outbox
+observations are evidence only:
+
+```sh
+velnor-tools workflow-monitor \
+  --repo OWNER/REPO \
+  --run-id RUN_ID \
+  --instance primary \
+  --timeout 30m \
+  --poll 2s \
+  --evidence-dir .velnor/evidence
+```
+
+The monitor never mutates the Velnor control plane and never treats local
+completion as proof of GitHub completion. GitHub credentials remain in the
+environment, not command arguments.
 
 ### Registration and local setup commands
 

@@ -105,6 +105,12 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/cache.rs` (explicit storage context for reclaim enumeration) | codex-lead | complete — T-017 (`dd93963`) |
 | `crates/velnor-runner/src/manifest.rs` (Mr Boxington action-specific input literals) | codex-lead | complete — T-018 (`8434d05`) |
 | `crates/velnor-runner/src/action.rs` + `manifest.rs` (approved remote action runtime-kind classification) | codex-lead | claimed — T-019 |
+| `crates/velnor-workflow/**` + workspace registration (workflow generator/client) | codex-lead | claimed — T-020 |
+| `crates/velnor-tools/src/workflow_monitor.rs` + approved `velnor-tools → velnor-client` read edge | codex-lead | claimed — T-020 |
+| `.github/workflows/velnor-workflow-policy.yml` (immutable reusable workflow-policy gate) | codex-lead | claimed — T-020 |
+| `.github/workflows/ci.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
+| `.github/workflows/docs.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
+| `.github/workflows/renovate.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
 
 ## 8. Discovered bug classes
 
@@ -2997,3 +3003,261 @@ This turn did not author edits to `crates/velnor-runner/src/executor.rs`,
 integration call sites. Concurrent shared-branch commits touch some of those paths and remain in
 the tested snapshot; they are identified in §§18, 20, and 22. The allowed configless acquisition
 regression fix is `e7bcac5`. No forbidden patch was silently presented as completed.
+
+## 24. Continuation anchor — 2026-09-04
+
+The exact requested branch heads were re-resolved before this continuation. The live
+Velnor head is `915cc15057665e461363f9cf87a6bcf27d3ddeea` on
+`origin/perf/docker-rust-mbx`; the live fixture head is
+`0cbec6e3265c59e714a31df5cdd67c7d99462443` on
+`origin/codex/verifier-completion-fixes`. These are newer than the immutable starting
+SHAs in §0 and remain the same requested branches.
+
+The continuation has pushed these focused benchmark hardening packages to the Velnor
+branch: `d7c061a` makes image identity probing read-only and refreshes the digest after a
+successful workload; `9cc2c3f` accounts for concurrent Cargo worker processes through
+isolated runners; and `915cc15` records per-child Linux/macOS wait-time resources so
+per-iteration RSS is not inherited from the process-wide high-water mark. The preceding
+journal, checkout, Docker status, cache, and identity packages remain in the history.
+
+Evidence at this anchor: Velnor fmt, workspace check, workspace Clippy with warnings
+denied, and workspace nextest pass (`2366` passed, `1` skipped); the fixture `mise run
+check` passes against this exact source and includes workflow/capability audits, actionlint,
+`41` Python tests, `49` Rust tests, fmt, check, and L2 closure. No live dual-lane result,
+deployed image digest, default-mbx end-to-end run, or soak result is claimed.
+
+The goal remains open. Highest unresolved classes include the reserved runner/control
+completion and acquisition recovery paths, unavailable VelnorJob benchmark driver,
+unsupported production reads, true network-cold Docker proof, and the broad semantic,
+cancellation, fault, soak, and architecture decomposition work in §§15, 18, and 58.
+
+## 25. Continuation findings — current anchor `aa913f3`
+
+`aa913f3` serializes mutable writes to each shared bare Git mirror. Health probing is
+shared-lock read-only work; mirror repair, ref publication, fetch, pinning, and requested
+SHA resolution now execute under one exclusive per-mirror lease. A barrier-started regression
+proves two different cold requests resolve their own commits and never overlap fetch writers.
+The workspace hydration phase remains outside that lease.
+
+The benchmark follow-ups are also on this branch: `d7c061a` removes image pulls from
+identity probing, `9cc2c3f` merges concurrent Cargo worker invocations into the sample
+census, and `915cc15` replaces process-wide RSS snapshots with per-child Linux/macOS
+`wait4` accounting. Full source and fixture gates remain green at the prior anchor; the
+mirror package has passed its focused tests and runner Clippy but still requires the next
+full workspace gate after this commit.
+
+Fresh independent audits found these unresolved requirements, not accepted as complete:
+
+* P0: recovery classifies a provisional acquisition as accepted and can leave the slot
+  occupied without a bounded `renewjob` ownership probe or terminal outcome. This crosses
+  the reserved runner/controller boundary and requires coordination with the other lead.
+* P1: mixed native/JavaScript post steps are stored and executed in separate lists rather
+  than one upstream LIFO stack; the implementation boundary is reserved `executor.rs`.
+* P1: the remaining live GitHub dual-lane provenance, deployed image identity, default-mbx
+  Rust run, fault suite, soak suite, and official-runner comparison are absent. Existing
+  local fixture gates prove schemas and mutation resistance, not live parity.
+* P1: control/mutation and acquisition recovery have additional fail-open/indeterminate
+  paths; no benchmark or source gate is treated as evidence that those paths are fixed.
+
+The branch is intentionally not declared complete. Next packages must preserve the shared
+ownership table, use explicit pathspec commits, and obtain independent review before
+touching reserved lifecycle or semantic code.
+
+## 26. Continuation anchor — mirror lease correction `d337304`
+
+`d337304` corrects the mirror package's reader lifetime. A successful checkout now retains a
+shared lease across mirror-backed hydration, and the repair path downgrades its exclusive
+lease only after ref publication, fetch, pinning, and requested-SHA resolution complete. A
+regression proves an active checkout reader blocks destructive mirror repair and releases the
+repair lock after checkout ownership is dropped. The stale shared health probe is rechecked
+under exclusive ownership before quarantine, so concurrent cold callers cannot quarantine a
+mirror that another caller just repaired.
+
+Independent post-correction reviews found no blocking correctness issue. Remaining medium
+proof/performance work is explicit: measure or test warm same-SHA N-way reads, different-repo
+concurrency, mutable-ref pinning, and end-to-end repair contention; release the reader lease
+as soon as hydration no longer needs the mirror if checkout semantics permit. These are
+bounded follow-ups, not evidence that the whole rearchitecture is complete.
+
+The exact Velnor head at this anchor is `d3373048ce80e65a6254cfe64684c803f8a5bcf9`; the
+fixture remains `0cbec6e3265c59e714a31df5cdd67c7d99462443`. Full workspace and fixture gates
+must be rerun after this correction. The reserved provisional-recovery and mixed-post-order
+findings in §25 remain open and owned by the other lead.
+
+## 27. Workflow generation migration — initial package `54782fd`
+
+T-020 now owns the Velnor-hosted workflow generator in `crates/velnor-workflow`.
+The package contains the static scanner/renderer and a standalone
+`velnor-workflow` binary. Generated workflow jobs invoke that binary directly;
+the generated `.github/ci/project.toml` is the strict runtime contract for
+affected-unit planning, layered execution, policy, and release checks. The
+former generated `run.sh`, `policy.sh`, and `release.sh` helpers are no longer
+emitted.
+
+The ownership sidecar path remains `.github/ci/.github-actions-generator-state`
+for compatibility with repositories produced by the former standalone tool.
+The existing Velnor owner-routed workflows remain authoritative; the stale
+generic artifact under the generator repository is not promoted over them.
+
+Focused proof at this package: `velnor-workflow` tests `87` passed, all-targets
+check passed, and the package was pushed to `perf/docker-rust-mbx`. Packaging,
+monitoring, and the full workspace gate remain follow-up work in this same
+ownership claim.
+
+## 28. Workflow runtime distribution and evidence — package pending
+
+The Velnor node image and Debian release package now include
+`velnor-workflow`. Release archives carry the executable beside the runner;
+release verification checks its presence and the Debian payload digest. The
+workspace dependency-boundary inventory includes the new package.
+
+`velnor-tools workflow-monitor` now polls the authoritative GitHub run through
+`gh api`, optionally snapshots the selected Velnor instance through the typed
+`velnor-client` read transport, and atomically rewrites bounded JSON evidence.
+Timeout, local transport failure, and GitHub terminal failure remain distinct;
+local success never substitutes for GitHub completion. The monitor is
+read-only and credentials stay in the existing environment/runner transport.
+
+Focused proof: `velnor-tools` tests `192` passed, strict package Clippy passed,
+and dependency-boundary tests `6` passed. Full workspace gates remain required.
+
+## 29. Continuation anchor — shared tip `118437e`
+
+This continuation synchronized the parallel branch without rewriting either history.
+`f7238fe` releases the per-mirror reader lease immediately after workspace hydration;
+`e9e4113` proves moving branch refs are refetched and repinned; `3550690` validates every
+mirror ref tip before accepting the object store; and `6d6b809` excludes Cargo setup,
+optional priming, and restoration from measured timing, process/resource, disk, and Git
+observations. The workspace package allowlist and strict Clippy contracts were updated in
+`5a9481a`, `c37c64f`, and `010af2c`. Merge commits `d2d4a2b` and `118437e` preserve the
+other lead's workflow generator, packaging, monitor, and typed-client work.
+
+Final local proof at this anchor:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2460 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against this source | pass; 41 Python tests, 49 Rust tests, workflow/capability/L2 audits |
+
+The hydration error-propagation patch was deliberately not landed: it exposed a fake
+mirror path in a reserved executor test. Propagating those errors safely requires a
+coordinated update at that reserved boundary; the uncommitted patch was reverted and the
+tree is clean. No live dual-lane run, deployed image digest, default-mbx end-to-end proof,
+VelnorJob benchmark, Docker daemon-resource accounting, fault/soak result, provisional
+acquisition recovery fix, or mixed native/JavaScript post-order fix is claimed. Those
+remain open under the ownership and evidence constraints recorded in §§15, 18, 25, and 28.
+
+## 30. Continuation anchor — workflow monitor sync `68d4cff`
+
+After §29, the shared branch received the other lead's reqwest-backed workflow monitor
+implementation and packaging follow-ups. The synchronization commits preserved those
+changes while adding `5a22ba9` (reject a successful no-op `cargo update`), `010af2c` and
+`69819df` (strict workflow-runtime Clippy cleanup), and the required merge ancestry. The
+workspace package boundary now names `velnor-workflow`; no duplicate package entry remains.
+
+Final proof at `68d4cff`:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2461 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against source | pass; 41 Python tests, 49 Rust tests, workflow/capability/L2 audits |
+
+The branch remains open. Fixture audits still find static-only or vacuous default-mbx,
+sccache, opt-out, image-digest, and provenance assertions; compatibility gate predicates
+have event/skip cases needing explicit tests; and no live dual-lane run has been triggered.
+Source audits still identify Docker CLI-only resource accounting and the unreachable
+VelnorJob/Rust/MBX authoritative benchmark path. Reserved provisional-acquisition recovery
+and mixed native/JavaScript post-order work remain with the other lead. Checkout traversal
+error propagation remains deferred because it requires a coordinated change to a reserved
+executor test boundary.
+
+## 31. Workflow migration completion evidence — runtime and policy hardening
+
+T-020 closes the previously open workflow-runtime follow-ups in the migration slice.
+GitHub-hosted generated jobs bootstrap the pinned Velnor commit
+`a2eecb6bededb3ef6c92ef2a921bec436d167256` with `cargo install`; Velnor lanes use the
+packaged `velnor-workflow` binary from the node image/release archive. Preview artifacts
+accept the explicit `preview` version, and Velnor release/preview jobs gate manual dispatch
+to the default branch.
+
+The policy runtime parses YAML structurally, ignores comments and shell text, rejects
+forbidden triggers/external reusable workflows/unpinned actions, and fails closed for
+unresolved dynamic runner labels. The generated policy job checks both the candidate
+checkout and the trusted base checkout. `velnor-tools workflow-monitor` uses bounded
+`reqwest` GitHub API polling with `GITHUB_TOKEN`/`GH_TOKEN` environment authentication,
+plus optional typed-client Velnor observations and atomic evidence writes.
+
+Focused proof: workflow-runtime tests `93` passed; tools tests `192` passed; strict
+package Clippy and locked all-target checks passed. Full workspace gates and live
+dual-lane execution remain final verification work, not claimed here.
+
+## 32. Continuation anchor — graph and evidence hardening `ce4bb8b`
+
+The shared source branch now includes `533fe67`, which normalizes Cargo's
+`dependency.workspace = true` keys before affected-unit graph expansion and adds
+coverage that preserves aliases and path dependencies. The parallel lead's
+`ef344c9`, `31e8e02`, and `e204e5f` changes remain preserved through merge
+`ce4bb8b`: trusted self-hosted jobs require an explicit gate even when the
+configuration supports both runner classes, the hosted bootstrap pin is checked,
+and Velnor jobs target the intended runner label.
+
+Final proof at this anchor:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2468 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against source `ce4bb8b` | pass; 41 Python tests, 51 Rust tests, workflow/capability/L2 audits |
+
+The fixture branch `codex/verifier-completion-fixes` is at `c97ec0e`: duplicate
+lane names are rejected, the L2 verifier expects its actual `produce` job, and
+JSON-loaded provenance enforces the same lane/environment binding as collection.
+The fixture gate now passes against `ce4bb8b`; this is static/fixture proof, not a
+live dual-lane run. No deployed image digest,
+default-mbx end-to-end proof, VelnorJob benchmark, Docker daemon-resource
+accounting, fault/soak result, provisional recovery fix, or mixed post-order fix
+is claimed. Reserved runner/executor ownership and the coordinated checkout
+error-propagation follow-up remain open.
+
+## 33. Continuation anchor — trust and fixture provenance hardening `b8b95fe`
+
+The benchmark now refuses to treat an arbitrary checkout as the Actions fixture:
+`3ffa772` validates the origin remote against the canonical
+`tailrocks/velnor-actions-fixture` repository, and `1c78b3f` tightens the probe
+regressions. The fixture branch `codex/verifier-completion-fixes` is at `a87bcbf`.
+Its incremental hardening rejects duplicate lanes (`4174d97`), binds L2
+provenance to the actual `produce` job (`963d846`), validates lane/environment
+and numeric/SHA provenance while loading evidence (`c97ec0e`, `cbf0767`), and
+runs fork pull requests GitHub-only (`4268a84`, `a87bcbf`).
+
+The parallel source history through `b8b95fe` is preserved without rewriting:
+immutable workflow policy, base-owned pull-request admission, pinned policy
+runtime, hosted bootstrap, manual-dispatch runner routing, and Velnor job-image
+provisioning are all present. The source branch remains shared with the other
+lead; merge commits retain each remote advancement.
+
+Final proof at this anchor:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2477 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against source `b8b95fe` | pass; 41 Python tests, 53 Rust tests, workflow/capability/L2 audits |
+
+This is static and fixture-backed proof. No live dual-lane run, deployed image
+digest, default-mbx end-to-end proof, reachable VelnorJob benchmark, Docker
+daemon-resource accounting, fault/soak result, provisional acquisition recovery,
+or mixed native/JavaScript post-order fix is claimed. Reserved runner/executor
+ownership and checkout traversal error propagation still require coordination;
+the fixture's remaining static-only defaults and no-live-run limitations remain
+explicit rather than promoted to readiness.
