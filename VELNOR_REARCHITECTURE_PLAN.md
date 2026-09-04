@@ -2903,15 +2903,20 @@ The shared branch now contains these bounded follow-ups from the post-handoff au
   `6194e14` rejects the currently unsupported global `--repo` selector instead of ignoring it.
 - `0c3bfda` allows cancellation only for known nonterminal GitHub run statuses; unknown statuses
   fail closed without issuing a cancel request.
+- `738007b` aligns the dependency-boundary test with the intentional shared-model leaf used by
+  `velnor-tools`; service, transport, and renderer edges remain forbidden. `1990182` rejects
+  ignored global selectors on `remove`, and `f579e6d` propagates cleanup subprocess failures so
+  remote runner registrations cannot be left behind while smoke reports success.
+- `dfa72c8` removes deleted-crate references from the development, security, and interface docs;
+  the interface now documents environment-only `GITHUB_TOKEN` registration.
 - `d7d10cf`, `372bf6a`, and `f294929` remove the unreachable action-journal, action-model, and
   CAS crates. The later journal/CAS durability findings therefore do not apply to this tree; no
   remaining root publisher owns that abandoned API.
 
-The fixture baseline is synchronized to `02284d9ad98cf429263d18a3d595df66e6bdec13`; its latest
-generated export is present at fixture commit `1ac2e10b9eb082af5615b91043924e5c4b82aeeb` on the
-shared fixture branch. The refresh readiness audit and the full fixture gate passed at this tip:
-49 Rust tests, 38 Python tests, workflow/actionlint, formatting, workspace, capability, and L2
-closure checks.
+The latest full fixture gate passed at source `ac389d64578f1dd26f210769388a22cb8e0c9eb8`, with
+the generated export at fixture commit `6cc55a43aecdc5fcd469d4e9952a27daf82289c0`. The later
+cleanup, dependency-boundary, and documentation commits do not alter the capability manifest;
+the fixture baseline is refreshed independently to the current source tip.
 
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
 mixed native/JavaScript post-action ordering, and the microVM registration order remain in the
